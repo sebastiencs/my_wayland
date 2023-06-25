@@ -5,12 +5,12 @@ use std::{
 
 type Result<T> = std::result::Result<T, ()>;
 
-struct Dispatcher<'a> {
+pub struct Dispatcher<'a> {
     queue: &'a mut VecDeque<AnyAction>,
 }
 
 impl Dispatcher<'_> {
-    fn dispatch<A>(&mut self, action: A)
+    pub fn dispatch<A>(&mut self, action: A)
     where
         A: Sized + 'static,
     {
@@ -72,7 +72,6 @@ struct AnyModel {
 
 struct ModelVTable {
     try_call_reducer: fn(state: &mut dyn Any, action: &AnyAction) -> Result<()>,
-
     try_call_effect: fn(action: &AnyAction, dispatcher: &mut Dispatcher) -> Result<()>,
 }
 
@@ -120,7 +119,7 @@ where
     }
 }
 
-trait Model<Action>
+pub trait Model<Action>
 where
     Self: Sized + 'static,
     Action: Sized + 'static,

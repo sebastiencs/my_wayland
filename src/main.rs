@@ -1,10 +1,8 @@
-#![allow(
-    dead_code,
-    unused_variables
-)]
+#![allow(dead_code, unused_variables)]
 
+mod io_uring;
 mod logger;
-mod state;
+pub mod state;
 
 fn main() {
     use std::any::Any;
