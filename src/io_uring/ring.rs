@@ -1,12 +1,11 @@
 use std::{
     fmt::Debug,
     os::unix::io::RawFd,
-    path::Path,
     ptr::NonNull,
     sync::atomic::{
         AtomicU32,
         Ordering::{Acquire, Relaxed, Release},
-    },
+    }, collections::BTreeMap,
 };
 
 use {
@@ -14,14 +13,15 @@ use {
     log::{info, warn},
 };
 
+use crate::state::Redispatcher;
+
 use super::{
     model::RingId,
     syscalls::{io_uring_enter, io_uring_register, io_uring_setup, mmap, munmap},
     types::{
-        io_uring_files_update, io_uring_params, io_uring_probe, timespec, CompletionQueueEntry,
-        EnterFlags, FeaturesFlags, IoUringFd, SqeFlags, SubmissionQueueEntry, IORING_OFF_CQ_RING,
-        IORING_OFF_SQES, IORING_OFF_SQ_RING, IORING_OP_FILES_UPDATE, IORING_OP_NOP,
-        IORING_OP_OPENAT, IORING_OP_READ, IORING_OP_READ_FIXED, IORING_OP_TIMEOUT, IORING_OP_WRITE,
+        io_uring_files_update, io_uring_params, io_uring_probe, CompletionQueueEntry,
+        EnterFlags, FeaturesFlags, IoUringFd, SubmissionQueueEntry, IORING_OFF_CQ_RING,
+        IORING_OFF_SQES, IORING_OFF_SQ_RING, IORING_OP_NOP, IORING_OP_READ, IORING_OP_WRITE,
         IORING_REGISTER_FILES, IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_PROBE,
         IORING_UNREGISTER_FILES,
     },
@@ -33,8 +33,20 @@ fn display_io_uring_features(features: u32) {
     info!("[io_uring] Available features: {:?}", flags);
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ReadOrWrite {
+    Read,
+    Write,
+}
+
+pub struct ReadWriteCompleted {
+    pub fd: RawFd,
+    pub offset: usize,
+    pub buffer: Box<[u8]>,
+}
+
 #[derive(Debug)]
-pub enum Operation {
+pub(super) enum Operation {
     // ReadFixed {
     //     fd: RawFd,
     //     offset: usize,
@@ -46,22 +58,47 @@ pub enum Operation {
     //     files: &'a [i32],
     //     link_next: bool,
     // },
-    Read {
+    ReadWrite {
         id: RingId,
         fd: RawFd,
-        // fd: FileDescriptor,
         offset: usize,
-        buffer_ptr: *const u8,
-        length: usize,
+        buffer: Box<[u8]>,
+        kind: ReadOrWrite,
+        /// number of bytes read/written
+        nbytes_processed: usize,
+        /// Number of EOF (res == 0) received
+        /// Consider EOF reached after 2
+        /// https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
+        neof: u8,
+        dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
+
+        // fd: FileDescriptor,
+        // buffer_ptr: *const u8,
+        // length: usize,
         // data: &'a mut [u8],
     },
-    Write {
-        id: RingId,
-        fd: RawFd,
-        offset: usize,
-        buffer_ptr: *const u8,
-        length: usize,
-    },
+
+        // fd: RawFd,
+        // data: Box<[u8]>,
+        // // data: NonNull<u8>,
+        // data_length: usize,
+        // /// number of bytes read/written
+        // nbytes_processed: usize,
+        // offset: usize,
+        // /// Number of EOF (res == 0) received
+        // /// Consider EOF reached after 2
+        // /// https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
+        // neof: u8,
+        // kind: ReadOrWrite,
+        // dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
+
+    // Write {
+    //     id: RingId,
+    //     fd: RawFd,
+    //     offset: usize,
+    //     buffer_ptr: *const u8,
+    //     length: usize,
+    // },
     // OpenAt {
     //     path: &'a Path,
     // },
@@ -71,8 +108,17 @@ pub enum Operation {
     NoOp,
 }
 
+impl Operation {
+    fn id(&self) -> Option<RingId> {
+        match self {
+            Operation::ReadWrite { id, .. } => Some(*id),
+            Operation::NoOp => None,
+        }
+    }
+}
+
 impl SubmissionQueueEntry {
-    fn apply_operation(&mut self, op: Operation) {
+    fn apply_operation(&mut self, op: &Operation) {
         // TODO: Remove this
         *self = Self::default();
 
@@ -104,48 +150,28 @@ impl SubmissionQueueEntry {
             //     self.buf_index = buf_index;
             //     self.len = length as u32;
             // }
-            Operation::Read {
+            Operation::ReadWrite {
                 id,
                 fd,
                 offset,
                 // buffer: data,
-                buffer_ptr,
-                length,
+                // buffer_ptr,
+                // length,
+                kind,
+                buffer,
+                nbytes_processed,
+                neof: _,
+                dispatch_to: _,
             } => {
-                self.opcode = IORING_OP_READ;
-                self.fd = fd;
-                // match fd {
-                //     FileDescriptor::RegisteredIndex(index) => {
-                //         self.sqe_flags.set(SqeFlags::IOSQE_FIXED_FILE, true);
-                //         index
-                //     }
-                //     FileDescriptor::Fd(fd) => fd,
-                // };
-                self.off_addr2 = offset as u64;
-                self.addr_splice_off_in = buffer_ptr as u64;
-                self.len = length as u32;
-                self.user_data = id.into();
-            }
-            Operation::Write {
-                id,
-                fd,
-                offset,
-                buffer_ptr,
-                length,
-            } => {
-                self.opcode = IORING_OP_WRITE;
-                self.fd = fd;
-                // match fd {
-                //     FileDescriptor::RegisteredIndex(index) => {
-                //         self.sqe_flags.set(SqeFlags::IOSQE_FIXED_FILE, true);
-                //         index
-                //     }
-                //     FileDescriptor::Fd(fd) => fd,
-                // };
-                self.addr_splice_off_in = buffer_ptr as u64;
-                self.off_addr2 = offset as u64;
-                self.len = length as u32;
-                self.user_data = id.into();
+                self.opcode = match kind {
+                    ReadOrWrite::Read => IORING_OP_READ,
+                    ReadOrWrite::Write => IORING_OP_WRITE,
+                };
+                self.fd = *fd;
+                self.off_addr2 = (offset + nbytes_processed) as u64;
+                self.addr_splice_off_in = unsafe { buffer.as_ptr().add(*nbytes_processed) } as u64;
+                self.len = (buffer.len() - nbytes_processed) as u32;
+                self.user_data = (*id).into();
             }
             // Operation::OpenAt { path } => {
             //     let path = path.to_str().unwrap().as_ptr();
@@ -432,14 +458,14 @@ impl IoUring {
             let sqes = self.sqes_ptr.as_ptr() as *mut SubmissionQueueEntry;
             &mut *sqes.add(index as usize)
         };
-        entry.apply_operation(op);
+        entry.apply_operation(&op);
 
         self.sq_tail_local = tail.wrapping_add(1);
 
         Ok(())
     }
 
-    pub(super) fn push_entries<F>(&mut self, mut fun: F) -> usize
+    pub(super) fn push_entries<F>(&mut self, mut fun: F, pending: &mut BTreeMap<RingId, Operation>) -> usize
     where
         F: FnMut() -> Option<Operation>,
     {
@@ -453,17 +479,20 @@ impl IoUring {
         let mut npushed = 0;
 
         while tail != end {
-            assert!((tail & mask) < self.sq_entries);
+            let Some(op) = fun() else { break };
 
             // Safety:
             // The index doesn't go past sq_entries
+            assert!((tail & mask) < self.sq_entries);
             let entry = unsafe {
                 let sqes = self.sqes_ptr.as_ptr() as *mut SubmissionQueueEntry;
                 &mut *sqes.add((tail & mask) as usize)
             };
+            entry.apply_operation(&op);
 
-            let Some(op) = fun() else { break };
-            entry.apply_operation(op);
+            if let Some(id) = op.id() {
+                pending.insert(id, op);
+            };
 
             npushed += 1;
             tail = tail.wrapping_add(1);
@@ -561,9 +590,11 @@ impl Drop for IoUring {
 
 #[cfg(test)]
 mod tests {
-    use std::{iter::repeat_with, os::unix::io::AsRawFd};
+    use std::iter::repeat_with;
 
-    use super::{timespec, IoUring, Operation, Submit};
+    use crate::io_uring::types::timespec;
+
+    use super::{IoUring, Operation, Submit};
 
     #[test]
     fn simple() {
@@ -599,11 +630,13 @@ mod tests {
             Err(_) => return, // not supported
         };
 
+        let mut pending = Default::default();
+
         let mut iter = repeat_with(|| Operation::NoOp).take(4);
-        let n = iou.push_entries(|| iter.next());
+        let n = iou.push_entries(|| iter.next(), &mut pending);
         assert_eq!(n, 4);
 
-        let n = iou.push_entries(|| Some(Operation::NoOp));
+        let n = iou.push_entries(|| Some(Operation::NoOp), &mut pending);
         assert_eq!(n, 0);
     }
 
@@ -614,8 +647,10 @@ mod tests {
             Err(_) => return, // not supported
         };
 
+        let mut pending = Default::default();
+
         let mut iter = repeat_with(|| Operation::NoOp).take(4);
-        let n = iou.push_entries(|| iter.next());
+        let n = iou.push_entries(|| iter.next(), &mut pending);
         assert_eq!(n, 4);
         iou.submit(Submit::All).unwrap();
 
@@ -627,7 +662,7 @@ mod tests {
         iou.pop().unwrap();
         assert!(iou.pop().is_none());
 
-        let mut spec = timespec {
+        let _spec = timespec {
             tv_sec: 0,
             tv_nsec: 100000000, // 0,1 sec
         };

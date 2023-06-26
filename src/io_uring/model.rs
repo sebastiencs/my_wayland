@@ -1,8 +1,7 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::{BTreeMap, VecDeque},
     os::fd::RawFd,
-    ptr::NonNull,
 };
 
 use log::error;
@@ -12,7 +11,7 @@ use crate::{
     state::{AnyAction, Dispatcher, Model, Redispatcher},
 };
 
-use super::ring::{Completed, IoUring};
+use super::ring::{Completed, IoUring, ReadOrWrite, ReadWriteCompleted};
 
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, PartialOrd, Ord)]
 pub struct RingId(u32);
@@ -42,12 +41,6 @@ impl From<RingId> for u64 {
     }
 }
 
-pub struct ReadWriteCompleted {
-    pub fd: RawFd,
-    pub offset: usize,
-    pub data: Box<[u8]>,
-}
-
 enum IoUringAction {
     Completion,
     WaitForCompletion,
@@ -65,35 +58,11 @@ enum IoUringAction {
     },
 }
 
-#[derive(Copy, Clone)]
-pub(super) enum OpKind {
-    Write,
-    Read,
-}
-
-enum PendingOperation {
-    ReadWrite {
-        fd: RawFd,
-        data: Box<[u8]>,
-        // data: NonNull<u8>,
-        data_length: usize,
-        /// number of bytes read/written
-        nbytes_processed: usize,
-        offset: usize,
-        /// Number of EOF (res == 0) received
-        /// Consider EOF reached after 2
-        /// https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
-        neof: u8,
-        kind: OpKind,
-        dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
-    },
-}
-
 struct IoUringState {
     ring: IoUring,
     need_submit: bool,
     /// Pushed to the sq
-    pending: BTreeMap<RingId, PendingOperation>,
+    pending: BTreeMap<RingId, Operation>,
     completed: VecDeque<Completed>,
     /// Operations that needs to be pushed to the sqe
     to_push: VecDeque<Operation>,
@@ -133,10 +102,11 @@ impl Model<IoUringAction> for IoUringModel {
                     }
 
                     match state.pending.remove(&id).unwrap() {
-                        PendingOperation::ReadWrite {
+                        Operation::NoOp => {},
+                        Operation::ReadWrite {
+                            id,
+                            buffer,
                             fd,
-                            data,
-                            data_length,
                             mut nbytes_processed,
                             offset,
                             mut neof,
@@ -147,53 +117,41 @@ impl Model<IoUringAction> for IoUringModel {
                             let nbytes = result as usize;
                             nbytes_processed += nbytes;
 
-                            if nbytes_processed == data_length {
+                            if nbytes_processed == buffer.len() {
                                 let action =
-                                    dispatch_to(Ok(ReadWriteCompleted { fd, offset, data }));
-                                state.to_dispatch.borrow_mut().push_back(action);
+                                    dispatch_to(Ok(ReadWriteCompleted { fd, offset, buffer }));
+                                state.to_dispatch.get_mut().push_back(action);
                                 continue;
                             }
 
                             // Handle partial read/write
 
-                            assert!(nbytes_processed < data_length);
+                            assert!(nbytes_processed < buffer.len());
                             if nbytes == 0 {
                                 // Try twice
                                 // https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
                                 if neof == 1 {
                                     // EOF reached
-
                                     let action =
                                         dispatch_to(Err(std::io::ErrorKind::UnexpectedEof.into()));
-                                    state.to_dispatch.borrow_mut().push_back(action);
+                                    state.to_dispatch.get_mut().push_back(action);
                                     continue;
                                 }
                                 neof += 1;
                             }
 
-                            state.to_push.push_back(Operation::Read {
+                            let id = state.next_id();
+                            state.to_push.push_back(Operation::ReadWrite {
                                 id,
                                 fd,
                                 offset,
-                                length: data_length - nbytes_processed,
-                                buffer_ptr: data[nbytes_processed..].as_ptr(),
+                                kind,
+                                nbytes_processed,
+                                neof,
+                                buffer,
+                                dispatch_to,
                             });
-                            state.ring.push_entries(|| state.to_push.pop_front());
-                            state.pending.insert(
-                                id,
-                                PendingOperation::ReadWrite {
-                                    fd,
-                                    offset,
-                                    dispatch_to,
-                                    data_length,
-                                    data,
-                                    nbytes_processed,
-                                    neof,
-                                    kind,
-                                },
-                            );
-
-                            todo!()
+                            state.ring.push_entries(|| state.to_push.pop_front(), &mut state.pending);
                         }
                     }
                 }
@@ -215,27 +173,17 @@ impl Model<IoUringAction> for IoUringModel {
                 let id = state.next_id();
                 let buffer = Self::State::make_buffer(length);
 
-                state.to_push.push_back(Operation::Read {
+                state.to_push.push_back(Operation::ReadWrite {
                     id,
                     fd,
                     offset,
-                    length,
-                    buffer_ptr: buffer.as_ptr(),
+                    buffer,
+                    dispatch_to,
+                    kind: ReadOrWrite::Read,
+                    nbytes_processed: 0,
+                    neof: 0,
                 });
-                state.ring.push_entries(|| state.to_push.pop_front());
-                state.pending.insert(
-                    id,
-                    PendingOperation::ReadWrite {
-                        fd,
-                        offset,
-                        dispatch_to,
-                        data_length: buffer.len(),
-                        data: buffer,
-                        nbytes_processed: 0,
-                        neof: 0,
-                        kind: OpKind::Read,
-                    },
-                );
+                state.ring.push_entries(|| state.to_push.pop_front(), &mut state.pending);
             }
             IoUringAction::Write {
                 fd,
@@ -247,27 +195,17 @@ impl Model<IoUringAction> for IoUringModel {
                 let id = state.next_id();
                 let buffer = buffer.clone();
 
-                state.to_push.push_back(Operation::Write {
+                state.to_push.push_back(Operation::ReadWrite {
                     id,
                     fd,
                     offset,
-                    length: buffer.len(),
-                    buffer_ptr: buffer.as_ptr(),
+                    buffer,
+                    dispatch_to,
+                    kind: ReadOrWrite::Write,
+                    nbytes_processed: 0,
+                    neof: 0,
                 });
-                state.ring.push_entries(|| state.to_push.pop_front());
-                state.pending.insert(
-                    id,
-                    PendingOperation::ReadWrite {
-                        fd,
-                        offset,
-                        dispatch_to,
-                        data_length: buffer.len(),
-                        data: buffer,
-                        nbytes_processed: 0,
-                        neof: 0,
-                        kind: OpKind::Write,
-                    },
-                );
+                state.ring.push_entries(|| state.to_push.pop_front(), &mut state.pending);
             }
         }
 
