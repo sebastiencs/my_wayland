@@ -128,7 +128,15 @@ where
         state: &dyn Any,
         dispatcher: &mut Dispatcher,
     ) -> Result<()> {
-        todo!()
+        let Some(state) = state.downcast_ref::<<Self as Model<Action>>::State>() else {
+            return Ok(());
+        };
+
+        let Some(action) = action.ptr.downcast_ref::<Action>() else {
+            return Ok(());
+        };
+
+        Self::effect(action, state, dispatcher)
     }
 }
 
