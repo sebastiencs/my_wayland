@@ -1,11 +1,12 @@
 use std::{
+    collections::BTreeMap,
     fmt::Debug,
     os::unix::io::RawFd,
     ptr::NonNull,
     sync::atomic::{
         AtomicU32,
         Ordering::{Acquire, Relaxed, Release},
-    }, collections::BTreeMap,
+    },
 };
 
 use {
@@ -16,14 +17,12 @@ use {
 use crate::state::Redispatcher;
 
 use super::{
-    model::RingId,
     syscalls::{io_uring_enter, io_uring_register, io_uring_setup, mmap, munmap},
     types::{
-        io_uring_files_update, io_uring_params, io_uring_probe, CompletionQueueEntry,
-        EnterFlags, FeaturesFlags, IoUringFd, SubmissionQueueEntry, IORING_OFF_CQ_RING,
-        IORING_OFF_SQES, IORING_OFF_SQ_RING, IORING_OP_NOP, IORING_OP_READ, IORING_OP_WRITE,
-        IORING_REGISTER_FILES, IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_PROBE,
-        IORING_UNREGISTER_FILES,
+        io_uring_files_update, io_uring_params, io_uring_probe, CompletionQueueEntry, EnterFlags,
+        FeaturesFlags, IoUringFd, SubmissionQueueEntry, IORING_OFF_CQ_RING, IORING_OFF_SQES,
+        IORING_OFF_SQ_RING, IORING_OP_NOP, IORING_OP_READ, IORING_OP_WRITE, IORING_REGISTER_FILES,
+        IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_PROBE, IORING_UNREGISTER_FILES,
     },
 };
 
@@ -31,6 +30,15 @@ fn display_io_uring_features(features: u32) {
     let flags = FeaturesFlags::from_bits_truncate(features);
 
     info!("[io_uring] Available features: {:?}", flags);
+}
+
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, PartialOrd, Ord)]
+pub struct RingId(pub u32);
+
+impl RingId {
+    pub fn to_user_data(self) -> u64 {
+        self.0 as u64
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,26 +79,25 @@ pub(super) enum Operation {
         /// https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
         neof: u8,
         dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
-
         // fd: FileDescriptor,
         // buffer_ptr: *const u8,
         // length: usize,
         // data: &'a mut [u8],
     },
 
-        // fd: RawFd,
-        // data: Box<[u8]>,
-        // // data: NonNull<u8>,
-        // data_length: usize,
-        // /// number of bytes read/written
-        // nbytes_processed: usize,
-        // offset: usize,
-        // /// Number of EOF (res == 0) received
-        // /// Consider EOF reached after 2
-        // /// https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
-        // neof: u8,
-        // kind: ReadOrWrite,
-        // dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
+    // fd: RawFd,
+    // data: Box<[u8]>,
+    // // data: NonNull<u8>,
+    // data_length: usize,
+    // /// number of bytes read/written
+    // nbytes_processed: usize,
+    // offset: usize,
+    // /// Number of EOF (res == 0) received
+    // /// Consider EOF reached after 2
+    // /// https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
+    // neof: u8,
+    // kind: ReadOrWrite,
+    // dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
 
     // Write {
     //     id: RingId,
@@ -171,7 +178,7 @@ impl SubmissionQueueEntry {
                 self.off_addr2 = (offset + nbytes_processed) as u64;
                 self.addr_splice_off_in = unsafe { buffer.as_ptr().add(*nbytes_processed) } as u64;
                 self.len = (buffer.len() - nbytes_processed) as u32;
-                self.user_data = (*id).into();
+                self.user_data = id.to_user_data();
             }
             // Operation::OpenAt { path } => {
             //     let path = path.to_str().unwrap().as_ptr();
@@ -199,14 +206,16 @@ impl SubmissionQueueEntry {
 
 #[derive(Debug)]
 pub struct Completed {
-    pub user_data: u64,
+    pub user_data: u32,
+    pub id: RingId,
     pub result: i32,
 }
 
 impl From<&CompletionQueueEntry> for Completed {
     fn from(e: &CompletionQueueEntry) -> Self {
         Self {
-            user_data: e.user_data,
+            user_data: (e.user_data >> 32) as u32,
+            id: RingId((e.user_data & 0xFFFF) as u32),
             result: e.res,
         }
     }
@@ -465,7 +474,11 @@ impl IoUring {
         Ok(())
     }
 
-    pub(super) fn push_entries<F>(&mut self, mut fun: F, pending: &mut BTreeMap<RingId, Operation>) -> usize
+    pub(super) fn push_entries<F>(
+        &mut self,
+        mut fun: F,
+        pending: &mut BTreeMap<RingId, Operation>,
+    ) -> usize
     where
         F: FnMut() -> Option<Operation>,
     {

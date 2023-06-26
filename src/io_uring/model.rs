@@ -11,35 +11,7 @@ use crate::{
     state::{AnyAction, Dispatcher, Model, Redispatcher},
 };
 
-use super::ring::{Completed, IoUring, ReadOrWrite, ReadWriteCompleted};
-
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, PartialOrd, Ord)]
-pub struct RingId(u32);
-
-impl std::fmt::Display for RingId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RingId {}", self.0)
-    }
-}
-
-impl From<&Completed> for RingId {
-    fn from(c: &Completed) -> Self {
-        let id = c.user_data & 0xFFFFFFFF;
-        Self(id.try_into().unwrap())
-    }
-}
-
-impl From<u32> for RingId {
-    fn from(n: u32) -> Self {
-        Self(n)
-    }
-}
-
-impl From<RingId> for u64 {
-    fn from(id: RingId) -> Self {
-        id.0 as u64
-    }
-}
+use super::ring::{Completed, IoUring, ReadOrWrite, ReadWriteCompleted, RingId};
 
 enum IoUringAction {
     Completion,
@@ -92,8 +64,11 @@ impl Model<IoUringAction> for IoUringModel {
         match action {
             IoUringAction::Completion => {
                 while let Some(completed) = state.completed.pop_front() {
-                    let Completed { user_data, result } = completed;
-                    let id: RingId = (&completed).into();
+                    let Completed {
+                        user_data,
+                        id,
+                        result,
+                    } = completed;
 
                     if result < 0 {
                         error!("Operation failed error_code={:?}", result);
@@ -102,7 +77,7 @@ impl Model<IoUringAction> for IoUringModel {
                     }
 
                     match state.pending.remove(&id).unwrap() {
-                        Operation::NoOp => {},
+                        Operation::NoOp => {}
                         Operation::ReadWrite {
                             id,
                             buffer,
@@ -151,7 +126,9 @@ impl Model<IoUringAction> for IoUringModel {
                                 buffer,
                                 dispatch_to,
                             });
-                            state.ring.push_entries(|| state.to_push.pop_front(), &mut state.pending);
+                            state
+                                .ring
+                                .push_entries(|| state.to_push.pop_front(), &mut state.pending);
                         }
                     }
                 }
@@ -183,7 +160,9 @@ impl Model<IoUringAction> for IoUringModel {
                     nbytes_processed: 0,
                     neof: 0,
                 });
-                state.ring.push_entries(|| state.to_push.pop_front(), &mut state.pending);
+                state
+                    .ring
+                    .push_entries(|| state.to_push.pop_front(), &mut state.pending);
             }
             IoUringAction::Write {
                 fd,
@@ -205,7 +184,9 @@ impl Model<IoUringAction> for IoUringModel {
                     nbytes_processed: 0,
                     neof: 0,
                 });
-                state.ring.push_entries(|| state.to_push.pop_front(), &mut state.pending);
+                state
+                    .ring
+                    .push_entries(|| state.to_push.pop_front(), &mut state.pending);
             }
         }
 

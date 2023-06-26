@@ -1,7 +1,6 @@
 use std::{
     any::Any,
     collections::{HashMap, VecDeque},
-    rc::Rc,
 };
 
 type Result<T> = std::result::Result<T, ()>;
@@ -16,7 +15,7 @@ impl Dispatcher<'_> {
         A: Sized + 'static,
     {
         self.queue.push_back(AnyAction {
-            ptr: Rc::new(action),
+            ptr: Box::new(action),
         });
     }
 }
@@ -58,9 +57,8 @@ impl Runner {
     }
 }
 
-#[derive(Clone)]
 pub struct AnyAction {
-    ptr: Rc<dyn Any>,
+    ptr: Box<dyn Any>,
 }
 
 impl AnyAction {
