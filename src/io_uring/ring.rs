@@ -15,6 +15,7 @@ use {
 };
 
 use super::{
+    model::RingId,
     syscalls::{io_uring_enter, io_uring_register, io_uring_setup, mmap, munmap},
     types::{
         io_uring_files_update, io_uring_params, io_uring_probe, timespec, CompletionQueueEntry,
@@ -23,7 +24,7 @@ use super::{
         IORING_OP_OPENAT, IORING_OP_READ, IORING_OP_READ_FIXED, IORING_OP_TIMEOUT, IORING_OP_WRITE,
         IORING_REGISTER_FILES, IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_PROBE,
         IORING_UNREGISTER_FILES,
-    }, model::RingId,
+    },
 };
 
 fn display_io_uring_features(features: u32) {
@@ -239,9 +240,7 @@ impl IoUring {
         let features = FeaturesFlags::from_bits_truncate(params.features);
         let has_single_mmap = features.contains(FeaturesFlags::IORING_FEAT_SINGLE_MMAP);
 
-        assert!(
-            features.contains(FeaturesFlags::IORING_FEAT_NODROP)
-        );
+        assert!(features.contains(FeaturesFlags::IORING_FEAT_NODROP));
 
         let mut sq_ring_size =
             params.sq_off.array + params.sq_entries * std::mem::size_of::<c_uint>() as u32;

@@ -1,6 +1,7 @@
 use std::{
     any::Any,
     collections::{HashMap, VecDeque},
+    rc::Rc,
 };
 
 type Result<T> = std::result::Result<T, ()>;
@@ -15,10 +16,16 @@ impl Dispatcher<'_> {
         A: Sized + 'static,
     {
         self.queue.push_back(AnyAction {
-            ptr: Box::new(action),
+            ptr: Rc::new(action),
         });
     }
 }
+
+// pub trait Redispatcher<Result> {
+//     fn into_action(result: Result) -> AnyAction;
+// }
+
+pub type Redispatcher<R> = fn(R) -> AnyAction;
 
 type ActionId = std::any::TypeId;
 
@@ -46,22 +53,19 @@ impl Runner {
 
         for model in models {
             (model.vtable.try_call_reducer)(&mut model.state, &action).unwrap();
-            (model.vtable.try_call_effect)(&action, &mut dispatcher).unwrap();
+            (model.vtable.try_call_effect)(&action, &model.state, &mut dispatcher).unwrap();
         }
     }
 }
 
-struct AnyAction {
-    ptr: Box<dyn Any>,
+#[derive(Clone)]
+pub struct AnyAction {
+    ptr: Rc<dyn Any>,
 }
 
 impl AnyAction {
     fn action_id(&self) -> ActionId {
         self.ptr.type_id()
-    }
-
-    pub fn downcast<T: Any>(self) -> Option<Box<T>> {
-        self.ptr.downcast::<T>().ok()
     }
 }
 
@@ -72,7 +76,8 @@ struct AnyModel {
 
 struct ModelVTable {
     try_call_reducer: fn(state: &mut dyn Any, action: &AnyAction) -> Result<()>,
-    try_call_effect: fn(action: &AnyAction, dispatcher: &mut Dispatcher) -> Result<()>,
+    try_call_effect:
+        fn(action: &AnyAction, state: &dyn Any, dispatcher: &mut Dispatcher) -> Result<()>,
 }
 
 trait PrivateModel<Action>
@@ -83,7 +88,11 @@ where
 
     fn init_with_vtable(params: Self::InitParams) -> AnyModel;
     fn try_call_reducer(state: &mut dyn Any, action: &AnyAction) -> Result<()>;
-    fn try_call_effect(action: &AnyAction, dispatcher: &mut Dispatcher) -> Result<()>;
+    fn try_call_effect(
+        action: &AnyAction,
+        state: &dyn Any,
+        dispatcher: &mut Dispatcher,
+    ) -> Result<()>;
 }
 
 impl<T, Action> PrivateModel<Action> for T
@@ -114,7 +123,11 @@ where
         Self::reducer(state, action)
     }
 
-    fn try_call_effect(action: &AnyAction, dispatcher: &mut Dispatcher) -> Result<()> {
+    fn try_call_effect(
+        action: &AnyAction,
+        state: &dyn Any,
+        dispatcher: &mut Dispatcher,
+    ) -> Result<()> {
         todo!()
     }
 }
@@ -129,7 +142,7 @@ where
 
     fn init(params: Self::InitParams) -> Box<Self::State>;
     fn reducer(state: &mut Self::State, action: &Action) -> Result<()>;
-    fn effect(action: &Action, dispatcher: &mut Dispatcher) -> Result<()>;
+    fn effect(action: &Action, state: &Self::State, dispatcher: &mut Dispatcher) -> Result<()>;
 }
 
 mod backend {
@@ -162,7 +175,11 @@ mod backend {
             }
         }
 
-        fn effect(action: &BackendAction, dispatcher: &mut Dispatcher) -> Result<()> {
+        fn effect(
+            action: &BackendAction,
+            state: &Self::State,
+            dispatcher: &mut Dispatcher,
+        ) -> Result<()> {
             todo!()
         }
     }
@@ -194,7 +211,11 @@ mod frontend {
             }
         }
 
-        fn effect(action: &FrontendAction, dispatcher: &mut Dispatcher) -> Result<()> {
+        fn effect(
+            action: &FrontendAction,
+            state: &Self::State,
+            dispatcher: &mut Dispatcher,
+        ) -> Result<()> {
             todo!()
         }
     }
