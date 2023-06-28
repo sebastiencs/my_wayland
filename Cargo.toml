@@ -6,13 +6,20 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0.71"
 bitflags = "2.3.2"
+egli = { version = "0.5.0", features = ["egl_1_5"] }
 env_logger = "0.10.0"
 libc = "0.2.146"
 log = "0.4"
-mktemp = "0.5.0"
 # nix = "0.26.2"
 # nix = { version = "0.26.2", default-features = false }
-rand = "0.8.5"
 # rustix = "0.37.20"
 static_assertions = "1.1.0"
+thiserror = "1.0.40"
+toml = "0.7.5"
+xkbcommon = { version = "0.5.0", default-features = false }
+
+[dev-dependencies]
+rand = "0.8.5"
+mktemp = "0.5.0"
