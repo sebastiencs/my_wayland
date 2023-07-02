@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_variables)]
 
+mod dbus;
 mod egl;
 mod io_uring;
 mod logger;
@@ -16,6 +17,8 @@ fn main() {
     let xkb = xkb::Xkb::new();
 
     log::info!("hello");
+
+    dbus::init();
 
     println!("Hello, world! {:?}", std::mem::size_of::<Box<dyn Any>>());
     println!("Hello, world! {:?}", std::mem::size_of::<Box<()>>());
