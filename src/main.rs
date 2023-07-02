@@ -5,6 +5,7 @@ mod egl;
 mod io_uring;
 mod logger;
 pub mod state;
+mod udev;
 mod xkb;
 
 fn main() {
@@ -19,6 +20,8 @@ fn main() {
     log::info!("hello");
 
     dbus::init();
+
+    udev::init();
 
     println!("Hello, world! {:?}", std::mem::size_of::<Box<dyn Any>>());
     println!("Hello, world! {:?}", std::mem::size_of::<Box<()>>());
