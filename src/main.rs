@@ -2,6 +2,7 @@
 
 mod dbus;
 mod egl;
+mod input;
 mod io_uring;
 mod logger;
 pub mod state;
@@ -19,9 +20,10 @@ fn main() {
 
     log::info!("hello");
 
-    dbus::init();
+    let seat_id = dbus::init();
 
-    udev::init();
+    udev::init().unwrap();
+    input::init(seat_id);
 
     println!("Hello, world! {:?}", std::mem::size_of::<Box<dyn Any>>());
     println!("Hello, world! {:?}", std::mem::size_of::<Box<()>>());

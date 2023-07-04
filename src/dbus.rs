@@ -79,7 +79,7 @@ where
     }
 }
 
-pub fn init() {
+pub fn init() -> String {
     let mut dbus_socket = rustbus::RpcConn::system_conn(Timeout::Infinite).unwrap();
 
     let session_id = std::env::var("XDG_SESSION_ID").unwrap_or("1".to_string());
@@ -117,8 +117,9 @@ pub fn init() {
     match response.typ {
         MessageType::Reply => {
             let v = response.body.parser().get::<Variant>().unwrap();
-            let v = v.get::<(String, ObjectPath<String>)>();
+            let v = v.get::<(String, ObjectPath<String>)>().unwrap();
             dbg!(&v);
+            return v.0;
         }
         MessageType::Error | MessageType::Invalid => todo!(),
         MessageType::Signal | MessageType::Call => todo!(),

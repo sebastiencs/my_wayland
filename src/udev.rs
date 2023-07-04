@@ -1,4 +1,3 @@
-
 pub fn init() -> Result<(), std::io::Error> {
     let udev = udev::Udev::new()?;
 
