@@ -5,6 +5,7 @@ mod egl;
 mod input;
 mod io_uring;
 mod logger;
+mod protocol;
 pub mod state;
 mod udev;
 mod xkb;
@@ -24,6 +25,8 @@ fn main() {
 
     udev::init().unwrap();
     input::init(seat_id);
+
+    protocol::gen().unwrap();
 
     println!("Hello, world! {:?}", std::mem::size_of::<Box<dyn Any>>());
     println!("Hello, world! {:?}", std::mem::size_of::<Box<()>>());
