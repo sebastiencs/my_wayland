@@ -39,7 +39,7 @@ fn type_to_name(arg: &protocol::Arg) -> Cow<'static, str> {
         protocol::Type::Array => Cow::Borrowed("Array"),
         // protocol::Type::Array => Cow::Borrowed(todo!()),
         protocol::Type::Fd => Cow::Borrowed("RawFd"),
-        protocol::Type::Destructor => Cow::Borrowed(todo!()),
+        protocol::Type::Destructor => todo!(),
     }
 }
 
@@ -168,7 +168,7 @@ pub fn gen() -> std::io::Result<()> {
         // "/usr/share/wayland-protocols/unstable/xwayland-keyboard-grab/xwayland-keyboard-grab-unstable-v1.xml",
     ];
 
-    let file = File::create("/tmp/testaa/src/new.rs")?;
+    let file = File::create("/home/sebastien/tmp/testaa/src/protocol.rs")?;
     let mut file = BufWriter::with_capacity(32 * 1024 * 1024, file);
 
     // let mut file = temp_file();
@@ -182,6 +182,8 @@ pub fn gen() -> std::io::Result<()> {
         .map(wayland_scanner::parse::parse)
         .collect::<Vec<_>>();
 
+    writeln!(f, "#![allow(dead_code, unused_imports)]")?;
+    writeln!(f, "#![allow(clippy::enum_variant_names)]\n")?;
     writeln!(f, "use std::os::unix::io::RawFd;\n")?;
     writeln!(f, "pub struct ObjectId;")?;
     writeln!(f, "pub struct NewId;")?;

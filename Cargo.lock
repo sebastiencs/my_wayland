@@ -291,15 +291,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quick-xml"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81b9228215d82c7b61490fec1de287136b5de6f5700f6e58ea9ad61a7964ca51"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -419,7 +410,6 @@ dependencies = [
  "libc",
  "log",
  "mktemp",
- "quick-xml 0.29.0",
  "rand",
  "rustbus",
  "static_assertions",
@@ -557,7 +547,7 @@ checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
 name = "wayland-scanner"
 version = "0.30.1"
 dependencies = [
- "quick-xml 0.28.2",
+ "quick-xml",
 ]
 
 [[package]]

@@ -1,7 +1,9 @@
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     collections::{HashMap, VecDeque},
 };
+
+use crate::io_uring::model::IoUringAction;
 
 type Result<T> = std::result::Result<T, ()>;
 
@@ -15,6 +17,7 @@ impl Dispatcher<'_> {
         A: Sized + 'static,
     {
         self.queue.push_back(AnyAction {
+            id: std::any::TypeId::of::<A>(),
             ptr: Box::new(action),
         });
     }
@@ -28,21 +31,38 @@ pub type Redispatcher<R> = fn(R) -> AnyAction;
 
 type ActionId = std::any::TypeId;
 
-struct Runner {
-    models: HashMap<ActionId, Vec<AnyModel>>,
+pub struct Runner {
+    pub models: HashMap<ActionId, Vec<AnyModel>>,
     queue: VecDeque<AnyAction>,
 }
 
 impl Runner {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             models: HashMap::with_capacity(128),
             queue: VecDeque::with_capacity(1024),
         }
     }
 
-    fn dispatch_action(&mut self, action: AnyAction) {
+    pub fn dispatch<A>(&mut self, action: A)
+    where
+        A: Sized + 'static,
+    {
+        self.queue.push_back(AnyAction {
+            id: std::any::TypeId::of::<A>(),
+            ptr: Box::new(action),
+        });
+    }
+
+    pub fn run(&mut self) {
+        while let Some(action) = self.queue.pop_front() {
+            self.dispatch_action(action)
+        }
+    }
+
+    pub fn dispatch_action(&mut self, action: AnyAction) {
         let Some(models) = self.models.get_mut(&action.action_id()) else {
+            eprintln!("action not found");
             return;
         };
 
@@ -58,37 +78,46 @@ impl Runner {
 }
 
 pub struct AnyAction {
+    id: TypeId,
     ptr: Box<dyn Any>,
 }
 
 impl AnyAction {
     fn action_id(&self) -> ActionId {
-        self.ptr.type_id()
+        self.id
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            id: std::any::TypeId::of::<()>(),
+            ptr: Box::new(()),
+        }
     }
 }
 
-struct AnyModel {
+pub struct AnyModel {
     state: Box<dyn Any>,
     vtable: ModelVTable,
 }
 
 struct ModelVTable {
-    try_call_reducer: fn(state: &mut dyn Any, action: &AnyAction) -> Result<()>,
+    try_call_reducer: fn(state: &mut Box<dyn Any>, action: &AnyAction) -> Result<()>,
     try_call_effect:
-        fn(action: &AnyAction, state: &dyn Any, dispatcher: &mut Dispatcher) -> Result<()>,
+        fn(action: &AnyAction, state: &Box<dyn Any>, dispatcher: &mut Dispatcher) -> Result<()>,
 }
 
-trait PrivateModel<Action>
+pub trait PrivateModel<Action>
 where
     Self: Sized + 'static,
 {
     type InitParams: 'static;
 
     fn init_with_vtable(params: Self::InitParams) -> AnyModel;
-    fn try_call_reducer(state: &mut dyn Any, action: &AnyAction) -> Result<()>;
+    // fn into_vtable(self: Box<Self>) -> AnyModel;
+    fn try_call_reducer(state: &mut Box<dyn Any>, action: &AnyAction) -> Result<()>;
     fn try_call_effect(
         action: &AnyAction,
-        state: &dyn Any,
+        state: &Box<dyn Any>,
         dispatcher: &mut Dispatcher,
     ) -> Result<()>;
 }
@@ -109,12 +138,25 @@ where
         AnyModel { state, vtable }
     }
 
-    fn try_call_reducer(state: &mut dyn Any, action: &AnyAction) -> Result<()> {
+    // fn into_vtable(self: Box<Self>) -> AnyModel {
+    //     let vtable = ModelVTable {
+    //         try_call_reducer: Self::try_call_reducer,
+    //         try_call_effect: Self::try_call_effect,
+    //     };
+    //     AnyModel { state: self, vtable }
+    // }
+
+    fn try_call_reducer(state: &mut Box<dyn Any>, action: &AnyAction) -> Result<()> {
+        eprintln!("try_call_reducer");
+
         let Some(state) = state.downcast_mut::<<Self as Model<Action>>::State>() else {
+            panic!("state not found");
             return Ok(());
         };
 
         let Some(action) = action.ptr.downcast_ref::<Action>() else {
+            eprintln!("action not found");
+            // panic!();
             return Ok(());
         };
 
@@ -123,14 +165,16 @@ where
 
     fn try_call_effect(
         action: &AnyAction,
-        state: &dyn Any,
+        state: &Box<dyn Any>,
         dispatcher: &mut Dispatcher,
     ) -> Result<()> {
         let Some(state) = state.downcast_ref::<<Self as Model<Action>>::State>() else {
+            panic!();
             return Ok(());
         };
 
         let Some(action) = action.ptr.downcast_ref::<Action>() else {
+            panic!();
             return Ok(());
         };
 

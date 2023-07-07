@@ -1,4 +1,4 @@
 pub mod model;
-mod ring;
+pub mod ring;
 mod syscalls;
 mod types;

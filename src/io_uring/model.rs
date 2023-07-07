@@ -11,9 +11,16 @@ use crate::{
     state::{AnyAction, Dispatcher, Model, Redispatcher},
 };
 
-use super::ring::{Completed, IoUring, ReadOrWrite, ReadWriteCompleted, RingId};
+use super::{
+    ring::{
+        AcceptCompleted, Completed, IoUring, ReadOrWrite, ReadWriteCompleted, RecvmsgCompleted,
+        RecvmsgData, RingId,
+    },
+    types::empty_msghdr,
+};
 
-enum IoUringAction {
+#[derive(Debug)]
+pub enum IoUringAction {
     Completion,
     WaitForCompletion,
     Read {
@@ -28,9 +35,17 @@ enum IoUringAction {
         buffer: Box<[u8]>,
         dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
     },
+    Recvmsg {
+        fd: RawFd,
+        dispatch_to: Redispatcher<std::io::Result<RecvmsgCompleted>>,
+    },
+    Accept {
+        fd: RawFd,
+        dispatch_to: Redispatcher<std::io::Result<AcceptCompleted>>,
+    },
 }
 
-struct IoUringState {
+pub struct IoUringState {
     ring: IoUring,
     need_submit: bool,
     /// Pushed to the sq
@@ -42,7 +57,7 @@ struct IoUringState {
     to_dispatch: RefCell<VecDeque<AnyAction>>,
 }
 
-struct IoUringModel;
+pub struct IoUringModel;
 
 impl Model<IoUringAction> for IoUringModel {
     type State = IoUringState;
@@ -61,6 +76,7 @@ impl Model<IoUringAction> for IoUringModel {
     }
 
     fn reducer(state: &mut Self::State, action: &IoUringAction) -> Result<(), ()> {
+        eprintln!("io_uring={:?}", action);
         match action {
             IoUringAction::Completion => {
                 while let Some(completed) = state.completed.pop_front() {
@@ -78,6 +94,26 @@ impl Model<IoUringAction> for IoUringModel {
 
                     match state.pending.remove(&id).unwrap() {
                         Operation::NoOp => {}
+                        Operation::Recvmsg {
+                            id,
+                            fd,
+                            data,
+                            dispatch_to,
+                        } => {
+                            let nbytes = result as usize;
+                            let buffer = Box::from(&data.buffer_read[..nbytes]);
+                            let action = dispatch_to(Ok(RecvmsgCompleted { fd, buffer }));
+                            state.to_dispatch.get_mut().push_back(action);
+                        }
+                        Operation::Accept {
+                            id,
+                            fd,
+                            dispatch_to,
+                        } => {
+                            let fd: RawFd = result;
+                            let action = dispatch_to(Ok(AcceptCompleted { new_client: fd }));
+                            state.to_dispatch.get_mut().push_back(action);
+                        }
                         Operation::ReadWrite {
                             id,
                             buffer,
@@ -126,14 +162,15 @@ impl Model<IoUringAction> for IoUringModel {
                                 buffer,
                                 dispatch_to,
                             });
-                            state
-                                .ring
-                                .push_entries(|| state.to_push.pop_front(), &mut state.pending);
+                            state.push_entries_to_sqe();
                         }
                     }
                 }
             }
             IoUringAction::WaitForCompletion => {
+                use crate::io_uring::ring::Submit;
+
+                state.ring.submit(Submit::All).unwrap();
                 let completed = state.ring.wait_pop().unwrap();
                 state.completed.push_back(completed);
                 while let Some(completed) = state.ring.pop() {
@@ -160,9 +197,7 @@ impl Model<IoUringAction> for IoUringModel {
                     nbytes_processed: 0,
                     neof: 0,
                 });
-                state
-                    .ring
-                    .push_entries(|| state.to_push.pop_front(), &mut state.pending);
+                state.push_entries_to_sqe();
             }
             IoUringAction::Write {
                 fd,
@@ -184,9 +219,47 @@ impl Model<IoUringAction> for IoUringModel {
                     nbytes_processed: 0,
                     neof: 0,
                 });
-                state
-                    .ring
-                    .push_entries(|| state.to_push.pop_front(), &mut state.pending);
+                state.push_entries_to_sqe();
+            }
+            IoUringAction::Recvmsg { fd, dispatch_to } => {
+                let (fd, dispatch_to) = (*fd, *dispatch_to);
+                let id = state.next_id();
+
+                let buffer_read = vec![0; 32 * 1024];
+                let buffer_aux = vec![0; 32 * 1024];
+
+                let mut data = Box::new(RecvmsgData {
+                    iovec: libc::iovec {
+                        iov_base: buffer_read.as_ptr() as *mut _,
+                        iov_len: buffer_read.len(),
+                    },
+                    msghdr: empty_msghdr(),
+                    buffer_aux,
+                    buffer_read,
+                });
+                data.msghdr.msg_iov = &data.iovec as *const _ as *mut _;
+                data.msghdr.msg_iovlen = 1;
+                data.msghdr.msg_control = data.buffer_aux.as_ptr() as *mut _;
+                data.msghdr.msg_controllen = data.buffer_aux.len();
+
+                state.to_push.push_back(Operation::Recvmsg {
+                    id,
+                    fd,
+                    data,
+                    dispatch_to,
+                });
+                state.push_entries_to_sqe();
+            }
+            IoUringAction::Accept { fd, dispatch_to } => {
+                let (fd, dispatch_to) = (*fd, *dispatch_to);
+                let id = state.next_id();
+
+                state.to_push.push_back(Operation::Accept {
+                    id,
+                    fd,
+                    dispatch_to,
+                });
+                state.push_entries_to_sqe();
             }
         }
 
@@ -205,16 +278,21 @@ impl Model<IoUringAction> for IoUringModel {
                 for action in state.to_dispatch.borrow_mut().drain(..) {
                     dispatcher.dispatch(action)
                 }
+                dispatcher.dispatch(WaitForCompletion);
             }
             WaitForCompletion => {
                 if state.completed.is_empty() {
+                    eprintln!("A");
                     dispatcher.dispatch(WaitForCompletion);
                 } else {
+                    eprintln!("B");
                     dispatcher.dispatch(Completion);
                 }
             }
             Read { .. } => {}
             Write { .. } => {}
+            Recvmsg { .. } => {}
+            Accept { .. } => {}
         }
         Ok(())
     }
@@ -229,5 +307,10 @@ impl IoUringState {
         let current = self.current_ring_id;
         self.current_ring_id = self.current_ring_id.wrapping_add(1);
         RingId(current)
+    }
+
+    fn push_entries_to_sqe(&mut self) {
+        self.ring
+            .push_entries(|| self.to_push.pop_front(), &mut self.pending);
     }
 }

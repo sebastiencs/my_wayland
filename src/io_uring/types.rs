@@ -274,3 +274,15 @@ pub struct timespec {
     pub(super) tv_sec: i64,
     pub(super) tv_nsec: libc::c_longlong,
 }
+
+pub fn empty_msghdr() -> libc::msghdr {
+    libc::msghdr {
+        msg_name: std::ptr::null_mut(),
+        msg_namelen: 0,
+        msg_iov: std::ptr::null_mut(),
+        msg_iovlen: 0,
+        msg_control: std::ptr::null_mut(),
+        msg_controllen: 0,
+        msg_flags: 0,
+    }
+}

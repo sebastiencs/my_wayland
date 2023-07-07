@@ -14,15 +14,18 @@ use {
     log::{info, warn},
 };
 
-use crate::state::Redispatcher;
+use libc::msghdr;
+
+use crate::{io_uring::types::IORING_OP_RECVMSG, state::Redispatcher};
 
 use super::{
     syscalls::{io_uring_enter, io_uring_register, io_uring_setup, mmap, munmap},
     types::{
         io_uring_files_update, io_uring_params, io_uring_probe, CompletionQueueEntry, EnterFlags,
         FeaturesFlags, IoUringFd, SubmissionQueueEntry, IORING_OFF_CQ_RING, IORING_OFF_SQES,
-        IORING_OFF_SQ_RING, IORING_OP_NOP, IORING_OP_READ, IORING_OP_WRITE, IORING_REGISTER_FILES,
-        IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_PROBE, IORING_UNREGISTER_FILES,
+        IORING_OFF_SQ_RING, IORING_OP_ACCEPT, IORING_OP_NOP, IORING_OP_READ, IORING_OP_WRITE,
+        IORING_REGISTER_FILES, IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_PROBE,
+        IORING_UNREGISTER_FILES,
     },
 };
 
@@ -47,10 +50,30 @@ pub(super) enum ReadOrWrite {
     Write,
 }
 
+#[derive(Debug)]
 pub struct ReadWriteCompleted {
     pub fd: RawFd,
     pub offset: usize,
     pub buffer: Box<[u8]>,
+}
+
+#[derive(Debug)]
+pub struct RecvmsgCompleted {
+    pub fd: RawFd,
+    pub buffer: Box<[u8]>,
+}
+
+#[derive(Debug)]
+pub struct AcceptCompleted {
+    pub new_client: RawFd,
+}
+
+#[derive(Debug)]
+pub struct RecvmsgData {
+    pub buffer_read: Vec<u8>,
+    pub buffer_aux: Vec<u8>,
+    pub iovec: libc::iovec,
+    pub msghdr: msghdr,
 }
 
 #[derive(Debug)]
@@ -83,6 +106,17 @@ pub(super) enum Operation {
         // buffer_ptr: *const u8,
         // length: usize,
         // data: &'a mut [u8],
+    },
+    Recvmsg {
+        id: RingId,
+        fd: RawFd,
+        data: Box<RecvmsgData>,
+        dispatch_to: Redispatcher<std::io::Result<RecvmsgCompleted>>,
+    },
+    Accept {
+        id: RingId,
+        fd: RawFd,
+        dispatch_to: Redispatcher<std::io::Result<AcceptCompleted>>,
     },
 
     // fd: RawFd,
@@ -120,6 +154,8 @@ impl Operation {
         match self {
             Operation::ReadWrite { id, .. } => Some(*id),
             Operation::NoOp => None,
+            Operation::Recvmsg { id, .. } => Some(*id),
+            Operation::Accept { id, .. } => Some(*id),
         }
     }
 }
@@ -199,6 +235,28 @@ impl SubmissionQueueEntry {
             // }
             Operation::NoOp => {
                 self.opcode = IORING_OP_NOP;
+            }
+            Operation::Recvmsg {
+                id,
+                fd,
+                data,
+                dispatch_to,
+            } => {
+                self.opcode = IORING_OP_RECVMSG;
+                self.fd = *fd;
+                self.addr_splice_off_in = &data.msghdr as *const _ as u64;
+                self.flags = libc::MSG_CMSG_CLOEXEC as u32;
+            }
+            Operation::Accept {
+                id,
+                fd,
+                dispatch_to,
+            } => {
+                self.opcode = IORING_OP_ACCEPT;
+                self.fd = *fd;
+                // self.addr_splice_off_in = 0;
+                // self.off_addr2 = 0;
+                self.flags = libc::SOCK_CLOEXEC as u32;
             }
         }
     }
@@ -494,6 +552,8 @@ impl IoUring {
         while tail != end {
             let Some(op) = fun() else { break };
 
+            eprintln!("PUSH");
+
             // Safety:
             // The index doesn't go past sq_entries
             assert!((tail & mask) < self.sq_entries);
@@ -531,6 +591,8 @@ impl IoUring {
             Submit::N(n) => n.min(pending),
             Submit::None => 0,
         };
+
+        dbg!(to_submit);
 
         if to_submit > 0 {
             tail_ref.store(tail, Release);
@@ -574,7 +636,9 @@ impl IoUring {
 
             // Submit at the same time
             let sq_pending = self.sq_pending();
+            eprintln!("WAIT_POP1 {}", sq_pending);
             io_uring_enter(self.fd, sq_pending, 1, EnterFlags::IORING_ENTER_GETEVENTS)?;
+            eprintln!("WAIT_POP2");
         }
     }
 
