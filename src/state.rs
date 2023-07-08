@@ -1,6 +1,6 @@
 use std::{
     any::{Any, TypeId},
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, VecDeque},
 };
 
 use crate::io_uring::model::IoUringAction;
@@ -9,6 +9,7 @@ type Result<T> = std::result::Result<T, ()>;
 
 pub struct Dispatcher<'a> {
     queue: &'a mut VecDeque<AnyAction>,
+    pending_models: BTreeMap<ActionId, Vec<AnyModel>>,
 }
 
 impl Dispatcher<'_> {
@@ -16,35 +17,126 @@ impl Dispatcher<'_> {
     where
         A: Sized + 'static,
     {
-        self.queue.push_back(AnyAction {
-            id: std::any::TypeId::of::<A>(),
-            type_name: std::any::type_name::<A>(),
-            ptr: Box::new(action),
-        });
+        assert_ne!(TypeId::of::<A>(), TypeId::of::<AnyAction>());
+        self.queue.push_back(AnyAction::from(action));
+    }
+
+    pub fn dispatch_to<A, I>(&mut self, id: I, action: A)
+    where
+        I: Into<u64>,
+        A: Sized + 'static,
+    {
+        assert_ne!(TypeId::of::<A>(), TypeId::of::<AnyAction>());
+        self.queue.push_back(AnyAction::from_id(id, action));
     }
 
     pub fn dispatch_any(&mut self, action: AnyAction) {
         self.queue.push_back(action);
     }
+
+    pub fn add_model_with_id<I, M>(&mut self, id: I, model: M)
+    where
+        I: Into<u64>,
+        M: Model,
+    {
+        let action_id = ActionId::of_with::<M::Action, _>(id);
+        let models = self.pending_models.entry(action_id).or_default();
+        models.push(Box::new(model).into_vtable());
+    }
+
+    pub fn start_model_with_id<I, M>(&mut self, id: I, model: M)
+    where
+        I: Into<u64> + Copy,
+        M: Model,
+    {
+        self.add_model_with_id(id, model);
+        self.dispatch_to(id, M::START.unwrap());
+    }
 }
 
-// pub trait Redispatcher<Result> {
-//     fn into_action(result: Result) -> AnyAction;
-// }
+#[derive(Debug)]
+pub enum Redispatcher<R> {
+    Fun(fn(R) -> AnyAction),
+    WithId((u64, fn(R) -> AnyAction)),
+}
 
-pub type Redispatcher<R> = fn(R) -> AnyAction;
+impl<R> Clone for Redispatcher<R> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Fun(arg0) => Self::Fun(*arg0),
+            Self::WithId(arg0) => Self::WithId(*arg0),
+        }
+    }
+}
 
-type ActionId = std::any::TypeId;
+impl<R> Copy for Redispatcher<R> {}
+
+impl<R> Redispatcher<R> {
+    pub fn new(fun: fn(R) -> AnyAction) -> Self {
+        Self::Fun(fun)
+    }
+
+    pub fn new_with_id<V>(id: V, fun: fn(R) -> AnyAction) -> Self
+    where
+        V: Into<u64>,
+    {
+        Self::WithId((id.into(), fun))
+    }
+}
+
+impl<R> Redispatcher<R> {
+    pub fn make(self, value: R) -> AnyAction {
+        match self {
+            Self::Fun(fun) => fun(value),
+            Self::WithId((id, fun)) => {
+                let mut action = fun(value);
+                action.id.specifier = Some(id);
+                action
+            }
+        }
+    }
+}
+
+// pub type Redispatcher<R> = fn(R) -> AnyAction;
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ActionId {
+    type_id: TypeId,
+    specifier: Option<u64>,
+}
+
+impl ActionId {
+    pub fn of<T>() -> Self
+    where
+        T: 'static,
+    {
+        Self {
+            type_id: TypeId::of::<T>(),
+            specifier: None,
+        }
+    }
+
+    pub fn of_with<T, S>(spec: S) -> Self
+    where
+        T: 'static,
+        S: Into<u64>,
+    {
+        Self {
+            type_id: TypeId::of::<T>(),
+            specifier: Some(spec.into()),
+        }
+    }
+}
 
 pub struct Runner {
-    models: HashMap<ActionId, Vec<AnyModel>>,
+    models: BTreeMap<ActionId, Vec<AnyModel>>,
     queue: VecDeque<AnyAction>,
 }
 
 impl Runner {
     pub fn new() -> Self {
         Self {
-            models: HashMap::with_capacity(128),
+            models: BTreeMap::default(),
             queue: VecDeque::with_capacity(1024),
         }
     }
@@ -53,10 +145,7 @@ impl Runner {
     where
         M: Model,
     {
-        let models = self
-            .models
-            .entry(std::any::TypeId::of::<M::Action>())
-            .or_default();
+        let models = self.models.entry(ActionId::of::<M::Action>()).or_default();
 
         models.push(model.into_vtable());
     }
@@ -74,53 +163,74 @@ impl Runner {
     where
         A: Sized + 'static,
     {
-        self.queue.push_back(AnyAction {
-            id: std::any::TypeId::of::<A>(),
-            type_name: std::any::type_name::<A>(),
-            ptr: Box::new(action),
-        });
+        self.queue.push_back(AnyAction::from(action));
     }
 
     fn dispatch_action(&mut self, action: AnyAction) {
-        assert_ne!(action.id, std::any::TypeId::of::<AnyAction>());
+        assert_ne!(action.id, ActionId::of::<AnyAction>());
 
-        let Some(models) = self.models.get_mut(&action.action_id()) else {
+        let Some(models) = self.models.get_mut(action.action_id()) else {
             eprintln!("action not found1 {}", action.type_name);
             return;
         };
 
         let mut dispatcher = Dispatcher {
             queue: &mut self.queue,
+            pending_models: BTreeMap::default(),
         };
 
         for model in models {
             (model.vtable.try_call_reducer_effect)(&mut model.state, &action, &mut dispatcher)
                 .unwrap();
         }
+
+        for (action_id, pending_models) in dispatcher.pending_models {
+            self.models
+                .entry(action_id)
+                .or_default()
+                .extend(pending_models);
+        }
     }
 }
 
 pub struct AnyAction {
-    id: TypeId,
+    id: ActionId,
     type_name: &'static str,
     ptr: Box<dyn Any>,
 }
 
 impl AnyAction {
-    fn action_id(&self) -> ActionId {
-        self.id
+    fn action_id(&self) -> &ActionId {
+        &self.id
     }
 
-    // pub fn empty() -> Self {
-    //     Self {
-    //         id: std::any::TypeId::of::<()>(),
-    //         ptr: Box::new(()),
-    //     }
-    // }
+    pub fn empty() -> Self {
+        Self {
+            id: ActionId::of::<()>(),
+            ptr: Box::new(()),
+            type_name: std::any::type_name::<()>(),
+        }
+    }
 
     pub fn from<T: 'static>(v: T) -> Self {
+        // Panic when calling `AnyAction::from(AnyAction { .. })`
+        assert_ne!(TypeId::of::<T>(), TypeId::of::<AnyAction>());
         Self {
-            id: std::any::TypeId::of::<T>(),
+            id: ActionId::of::<T>(),
+            ptr: Box::new(v),
+            type_name: std::any::type_name::<T>(),
+        }
+    }
+
+    pub fn from_id<T, S>(id: S, v: T) -> Self
+    where
+        T: 'static,
+        S: Into<u64>,
+    {
+        // Panic when calling `AnyAction::from(AnyAction { .. })`
+        assert_ne!(TypeId::of::<T>(), TypeId::of::<AnyAction>());
+        Self {
+            id: ActionId::of_with::<T, S>(id),
             ptr: Box::new(v),
             type_name: std::any::type_name::<T>(),
         }
@@ -178,8 +288,7 @@ where
             eprintln!("action not found2");
             return Ok(());
         };
-        state.reducer(action)?;
-        state.effect(action, dispatcher)?;
+        state.reducer(action, dispatcher)?;
         Ok(())
     }
 }
@@ -190,10 +299,10 @@ where
 {
     type InitParams: 'static;
     type Action: Sized + 'static;
+    const START: Option<Self::Action> = None;
 
     fn init(params: Self::InitParams) -> Box<Self>;
-    fn reducer(&mut self, action: &Self::Action) -> Result<()>;
-    fn effect(&self, action: &Self::Action, dispatcher: &mut Dispatcher) -> Result<()>;
+    fn reducer(&mut self, action: &Self::Action, dispatcher: &mut Dispatcher) -> Result<()>;
 }
 
 mod backend {
@@ -218,22 +327,13 @@ mod backend {
             todo!()
         }
 
-        fn reducer(&mut self, action: &Self::Action) -> Result<()> {
+        fn reducer(&mut self, action: &Self::Action, dispatcher: &mut Dispatcher) -> Result<()> {
             match action {
                 Self::Action::NewDrmDevice => todo!(),
                 Self::Action::NewConnector => todo!(),
                 Self::Action::NewInputDevice => todo!(),
                 Self::Action::DevicesEnumerated => todo!(),
             }
-        }
-
-        fn effect(
-            &self,
-            action: &Self::Action,
-            // state: &Self::State,
-            dispatcher: &mut Dispatcher,
-        ) -> Result<()> {
-            todo!()
         }
     }
 }
@@ -258,20 +358,11 @@ mod frontend {
             todo!()
         }
 
-        fn reducer(&mut self, action: &Self::Action) -> Result<()> {
+        fn reducer(&mut self, action: &Self::Action, dispatcher: &mut Dispatcher) -> Result<()> {
             match action {
                 Self::Action::Push => todo!(),
                 Self::Action::Click => todo!(),
             }
-        }
-
-        fn effect(
-            &self,
-            action: &Self::Action,
-            // state: &Self::State,
-            dispatcher: &mut Dispatcher,
-        ) -> Result<()> {
-            todo!()
         }
     }
 }

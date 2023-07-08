@@ -69,12 +69,22 @@ pub struct AcceptCompleted {
     pub new_client: RawFd,
 }
 
-#[derive(Debug)]
 pub struct RecvmsgData {
     pub buffer_read: Vec<u8>,
     pub buffer_aux: Vec<u8>,
     pub iovec: libc::iovec,
     pub msghdr: msghdr,
+}
+
+impl Debug for RecvmsgData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecvmsgData")
+            .field("buffer_read_len", &self.buffer_read.len())
+            .field("buffer_aux_len", &self.buffer_aux.len())
+            .field("iovec", &self.iovec)
+            .field("msghdr", &self.msghdr)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
