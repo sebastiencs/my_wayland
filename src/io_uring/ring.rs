@@ -65,6 +65,7 @@ pub struct RecvmsgCompleted {
 
 #[derive(Debug)]
 pub struct AcceptCompleted {
+    pub fd: RawFd,
     pub new_client: RawFd,
 }
 
@@ -246,6 +247,7 @@ impl SubmissionQueueEntry {
                 self.fd = *fd;
                 self.addr_splice_off_in = &data.msghdr as *const _ as u64;
                 self.flags = libc::MSG_CMSG_CLOEXEC as u32;
+                self.user_data = id.to_user_data();
             }
             Operation::Accept {
                 id,
@@ -257,6 +259,7 @@ impl SubmissionQueueEntry {
                 // self.addr_splice_off_in = 0;
                 // self.off_addr2 = 0;
                 self.flags = libc::SOCK_CLOEXEC as u32;
+                self.user_data = id.to_user_data();
             }
         }
     }
@@ -552,8 +555,6 @@ impl IoUring {
         while tail != end {
             let Some(op) = fun() else { break };
 
-            eprintln!("PUSH");
-
             // Safety:
             // The index doesn't go past sq_entries
             assert!((tail & mask) < self.sq_entries);
@@ -628,17 +629,32 @@ impl IoUring {
         Some(entry)
     }
 
+    /// Wait for completion, and submit at the same time
+    #[allow(clippy::unnecessary_unwrap)]
     pub(super) fn wait_pop(&self) -> std::io::Result<Completed> {
         loop {
-            if let Some(e) = self.pop() {
-                return Ok(e);
+            let completed = self.pop();
+            let nto_submit = self.sq_pending();
+
+            if nto_submit == 0 && completed.is_some() {
+                return Ok(completed.unwrap());
+            }
+
+            let (min_complete, enter_flags) = match completed.is_some() {
+                true => (0, EnterFlags::empty()),
+                false => (1, EnterFlags::IORING_ENTER_GETEVENTS),
             };
 
-            // Submit at the same time
-            let sq_pending = self.sq_pending();
-            eprintln!("WAIT_POP1 {}", sq_pending);
-            io_uring_enter(self.fd, sq_pending, 1, EnterFlags::IORING_ENTER_GETEVENTS)?;
-            eprintln!("WAIT_POP2");
+            if nto_submit > 0 {
+                let (head_ref, tail_ref) = self.sq_refs();
+                tail_ref.store(self.sq_tail_local, Release);
+            }
+
+            io_uring_enter(self.fd, nto_submit, min_complete, enter_flags)?;
+
+            if let Some(completed) = completed {
+                return Ok(completed);
+            };
         }
     }
 

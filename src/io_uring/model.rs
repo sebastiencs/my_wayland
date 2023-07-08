@@ -59,11 +59,13 @@ pub struct IoUringState {
 
 pub struct IoUringModel;
 
-impl Model<IoUringAction> for IoUringModel {
-    type State = IoUringState;
+// impl Model<IoUringAction> for IoUringState {
+impl Model for IoUringState {
+    // type State = IoUringState;
     type InitParams = ();
+    type Action = IoUringAction;
 
-    fn init(params: Self::InitParams) -> Box<Self::State> {
+    fn init(params: Self::InitParams) -> Box<Self> {
         Box::new(IoUringState {
             ring: IoUring::new(256).unwrap(),
             need_submit: false,
@@ -75,11 +77,11 @@ impl Model<IoUringAction> for IoUringModel {
         })
     }
 
-    fn reducer(state: &mut Self::State, action: &IoUringAction) -> Result<(), ()> {
-        eprintln!("io_uring={:?}", action);
+    fn reducer(&mut self, action: &IoUringAction) -> Result<(), ()> {
+        log::trace!("io_uring action={:?}", action);
         match action {
             IoUringAction::Completion => {
-                while let Some(completed) = state.completed.pop_front() {
+                while let Some(completed) = self.completed.pop_front() {
                     let Completed {
                         user_data,
                         id,
@@ -92,7 +94,11 @@ impl Model<IoUringAction> for IoUringModel {
                         panic!()
                     }
 
-                    match state.pending.remove(&id).unwrap() {
+                    let op = self.pending.remove(&id).unwrap();
+
+                    log::trace!("io_uring completed={:?}", op);
+
+                    match op {
                         Operation::NoOp => {}
                         Operation::Recvmsg {
                             id,
@@ -103,16 +109,16 @@ impl Model<IoUringAction> for IoUringModel {
                             let nbytes = result as usize;
                             let buffer = Box::from(&data.buffer_read[..nbytes]);
                             let action = dispatch_to(Ok(RecvmsgCompleted { fd, buffer }));
-                            state.to_dispatch.get_mut().push_back(action);
+                            self.to_dispatch.get_mut().push_back(action);
                         }
                         Operation::Accept {
                             id,
                             fd,
                             dispatch_to,
                         } => {
-                            let fd: RawFd = result;
-                            let action = dispatch_to(Ok(AcceptCompleted { new_client: fd }));
-                            state.to_dispatch.get_mut().push_back(action);
+                            let new_client: RawFd = result;
+                            let action = dispatch_to(Ok(AcceptCompleted { new_client, fd }));
+                            self.to_dispatch.get_mut().push_back(action);
                         }
                         Operation::ReadWrite {
                             id,
@@ -131,7 +137,7 @@ impl Model<IoUringAction> for IoUringModel {
                             if nbytes_processed == buffer.len() {
                                 let action =
                                     dispatch_to(Ok(ReadWriteCompleted { fd, offset, buffer }));
-                                state.to_dispatch.get_mut().push_back(action);
+                                self.to_dispatch.get_mut().push_back(action);
                                 continue;
                             }
 
@@ -145,14 +151,14 @@ impl Model<IoUringAction> for IoUringModel {
                                     // EOF reached
                                     let action =
                                         dispatch_to(Err(std::io::ErrorKind::UnexpectedEof.into()));
-                                    state.to_dispatch.get_mut().push_back(action);
+                                    self.to_dispatch.get_mut().push_back(action);
                                     continue;
                                 }
                                 neof += 1;
                             }
 
-                            let id = state.next_id();
-                            state.to_push.push_back(Operation::ReadWrite {
+                            let id = self.next_id();
+                            self.push_op(Operation::ReadWrite {
                                 id,
                                 fd,
                                 offset,
@@ -162,19 +168,15 @@ impl Model<IoUringAction> for IoUringModel {
                                 buffer,
                                 dispatch_to,
                             });
-                            state.push_entries_to_sqe();
                         }
                     }
                 }
             }
             IoUringAction::WaitForCompletion => {
-                use crate::io_uring::ring::Submit;
-
-                state.ring.submit(Submit::All).unwrap();
-                let completed = state.ring.wait_pop().unwrap();
-                state.completed.push_back(completed);
-                while let Some(completed) = state.ring.pop() {
-                    state.completed.push_back(completed);
+                let completed = self.ring.wait_pop().unwrap();
+                self.completed.push_back(completed);
+                while let Some(completed) = self.ring.pop() {
+                    self.completed.push_back(completed);
                 }
             }
             IoUringAction::Read {
@@ -184,10 +186,10 @@ impl Model<IoUringAction> for IoUringModel {
                 dispatch_to,
             } => {
                 let (fd, offset, length, dispatch_to) = (*fd, *offset, *length, *dispatch_to);
-                let id = state.next_id();
-                let buffer = Self::State::make_buffer(length);
+                let id = self.next_id();
+                let buffer = Self::make_buffer(length);
 
-                state.to_push.push_back(Operation::ReadWrite {
+                self.push_op(Operation::ReadWrite {
                     id,
                     fd,
                     offset,
@@ -197,7 +199,6 @@ impl Model<IoUringAction> for IoUringModel {
                     nbytes_processed: 0,
                     neof: 0,
                 });
-                state.push_entries_to_sqe();
             }
             IoUringAction::Write {
                 fd,
@@ -206,10 +207,10 @@ impl Model<IoUringAction> for IoUringModel {
                 dispatch_to,
             } => {
                 let (fd, offset, dispatch_to) = (*fd, *offset, *dispatch_to);
-                let id = state.next_id();
+                let id = self.next_id();
                 let buffer = buffer.clone();
 
-                state.to_push.push_back(Operation::ReadWrite {
+                self.push_op(Operation::ReadWrite {
                     id,
                     fd,
                     offset,
@@ -219,11 +220,10 @@ impl Model<IoUringAction> for IoUringModel {
                     nbytes_processed: 0,
                     neof: 0,
                 });
-                state.push_entries_to_sqe();
             }
             IoUringAction::Recvmsg { fd, dispatch_to } => {
                 let (fd, dispatch_to) = (*fd, *dispatch_to);
-                let id = state.next_id();
+                let id = self.next_id();
 
                 let buffer_read = vec![0; 32 * 1024];
                 let buffer_aux = vec![0; 32 * 1024];
@@ -242,24 +242,22 @@ impl Model<IoUringAction> for IoUringModel {
                 data.msghdr.msg_control = data.buffer_aux.as_ptr() as *mut _;
                 data.msghdr.msg_controllen = data.buffer_aux.len();
 
-                state.to_push.push_back(Operation::Recvmsg {
+                self.push_op(Operation::Recvmsg {
                     id,
                     fd,
                     data,
                     dispatch_to,
                 });
-                state.push_entries_to_sqe();
             }
             IoUringAction::Accept { fd, dispatch_to } => {
                 let (fd, dispatch_to) = (*fd, *dispatch_to);
-                let id = state.next_id();
+                let id = self.next_id();
 
-                state.to_push.push_back(Operation::Accept {
+                self.push_op(Operation::Accept {
                     id,
                     fd,
                     dispatch_to,
                 });
-                state.push_entries_to_sqe();
             }
         }
 
@@ -267,25 +265,22 @@ impl Model<IoUringAction> for IoUringModel {
     }
 
     fn effect(
+        &self,
         action: &IoUringAction,
-        state: &Self::State,
+        // state: &Self::State,
         dispatcher: &mut Dispatcher,
     ) -> Result<(), ()> {
         use IoUringAction::*;
 
         match action {
             Completion => {
-                for action in state.to_dispatch.borrow_mut().drain(..) {
-                    dispatcher.dispatch(action)
+                for action in self.to_dispatch.borrow_mut().drain(..) {
+                    dispatcher.dispatch_any(action)
                 }
-                dispatcher.dispatch(WaitForCompletion);
+                // dispatcher.dispatch(WaitForCompletion);
             }
             WaitForCompletion => {
-                if state.completed.is_empty() {
-                    eprintln!("A");
-                    dispatcher.dispatch(WaitForCompletion);
-                } else {
-                    eprintln!("B");
+                if !self.completed.is_empty() {
                     dispatcher.dispatch(Completion);
                 }
             }
@@ -309,7 +304,8 @@ impl IoUringState {
         RingId(current)
     }
 
-    fn push_entries_to_sqe(&mut self) {
+    fn push_op(&mut self, op: Operation) {
+        self.to_push.push_back(op);
         self.ring
             .push_entries(|| self.to_push.pop_front(), &mut self.pending);
     }

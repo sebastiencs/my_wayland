@@ -1,18 +1,12 @@
 #![allow(dead_code, unused_variables)]
 
-use std::os::{
-    fd::{AsFd, AsRawFd},
-    unix::net::UnixListener,
-};
-
 use crate::{
-    io_uring::{
-        model::{IoUringAction, IoUringModel},
-        ring::AcceptCompleted,
-    },
-    state::{AnyAction, PrivateModel, Runner},
+    clients::{Clients, ClientsAction},
+    io_uring::model::IoUringState,
+    state::{Model, Runner},
 };
 
+mod clients;
 mod dbus;
 mod egl;
 mod input;
@@ -61,7 +55,7 @@ fn main() {
 
     // /var/run/user/1000/wayland-1
 
-    let unix = UnixListener::bind("/var/run/user/1000/wayland-1").unwrap();
+    // let unix = UnixListener::bind("/var/run/user/1000/wayland-1").unwrap();
 
     // // accept connections and process them, spawning a new thread for each one
     // for stream in listener.incoming() {
@@ -90,29 +84,24 @@ fn main() {
     //     }
     // }
 
+    let uring = IoUringState::init(());
+    let clients = Clients::init(());
+
     let mut runner = Runner::new();
+    runner.add_model(uring);
+    runner.add_model(clients);
 
-    let uring = IoUringModel::init_with_vtable(());
+    // fn on_accept(result: std::io::Result<AcceptCompleted>) -> AnyAction {
+    //     eprintln!("on_accept={:?}", result);
+    //     AnyAction::empty()
+    // }
 
-    // let uring = IoUringModel::init(());
-
-    // uring.into_vtable();
-
-    runner
-        .models
-        .insert(std::any::TypeId::of::<IoUringAction>(), vec![uring]);
-    // runner.models.insert(std::any::TypeId::of::<Box<IoUringAction>>(), vec![uring]);
-
-    fn on_accept(result: std::io::Result<AcceptCompleted>) -> AnyAction {
-        eprintln!("on_accept={:?}", result);
-        AnyAction::empty()
-    }
-
-    runner.dispatch(IoUringAction::Accept {
-        fd: unix.as_fd().as_raw_fd(),
-        dispatch_to: on_accept,
-    });
-    runner.dispatch(IoUringAction::WaitForCompletion);
+    // runner.dispatch(IoUringAction::Accept {
+    //     fd: unix.as_raw_fd(),
+    //     dispatch_to: on_accept,
+    // });
+    runner.dispatch(ClientsAction::StartListen);
+    // runner.dispatch(IoUringAction::WaitForCompletion);
     runner.run();
 
     println!("Hello, world! {:?}", std::mem::size_of::<Box<dyn Any>>());

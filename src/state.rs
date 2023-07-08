@@ -18,8 +18,13 @@ impl Dispatcher<'_> {
     {
         self.queue.push_back(AnyAction {
             id: std::any::TypeId::of::<A>(),
+            type_name: std::any::type_name::<A>(),
             ptr: Box::new(action),
         });
+    }
+
+    pub fn dispatch_any(&mut self, action: AnyAction) {
+        self.queue.push_back(action);
     }
 }
 
@@ -32,7 +37,7 @@ pub type Redispatcher<R> = fn(R) -> AnyAction;
 type ActionId = std::any::TypeId;
 
 pub struct Runner {
-    pub models: HashMap<ActionId, Vec<AnyModel>>,
+    models: HashMap<ActionId, Vec<AnyModel>>,
     queue: VecDeque<AnyAction>,
 }
 
@@ -44,25 +49,43 @@ impl Runner {
         }
     }
 
+    pub fn add_model<M>(&mut self, model: Box<M>)
+    where
+        M: Model,
+    {
+        let models = self
+            .models
+            .entry(std::any::TypeId::of::<M::Action>())
+            .or_default();
+
+        models.push(model.into_vtable());
+    }
+
+    pub fn run(&mut self) {
+        loop {
+            while let Some(action) = self.queue.pop_front() {
+                self.dispatch_action(action)
+            }
+            self.dispatch(IoUringAction::WaitForCompletion);
+        }
+    }
+
     pub fn dispatch<A>(&mut self, action: A)
     where
         A: Sized + 'static,
     {
         self.queue.push_back(AnyAction {
             id: std::any::TypeId::of::<A>(),
+            type_name: std::any::type_name::<A>(),
             ptr: Box::new(action),
         });
     }
 
-    pub fn run(&mut self) {
-        while let Some(action) = self.queue.pop_front() {
-            self.dispatch_action(action)
-        }
-    }
+    fn dispatch_action(&mut self, action: AnyAction) {
+        assert_ne!(action.id, std::any::TypeId::of::<AnyAction>());
 
-    pub fn dispatch_action(&mut self, action: AnyAction) {
         let Some(models) = self.models.get_mut(&action.action_id()) else {
-            eprintln!("action not found");
+            eprintln!("action not found1 {}", action.type_name);
             return;
         };
 
@@ -71,14 +94,15 @@ impl Runner {
         };
 
         for model in models {
-            (model.vtable.try_call_reducer)(&mut model.state, &action).unwrap();
-            (model.vtable.try_call_effect)(&action, &model.state, &mut dispatcher).unwrap();
+            (model.vtable.try_call_reducer_effect)(&mut model.state, &action, &mut dispatcher)
+                .unwrap();
         }
     }
 }
 
 pub struct AnyAction {
     id: TypeId,
+    type_name: &'static str,
     ptr: Box<dyn Any>,
 }
 
@@ -87,10 +111,18 @@ impl AnyAction {
         self.id
     }
 
-    pub fn empty() -> Self {
+    // pub fn empty() -> Self {
+    //     Self {
+    //         id: std::any::TypeId::of::<()>(),
+    //         ptr: Box::new(()),
+    //     }
+    // }
+
+    pub fn from<T: 'static>(v: T) -> Self {
         Self {
-            id: std::any::TypeId::of::<()>(),
-            ptr: Box::new(()),
+            id: std::any::TypeId::of::<T>(),
+            ptr: Box::new(v),
+            type_name: std::any::type_name::<T>(),
         }
     }
 }
@@ -101,98 +133,67 @@ pub struct AnyModel {
 }
 
 struct ModelVTable {
-    try_call_reducer: fn(state: &mut Box<dyn Any>, action: &AnyAction) -> Result<()>,
-    try_call_effect:
-        fn(action: &AnyAction, state: &Box<dyn Any>, dispatcher: &mut Dispatcher) -> Result<()>,
+    try_call_reducer_effect:
+        fn(state: &mut Box<dyn Any>, action: &AnyAction, dispatcher: &mut Dispatcher) -> Result<()>,
 }
 
-pub trait PrivateModel<Action>
+pub trait PrivateModel
 where
     Self: Sized + 'static,
 {
-    type InitParams: 'static;
+    type Action: 'static;
 
-    fn init_with_vtable(params: Self::InitParams) -> AnyModel;
-    // fn into_vtable(self: Box<Self>) -> AnyModel;
-    fn try_call_reducer(state: &mut Box<dyn Any>, action: &AnyAction) -> Result<()>;
-    fn try_call_effect(
+    fn into_vtable(self: Box<Self>) -> AnyModel;
+    fn try_call_reducer_effect(
+        state: &mut Box<dyn Any>,
         action: &AnyAction,
-        state: &Box<dyn Any>,
         dispatcher: &mut Dispatcher,
     ) -> Result<()>;
 }
 
-impl<T, Action> PrivateModel<Action> for T
+impl<T> PrivateModel for T
 where
-    T: Model<Action>,
-    Action: Sized + 'static,
+    T: Model,
 {
-    type InitParams = <T as Model<Action>>::InitParams;
+    type Action = <T as Model>::Action;
 
-    fn init_with_vtable(params: Self::InitParams) -> AnyModel {
-        let state = Self::init(params);
+    fn into_vtable(self: Box<Self>) -> AnyModel {
+        let state = self;
         let vtable = ModelVTable {
-            try_call_reducer: Self::try_call_reducer,
-            try_call_effect: Self::try_call_effect,
+            try_call_reducer_effect: Self::try_call_reducer_effect,
         };
         AnyModel { state, vtable }
     }
 
-    // fn into_vtable(self: Box<Self>) -> AnyModel {
-    //     let vtable = ModelVTable {
-    //         try_call_reducer: Self::try_call_reducer,
-    //         try_call_effect: Self::try_call_effect,
-    //     };
-    //     AnyModel { state: self, vtable }
-    // }
-
-    fn try_call_reducer(state: &mut Box<dyn Any>, action: &AnyAction) -> Result<()> {
-        eprintln!("try_call_reducer");
-
-        let Some(state) = state.downcast_mut::<<Self as Model<Action>>::State>() else {
-            panic!("state not found");
-            return Ok(());
-        };
-
-        let Some(action) = action.ptr.downcast_ref::<Action>() else {
-            eprintln!("action not found");
-            // panic!();
-            return Ok(());
-        };
-
-        Self::reducer(state, action)
-    }
-
-    fn try_call_effect(
+    fn try_call_reducer_effect(
+        state: &mut Box<dyn Any>,
         action: &AnyAction,
-        state: &Box<dyn Any>,
         dispatcher: &mut Dispatcher,
     ) -> Result<()> {
-        let Some(state) = state.downcast_ref::<<Self as Model<Action>>::State>() else {
-            panic!();
+        let Some(state) = state.downcast_mut::<Self>() else {
+            eprintln!("state not found");
             return Ok(());
         };
-
-        let Some(action) = action.ptr.downcast_ref::<Action>() else {
-            panic!();
+        let Some(action) = action.ptr.downcast_ref::<Self::Action>() else {
+            eprintln!("action not found2");
             return Ok(());
         };
-
-        Self::effect(action, state, dispatcher)
+        state.reducer(action)?;
+        state.effect(action, dispatcher)?;
+        Ok(())
     }
 }
 
-pub trait Model<Action>
+pub trait Model
 where
     Self: Sized + 'static,
-    Action: Sized + 'static,
 {
-    type State: 'static;
     type InitParams: 'static;
+    type Action: Sized + 'static;
 
-    fn init(params: Self::InitParams) -> Box<Self::State>;
-    fn reducer(state: &mut Self::State, action: &Action) -> Result<()>;
-    fn effect(action: &Action, state: &Self::State, dispatcher: &mut Dispatcher) -> Result<()>;
+    fn init(params: Self::InitParams) -> Box<Self>;
+    fn reducer(&mut self, action: &Self::Action) -> Result<()>;
+    fn effect(&self, action: &Self::Action, dispatcher: &mut Dispatcher) -> Result<()>;
 }
 
 mod backend {
@@ -208,26 +209,28 @@ mod backend {
     struct Backend;
     struct BackendState;
 
-    impl Model<BackendAction> for Backend {
-        type State = BackendState;
+    impl Model for BackendState {
+        // type State = BackendState;
         type InitParams = ();
+        type Action = BackendAction;
 
-        fn init(params: Self::InitParams) -> Box<Self::State> {
+        fn init(params: Self::InitParams) -> Box<Self> {
             todo!()
         }
 
-        fn reducer(state: &mut Self::State, action: &BackendAction) -> Result<()> {
+        fn reducer(&mut self, action: &Self::Action) -> Result<()> {
             match action {
-                BackendAction::NewDrmDevice => todo!(),
-                BackendAction::NewConnector => todo!(),
-                BackendAction::NewInputDevice => todo!(),
-                BackendAction::DevicesEnumerated => todo!(),
+                Self::Action::NewDrmDevice => todo!(),
+                Self::Action::NewConnector => todo!(),
+                Self::Action::NewInputDevice => todo!(),
+                Self::Action::DevicesEnumerated => todo!(),
             }
         }
 
         fn effect(
-            action: &BackendAction,
-            state: &Self::State,
+            &self,
+            action: &Self::Action,
+            // state: &Self::State,
             dispatcher: &mut Dispatcher,
         ) -> Result<()> {
             todo!()
@@ -243,27 +246,29 @@ mod frontend {
         Click,
     }
 
-    struct Frontend;
+    // struct Frontend;
     struct FrontendState;
 
-    impl Model<FrontendAction> for Frontend {
-        type State = FrontendState;
+    impl Model for FrontendState {
+        // type State = FrontendState;
         type InitParams = ();
+        type Action = FrontendAction;
 
-        fn init(params: Self::InitParams) -> Box<Self::State> {
+        fn init(params: Self::InitParams) -> Box<Self> {
             todo!()
         }
 
-        fn reducer(state: &mut Self::State, action: &FrontendAction) -> Result<()> {
+        fn reducer(&mut self, action: &Self::Action) -> Result<()> {
             match action {
-                FrontendAction::Push => todo!(),
-                FrontendAction::Click => todo!(),
+                Self::Action::Push => todo!(),
+                Self::Action::Click => todo!(),
             }
         }
 
         fn effect(
-            action: &FrontendAction,
-            state: &Self::State,
+            &self,
+            action: &Self::Action,
+            // state: &Self::State,
             dispatcher: &mut Dispatcher,
         ) -> Result<()> {
             todo!()
