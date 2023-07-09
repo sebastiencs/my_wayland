@@ -54,10 +54,18 @@ impl Dispatcher<'_> {
     }
 }
 
-#[derive(Debug)]
 pub enum Redispatcher<R> {
     Fun(fn(R) -> AnyAction),
     WithId((u64, fn(R) -> AnyAction)),
+}
+
+impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fun(_fun) => f.write_str("ptr"),
+            Self::WithId((id, _fun)) => f.write_fmt(format_args!("id={:?}", id)),
+        }
+    }
 }
 
 impl<R> Clone for Redispatcher<R> {

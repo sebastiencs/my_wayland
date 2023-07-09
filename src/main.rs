@@ -1,5 +1,4 @@
 #![feature(array_chunks)]
-
 #![allow(dead_code, unused_variables)]
 
 use crate::{
@@ -14,7 +13,9 @@ mod egl;
 mod input;
 mod io_uring;
 mod logger;
+mod objects;
 mod protocol;
+mod protocol_generated;
 pub mod state;
 mod udev;
 mod xkb;
@@ -55,37 +56,6 @@ fn main() {
 
     // protocol::gen().unwrap();
 
-    // /var/run/user/1000/wayland-1
-
-    // let unix = UnixListener::bind("/var/run/user/1000/wayland-1").unwrap();
-
-    // // accept connections and process them, spawning a new thread for each one
-    // for stream in listener.incoming() {
-    //     match stream {
-    //         Ok(mut stream) => {
-    //             println!("connected {:?}", stream);
-    //             loop {
-    //                 let mut buf = vec![0; 128 * 1024];
-    //                 let nread = stream.read(&mut buf).unwrap();
-
-    //                 parse_request(&buf[..nread]);
-
-    //                 break;
-    //                 // if nread > 0 {
-    //                 //     println!("read={:?}", &buf[..nread]);
-    //                 // }
-    //             }
-    //             /* connection succeeded */
-    //             // thread::spawn(|| handle_client(stream));
-    //         }
-    //         Err(err) => {
-    //             /* connection failed */
-    //             println!("failed {:?}", err);
-    //             break;
-    //         }
-    //     }
-    // }
-
     let uring = IoUringState::init(());
     let clients = Clients::init(());
 
@@ -106,6 +76,6 @@ fn main() {
     // runner.dispatch(IoUringAction::WaitForCompletion);
     runner.run();
 
-    println!("Hello, world! {:?}", std::mem::size_of::<Box<dyn Any>>());
-    println!("Hello, world! {:?}", std::mem::size_of::<Box<()>>());
+    // println!("Hello, world! {:?}", std::mem::size_of::<Box<dyn Any>>());
+    // println!("Hello, world! {:?}", std::mem::size_of::<Box<()>>());
 }

@@ -28,11 +28,11 @@ fn type_to_name(arg: &protocol::Arg) -> Cow<'static, str> {
         protocol::Type::String => Cow::Borrowed("String"),
         // protocol::Type::Object => Cow::Borrowed(todo!()),
         protocol::Type::Object => match arg.interface.as_ref() {
-            Some(interface) => Cow::Owned(interface.to_upper_camel_case()),
+            Some(interface) => Cow::Owned(interface_name_to_id(interface)),
             None => Cow::Borrowed("ObjectId"),
         },
         protocol::Type::NewId => match arg.interface.as_ref() {
-            Some(interface) => Cow::Owned(interface.to_upper_camel_case()),
+            Some(interface) => Cow::Owned(interface_name_to_id(interface)),
             None => Cow::Borrowed("NewId"),
         },
         // protocol::Type::NewId => Cow::Owned(arg.interface.as_ref().unwrap().to_upper_camel_case()),
@@ -54,6 +54,11 @@ fn first_char_to_uppercase(s: &str) -> String {
     }
     let mut s = s.chars();
     s.next().unwrap().to_uppercase().chain(s).collect()
+}
+
+fn interface_name_to_id(interface_name: &str) -> String {
+    let this_interface = interface_name.to_upper_camel_case();
+    this_interface + "Id"
 }
 
 fn write_description(
@@ -182,17 +187,22 @@ pub fn gen() -> std::io::Result<()> {
         .map(wayland_scanner::parse::parse)
         .collect::<Vec<_>>();
 
+    let derive_str = "#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]";
+
     writeln!(f, "#![allow(dead_code, unused_imports)]")?;
     writeln!(f, "#![allow(clippy::enum_variant_names)]\n")?;
     writeln!(f, "use std::os::unix::io::RawFd;\n")?;
-    writeln!(f, "pub struct ObjectId;")?;
-    writeln!(f, "pub struct NewId;")?;
+    writeln!(f, "{}", derive_str)?;
+    writeln!(f, "pub struct ObjectId(u32);")?;
+    writeln!(f, "{}", derive_str)?;
+    writeln!(f, "pub struct NewId(u32);")?;
     writeln!(f, "pub struct Array;")?;
 
     for protocol in &protocols {
         for interface in &protocol.interfaces {
-            let this_interface = interface.name.to_upper_camel_case();
-            writeln!(f, "pub struct {};", this_interface)?;
+            let name = interface_name_to_id(&interface.name);
+            writeln!(f, "{}", derive_str)?;
+            writeln!(f, "pub struct {}(u32);", name)?;
         }
     }
     writeln!(f)?;

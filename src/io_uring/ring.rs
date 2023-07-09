@@ -79,10 +79,12 @@ pub struct RecvmsgData {
 impl Debug for RecvmsgData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RecvmsgData")
-            .field("buffer_read_len", &self.buffer_read.len())
-            .field("buffer_aux_len", &self.buffer_aux.len())
-            .field("iovec", &self.iovec)
-            .field("msghdr", &self.msghdr)
+            .field("ncontrol", &self.msghdr.msg_controllen)
+            .field("flags", &self.msghdr.msg_flags)
+            // .field("buffer_read_len", &self.buffer_read.len())
+            // .field("buffer_aux_len", &self.buffer_aux.len())
+            // .field("iovec", &self.iovec)
+            // .field("msghdr", &self.msghdr)
             .finish()
     }
 }

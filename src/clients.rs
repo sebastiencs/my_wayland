@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     os::{
         fd::{AsRawFd, RawFd},
         unix::net::UnixListener,
@@ -11,6 +11,7 @@ use crate::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted},
     },
+    objects::wl_display::ParserError,
     state::{AnyAction, Dispatcher, Model, Redispatcher},
 };
 
@@ -89,14 +90,18 @@ impl Model for Clients {
     }
 }
 
-struct Client {
+// pub struct Objects {
+//     all: BTreeMap<ObjectId, Object>,
+// }
+
+pub struct Client {
     id: ClientId,
     fd: RawFd,
 }
 
 pub enum ClientAction {
     Start,
-    MsgReceived { request: Request },
+    MsgReceived { request: RawRequest },
     Closed,
 }
 
@@ -116,7 +121,16 @@ impl Model for Client {
                 dispatcher.start_model_with_id(client_reader_id, client_reader);
             }
             ClientAction::MsgReceived { request } => {
+                let obj = crate::objects::wl_display::WlDisplay {
+                    id: crate::protocol_generated::WlDisplayId::from(0),
+                };
+
+                let mut any: crate::objects::wl_display::AnyObject =
+                    crate::objects::wl_display::PrivateObject::into_vtable(Box::new(obj));
+
                 eprintln!("client_id={:?} recv={:?}", self.id, request);
+
+                (any.vtable.try_parse_and_handle)(&mut any.object, self, request.clone()).unwrap();
             }
             ClientAction::Closed => {
                 eprintln!("client_id={:?} CLOSED", self.id);
@@ -274,7 +288,7 @@ impl Model for ClientReader {
                         Some(msg) => msg,
                         None => return self.read(dispatcher),
                     };
-                    let request: Request = match msg.try_into() {
+                    let request: RawRequest = match msg.try_into() {
                         Ok(request) => request,
                         Err(_) => todo!(),
                     };
@@ -286,14 +300,28 @@ impl Model for ClientReader {
     }
 }
 
-#[derive(Debug)]
-pub struct Request {
-    object_id: u32,
-    request_id: u16,
-    arguments: Box<[u32]>,
+#[derive(Clone, Debug)]
+pub struct RawRequest {
+    pub object_id: u32,
+    pub request_id: u16,
+    pub arguments: Arguments,
 }
 
-impl TryFrom<&[u8]> for Request {
+impl std::ops::Deref for RawRequest {
+    type Target = Arguments;
+
+    fn deref(&self) -> &Self::Target {
+        &self.arguments
+    }
+}
+
+impl std::ops::DerefMut for RawRequest {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.arguments
+    }
+}
+
+impl TryFrom<&[u8]> for RawRequest {
     type Error = ();
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
@@ -307,7 +335,8 @@ impl TryFrom<&[u8]> for Request {
             return Err(()); // Invalid
         }
 
-        let arguments = value[8..].array_chunks::<4>()
+        let args = value[8..]
+            .array_chunks::<4>()
             .copied()
             .map(u32::from_ne_bytes)
             .collect();
@@ -315,7 +344,47 @@ impl TryFrom<&[u8]> for Request {
         Ok(Self {
             object_id,
             request_id,
-            arguments,
+            arguments: Arguments { args },
         })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Arguments {
+    args: VecDeque<u32>,
+}
+
+impl Arguments {
+    fn pop(&mut self) -> Result<u32, ParserError> {
+        self.args.pop_front().ok_or(ParserError::Malformed)
+    }
+
+    pub fn uint(&mut self) -> Result<u32, ParserError> {
+        self.pop()
+    }
+
+    pub fn int(&mut self) -> Result<i32, ParserError> {
+        self.uint().map(|uint| uint as i32)
+    }
+
+    pub fn id<I>(&mut self) -> Result<I, ParserError>
+    where
+        I: From<u32>,
+    {
+        self.pop().map(Into::into)
+    }
+
+    pub fn string(&mut self) -> Result<String, ParserError> {
+        let len = self.uint()? as usize;
+        let nwords = len / 4;
+
+        let mut words = Vec::with_capacity(len);
+        for _ in 0..nwords {
+            let word = self.pop()?;
+            words.extend(u32::to_ne_bytes(word));
+        }
+        words.truncate(len);
+
+        Ok(String::from_utf8(words).unwrap())
     }
 }
