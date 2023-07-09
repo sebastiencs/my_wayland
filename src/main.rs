@@ -1,3 +1,5 @@
+#![feature(array_chunks)]
+
 #![allow(dead_code, unused_variables)]
 
 use crate::{

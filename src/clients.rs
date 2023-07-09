@@ -40,6 +40,13 @@ impl Clients {
         let AcceptCompleted { fd, new_client } = result.unwrap();
         AnyAction::from(ClientsAction::NewClient { fd, new_client })
     }
+
+    fn dispatch_accept(&self, dispatcher: &mut Dispatcher) {
+        dispatcher.dispatch(IoUringAction::Accept {
+            fd: self.fd.as_raw_fd(),
+            dispatch_to: Redispatcher::new(Self::on_accept),
+        });
+    }
 }
 
 impl Model for Clients {
@@ -57,19 +64,12 @@ impl Model for Clients {
 
     #[allow(clippy::needless_late_init)]
     fn reducer(&mut self, action: &ClientsAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
-        let mut dispatch_accept = || {
-            dispatcher.dispatch(IoUringAction::Accept {
-                fd: self.fd.as_raw_fd(),
-                dispatch_to: Redispatcher::new(Self::on_accept),
-            });
-        };
-
         match action {
             ClientsAction::StartListen => {
-                dispatch_accept();
+                self.dispatch_accept(dispatcher);
             }
             ClientsAction::NewClient { fd, new_client } => {
-                dispatch_accept();
+                self.dispatch_accept(dispatcher);
 
                 let client_id = self.next_id();
                 log::trace!("new_client id={:?} fd={:?}", client_id, new_client);
@@ -96,7 +96,7 @@ struct Client {
 
 pub enum ClientAction {
     Start,
-    MsgReceived { msg: Box<[u8]> },
+    MsgReceived { request: Request },
     Closed,
 }
 
@@ -115,8 +115,8 @@ impl Model for Client {
                 let (client_reader_id, client_reader) = ClientReader::new(self.fd, self.id);
                 dispatcher.start_model_with_id(client_reader_id, client_reader);
             }
-            ClientAction::MsgReceived { msg } => {
-                eprintln!("client_id={:?} recv={:?}", self.id, msg);
+            ClientAction::MsgReceived { request } => {
+                eprintln!("client_id={:?} recv={:?}", self.id, request);
             }
             ClientAction::Closed => {
                 eprintln!("client_id={:?} CLOSED", self.id);
@@ -227,7 +227,6 @@ impl ClientReader {
             self.neof = 0;
         } else {
             self.neof += 1;
-
             // Number of EOF (len == 0) received
             // Consider EOF reached after 2
             // https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
@@ -271,14 +270,52 @@ impl Model for ClientReader {
                 }
                 self.read_buffer.append(buffer);
                 loop {
-                    let msg: Box<[u8]> = match self.read_buffer.get_whole_message() {
-                        Some(msg) => msg.into(),
+                    let msg: &[u8] = match self.read_buffer.get_whole_message() {
+                        Some(msg) => msg,
                         None => return self.read(dispatcher),
                     };
-                    dispatcher.dispatch_to(self.client_id, ClientAction::MsgReceived { msg });
+                    let request: Request = match msg.try_into() {
+                        Ok(request) => request,
+                        Err(_) => todo!(),
+                    };
+                    dispatcher.dispatch_to(self.client_id, ClientAction::MsgReceived { request });
                     self.read_buffer.consume_msg();
                 }
             }
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct Request {
+    object_id: u32,
+    request_id: u16,
+    arguments: Box<[u32]>,
+}
+
+impl TryFrom<&[u8]> for Request {
+    type Error = ();
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let object_id = u32::from_ne_bytes(value[0..4].try_into().unwrap());
+        let word = u32::from_ne_bytes(value[4..8].try_into().unwrap());
+
+        let len = (word >> 16) as usize;
+        let request_id = (word & 0xFFFF) as u16;
+
+        if len % 4 != 0 {
+            return Err(()); // Invalid
+        }
+
+        let arguments = value[8..].array_chunks::<4>()
+            .copied()
+            .map(u32::from_ne_bytes)
+            .collect();
+
+        Ok(Self {
+            object_id,
+            request_id,
+            arguments,
+        })
     }
 }
