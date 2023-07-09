@@ -1,17 +1,20 @@
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     os::{
         fd::{AsRawFd, RawFd},
         unix::net::UnixListener,
     },
 };
 
+use libc::getsockopt;
+
 use crate::{
     io_uring::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted},
     },
-    object::ParserError,
+    object::{Object, ParserError},
+    protocol_generated::WaylandId,
     state::{AnyAction, Dispatcher, Model, Redispatcher},
 };
 
@@ -77,32 +80,70 @@ impl Model for Clients {
 
                 self.set.insert(client_id);
 
-                dispatcher.start_model_with_id(
-                    client_id,
-                    Client {
-                        id: client_id,
-                        fd: *new_client,
-                    },
-                );
+                dispatcher.start_model_with_id(client_id, Client::new(client_id, *new_client));
             }
         }
         Ok(())
     }
 }
 
-// pub struct Objects {
-//     all: BTreeMap<ObjectId, Object>,
-// }
+struct ProcessInfo {
+    command: String,
+    cred: libc::ucred,
+}
 
 pub struct Client {
     id: ClientId,
     fd: RawFd,
+    objects: BTreeMap<WaylandId, Box<dyn Object>>,
+    info: Option<ProcessInfo>,
 }
 
 pub enum ClientAction {
     Start,
     MsgReceived { request: RawRequest },
     Closed,
+}
+
+impl Client {
+    fn new(client_id: ClientId, fd: RawFd) -> Self {
+        Self {
+            id: client_id,
+            fd,
+            objects: BTreeMap::default(),
+            info: None,
+        }
+    }
+
+    fn read_process_info(&mut self) {
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut len = std::mem::size_of::<libc::ucred>() as u32;
+        let result = unsafe {
+            getsockopt(
+                self.fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut _ as *mut _,
+                &mut len as *mut _,
+            )
+        };
+        if result == -1 {
+            let e = std::io::Error::last_os_error();
+            return log::warn!("Unable to `getsockopt` of new client: {:?}", e);
+        }
+        let comm = match std::fs::read(format!("/proc/{}/comm", cred.pid)) {
+            Ok(comm) => comm,
+            Err(e) => return log::warn!("Unable to read `comm` of new client: {:?}", e),
+        };
+        let command = String::from_utf8_lossy(&comm);
+        let command = command.trim().to_string();
+
+        self.info = Some(ProcessInfo { command, cred })
+    }
 }
 
 impl Model for Client {
@@ -117,20 +158,16 @@ impl Model for Client {
     fn reducer(&mut self, action: &ClientAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         match action {
             ClientAction::Start => {
+                self.read_process_info();
+
                 let (client_reader_id, client_reader) = ClientReader::new(self.fd, self.id);
                 dispatcher.start_model_with_id(client_reader_id, client_reader);
             }
             ClientAction::MsgReceived { request } => {
-                let obj = crate::wayland_objects::wl_display::WlDisplay {
+                let mut obj = crate::wayland_objects::wl_display::WlDisplay {
                     id: crate::protocol_generated::WlDisplayId::from(0),
                 };
-
-                let mut any: crate::object::AnyObject =
-                    crate::object::PrivateObject::into_vtable(Box::new(obj));
-
-                eprintln!("client_id={:?} recv={:?}", self.id, request);
-
-                (any.vtable.try_parse_and_handle)(&mut any.object, self, request.clone()).unwrap();
+                obj.on(self, request.clone());
             }
             ClientAction::Closed => {
                 eprintln!("client_id={:?} CLOSED", self.id);
@@ -305,6 +342,12 @@ pub struct RawRequest {
     pub object_id: u32,
     pub request_id: u16,
     pub arguments: Arguments,
+}
+
+impl RawRequest {
+    pub fn object_id(&self) -> WaylandId {
+        WaylandId::from(self.object_id)
+    }
 }
 
 impl std::ops::Deref for RawRequest {

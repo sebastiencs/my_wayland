@@ -1,6 +1,23 @@
 #![feature(array_chunks)]
 #![allow(dead_code, unused_variables)]
 
+macro_rules! wayland_id {
+    ($($name:ident,)+) => ($(
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
+        pub struct $name(pub(super) u32);
+        impl From<WaylandId> for $name {
+            fn from(value: WaylandId) -> Self {
+                Self(value.0)
+            }
+        }
+        impl From<$name> for WaylandId {
+            fn from(value: $name) -> Self {
+                Self(value.0)
+            }
+        }
+    )+)
+}
+
 use crate::{
     clients::{Clients, ClientsAction},
     io_uring::model::IoUringState,

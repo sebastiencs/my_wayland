@@ -10,113 +10,65 @@ use {
 };
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct ObjectId(u32);
+pub struct WaylandId(u32);
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
 pub struct NewId(u32);
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
 pub struct Array;
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlDisplayId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlRegistryId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlCallbackId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlCompositorId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlShmPoolId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlShmId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlBufferId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlDataOfferId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlDataSourceId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlDataDeviceId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlDataDeviceManagerId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlShellId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlShellSurfaceId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlSurfaceId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlSeatId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlPointerId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlKeyboardId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlTouchId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlOutputId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlRegionId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlSubcompositorId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WlSubsurfaceId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpPresentationId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpPresentationFeedbackId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpViewporterId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpViewportId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct XdgWmBaseId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct XdgPositionerId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct XdgSurfaceId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct XdgToplevelId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct XdgPopupId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpContentTypeManagerV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpContentTypeV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpDrmLeaseDeviceV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpDrmLeaseConnectorV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpDrmLeaseRequestV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpDrmLeaseV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct ExtIdleNotifierV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct ExtIdleNotificationV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct ExtSessionLockManagerV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct ExtSessionLockV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct ExtSessionLockSurfaceV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpFractionalScaleManagerV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpFractionalScaleV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpSinglePixelBufferManagerV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpTearingControlManagerV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct WpTearingControlV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct XdgActivationV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct XdgActivationTokenV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct XwaylandShellV1Id(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-pub struct XwaylandSurfaceV1Id(u32);
+
+wayland_id! {
+  WlDisplayId,
+  WlRegistryId,
+  WlCallbackId,
+  WlCompositorId,
+  WlShmPoolId,
+  WlShmId,
+  WlBufferId,
+  WlDataOfferId,
+  WlDataSourceId,
+  WlDataDeviceId,
+  WlDataDeviceManagerId,
+  WlShellId,
+  WlShellSurfaceId,
+  WlSurfaceId,
+  WlSeatId,
+  WlPointerId,
+  WlKeyboardId,
+  WlTouchId,
+  WlOutputId,
+  WlRegionId,
+  WlSubcompositorId,
+  WlSubsurfaceId,
+  WpPresentationId,
+  WpPresentationFeedbackId,
+  WpViewporterId,
+  WpViewportId,
+  XdgWmBaseId,
+  XdgPositionerId,
+  XdgSurfaceId,
+  XdgToplevelId,
+  XdgPopupId,
+  WpContentTypeManagerV1Id,
+  WpContentTypeV1Id,
+  WpDrmLeaseDeviceV1Id,
+  WpDrmLeaseConnectorV1Id,
+  WpDrmLeaseRequestV1Id,
+  WpDrmLeaseV1Id,
+  ExtIdleNotifierV1Id,
+  ExtIdleNotificationV1Id,
+  ExtSessionLockManagerV1Id,
+  ExtSessionLockV1Id,
+  ExtSessionLockSurfaceV1Id,
+  WpFractionalScaleManagerV1Id,
+  WpFractionalScaleV1Id,
+  WpSinglePixelBufferManagerV1Id,
+  WpTearingControlManagerV1Id,
+  WpTearingControlV1Id,
+  XdgActivationV1Id,
+  XdgActivationTokenV1Id,
+  XwaylandShellV1Id,
+  XwaylandSurfaceV1Id,
+}
 
 /// Core global object
 ///
@@ -188,7 +140,7 @@ pub mod wl_display {
         /// of the error, for (debugging) convenience.
         Error {
             /// Object where the error occurred,
-            object_id: ObjectId,
+            object_id: WaylandId,
             /// Error code,
             code: u32,
             /// Error description,

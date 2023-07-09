@@ -29,7 +29,7 @@ fn type_to_name(arg: &protocol::Arg) -> Cow<'static, str> {
         // protocol::Type::Object => Cow::Borrowed(todo!()),
         protocol::Type::Object => match arg.interface.as_ref() {
             Some(interface) => Cow::Owned(interface_name_to_id(interface)),
-            None => Cow::Borrowed("ObjectId"),
+            None => Cow::Borrowed("WaylandId"),
         },
         protocol::Type::NewId => match arg.interface.as_ref() {
             Some(interface) => Cow::Owned(interface_name_to_id(interface)),
@@ -247,20 +247,20 @@ pub fn gen() -> std::io::Result<()> {
         "use crate::{{clients::RawRequest, object::{{Parser, ParserError}}}};\n"
     )?;
     writeln!(f, "{}", derive_str)?;
-    writeln!(f, "pub struct ObjectId(u32);")?;
+    writeln!(f, "pub struct WaylandId(u32);")?;
     writeln!(f, "{}", derive_str)?;
     writeln!(f, "pub struct NewId(u32);")?;
     writeln!(f, "{}", derive_str)?;
-    writeln!(f, "pub struct Array;")?;
+    writeln!(f, "pub struct Array;\n")?;
 
+    writeln!(f, "wayland_id! {{")?;
     for protocol in &protocols {
         for interface in &protocol.interfaces {
             let name = interface_name_to_id(&interface.name);
-            writeln!(f, "{}", derive_str)?;
-            writeln!(f, "pub struct {}(u32);", name)?;
+            writeln!(f, "  {},", name)?;
         }
     }
-    writeln!(f)?;
+    writeln!(f, "}}\n")?;
 
     for protocol in &protocols {
         for interface in &protocol.interfaces {
