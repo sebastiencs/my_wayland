@@ -13,11 +13,12 @@ mod egl;
 mod input;
 mod io_uring;
 mod logger;
-mod objects;
+mod object;
 mod protocol;
 mod protocol_generated;
 pub mod state;
 mod udev;
+mod wayland_objects;
 mod xkb;
 
 fn parse_request(bytes: &[u8]) -> std::io::Result<()> {
@@ -39,7 +40,7 @@ fn parse_request(bytes: &[u8]) -> std::io::Result<()> {
 }
 
 fn main() {
-    use std::any::Any;
+    // use std::any::Any;
 
     logger::install();
 
@@ -62,18 +63,7 @@ fn main() {
     let mut runner = Runner::new();
     runner.add_model(uring);
     runner.add_model(clients);
-
-    // fn on_accept(result: std::io::Result<AcceptCompleted>) -> AnyAction {
-    //     eprintln!("on_accept={:?}", result);
-    //     AnyAction::empty()
-    // }
-
-    // runner.dispatch(IoUringAction::Accept {
-    //     fd: unix.as_raw_fd(),
-    //     dispatch_to: on_accept,
-    // });
     runner.dispatch(ClientsAction::StartListen);
-    // runner.dispatch(IoUringAction::WaitForCompletion);
     runner.run();
 
     // println!("Hello, world! {:?}", std::mem::size_of::<Box<dyn Any>>());

@@ -1,25 +1,6 @@
 use std::any::Any;
 
-use crate::{
-    clients::{Client, RawRequest},
-    protocol_generated::{self, wl_display},
-};
-
-pub struct WlDisplay {
-    pub id: protocol_generated::WlDisplayId,
-}
-
-impl Object for WlDisplay {
-    fn on(&mut self, client: &mut Client, request: wl_display::Request) {
-        use wl_display::Request::*;
-
-        eprintln!("WlDisplay::on {:?}", request);
-        match request {
-            Sync { callback } => {}
-            GetRegistry { registry } => {}
-        }
-    }
-}
+use crate::clients::{Client, RawRequest};
 
 pub struct AnyObject {
     pub object: Box<dyn Any>,
@@ -83,23 +64,4 @@ pub trait Parser {
 pub enum ParserError {
     Malformed,
     InvalidRequest,
-}
-
-impl Parser for WlDisplay {
-    type Request = wl_display::Request;
-
-    fn parse_request(mut req: RawRequest) -> Result<wl_display::Request, ParserError> {
-        use wl_display::Request::*;
-
-        let req = match req.request_id {
-            0 => Sync {
-                callback: req.id()?,
-            },
-            1 => GetRegistry {
-                registry: req.id()?,
-            },
-            _ => return Err(ParserError::InvalidRequest),
-        };
-        Ok(req)
-    }
 }

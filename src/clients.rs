@@ -11,7 +11,7 @@ use crate::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted},
     },
-    objects::wl_display::ParserError,
+    object::ParserError,
     state::{AnyAction, Dispatcher, Model, Redispatcher},
 };
 
@@ -121,12 +121,12 @@ impl Model for Client {
                 dispatcher.start_model_with_id(client_reader_id, client_reader);
             }
             ClientAction::MsgReceived { request } => {
-                let obj = crate::objects::wl_display::WlDisplay {
+                let obj = crate::wayland_objects::wl_display::WlDisplay {
                     id: crate::protocol_generated::WlDisplayId::from(0),
                 };
 
-                let mut any: crate::objects::wl_display::AnyObject =
-                    crate::objects::wl_display::PrivateObject::into_vtable(Box::new(obj));
+                let mut any: crate::object::AnyObject =
+                    crate::object::PrivateObject::into_vtable(Box::new(obj));
 
                 eprintln!("client_id={:?} recv={:?}", self.id, request);
 
@@ -386,5 +386,13 @@ impl Arguments {
         words.truncate(len);
 
         Ok(String::from_utf8(words).unwrap())
+    }
+
+    pub fn fixed(&mut self) -> Result<f32, ParserError> {
+        todo!()
+    }
+
+    pub fn fd(&mut self) -> Result<RawFd, ParserError> {
+        todo!()
     }
 }

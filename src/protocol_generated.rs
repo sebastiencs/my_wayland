@@ -1,10 +1,19 @@
-#![allow(dead_code, unused_imports)]
+#![allow(dead_code, unused_imports, unused_mut)]
 #![allow(clippy::enum_variant_names)]
 
-use std::os::unix::io::RawFd;
+use {
+    crate::{
+        clients::RawRequest,
+        object::{Parser, ParserError},
+    },
+    std::os::unix::io::RawFd,
+};
 
-pub struct ObjectId;
-pub struct NewId;
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
+pub struct ObjectId(u32);
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
+pub struct NewId(u32);
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
 pub struct Array;
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
 pub struct WlDisplayId(u32);
@@ -150,6 +159,23 @@ pub mod wl_display {
             registry: WlRegistryId,
         },
     }
+    impl Parser for crate::wayland_objects::wl_display::WlDisplay {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Sync {
+                    callback: req.id()?,
+                },
+                1 => GetRegistry {
+                    registry: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Fatal error event
         ///
@@ -184,6 +210,7 @@ pub mod wl_display {
     ///
     /// These errors are global and can be emitted in response to any
     /// server request.
+    #[derive(Debug)]
     pub enum Error {
         /// Server couldn't find object,
         InvalidObject = 0,
@@ -220,6 +247,7 @@ pub mod wl_display {
 /// the object.
 pub mod wl_registry {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Bind an object to the display
         ///
@@ -232,6 +260,21 @@ pub mod wl_registry {
             id: NewId,
         },
     }
+    impl Parser for crate::wayland_objects::wl_registry::WlRegistry {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Bind {
+                    name: req.uint()?,
+                    id: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Announce global object
         ///
@@ -276,6 +319,7 @@ pub mod wl_registry {
 /// factory interfaces, the wl_callback interface is frozen at version 1.
 pub mod wl_callback {
     use super::*;
+    #[derive(Debug)]
     pub enum Event {
         /// Done event
         ///
@@ -294,6 +338,7 @@ pub mod wl_callback {
 /// surfaces into one displayable output.
 pub mod wl_compositor {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Create new surface
         ///
@@ -310,6 +355,18 @@ pub mod wl_compositor {
             id: WlRegionId,
         },
     }
+    impl Parser for crate::wayland_objects::wl_compositor::WlCompositor {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => CreateSurface { id: req.id()? },
+                1 => CreateRegion { id: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
 }
 
 /// A shared memory pool
@@ -323,6 +380,7 @@ pub mod wl_compositor {
 /// a surface or for many small buffers.
 pub mod wl_shm_pool {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Create a buffer from the pool
         ///
@@ -376,6 +434,26 @@ pub mod wl_shm_pool {
             size: i32,
         },
     }
+    impl Parser for crate::wayland_objects::wl_shm_pool::WlShmPool {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => CreateBuffer {
+                    id: req.id()?,
+                    offset: req.int()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                    stride: req.int()?,
+                    format: req.uint()?,
+                },
+                1 => Destroy,
+                2 => Resize { size: req.int()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
 }
 
 /// Shared memory support
@@ -391,6 +469,7 @@ pub mod wl_shm_pool {
 /// that can be used for buffers.
 pub mod wl_shm {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Create a shm pool
         ///
@@ -408,6 +487,22 @@ pub mod wl_shm {
             size: i32,
         },
     }
+    impl Parser for crate::wayland_objects::wl_shm::WlShm {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => CreatePool {
+                    id: req.id()?,
+                    fd: req.fd()?,
+                    size: req.int()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Pixel format description
         ///
@@ -422,6 +517,7 @@ pub mod wl_shm {
     /// Wl_shm error values
     ///
     /// These errors can be emitted in response to wl_shm requests.
+    #[derive(Debug)]
     pub enum Error {
         /// Buffer format is not known,
         InvalidFormat = 0,
@@ -444,6 +540,7 @@ pub mod wl_shm {
     ///
     /// For all wl_shm formats and unless specified in another protocol
     /// extension, pre-multiplied alpha is used for pixel values.
+    #[derive(Debug)]
     pub enum Format {
         /// 32-bit ARGB format, [31:0] A:R:G:B 8:8:8:8 little endian,
         Argb8888 = 0,
@@ -669,6 +766,7 @@ pub mod wl_shm {
 /// factory interfaces, the wl_buffer interface is frozen at version 1.
 pub mod wl_buffer {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy a buffer
         ///
@@ -678,6 +776,18 @@ pub mod wl_buffer {
         /// For possible side-effects to a surface, see wl_surface.attach.
         Destroy,
     }
+    impl Parser for crate::wayland_objects::wl_buffer::WlBuffer {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Compositor releases buffer
         ///
@@ -707,6 +817,7 @@ pub mod wl_buffer {
 /// data directly from the source client.
 pub mod wl_data_offer {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Accept one of the offered mime types
         ///
@@ -814,6 +925,31 @@ pub mod wl_data_offer {
             preferred_action: u32,
         },
     }
+    impl Parser for crate::wayland_objects::wl_data_offer::WlDataOffer {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Accept {
+                    serial: req.uint()?,
+                    mime_type: req.string()?,
+                },
+                1 => Receive {
+                    mime_type: req.string()?,
+                    fd: req.fd()?,
+                },
+                2 => Destroy,
+                3 => Finish,
+                4 => SetActions {
+                    dnd_actions: req.uint()?,
+                    preferred_action: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Advertise offered mime type
         ///
@@ -875,6 +1011,7 @@ pub mod wl_data_offer {
             dnd_action: u32,
         },
     }
+    #[derive(Debug)]
     pub enum Error {
         /// Finish request was called untimely,
         InvalidFinish = 0,
@@ -895,6 +1032,7 @@ pub mod wl_data_offer {
 /// to requests to transfer the data.
 pub mod wl_data_source {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Add an offered mime type
         ///
@@ -929,6 +1067,24 @@ pub mod wl_data_source {
             dnd_actions: u32,
         },
     }
+    impl Parser for crate::wayland_objects::wl_data_source::WlDataSource {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Offer {
+                    mime_type: req.string()?,
+                },
+                1 => Destroy,
+                2 => SetActions {
+                    dnd_actions: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// A target accepts an offered mime type
         ///
@@ -1027,6 +1183,7 @@ pub mod wl_data_source {
             dnd_action: u32,
         },
     }
+    #[derive(Debug)]
     pub enum Error {
         /// Action mask contains invalid values,
         InvalidActionMask = 0,
@@ -1044,6 +1201,7 @@ pub mod wl_data_source {
 /// mechanisms such as copy-and-paste and drag-and-drop.
 pub mod wl_data_device {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Start drag-and-drop operation
         ///
@@ -1099,6 +1257,28 @@ pub mod wl_data_device {
         /// This request destroys the data device.
         Release,
     }
+    impl Parser for crate::wayland_objects::wl_data_device::WlDataDevice {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => StartDrag {
+                    source: req.id()?,
+                    origin: req.id()?,
+                    icon: req.id()?,
+                    serial: req.uint()?,
+                },
+                1 => SetSelection {
+                    source: req.id()?,
+                    serial: req.uint()?,
+                },
+                2 => Release,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Introduce a new wl_data_offer
         ///
@@ -1186,6 +1366,7 @@ pub mod wl_data_device {
             id: WlDataOfferId,
         },
     }
+    #[derive(Debug)]
     pub enum Error {
         /// Given wl_surface has another role,
         Role = 0,
@@ -1206,6 +1387,7 @@ pub mod wl_data_device {
 /// wl_data_offer.accept and wl_data_offer.finish for details.
 pub mod wl_data_device_manager {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Create a new data source
         ///
@@ -1223,6 +1405,21 @@ pub mod wl_data_device_manager {
             /// Seat associated with the data device,
             seat: WlSeatId,
         },
+    }
+    impl Parser for crate::wayland_objects::wl_data_device_manager::WlDataDeviceManager {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => CreateDataSource { id: req.id()? },
+                1 => GetDataDevice {
+                    id: req.id()?,
+                    seat: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
     }
     /// Drag and drop actions
     ///
@@ -1249,6 +1446,7 @@ pub mod wl_data_device_manager {
     /// Compositors may for example bind other modifiers (like Alt/Meta)
     /// or drags initiated with other buttons than BTN_LEFT to specific
     /// actions (e.g. "ask").
+    #[derive(Debug)]
     pub enum DndAction {
         /// No action,
         None = 0,
@@ -1274,6 +1472,7 @@ pub mod wl_data_device_manager {
 /// should not implement this interface.
 pub mod wl_shell {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Create a shell surface from a surface
         ///
@@ -1289,6 +1488,21 @@ pub mod wl_shell {
             surface: WlSurfaceId,
         },
     }
+    impl Parser for crate::wayland_objects::wl_shell::WlShell {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => GetShellSurface {
+                    id: req.id()?,
+                    surface: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Error {
         /// Given wl_surface has another role,
         Role = 0,
@@ -1310,6 +1524,7 @@ pub mod wl_shell {
 /// the wl_surface object.
 pub mod wl_shell_surface {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Respond to a ping event
         ///
@@ -1500,6 +1715,56 @@ pub mod wl_shell_surface {
             class_: String,
         },
     }
+    impl Parser for crate::wayland_objects::wl_shell_surface::WlShellSurface {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Pong {
+                    serial: req.uint()?,
+                },
+                1 => Move {
+                    seat: req.id()?,
+                    serial: req.uint()?,
+                },
+                2 => Resize {
+                    seat: req.id()?,
+                    serial: req.uint()?,
+                    edges: req.uint()?,
+                },
+                3 => SetToplevel,
+                4 => SetTransient {
+                    parent: req.id()?,
+                    x: req.int()?,
+                    y: req.int()?,
+                    flags: req.uint()?,
+                },
+                5 => SetFullscreen {
+                    method: req.uint()?,
+                    framerate: req.uint()?,
+                    output: req.id()?,
+                },
+                6 => SetPopup {
+                    seat: req.id()?,
+                    serial: req.uint()?,
+                    parent: req.id()?,
+                    x: req.int()?,
+                    y: req.int()?,
+                    flags: req.uint()?,
+                },
+                7 => SetMaximized { output: req.id()? },
+                8 => SetTitle {
+                    title: req.string()?,
+                },
+                9 => SetClass {
+                    class_: req.string()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Ping client
         ///
@@ -1549,6 +1814,7 @@ pub mod wl_shell_surface {
     /// is being dragged in a resize operation. The server may
     /// use this information to adapt its behavior, e.g. choose
     /// an appropriate cursor image.
+    #[derive(Debug)]
     pub enum Resize {
         /// No edge,
         None = 0,
@@ -1573,6 +1839,7 @@ pub mod wl_shell_surface {
     ///
     /// These flags specify details of the expected behaviour
     /// of transient surfaces. Used in the set_transient request.
+    #[derive(Debug)]
     pub enum Transient {
         /// Do not set keyboard focus,
         Inactive = 1,
@@ -1582,6 +1849,7 @@ pub mod wl_shell_surface {
     /// Hints to indicate to the compositor how to deal with a conflict
     /// between the dimensions of the surface and the dimensions of the
     /// output. The compositor is free to ignore this parameter.
+    #[derive(Debug)]
     pub enum FullscreenMethod {
         /// No preference, apply default policy,
         Default = 0,
@@ -1640,6 +1908,7 @@ pub mod wl_shell_surface {
 /// switching is not allowed).
 pub mod wl_surface {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Delete surface
         ///
@@ -1990,6 +2259,49 @@ pub mod wl_surface {
             y: i32,
         },
     }
+    impl Parser for crate::wayland_objects::wl_surface::WlSurface {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => Attach {
+                    buffer: req.id()?,
+                    x: req.int()?,
+                    y: req.int()?,
+                },
+                2 => Damage {
+                    x: req.int()?,
+                    y: req.int()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                3 => Frame {
+                    callback: req.id()?,
+                },
+                4 => SetOpaqueRegion { region: req.id()? },
+                5 => SetInputRegion { region: req.id()? },
+                6 => Commit,
+                7 => SetBufferTransform {
+                    transform: req.int()?,
+                },
+                8 => SetBufferScale { scale: req.int()? },
+                9 => DamageBuffer {
+                    x: req.int()?,
+                    y: req.int()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                10 => Offset {
+                    x: req.int()?,
+                    y: req.int()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Surface enters an output
         ///
@@ -2046,6 +2358,7 @@ pub mod wl_surface {
     /// Wl_surface error values
     ///
     /// These errors can be emitted in response to wl_surface requests.
+    #[derive(Debug)]
     pub enum Error {
         /// Buffer scale value is invalid,
         InvalidScale = 0,
@@ -2068,6 +2381,7 @@ pub mod wl_surface {
 /// maintains a keyboard focus and a pointer focus.
 pub mod wl_seat {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Return pointer object
         ///
@@ -2117,6 +2431,21 @@ pub mod wl_seat {
         /// use the seat object anymore.
         Release,
     }
+    impl Parser for crate::wayland_objects::wl_seat::WlSeat {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => GetPointer { id: req.id()? },
+                1 => GetKeyboard { id: req.id()? },
+                2 => GetTouch { id: req.id()? },
+                3 => Release,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Seat capabilities changed
         ///
@@ -2175,6 +2504,7 @@ pub mod wl_seat {
     ///
     /// This is a bitmask of capabilities this seat has; if a member is
     /// set, then it is present on the seat.
+    #[derive(Debug)]
     pub enum Capability {
         /// The seat has pointer devices,
         Pointer = 1,
@@ -2186,6 +2516,7 @@ pub mod wl_seat {
     /// Wl_seat error values
     ///
     /// These errors can be emitted in response to wl_seat requests.
+    #[derive(Debug)]
     pub enum Error {
         /// Get_pointer, get_keyboard or get_touch called on seat without the matching capability,
         MissingCapability = 0,
@@ -2204,6 +2535,7 @@ pub mod wl_seat {
 /// and scrolling.
 pub mod wl_pointer {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Set the pointer surface
         ///
@@ -2259,6 +2591,24 @@ pub mod wl_pointer {
         /// wl_pointer_destroy() after using this request.
         Release,
     }
+    impl Parser for crate::wayland_objects::wl_pointer::WlPointer {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetCursor {
+                    serial: req.uint()?,
+                    surface: req.id()?,
+                    hotspot_x: req.int()?,
+                    hotspot_y: req.int()?,
+                },
+                1 => Release,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Enter event
         ///
@@ -2557,6 +2907,7 @@ pub mod wl_pointer {
             direction: u32,
         },
     }
+    #[derive(Debug)]
     pub enum Error {
         /// Given wl_surface has another role,
         Role = 0,
@@ -2565,6 +2916,7 @@ pub mod wl_pointer {
     ///
     /// Describes the physical state of a button that produced the button
     /// event.
+    #[derive(Debug)]
     pub enum ButtonState {
         /// The button is not pressed,
         Released = 0,
@@ -2574,6 +2926,7 @@ pub mod wl_pointer {
     /// Axis types
     ///
     /// Describes the axis types of scroll events.
+    #[derive(Debug)]
     pub enum Axis {
         /// Vertical axis,
         VerticalScroll = 0,
@@ -2598,6 +2951,7 @@ pub mod wl_pointer {
     /// The "wheel tilt" axis source indicates that the actual device is a
     /// wheel but the scroll event is not caused by a rotation but a
     /// (usually sideways) tilt of the wheel.
+    #[derive(Debug)]
     pub enum AxisSource {
         /// A physical wheel rotation,
         Wheel = 0,
@@ -2612,6 +2966,7 @@ pub mod wl_pointer {
     ///
     /// This specifies the direction of the physical motion that caused a
     /// wl_pointer.axis event, relative to the wl_pointer.axis direction.
+    #[derive(Debug)]
     pub enum AxisRelativeDirection {
         /// Physical motion matches axis direction,
         Identical = 0,
@@ -2626,12 +2981,25 @@ pub mod wl_pointer {
 /// associated with a seat.
 pub mod wl_keyboard {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Release the keyboard object
         ///
         ///
         Release,
     }
+    impl Parser for crate::wayland_objects::wl_keyboard::WlKeyboard {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Release,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Keyboard mapping
         ///
@@ -2742,6 +3110,7 @@ pub mod wl_keyboard {
     ///
     /// This specifies the format of the keymap provided to the
     /// client with the wl_keyboard.keymap event.
+    #[derive(Debug)]
     pub enum KeymapFormat {
         /// No keymap; client must understand how to interpret the raw keycode,
         NoKeymap = 0,
@@ -2751,6 +3120,7 @@ pub mod wl_keyboard {
     /// Physical key state
     ///
     /// Describes the physical state of a key that produced the key event.
+    #[derive(Debug)]
     pub enum KeyState {
         /// Key is not pressed,
         Released = 0,
@@ -2771,12 +3141,25 @@ pub mod wl_keyboard {
 /// contact point can be identified by the ID of the sequence.
 pub mod wl_touch {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Release the touch object
         ///
         ///
         Release,
     }
+    impl Parser for crate::wayland_objects::wl_touch::WlTouch {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Release,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Touch down event and beginning of a touch sequence
         ///
@@ -2923,6 +3306,7 @@ pub mod wl_touch {
 /// as global during start up, or when a monitor is hotplugged.
 pub mod wl_output {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Release the output object
         ///
@@ -2930,6 +3314,18 @@ pub mod wl_output {
         /// use the output object anymore.
         Release,
     }
+    impl Parser for crate::wayland_objects::wl_output::WlOutput {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Release,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Properties of the output
         ///
@@ -3105,6 +3501,7 @@ pub mod wl_output {
     ///
     /// This enumeration describes how the physical
     /// pixels on an output are laid out.
+    #[derive(Debug)]
     pub enum Subpixel {
         /// Unknown geometry,
         Unknown = 0,
@@ -3132,6 +3529,7 @@ pub mod wl_output {
     /// tell the compositor, so that for fullscreen surfaces, the
     /// compositor will still be able to scan out directly from client
     /// surfaces.
+    #[derive(Debug)]
     pub enum Transform {
         /// No transform,
         Normal = 0,
@@ -3154,6 +3552,7 @@ pub mod wl_output {
     ///
     /// These flags describe properties of an output mode.
     /// They are used in the flags bitfield of the mode event.
+    #[derive(Debug)]
     pub enum Mode {
         /// Indicates this is the current mode,
         Current = 1,
@@ -3170,6 +3569,7 @@ pub mod wl_output {
 /// regions of a surface.
 pub mod wl_region {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy region
         ///
@@ -3202,6 +3602,29 @@ pub mod wl_region {
             height: i32,
         },
     }
+    impl Parser for crate::wayland_objects::wl_region::WlRegion {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => Add {
+                    x: req.int()?,
+                    y: req.int()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                2 => Subtract {
+                    x: req.int()?,
+                    y: req.int()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
 }
 
 /// Sub-surface compositing
@@ -3227,6 +3650,7 @@ pub mod wl_region {
 /// processing to dedicated overlay hardware when possible.
 pub mod wl_subcompositor {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Unbind from the subcompositor interface
         ///
@@ -3264,6 +3688,23 @@ pub mod wl_subcompositor {
             parent: WlSurfaceId,
         },
     }
+    impl Parser for crate::wayland_objects::wl_subcompositor::WlSubcompositor {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetSubsurface {
+                    id: req.id()?,
+                    surface: req.id()?,
+                    parent: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Error {
         /// The to-be sub-surface is invalid,
         BadSurface = 0,
@@ -3323,6 +3764,7 @@ pub mod wl_subcompositor {
 /// unmapped.
 pub mod wl_subsurface {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Remove sub-surface interface
         ///
@@ -3423,6 +3865,26 @@ pub mod wl_subsurface {
         /// the cached state is applied on set_desync.
         SetDesync,
     }
+    impl Parser for crate::wayland_objects::wl_subsurface::WlSubsurface {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => SetPosition {
+                    x: req.int()?,
+                    y: req.int()?,
+                },
+                2 => PlaceAbove { sibling: req.id()? },
+                3 => PlaceBelow { sibling: req.id()? },
+                4 => SetSync,
+                5 => SetDesync,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Error {
         /// Wl_surface is not a sibling or the parent,
         BadSurface = 0,
@@ -3450,6 +3912,7 @@ pub mod wl_subsurface {
 /// when the compositor misses its target vertical blanking period.
 pub mod wp_presentation {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Unbind from the presentation interface
         ///
@@ -3474,6 +3937,22 @@ pub mod wp_presentation {
             callback: WpPresentationFeedbackId,
         },
     }
+    impl Parser for crate::wayland_objects::wp_presentation::WpPresentation {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => Feedback {
+                    surface: req.id()?,
+                    callback: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Clock ID for timestamps
         ///
@@ -3515,6 +3994,7 @@ pub mod wp_presentation {
     ///
     /// These fatal protocol errors may be emitted in response to
     /// illegal presentation requests.
+    #[derive(Debug)]
     pub enum Error {
         /// Invalid value in tv_nsec,
         InvalidTimestamp = 0,
@@ -3538,6 +4018,7 @@ pub mod wp_presentation {
 /// or 'discarded' event it is automatically destroyed.
 pub mod wp_presentation_feedback {
     use super::*;
+    #[derive(Debug)]
     pub enum Event {
         /// Presentation synchronized to this output
         ///
@@ -3623,6 +4104,7 @@ pub mod wp_presentation_feedback {
     /// the related content update was done. The intent is to help
     /// clients assess the reliability of the feedback and the visual
     /// quality with respect to possible tearing and timings.
+    #[derive(Debug)]
     pub enum Kind {
         /// Presentation was vsync'd
         ///
@@ -3668,6 +4150,7 @@ pub mod wp_presentation_feedback {
 /// surface size.
 pub mod wp_viewporter {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Unbind from the cropping and scaling interface
         ///
@@ -3688,6 +4171,22 @@ pub mod wp_viewporter {
             surface: WlSurfaceId,
         },
     }
+    impl Parser for crate::wayland_objects::wp_viewporter::WpViewporter {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetViewport {
+                    id: req.id()?,
+                    surface: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Error {
         /// The surface already has a viewport object associated,
         ViewportExists = 0,
@@ -3753,6 +4252,7 @@ pub mod wp_viewporter {
 /// on the next wl_surface.commit.
 pub mod wp_viewport {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Remove scaling and cropping from the surface
         ///
@@ -3802,6 +4302,28 @@ pub mod wp_viewport {
             height: i32,
         },
     }
+    impl Parser for crate::wayland_objects::wp_viewport::WpViewport {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => SetSource {
+                    x: req.fixed()?,
+                    y: req.fixed()?,
+                    width: req.fixed()?,
+                    height: req.fixed()?,
+                },
+                2 => SetDestination {
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Error {
         /// Negative or zero values in width or height,
         BadValue = 0,
@@ -3823,6 +4345,7 @@ pub mod wp_viewport {
 /// creating transient windows such as popup menus.
 pub mod xdg_wm_base {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy xdg_wm_base
         ///
@@ -3867,6 +4390,26 @@ pub mod xdg_wm_base {
             serial: u32,
         },
     }
+    impl Parser for crate::wayland_objects::xdg_wm_base::XdgWmBase {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => CreatePositioner { id: req.id()? },
+                2 => GetXdgSurface {
+                    id: req.id()?,
+                    surface: req.id()?,
+                },
+                3 => Pong {
+                    serial: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Check if the client is alive
         ///
@@ -3888,6 +4431,7 @@ pub mod xdg_wm_base {
             serial: u32,
         },
     }
+    #[derive(Debug)]
     pub enum Error {
         /// Given wl_surface has another role,
         Role = 0,
@@ -3929,6 +4473,7 @@ pub mod xdg_wm_base {
 /// positioning a surface raises an invalid_positioner error.
 pub mod xdg_positioner {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_positioner object
         ///
@@ -4067,10 +4612,54 @@ pub mod xdg_positioner {
             serial: u32,
         },
     }
+    impl Parser for crate::wayland_objects::xdg_positioner::XdgPositioner {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => SetSize {
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                2 => SetAnchorRect {
+                    x: req.int()?,
+                    y: req.int()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                3 => SetAnchor {
+                    anchor: req.uint()?,
+                },
+                4 => SetGravity {
+                    gravity: req.uint()?,
+                },
+                5 => SetConstraintAdjustment {
+                    constraint_adjustment: req.uint()?,
+                },
+                6 => SetOffset {
+                    x: req.int()?,
+                    y: req.int()?,
+                },
+                7 => SetReactive,
+                8 => SetParentSize {
+                    parent_width: req.int()?,
+                    parent_height: req.int()?,
+                },
+                9 => SetParentConfigure {
+                    serial: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Error {
         /// Invalid input provided,
         InvalidInput = 0,
     }
+    #[derive(Debug)]
     pub enum Anchor {
         None = 0,
         Top = 1,
@@ -4082,6 +4671,7 @@ pub mod xdg_positioner {
         TopRight = 7,
         BottomRight = 8,
     }
+    #[derive(Debug)]
     pub enum Gravity {
         None = 0,
         Top = 1,
@@ -4106,6 +4696,7 @@ pub mod xdg_positioner {
     ///
     /// The adjustments can be combined, according to a defined precedence: 1)
     /// Flip, 2) Slide, 3) Resize.
+    #[derive(Debug)]
     pub enum ConstraintAdjustment {
         /// Don't move the child surface when constrained
         ///
@@ -4229,6 +4820,7 @@ pub mod xdg_positioner {
 /// again before attaching a buffer.
 pub mod xdg_surface {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_surface
         ///
@@ -4344,6 +4936,33 @@ pub mod xdg_surface {
             serial: u32,
         },
     }
+    impl Parser for crate::wayland_objects::xdg_surface::XdgSurface {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetToplevel { id: req.id()? },
+                2 => GetPopup {
+                    id: req.id()?,
+                    parent: req.id()?,
+                    positioner: req.id()?,
+                },
+                3 => SetWindowGeometry {
+                    x: req.int()?,
+                    y: req.int()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                4 => AckConfigure {
+                    serial: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Suggest a surface change
         ///
@@ -4368,6 +4987,7 @@ pub mod xdg_surface {
             serial: u32,
         },
     }
+    #[derive(Debug)]
     pub enum Error {
         /// Surface was not fully constructed,
         NotConstructed = 1,
@@ -4405,6 +5025,7 @@ pub mod xdg_surface {
 /// Attaching a null buffer to a toplevel unmaps the surface.
 pub mod xdg_toplevel {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_toplevel
         ///
@@ -4737,6 +5358,53 @@ pub mod xdg_toplevel {
         /// similar compositor features.
         SetMinimized,
     }
+    impl Parser for crate::wayland_objects::xdg_toplevel::XdgToplevel {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => SetParent { parent: req.id()? },
+                2 => SetTitle {
+                    title: req.string()?,
+                },
+                3 => SetAppId {
+                    app_id: req.string()?,
+                },
+                4 => ShowWindowMenu {
+                    seat: req.id()?,
+                    serial: req.uint()?,
+                    x: req.int()?,
+                    y: req.int()?,
+                },
+                5 => Move {
+                    seat: req.id()?,
+                    serial: req.uint()?,
+                },
+                6 => Resize {
+                    seat: req.id()?,
+                    serial: req.uint()?,
+                    edges: req.uint()?,
+                },
+                7 => SetMaxSize {
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                8 => SetMinSize {
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                9 => SetMaximized,
+                10 => UnsetMaximized,
+                11 => SetFullscreen { output: req.id()? },
+                12 => UnsetFullscreen,
+                13 => SetMinimized,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Suggest a surface change
         ///
@@ -4820,6 +5488,7 @@ pub mod xdg_toplevel {
             capabilities: Array,
         },
     }
+    #[derive(Debug)]
     pub enum Error {
         /// Provided value is not a valid variant of the resize_edge enum,
         InvalidResizeEdge = 0,
@@ -4832,6 +5501,7 @@ pub mod xdg_toplevel {
     ///
     /// These values are used to indicate which edge of a surface
     /// is being dragged in a resize operation.
+    #[derive(Debug)]
     pub enum ResizeEdge {
         None = 0,
         Top = 1,
@@ -4852,6 +5522,7 @@ pub mod xdg_toplevel {
     ///
     /// States set in this way are double-buffered. They will get applied on
     /// the next commit.
+    #[derive(Debug)]
     pub enum State {
         /// The surface is maximized,
         /// The surface is maximized
@@ -4914,6 +5585,7 @@ pub mod xdg_toplevel {
         /// outputs are switched off due to screen locking.
         Suspended = 9,
     }
+    #[derive(Debug)]
     pub enum WmCapabilities {
         /// Show_window_menu is available,
         WindowMenu = 1,
@@ -4954,6 +5626,7 @@ pub mod xdg_toplevel {
 /// for the xdg_popup state to take effect.
 pub mod xdg_popup {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Remove xdg_popup interface
         ///
@@ -5039,6 +5712,26 @@ pub mod xdg_popup {
             token: u32,
         },
     }
+    impl Parser for crate::wayland_objects::xdg_popup::XdgPopup {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => Grab {
+                    seat: req.id()?,
+                    serial: req.uint()?,
+                },
+                2 => Reposition {
+                    positioner: req.id()?,
+                    token: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Configure the popup surface
         ///
@@ -5092,6 +5785,7 @@ pub mod xdg_popup {
             token: u32,
         },
     }
+    #[derive(Debug)]
     pub enum Error {
         /// Tried to grab after being mapped,
         InvalidGrab = 0,
@@ -5109,6 +5803,7 @@ pub mod xdg_popup {
 /// only be done by creating a new major version of the extension.
 pub mod wp_content_type_manager_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the content type manager object
         ///
@@ -5126,6 +5821,22 @@ pub mod wp_content_type_manager_v1 {
             surface: WlSurfaceId,
         },
     }
+    impl Parser for crate::wayland_objects::wp_content_type_manager_v1::WpContentTypeManagerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetSurfaceContentType {
+                    id: req.id()?,
+                    surface: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Error {
         /// Wl_surface already has a content type object,
         AlreadyConstructed = 0,
@@ -5143,6 +5854,7 @@ pub mod wp_content_type_manager_v1 {
 /// the client should destroy it.
 pub mod wp_content_type_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the content type object
         ///
@@ -5165,9 +5877,24 @@ pub mod wp_content_type_v1 {
             content_type: u32,
         },
     }
+    impl Parser for crate::wayland_objects::wp_content_type_v1::WpContentTypeV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => SetContentType {
+                    content_type: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
     /// Possible content types
     ///
     /// These values describe the available content types for a surface.
+    #[derive(Debug)]
     pub enum Type {
         /// No content type applies
         ///
@@ -5228,6 +5955,7 @@ pub mod wp_content_type_v1 {
 /// only be done by creating a new major version of the extension.
 pub mod wp_drm_lease_device_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Create a lease request object
         ///
@@ -5245,6 +5973,19 @@ pub mod wp_drm_lease_device_v1 {
         /// Existing connectors, lease request and leases will not be affected.
         Release,
     }
+    impl Parser for crate::wayland_objects::wp_drm_lease_device_v1::WpDrmLeaseDeviceV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => CreateLeaseRequest { id: req.id()? },
+                1 => Release,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Open a non-master fd for this DRM node
         ///
@@ -5304,6 +6045,7 @@ pub mod wp_drm_lease_device_v1 {
 /// description event followed by a done event.
 pub mod wp_drm_lease_connector_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy connector
         ///
@@ -5314,6 +6056,18 @@ pub mod wp_drm_lease_connector_v1 {
         /// nor leases will be affected.
         Destroy,
     }
+    impl Parser for crate::wayland_objects::wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Name
         ///
@@ -5376,6 +6130,7 @@ pub mod wp_drm_lease_connector_v1 {
 /// request.
 pub mod wp_drm_lease_request_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Request a connector for this lease
         ///
@@ -5401,6 +6156,21 @@ pub mod wp_drm_lease_request_v1 {
         /// will raise the empty_lease error.
         Submit { id: WpDrmLeaseV1Id },
     }
+    impl Parser for crate::wayland_objects::wp_drm_lease_request_v1::WpDrmLeaseRequestV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => RequestConnector {
+                    connector: req.id()?,
+                },
+                1 => Submit { id: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Error {
         /// Requested a connector from a different lease device,
         WrongDevice = 0,
@@ -5423,6 +6193,7 @@ pub mod wp_drm_lease_request_v1 {
 /// event.
 pub mod wp_drm_lease_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroys the lease object
         ///
@@ -5431,6 +6202,18 @@ pub mod wp_drm_lease_v1 {
         /// appropriate file descriptor, if necessary.
         Destroy,
     }
+    impl Parser for crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Shares the DRM file descriptor
         ///
@@ -5470,6 +6253,7 @@ pub mod wp_drm_lease_v1 {
 /// objects to get notified when the user is idle for a given amount of time.
 pub mod ext_idle_notifier_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the manager
         ///
@@ -5493,6 +6277,22 @@ pub mod ext_idle_notifier_v1 {
             seat: WlSeatId,
         },
     }
+    impl Parser for crate::wayland_objects::ext_idle_notifier_v1::ExtIdleNotifierV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetIdleNotification {
+                    id: req.id()?,
+                    timeout: req.uint()?,
+                    seat: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
 }
 
 /// Idle notification
@@ -5513,12 +6313,25 @@ pub mod ext_idle_notifier_v1 {
 /// a resumed event is sent and the timeout is restarted.
 pub mod ext_idle_notification_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the notification object
         ///
         /// Destroy the notification object.
         Destroy,
     }
+    impl Parser for crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Notification object is idle
         ///
@@ -5543,6 +6356,7 @@ pub mod ext_idle_notification_v1 {
 /// This interface is used to request that the session be locked.
 pub mod ext_session_lock_manager_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the session lock manager object
         ///
@@ -5557,6 +6371,18 @@ pub mod ext_session_lock_manager_v1 {
         /// or ext_session_lock_v1.finished event on the created object in
         /// response to this request.
         Lock { id: ExtSessionLockV1Id },
+    }
+    impl Parser for crate::wayland_objects::ext_session_lock_manager_v1::ExtSessionLockManagerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => Lock { id: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
     }
 }
 
@@ -5612,6 +6438,7 @@ pub mod ext_session_lock_manager_v1 {
 /// instance automatically.
 pub mod ext_session_lock_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the session lock
         ///
@@ -5670,6 +6497,24 @@ pub mod ext_session_lock_v1 {
         /// it processes the unlock_and_destroy request.
         UnlockAndDestroy,
     }
+    impl Parser for crate::wayland_objects::ext_session_lock_v1::ExtSessionLockV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetLockSurface {
+                    id: req.id()?,
+                    surface: req.id()?,
+                    output: req.id()?,
+                },
+                2 => UnlockAndDestroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Session successfully locked
         ///
@@ -5709,6 +6554,7 @@ pub mod ext_session_lock_v1 {
         /// not the locked event was received on this object.
         Finished,
     }
+    #[derive(Debug)]
     pub enum Error {
         /// Attempted to destroy session lock while locked,
         InvalidDestroy = 0,
@@ -5742,6 +6588,7 @@ pub mod ext_session_lock_v1 {
 /// focus if the user clicks on other surfaces.
 pub mod ext_session_lock_surface_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the lock surface object
         ///
@@ -5786,6 +6633,21 @@ pub mod ext_session_lock_surface_v1 {
             serial: u32,
         },
     }
+    impl Parser for crate::wayland_objects::ext_session_lock_surface_v1::ExtSessionLockSurfaceV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => AckConfigure {
+                    serial: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// The client should resize its surface
         ///
@@ -5802,6 +6664,7 @@ pub mod ext_session_lock_surface_v1 {
             height: u32,
         },
     }
+    #[derive(Debug)]
     pub enum Error {
         /// Surface committed before first ack_configure request,
         CommitBeforeFirstAck = 0,
@@ -5819,6 +6682,7 @@ pub mod ext_session_lock_surface_v1 {
 /// A global interface for requesting surfaces to use fractional scales.
 pub mod wp_fractional_scale_manager_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Unbind the fractional surface scale interface
         ///
@@ -5839,6 +6703,22 @@ pub mod wp_fractional_scale_manager_v1 {
             surface: WlSurfaceId,
         },
     }
+    impl Parser for crate::wayland_objects::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetFractionalScale {
+                    id: req.id()?,
+                    surface: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Error {
         /// The surface already has a fractional_scale object associated,
         FractionalScaleExists = 0,
@@ -5851,6 +6731,7 @@ pub mod wp_fractional_scale_manager_v1 {
 /// to inform the client of the preferred scale.
 pub mod wp_fractional_scale_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Remove surface scale information for surface
         ///
@@ -5858,6 +6739,18 @@ pub mod wp_fractional_scale_v1 {
         /// preferred_scale events will no longer be sent.
         Destroy,
     }
+    impl Parser for crate::wayland_objects::wp_fractional_scale_v1::WpFractionalScaleV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// Notify of new preferred scale
         ///
@@ -5878,6 +6771,7 @@ pub mod wp_fractional_scale_v1 {
 /// single-pixel buffers.
 pub mod wp_single_pixel_buffer_manager_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the manager
         ///
@@ -5905,6 +6799,26 @@ pub mod wp_single_pixel_buffer_manager_v1 {
             a: u32,
         },
     }
+    impl Parser
+        for crate::wayland_objects::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => CreateU32RgbaBuffer {
+                    id: req.id()?,
+                    r: req.uint()?,
+                    g: req.uint()?,
+                    b: req.uint()?,
+                    a: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
 }
 
 /// Protocol for tearing control
@@ -5926,6 +6840,7 @@ pub mod wp_single_pixel_buffer_manager_v1 {
 /// only be done by creating a new major version of the extension.
 pub mod wp_tearing_control_manager_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy tearing control factory object
         ///
@@ -5945,6 +6860,22 @@ pub mod wp_tearing_control_manager_v1 {
             surface: WlSurfaceId,
         },
     }
+    impl Parser for crate::wayland_objects::wp_tearing_control_manager_v1::WpTearingControlManagerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetTearingControl {
+                    id: req.id()?,
+                    surface: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Error {
         /// The surface already has a tearing object associated,
         TearingControlExists = 0,
@@ -5960,6 +6891,7 @@ pub mod wp_tearing_control_manager_v1 {
 /// details.
 pub mod wp_tearing_control_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Set presentation hint
         ///
@@ -5976,10 +6908,23 @@ pub mod wp_tearing_control_v1 {
         /// vsync. The change will be applied on the next wl_surface.commit.
         Destroy,
     }
+    impl Parser for crate::wayland_objects::wp_tearing_control_v1::WpTearingControlV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetPresentationHint { hint: req.uint()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
     /// Presentation hint values
     ///
     /// This enum provides information for if submitted frames from the client
     /// may be presented with tearing.
+    #[derive(Debug)]
     pub enum PresentationHint {
         /// Tearing-free presentation
         ///
@@ -6002,6 +6947,7 @@ pub mod wp_tearing_control_v1 {
 /// activated.
 pub mod xdg_activation_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_activation object
         ///
@@ -6036,6 +6982,22 @@ pub mod xdg_activation_v1 {
             surface: WlSurfaceId,
         },
     }
+    impl Parser for crate::wayland_objects::xdg_activation_v1::XdgActivationV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetActivationToken { id: req.id()? },
+                2 => Activate {
+                    token: req.string()?,
+                    surface: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
 }
 
 /// An exported activation handle
@@ -6050,6 +7012,7 @@ pub mod xdg_activation_v1 {
 /// the compositor will provide an invalid token.
 pub mod xdg_activation_token_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Specifies the seat and serial of the activating event
         ///
@@ -6105,6 +7068,27 @@ pub mod xdg_activation_token_v1 {
         /// longer be used. The received token stays valid.
         Destroy,
     }
+    impl Parser for crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetSerial {
+                    serial: req.uint()?,
+                    seat: req.id()?,
+                },
+                1 => SetAppId {
+                    app_id: req.string()?,
+                },
+                2 => SetSurface { surface: req.id()? },
+                3 => Commit,
+                4 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Event {
         /// The exported activation token
         ///
@@ -6115,6 +7099,7 @@ pub mod xdg_activation_token_v1 {
             token: String,
         },
     }
+    #[derive(Debug)]
     pub enum Error {
         /// The token has already been used previously,
         AlreadyUsed = 0,
@@ -6140,6 +7125,7 @@ pub mod xdg_activation_token_v1 {
 /// set the `WL_SURFACE_ID` atom on a window.
 pub mod xwayland_shell_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Destroy the Xwayland shell object
         ///
@@ -6163,6 +7149,22 @@ pub mod xwayland_shell_v1 {
             surface: WlSurfaceId,
         },
     }
+    impl Parser for crate::wayland_objects::xwayland_shell_v1::XwaylandShellV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetXwaylandSurface {
+                    id: req.id()?,
+                    surface: req.id()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Error {
         /// Given wl_surface has another role,
         Role = 0,
@@ -6181,6 +7183,7 @@ pub mod xwayland_shell_v1 {
 /// for the xwayland_surface_v1 state to take effect.
 pub mod xwayland_surface_v1 {
     use super::*;
+    #[derive(Debug)]
     pub enum Request {
         /// Associates a Xwayland window to a wl_surface
         ///
@@ -6219,6 +7222,22 @@ pub mod xwayland_surface_v1 {
         /// Any already existing associations are unaffected by this action.
         Destroy,
     }
+    impl Parser for crate::wayland_objects::xwayland_surface_v1::XwaylandSurfaceV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetSerial {
+                    serial_lo: req.uint()?,
+                    serial_hi: req.uint()?,
+                },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
     pub enum Error {
         /// Given wl_surface is already associated with an X11 window,
         AlreadyAssociated = 0,

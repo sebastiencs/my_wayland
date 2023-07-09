@@ -83,6 +83,7 @@ fn write_description(
 fn write_enums(f: &mut impl Write, enums: &[Enum]) -> std::io::Result<()> {
     for e in enums {
         write_description(f, "  /// ", e.description.as_ref())?;
+        writeln!(f, "  #[derive(Debug)]")?;
         writeln!(f, "  pub enum {} {{", e.name.to_upper_camel_case())?;
         for entry in &e.entries {
             if let Some(summary) = entry.summary.as_ref() {
@@ -104,12 +105,61 @@ fn write_enums(f: &mut impl Write, enums: &[Enum]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn write_message(
-    f: &mut impl Write,
-    name: &str,
-    this_interface: &str,
-    msgs: &[Message],
-) -> std::io::Result<()> {
+fn write_parser(f: &mut impl Write, this_interface: &str, msgs: &[Message]) -> std::io::Result<()> {
+    fn type_to_method_name(typ: protocol::Type) -> &'static str {
+        match typ {
+            protocol::Type::Int => "int()",
+            protocol::Type::Uint => "uint()",
+            protocol::Type::Fixed => "fixed()",
+            protocol::Type::String => "string()",
+            protocol::Type::Object => "id()",
+            protocol::Type::NewId => "id()",
+            protocol::Type::Array => todo!(),
+            protocol::Type::Fd => "fd()",
+            protocol::Type::Destructor => todo!(),
+        }
+    }
+
+    writeln!(
+        f,
+        "  impl Parser for crate::wayland_objects::{}::{} {{",
+        this_interface,
+        this_interface.to_upper_camel_case()
+    )?;
+    writeln!(f, "    type Request = Request;")?;
+    writeln!(
+        f,
+        "    fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {{"
+    )?;
+    writeln!(f, "      use Request::*;")?;
+    writeln!(f, "      let request = match req.request_id {{")?;
+
+    for (index, msg) in msgs.iter().enumerate() {
+        let name = msg.name.to_upper_camel_case();
+        if msg.args.is_empty() {
+            writeln!(f, "        {} => {},", index, name)?;
+        } else {
+            writeln!(f, "        {} => {} {{", index, name)?;
+            for arg in &msg.args {
+                let method = type_to_method_name(arg.typ);
+                writeln!(f, "          {}: req.{}?,", &arg.name, method)?;
+            }
+            writeln!(f, "        }},")?;
+        }
+    }
+
+    writeln!(f, "        _ => return Err(ParserError::InvalidRequest),")?;
+    writeln!(f, "      }};")?;
+    writeln!(f, "      Ok(request)")?;
+    writeln!(f, "    }}")?;
+
+    writeln!(f, "  }}")?;
+
+    Ok(())
+}
+
+fn write_message(f: &mut impl Write, name: &str, msgs: &[Message]) -> std::io::Result<()> {
+    writeln!(f, "  #[derive(Debug)]")?;
     writeln!(f, "  pub enum {} {{", name)?;
     for req in msgs {
         write_description(f, "    /// ", req.description.as_ref())?;
@@ -189,13 +239,18 @@ pub fn gen() -> std::io::Result<()> {
 
     let derive_str = "#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]";
 
-    writeln!(f, "#![allow(dead_code, unused_imports)]")?;
+    writeln!(f, "#![allow(dead_code, unused_imports, unused_mut)]")?;
     writeln!(f, "#![allow(clippy::enum_variant_names)]\n")?;
-    writeln!(f, "use std::os::unix::io::RawFd;\n")?;
+    writeln!(f, "use std::os::unix::io::RawFd;")?;
+    writeln!(
+        f,
+        "use crate::{{clients::RawRequest, object::{{Parser, ParserError}}}};\n"
+    )?;
     writeln!(f, "{}", derive_str)?;
     writeln!(f, "pub struct ObjectId(u32);")?;
     writeln!(f, "{}", derive_str)?;
     writeln!(f, "pub struct NewId(u32);")?;
+    writeln!(f, "{}", derive_str)?;
     writeln!(f, "pub struct Array;")?;
 
     for protocol in &protocols {
@@ -210,17 +265,18 @@ pub fn gen() -> std::io::Result<()> {
     for protocol in &protocols {
         for interface in &protocol.interfaces {
             dbg!(interface);
-            let this_interface = interface.name.to_upper_camel_case();
+            let this_interface = &interface.name;
 
             write_description(f, "/// ", interface.description.as_ref())?;
             writeln!(f, "pub mod {} {{", interface.name)?;
             writeln!(f, "  use super::*;")?;
 
             if !interface.requests.is_empty() {
-                write_message(f, "Request", &this_interface, &interface.requests)?;
+                write_message(f, "Request", &interface.requests)?;
+                write_parser(f, this_interface, &interface.requests)?;
             }
             if !interface.events.is_empty() {
-                write_message(f, "Event", &this_interface, &interface.events)?;
+                write_message(f, "Event", &interface.events)?;
             }
             write_enums(f, &interface.enums)?;
 
