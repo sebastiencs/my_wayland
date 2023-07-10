@@ -167,6 +167,7 @@ impl Model for Client {
     fn reducer(&mut self, action: &ClientAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         use crate::wayland_objects::wl_display::WlDisplay;
 
+        dispatcher.set_client_fd(self.fd);
         match action {
             ClientAction::Start => {
                 self.read_process_info();
@@ -185,7 +186,7 @@ impl Model for Client {
             }
             ClientAction::MsgReceived { request } => {
                 let mut obj = self.objects.remove(&request.object_id()).unwrap();
-                obj.on(self, request.clone());
+                obj.on(self, request.clone(), dispatcher);
                 self.objects.insert(obj.id(), obj);
             }
             ClientAction::Close => {
@@ -376,6 +377,9 @@ pub struct RawEvent {
 pub trait EventWriter {
     type Event: 'static;
     fn to_raw_event(&self, event: Self::Event) -> RawEvent;
+    fn send_event(&self, event: Self::Event, dispatcher: &mut Dispatcher) {
+        dispatcher.send_raw(self.to_raw_event(event));
+    }
 }
 
 impl RawEvent {
@@ -384,7 +388,8 @@ impl RawEvent {
             object_id: id.into(),
             request_id: req_id,
             arguments: Arguments {
-                args: VecDeque::with_capacity(nargs),
+                // + 2 for object_id + (length | req_id) on serialization
+                args: VecDeque::with_capacity(nargs + 2),
             },
         }
     }
@@ -435,6 +440,19 @@ impl RawEvent {
 
     pub fn fd(&mut self, fd: RawFd) {
         todo!()
+    }
+
+    pub fn into_bytes(self) -> Box<[u8]> {
+        let mut words = self.arguments.args;
+        let length = words.len() + 2;
+
+        let length: u16 = (length * 4).try_into().unwrap();
+        let word = (length as u32) << 16 | self.request_id as u32;
+
+        words.push_front(word);
+        words.push_front(self.object_id);
+
+        words.into_iter().flat_map(u32::to_ne_bytes).collect()
     }
 }
 

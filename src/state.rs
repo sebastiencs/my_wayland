@@ -1,9 +1,10 @@
 use std::{
     any::{Any, TypeId},
     collections::{BTreeMap, VecDeque},
+    os::fd::RawFd,
 };
 
-use crate::io_uring::model::IoUringAction;
+use crate::{clients::RawEvent, io_uring::model::IoUringAction};
 
 type Result<T> = std::result::Result<T, ()>;
 
@@ -11,6 +12,8 @@ pub struct Dispatcher<'a> {
     queue: &'a mut VecDeque<AnyAction>,
     pending_models: BTreeMap<ActionId, Vec<AnyModel>>,
     to_remove: VecDeque<ActionId>,
+
+    client_fd: Option<RawFd>,
 }
 
 impl Dispatcher<'_> {
@@ -31,8 +34,10 @@ impl Dispatcher<'_> {
         self.queue.push_back(AnyAction::from_id(id, action));
     }
 
-    pub fn dispatch_any(&mut self, action: AnyAction) {
-        self.queue.push_back(action);
+    pub fn dispatch_any(&mut self, action: Option<AnyAction>) {
+        if let Some(action) = action {
+            self.queue.push_back(action);
+        };
     }
 
     pub fn add_model<I, M>(&mut self, id: I, model: M)
@@ -62,11 +67,36 @@ impl Dispatcher<'_> {
         let action_id = ActionId::of_with::<M::Action, _>(id);
         self.to_remove.push_back(action_id);
     }
+
+    pub fn send_raw(&mut self, event: RawEvent) {
+        let action = IoUringAction::Write {
+            fd: self.client_fd.unwrap(),
+            offset: 0,
+            buffer: event.into_bytes(),
+            dispatch_to: Redispatcher::None,
+        };
+        self.dispatch(action);
+    }
+
+    pub fn set_client_fd(&mut self, fd: RawFd) {
+        self.client_fd = Some(fd);
+    }
+
+    fn clear_client_fd(&mut self) {
+        if self.client_fd.is_some() {
+            self.client_fd = None;
+        }
+    }
+
+    // pub fn send_event<T: EventWriter>(&mut self, event: T::Event) {
+    //     let raw = T::to_raw_event(&self, event);
+    // }
 }
 
 pub enum Redispatcher<R> {
     Fun(fn(R) -> AnyAction),
     WithId((u64, fn(R) -> AnyAction)),
+    None,
 }
 
 impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
@@ -74,6 +104,7 @@ impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
         match self {
             Self::Fun(_fun) => f.write_str("ptr"),
             Self::WithId((id, _fun)) => f.write_fmt(format_args!("id={:?}", id)),
+            Self::None => f.write_str("None"),
         }
     }
 }
@@ -83,6 +114,7 @@ impl<R> Clone for Redispatcher<R> {
         match self {
             Self::Fun(arg0) => Self::Fun(*arg0),
             Self::WithId(arg0) => Self::WithId(*arg0),
+            Self::None => Self::None,
         }
     }
 }
@@ -103,14 +135,15 @@ impl<R> Redispatcher<R> {
 }
 
 impl<R> Redispatcher<R> {
-    pub fn make(self, value: R) -> AnyAction {
+    pub fn make(self, value: R) -> Option<AnyAction> {
         match self {
-            Self::Fun(fun) => fun(value),
+            Self::Fun(fun) => Some(fun(value)),
             Self::WithId((id, fun)) => {
                 let mut action = fun(value);
                 action.id.specifier = Some(id);
-                action
+                Some(action)
             }
+            Self::None => None,
         }
     }
 }
@@ -196,11 +229,13 @@ impl Runner {
             queue: &mut self.queue,
             pending_models: BTreeMap::default(),
             to_remove: VecDeque::default(),
+            client_fd: None,
         };
 
         for model in models {
             (model.vtable.try_call_reducer_effect)(&mut model.state, &action, &mut dispatcher)
                 .unwrap();
+            dispatcher.clear_client_fd();
         }
 
         // Add new models

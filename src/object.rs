@@ -1,11 +1,12 @@
 use crate::{
     clients::{Client, RawRequest},
     protocol_generated::WaylandId,
+    state::Dispatcher,
 };
 
 pub trait Object {
     fn id(&self) -> WaylandId;
-    fn on(&mut self, client: &mut Client, request: RawRequest);
+    fn on(&mut self, client: &mut Client, request: RawRequest, dispatcher: &mut Dispatcher);
 }
 
 pub trait Parser {

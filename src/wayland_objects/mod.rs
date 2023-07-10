@@ -1,3 +1,4 @@
+pub mod wl_callback;
 pub mod wl_display;
 
 macro_rules! fake_obj {
@@ -14,7 +15,6 @@ macro_rules! fake_obj {
 
 fake_obj! {
     { wl_registry, WlRegistry },
-    { wl_callback, WlCallback },
     { wl_compositor, WlCompositor },
     { wl_shm_pool, WlShmPool },
     { wl_shm, WlShm },
