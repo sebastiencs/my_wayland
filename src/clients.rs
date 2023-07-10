@@ -367,6 +367,78 @@ impl Model for ClientReader {
 }
 
 #[derive(Clone, Debug)]
+pub struct RawEvent {
+    pub object_id: u32,
+    pub request_id: u16,
+    pub arguments: Arguments,
+}
+
+pub trait EventWriter {
+    type Event: 'static;
+    fn to_raw_event(&self, event: Self::Event) -> RawEvent;
+}
+
+impl RawEvent {
+    pub fn new(id: WaylandId, req_id: u16, nargs: usize) -> Self {
+        Self {
+            object_id: id.into(),
+            request_id: req_id,
+            arguments: Arguments {
+                args: VecDeque::with_capacity(nargs),
+            },
+        }
+    }
+
+    fn push(&mut self, value: u32) {
+        self.arguments.args.push_back(value);
+    }
+
+    pub fn uint(&mut self, uint: u32) {
+        self.push(uint);
+    }
+
+    pub fn int(&mut self, int: i32) {
+        self.push(int as u32);
+    }
+
+    pub fn id<I>(&mut self, id: I)
+    where
+        I: Into<u32>,
+    {
+        self.push(id.into());
+    }
+
+    pub fn string<S: AsRef<str>>(&mut self, s: S) {
+        let s = s.as_ref();
+        let len: u32 = s.len().try_into().unwrap();
+        self.push(len);
+
+        for (chunk, chunk_len) in s.as_bytes().chunks(4).map(|chunk| (chunk, chunk.len())) {
+            let uint = if chunk_len == 4 {
+                u32::from_ne_bytes(chunk.try_into().unwrap())
+            } else {
+                let mut bytes = [0u8; 4];
+                bytes[..chunk_len].copy_from_slice(chunk);
+                u32::from_ne_bytes(bytes)
+            };
+            self.push(uint);
+        }
+    }
+
+    pub fn fixed(&mut self, fixed: f32) {
+        todo!()
+    }
+
+    pub fn array(&mut self, array: crate::protocol_generated::Array) {
+        todo!()
+    }
+
+    pub fn fd(&mut self, fd: RawFd) {
+        todo!()
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct RawRequest {
     pub object_id: u32,
     pub request_id: u16,
@@ -450,14 +522,15 @@ impl Arguments {
         let len = self.uint()? as usize;
         let nwords = len / 4;
 
-        let mut words = Vec::with_capacity(len);
+        let mut bytes = Vec::with_capacity(len);
         for _ in 0..nwords {
             let word = self.pop()?;
-            words.extend(u32::to_ne_bytes(word));
+            bytes.extend(u32::to_ne_bytes(word));
         }
-        words.truncate(len);
+        assert!(bytes.len() >= len);
+        bytes.truncate(len);
 
-        Ok(String::from_utf8(words).unwrap())
+        Ok(String::from_utf8(bytes).unwrap())
     }
 
     pub fn fixed(&mut self) -> Result<f32, ParserError> {

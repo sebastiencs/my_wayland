@@ -6,6 +6,8 @@ use std::{
     os::fd::FromRawFd,
 };
 
+use itertools::Itertools;
+
 use {
     heck::ToUpperCamelCase,
     libc::memfd_create,
@@ -105,21 +107,63 @@ fn write_enums(f: &mut impl Write, enums: &[Enum]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn write_parser(f: &mut impl Write, this_interface: &str, msgs: &[Message]) -> std::io::Result<()> {
-    fn type_to_method_name(typ: protocol::Type) -> &'static str {
-        match typ {
-            protocol::Type::Int => "int()",
-            protocol::Type::Uint => "uint()",
-            protocol::Type::Fixed => "fixed()",
-            protocol::Type::String => "string()",
-            protocol::Type::Object => "id()",
-            protocol::Type::NewId => "id()",
-            protocol::Type::Array => todo!(),
-            protocol::Type::Fd => "fd()",
-            protocol::Type::Destructor => todo!(),
+fn type_to_method_name(typ: protocol::Type) -> &'static str {
+    match typ {
+        protocol::Type::Int => "int",
+        protocol::Type::Uint => "uint",
+        protocol::Type::Fixed => "fixed",
+        protocol::Type::String => "string",
+        protocol::Type::Object => "id",
+        protocol::Type::NewId => "id",
+        protocol::Type::Array => "array",
+        protocol::Type::Fd => "fd",
+        protocol::Type::Destructor => todo!(),
+    }
+}
+
+fn write_event_writer(
+    f: &mut impl Write,
+    this_interface: &str,
+    msgs: &[Message],
+) -> std::io::Result<()> {
+    writeln!(
+        f,
+        "  impl EventWriter for crate::wayland_objects::{}::{} {{",
+        this_interface,
+        this_interface.to_upper_camel_case()
+    )?;
+    writeln!(f, "    type Event = Event;")?;
+    writeln!(f, "    fn to_raw_event(&self, event: Event) -> RawEvent {{")?;
+    writeln!(f, "      use Event::*;")?;
+    writeln!(f, "      use crate::object::Object;")?;
+    writeln!(f, "      match event {{")?;
+
+    for (index, event) in msgs.iter().enumerate() {
+        let name = event.name.to_upper_camel_case();
+        let args = event.args.iter().map(|a| a.name.as_str()).join(",");
+        writeln!(f, "        {} {{ {} }} => {{", name, args)?;
+        writeln!(
+            f,
+            "          let mut raw = RawEvent::new(self.id(), {}, {});",
+            index,
+            event.args.len()
+        )?;
+        for arg in &event.args {
+            let method = type_to_method_name(arg.typ);
+            writeln!(f, "          raw.{}({});", method, &arg.name)?;
         }
+        writeln!(f, "        raw")?;
+        writeln!(f, "        }},")?;
     }
 
+    writeln!(f, "      }}")?;
+    writeln!(f, "    }}")?;
+
+    writeln!(f, "  }}")?;
+    Ok(())
+}
+
+fn write_parser(f: &mut impl Write, this_interface: &str, msgs: &[Message]) -> std::io::Result<()> {
     writeln!(
         f,
         "  impl Parser for crate::wayland_objects::{}::{} {{",
@@ -142,7 +186,7 @@ fn write_parser(f: &mut impl Write, this_interface: &str, msgs: &[Message]) -> s
             writeln!(f, "        {} => {} {{", index, name)?;
             for arg in &msg.args {
                 let method = type_to_method_name(arg.typ);
-                writeln!(f, "          {}: req.{}?,", &arg.name, method)?;
+                writeln!(f, "          {}: req.{}()?,", &arg.name, method)?;
             }
             writeln!(f, "        }},")?;
         }
@@ -237,14 +281,15 @@ pub fn gen() -> std::io::Result<()> {
         .map(wayland_scanner::parse::parse)
         .collect::<Vec<_>>();
 
-    let derive_str = "#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]";
+    let derive_str =
+        "#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into)]";
 
     writeln!(f, "#![allow(dead_code, unused_imports, unused_mut)]")?;
     writeln!(f, "#![allow(clippy::enum_variant_names)]\n")?;
     writeln!(f, "use std::os::unix::io::RawFd;")?;
     writeln!(
         f,
-        "use crate::{{clients::RawRequest, object::{{Parser, ParserError}}}};\n"
+        "use crate::{{clients::{{RawRequest, RawEvent, EventWriter}}, object::{{Parser, ParserError}}}};\n"
     )?;
     writeln!(f, "{}", derive_str)?;
     writeln!(f, "pub struct WaylandId(u32);")?;
@@ -277,6 +322,7 @@ pub fn gen() -> std::io::Result<()> {
             }
             if !interface.events.is_empty() {
                 write_message(f, "Event", &interface.events)?;
+                write_event_writer(f, this_interface, &interface.events)?;
             }
             write_enums(f, &interface.enums)?;
 

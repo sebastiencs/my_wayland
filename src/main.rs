@@ -3,7 +3,7 @@
 
 macro_rules! wayland_id {
     ($($name:ident,)+) => ($(
-        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into)]
         pub struct $name(pub(super) u32);
         impl From<WaylandId> for $name {
             fn from(value: WaylandId) -> Self {

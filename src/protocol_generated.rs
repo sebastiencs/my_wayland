@@ -3,17 +3,17 @@
 
 use {
     crate::{
-        clients::RawRequest,
+        clients::{EventWriter, RawEvent, RawRequest},
         object::{Parser, ParserError},
     },
     std::os::unix::io::RawFd,
 };
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into)]
 pub struct WaylandId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into)]
 pub struct NewId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into)]
 pub struct Array;
 
 wayland_id! {
@@ -158,6 +158,30 @@ pub mod wl_display {
             id: u32,
         },
     }
+    impl EventWriter for crate::wayland_objects::wl_display::WlDisplay {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Error {
+                    object_id,
+                    code,
+                    message,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 3);
+                    raw.id(object_id);
+                    raw.uint(code);
+                    raw.string(message);
+                    raw
+                }
+                DeleteId { id } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.uint(id);
+                    raw
+                }
+            }
+        }
+    }
     /// Global error values
     ///
     /// These errors are global and can be emitted in response to any
@@ -260,6 +284,30 @@ pub mod wl_registry {
             name: u32,
         },
     }
+    impl EventWriter for crate::wayland_objects::wl_registry::WlRegistry {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Global {
+                    name,
+                    interface,
+                    version,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 3);
+                    raw.uint(name);
+                    raw.string(interface);
+                    raw.uint(version);
+                    raw
+                }
+                GlobalRemove { name } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.uint(name);
+                    raw
+                }
+            }
+        }
+    }
 }
 
 /// Callback object
@@ -280,6 +328,19 @@ pub mod wl_callback {
             /// Request-specific data for the callback,
             callback_data: u32,
         },
+    }
+    impl EventWriter for crate::wayland_objects::wl_callback::WlCallback {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Done { callback_data } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(callback_data);
+                    raw
+                }
+            }
+        }
     }
 }
 
@@ -465,6 +526,19 @@ pub mod wl_shm {
             /// Buffer pixel format,
             format: u32,
         },
+    }
+    impl EventWriter for crate::wayland_objects::wl_shm::WlShm {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Format { format } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(format);
+                    raw
+                }
+            }
+        }
     }
     /// Wl_shm error values
     ///
@@ -757,6 +831,18 @@ pub mod wl_buffer {
         /// optimization for GL(ES) compositors with wl_shm clients.
         Release,
     }
+    impl EventWriter for crate::wayland_objects::wl_buffer::WlBuffer {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Release {} => {
+                    let mut raw = RawEvent::new(self.id(), 0, 0);
+                    raw
+                }
+            }
+        }
+    }
 }
 
 /// Offer to transfer data
@@ -963,6 +1049,29 @@ pub mod wl_data_offer {
             dnd_action: u32,
         },
     }
+    impl EventWriter for crate::wayland_objects::wl_data_offer::WlDataOffer {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Offer { mime_type } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.string(mime_type);
+                    raw
+                }
+                SourceActions { source_actions } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.uint(source_actions);
+                    raw
+                }
+                Action { dnd_action } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.uint(dnd_action);
+                    raw
+                }
+            }
+        }
+    }
     #[derive(Debug)]
     pub enum Error {
         /// Finish request was called untimely,
@@ -1134,6 +1243,42 @@ pub mod wl_data_source {
             /// Action selected by the compositor,
             dnd_action: u32,
         },
+    }
+    impl EventWriter for crate::wayland_objects::wl_data_source::WlDataSource {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Target { mime_type } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.string(mime_type);
+                    raw
+                }
+                Send { mime_type, fd } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 2);
+                    raw.string(mime_type);
+                    raw.fd(fd);
+                    raw
+                }
+                Cancelled {} => {
+                    let mut raw = RawEvent::new(self.id(), 2, 0);
+                    raw
+                }
+                DndDropPerformed {} => {
+                    let mut raw = RawEvent::new(self.id(), 3, 0);
+                    raw
+                }
+                DndFinished {} => {
+                    let mut raw = RawEvent::new(self.id(), 4, 0);
+                    raw
+                }
+                Action { dnd_action } => {
+                    let mut raw = RawEvent::new(self.id(), 5, 1);
+                    raw.uint(dnd_action);
+                    raw
+                }
+            }
+        }
     }
     #[derive(Debug)]
     pub enum Error {
@@ -1317,6 +1462,54 @@ pub mod wl_data_device {
             /// Selection data_offer object,
             id: WlDataOfferId,
         },
+    }
+    impl EventWriter for crate::wayland_objects::wl_data_device::WlDataDevice {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                DataOffer { id } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(id);
+                    raw
+                }
+                Enter {
+                    serial,
+                    surface,
+                    x,
+                    y,
+                    id,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 5);
+                    raw.uint(serial);
+                    raw.id(surface);
+                    raw.fixed(x);
+                    raw.fixed(y);
+                    raw.id(id);
+                    raw
+                }
+                Leave {} => {
+                    let mut raw = RawEvent::new(self.id(), 2, 0);
+                    raw
+                }
+                Motion { time, x, y } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 3);
+                    raw.uint(time);
+                    raw.fixed(x);
+                    raw.fixed(y);
+                    raw
+                }
+                Drop {} => {
+                    let mut raw = RawEvent::new(self.id(), 4, 0);
+                    raw
+                }
+                Selection { id } => {
+                    let mut raw = RawEvent::new(self.id(), 5, 1);
+                    raw.id(id);
+                    raw
+                }
+            }
+        }
     }
     #[derive(Debug)]
     pub enum Error {
@@ -1759,6 +1952,34 @@ pub mod wl_shell_surface {
         /// that is, when the user clicks a surface that doesn't belong
         /// to the client owning the popup surface.
         PopupDone,
+    }
+    impl EventWriter for crate::wayland_objects::wl_shell_surface::WlShellSurface {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Ping { serial } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(serial);
+                    raw
+                }
+                Configure {
+                    edges,
+                    width,
+                    height,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 3);
+                    raw.uint(edges);
+                    raw.int(width);
+                    raw.int(height);
+                    raw
+                }
+                PopupDone {} => {
+                    let mut raw = RawEvent::new(self.id(), 2, 0);
+                    raw
+                }
+            }
+        }
     }
     /// Edge values for resizing
     ///
@@ -2307,6 +2528,34 @@ pub mod wl_surface {
             transform: u32,
         },
     }
+    impl EventWriter for crate::wayland_objects::wl_surface::WlSurface {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Enter { output } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(output);
+                    raw
+                }
+                Leave { output } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.id(output);
+                    raw
+                }
+                PreferredBufferScale { factor } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.int(factor);
+                    raw
+                }
+                PreferredBufferTransform { transform } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.uint(transform);
+                    raw
+                }
+            }
+        }
+    }
     /// Wl_surface error values
     ///
     /// These errors can be emitted in response to wl_surface requests.
@@ -2451,6 +2700,24 @@ pub mod wl_seat {
             /// Seat identifier,
             name: String,
         },
+    }
+    impl EventWriter for crate::wayland_objects::wl_seat::WlSeat {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Capabilities { capabilities } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(capabilities);
+                    raw
+                }
+                Name { name } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.string(name);
+                    raw
+                }
+            }
+        }
     }
     /// Seat capability bitmask
     ///
@@ -2859,6 +3126,97 @@ pub mod wl_pointer {
             direction: u32,
         },
     }
+    impl EventWriter for crate::wayland_objects::wl_pointer::WlPointer {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Enter {
+                    serial,
+                    surface,
+                    surface_x,
+                    surface_y,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 4);
+                    raw.uint(serial);
+                    raw.id(surface);
+                    raw.fixed(surface_x);
+                    raw.fixed(surface_y);
+                    raw
+                }
+                Leave { serial, surface } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 2);
+                    raw.uint(serial);
+                    raw.id(surface);
+                    raw
+                }
+                Motion {
+                    time,
+                    surface_x,
+                    surface_y,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 3);
+                    raw.uint(time);
+                    raw.fixed(surface_x);
+                    raw.fixed(surface_y);
+                    raw
+                }
+                Button {
+                    serial,
+                    time,
+                    button,
+                    state,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 4);
+                    raw.uint(serial);
+                    raw.uint(time);
+                    raw.uint(button);
+                    raw.uint(state);
+                    raw
+                }
+                Axis { time, axis, value } => {
+                    let mut raw = RawEvent::new(self.id(), 4, 3);
+                    raw.uint(time);
+                    raw.uint(axis);
+                    raw.fixed(value);
+                    raw
+                }
+                Frame {} => {
+                    let mut raw = RawEvent::new(self.id(), 5, 0);
+                    raw
+                }
+                AxisSource { axis_source } => {
+                    let mut raw = RawEvent::new(self.id(), 6, 1);
+                    raw.uint(axis_source);
+                    raw
+                }
+                AxisStop { time, axis } => {
+                    let mut raw = RawEvent::new(self.id(), 7, 2);
+                    raw.uint(time);
+                    raw.uint(axis);
+                    raw
+                }
+                AxisDiscrete { axis, discrete } => {
+                    let mut raw = RawEvent::new(self.id(), 8, 2);
+                    raw.uint(axis);
+                    raw.int(discrete);
+                    raw
+                }
+                AxisValue120 { axis, value120 } => {
+                    let mut raw = RawEvent::new(self.id(), 9, 2);
+                    raw.uint(axis);
+                    raw.int(value120);
+                    raw
+                }
+                AxisRelativeDirection { axis, direction } => {
+                    let mut raw = RawEvent::new(self.id(), 10, 2);
+                    raw.uint(axis);
+                    raw.uint(direction);
+                    raw
+                }
+            }
+        }
+    }
     #[derive(Debug)]
     pub enum Error {
         /// Given wl_surface has another role,
@@ -3058,6 +3416,72 @@ pub mod wl_keyboard {
             delay: i32,
         },
     }
+    impl EventWriter for crate::wayland_objects::wl_keyboard::WlKeyboard {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Keymap { format, fd, size } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 3);
+                    raw.uint(format);
+                    raw.fd(fd);
+                    raw.uint(size);
+                    raw
+                }
+                Enter {
+                    serial,
+                    surface,
+                    keys,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 3);
+                    raw.uint(serial);
+                    raw.id(surface);
+                    raw.array(keys);
+                    raw
+                }
+                Leave { serial, surface } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 2);
+                    raw.uint(serial);
+                    raw.id(surface);
+                    raw
+                }
+                Key {
+                    serial,
+                    time,
+                    key,
+                    state,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 4);
+                    raw.uint(serial);
+                    raw.uint(time);
+                    raw.uint(key);
+                    raw.uint(state);
+                    raw
+                }
+                Modifiers {
+                    serial,
+                    mods_depressed,
+                    mods_latched,
+                    mods_locked,
+                    group,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 4, 5);
+                    raw.uint(serial);
+                    raw.uint(mods_depressed);
+                    raw.uint(mods_latched);
+                    raw.uint(mods_locked);
+                    raw.uint(group);
+                    raw
+                }
+                RepeatInfo { rate, delay } => {
+                    let mut raw = RawEvent::new(self.id(), 5, 2);
+                    raw.int(rate);
+                    raw.int(delay);
+                    raw
+                }
+            }
+        }
+    }
     /// Keyboard mapping format
     ///
     /// This specifies the format of the keymap provided to the
@@ -3245,6 +3669,67 @@ pub mod wl_touch {
             /// Angle between major axis and positive surface y-axis in degrees,
             orientation: f32,
         },
+    }
+    impl EventWriter for crate::wayland_objects::wl_touch::WlTouch {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Down {
+                    serial,
+                    time,
+                    surface,
+                    id,
+                    x,
+                    y,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 6);
+                    raw.uint(serial);
+                    raw.uint(time);
+                    raw.id(surface);
+                    raw.int(id);
+                    raw.fixed(x);
+                    raw.fixed(y);
+                    raw
+                }
+                Up { serial, time, id } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 3);
+                    raw.uint(serial);
+                    raw.uint(time);
+                    raw.int(id);
+                    raw
+                }
+                Motion { time, id, x, y } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 4);
+                    raw.uint(time);
+                    raw.int(id);
+                    raw.fixed(x);
+                    raw.fixed(y);
+                    raw
+                }
+                Frame {} => {
+                    let mut raw = RawEvent::new(self.id(), 3, 0);
+                    raw
+                }
+                Cancel {} => {
+                    let mut raw = RawEvent::new(self.id(), 4, 0);
+                    raw
+                }
+                Shape { id, major, minor } => {
+                    let mut raw = RawEvent::new(self.id(), 5, 3);
+                    raw.int(id);
+                    raw.fixed(major);
+                    raw.fixed(minor);
+                    raw
+                }
+                Orientation { id, orientation } => {
+                    let mut raw = RawEvent::new(self.id(), 6, 2);
+                    raw.int(id);
+                    raw.fixed(orientation);
+                    raw
+                }
+            }
+        }
     }
 }
 
@@ -3448,6 +3933,67 @@ pub mod wl_output {
             /// Output description,
             description: String,
         },
+    }
+    impl EventWriter for crate::wayland_objects::wl_output::WlOutput {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Geometry {
+                    x,
+                    y,
+                    physical_width,
+                    physical_height,
+                    subpixel,
+                    make,
+                    model,
+                    transform,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 8);
+                    raw.int(x);
+                    raw.int(y);
+                    raw.int(physical_width);
+                    raw.int(physical_height);
+                    raw.int(subpixel);
+                    raw.string(make);
+                    raw.string(model);
+                    raw.int(transform);
+                    raw
+                }
+                Mode {
+                    flags,
+                    width,
+                    height,
+                    refresh,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 4);
+                    raw.uint(flags);
+                    raw.int(width);
+                    raw.int(height);
+                    raw.int(refresh);
+                    raw
+                }
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 2, 0);
+                    raw
+                }
+                Scale { factor } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.int(factor);
+                    raw
+                }
+                Name { name } => {
+                    let mut raw = RawEvent::new(self.id(), 4, 1);
+                    raw.string(name);
+                    raw
+                }
+                Description { description } => {
+                    let mut raw = RawEvent::new(self.id(), 5, 1);
+                    raw.string(description);
+                    raw
+                }
+            }
+        }
     }
     /// Subpixel geometry information
     ///
@@ -3942,6 +4488,19 @@ pub mod wp_presentation {
             clk_id: u32,
         },
     }
+    impl EventWriter for crate::wayland_objects::wp_presentation::WpPresentation {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                ClockId { clk_id } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(clk_id);
+                    raw
+                }
+            }
+        }
+    }
     /// Fatal presentation errors
     ///
     /// These fatal protocol errors may be emitted in response to
@@ -4049,6 +4608,42 @@ pub mod wp_presentation_feedback {
         ///
         /// The content update was never displayed to the user.
         Discarded,
+    }
+    impl EventWriter for crate::wayland_objects::wp_presentation_feedback::WpPresentationFeedback {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                SyncOutput { output } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(output);
+                    raw
+                }
+                Presented {
+                    tv_sec_hi,
+                    tv_sec_lo,
+                    tv_nsec,
+                    refresh,
+                    seq_hi,
+                    seq_lo,
+                    flags,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 7);
+                    raw.uint(tv_sec_hi);
+                    raw.uint(tv_sec_lo);
+                    raw.uint(tv_nsec);
+                    raw.uint(refresh);
+                    raw.uint(seq_hi);
+                    raw.uint(seq_lo);
+                    raw.uint(flags);
+                    raw
+                }
+                Discarded {} => {
+                    let mut raw = RawEvent::new(self.id(), 2, 0);
+                    raw
+                }
+            }
+        }
     }
     /// Bitmask of flags in presented event
     ///
@@ -4382,6 +4977,19 @@ pub mod xdg_wm_base {
             /// Pass this to the pong request,
             serial: u32,
         },
+    }
+    impl EventWriter for crate::wayland_objects::xdg_wm_base::XdgWmBase {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Ping { serial } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(serial);
+                    raw
+                }
+            }
+        }
     }
     #[derive(Debug)]
     pub enum Error {
@@ -4939,6 +5547,19 @@ pub mod xdg_surface {
             serial: u32,
         },
     }
+    impl EventWriter for crate::wayland_objects::xdg_surface::XdgSurface {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Configure { serial } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(serial);
+                    raw
+                }
+            }
+        }
+    }
     #[derive(Debug)]
     pub enum Error {
         /// Surface was not fully constructed,
@@ -5440,6 +6061,40 @@ pub mod xdg_toplevel {
             capabilities: Array,
         },
     }
+    impl EventWriter for crate::wayland_objects::xdg_toplevel::XdgToplevel {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Configure {
+                    width,
+                    height,
+                    states,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 3);
+                    raw.int(width);
+                    raw.int(height);
+                    raw.array(states);
+                    raw
+                }
+                Close {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+                ConfigureBounds { width, height } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 2);
+                    raw.int(width);
+                    raw.int(height);
+                    raw
+                }
+                WmCapabilities { capabilities } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.array(capabilities);
+                    raw
+                }
+            }
+        }
+    }
     #[derive(Debug)]
     pub enum Error {
         /// Provided value is not a valid variant of the resize_edge enum,
@@ -5737,6 +6392,36 @@ pub mod xdg_popup {
             token: u32,
         },
     }
+    impl EventWriter for crate::wayland_objects::xdg_popup::XdgPopup {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Configure {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 4);
+                    raw.int(x);
+                    raw.int(y);
+                    raw.int(width);
+                    raw.int(height);
+                    raw
+                }
+                PopupDone {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+                Repositioned { token } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.uint(token);
+                    raw
+                }
+            }
+        }
+    }
     #[derive(Debug)]
     pub enum Error {
         /// Tried to grab after being mapped,
@@ -5984,6 +6669,32 @@ pub mod wp_drm_lease_device_v1 {
         /// resources associated with this device after receiving this event.
         Released,
     }
+    impl EventWriter for crate::wayland_objects::wp_drm_lease_device_v1::WpDrmLeaseDeviceV1 {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                DrmFd { fd } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.fd(fd);
+                    raw
+                }
+                Connector { id } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.id(id);
+                    raw
+                }
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 2, 0);
+                    raw
+                }
+                Released {} => {
+                    let mut raw = RawEvent::new(self.id(), 3, 0);
+                    raw
+                }
+            }
+        }
+    }
 }
 
 /// A leasable DRM connector
@@ -6071,6 +6782,37 @@ pub mod wp_drm_lease_connector_v1 {
         /// example when the connector is hot-unplugged, when the connector gets
         /// leased to a client or when the compositor loses DRM master.
         Withdrawn,
+    }
+    impl EventWriter for crate::wayland_objects::wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1 {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Name { name } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.string(name);
+                    raw
+                }
+                Description { description } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.string(description);
+                    raw
+                }
+                ConnectorId { connector_id } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.uint(connector_id);
+                    raw
+                }
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 3, 0);
+                    raw
+                }
+                Withdrawn {} => {
+                    let mut raw = RawEvent::new(self.id(), 4, 0);
+                    raw
+                }
+            }
+        }
     }
 }
 
@@ -6195,6 +6937,23 @@ pub mod wp_drm_lease_v1 {
         /// compositor loses DRM master.
         Finished,
     }
+    impl EventWriter for crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1 {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                LeaseFd { leased_fd } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.fd(leased_fd);
+                    raw
+                }
+                Finished {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
 }
 
 /// Idle notification manager
@@ -6300,6 +7059,22 @@ pub mod ext_idle_notification_v1 {
         /// idled event in-between. It's a compositor protocol error to send this
         /// event prior to any idled event.
         Resumed,
+    }
+    impl EventWriter for crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1 {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Idled {} => {
+                    let mut raw = RawEvent::new(self.id(), 0, 0);
+                    raw
+                }
+                Resumed {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
     }
 }
 
@@ -6506,6 +7281,22 @@ pub mod ext_session_lock_v1 {
         /// not the locked event was received on this object.
         Finished,
     }
+    impl EventWriter for crate::wayland_objects::ext_session_lock_v1::ExtSessionLockV1 {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Locked {} => {
+                    let mut raw = RawEvent::new(self.id(), 0, 0);
+                    raw
+                }
+                Finished {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
     #[derive(Debug)]
     pub enum Error {
         /// Attempted to destroy session lock while locked,
@@ -6616,6 +7407,25 @@ pub mod ext_session_lock_surface_v1 {
             height: u32,
         },
     }
+    impl EventWriter for crate::wayland_objects::ext_session_lock_surface_v1::ExtSessionLockSurfaceV1 {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Configure {
+                    serial,
+                    width,
+                    height,
+                } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 3);
+                    raw.uint(serial);
+                    raw.uint(width);
+                    raw.uint(height);
+                    raw
+                }
+            }
+        }
+    }
     #[derive(Debug)]
     pub enum Error {
         /// Surface committed before first ack_configure request,
@@ -6714,6 +7524,19 @@ pub mod wp_fractional_scale_v1 {
             /// The new preferred scale,
             scale: u32,
         },
+    }
+    impl EventWriter for crate::wayland_objects::wp_fractional_scale_v1::WpFractionalScaleV1 {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                PreferredScale { scale } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(scale);
+                    raw
+                }
+            }
+        }
     }
 }
 
@@ -7050,6 +7873,19 @@ pub mod xdg_activation_token_v1 {
             /// The exported activation token,
             token: String,
         },
+    }
+    impl EventWriter for crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1 {
+        type Event = Event;
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Done { token } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.string(token);
+                    raw
+                }
+            }
+        }
     }
     #[derive(Debug)]
     pub enum Error {
