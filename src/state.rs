@@ -10,6 +10,7 @@ type Result<T> = std::result::Result<T, ()>;
 pub struct Dispatcher<'a> {
     queue: &'a mut VecDeque<AnyAction>,
     pending_models: BTreeMap<ActionId, Vec<AnyModel>>,
+    to_remove: VecDeque<ActionId>,
 }
 
 impl Dispatcher<'_> {
@@ -34,7 +35,7 @@ impl Dispatcher<'_> {
         self.queue.push_back(action);
     }
 
-    pub fn add_model_with_id<I, M>(&mut self, id: I, model: M)
+    pub fn add_model<I, M>(&mut self, id: I, model: M)
     where
         I: Into<u64>,
         M: Model,
@@ -44,13 +45,22 @@ impl Dispatcher<'_> {
         models.push(Box::new(model).into_vtable());
     }
 
-    pub fn start_model_with_id<I, M>(&mut self, id: I, model: M)
+    pub fn start_model<I, M>(&mut self, id: I, model: M)
     where
         I: Into<u64> + Copy,
         M: Model,
     {
-        self.add_model_with_id(id, model);
+        self.add_model(id, model);
         self.dispatch_to(id, M::START.unwrap());
+    }
+
+    pub fn stop_model<I, M>(&mut self, id: I)
+    where
+        I: Into<u64> + Copy,
+        M: Model,
+    {
+        let action_id = ActionId::of_with::<M::Action, _>(id);
+        self.to_remove.push_back(action_id);
     }
 }
 
@@ -185,6 +195,7 @@ impl Runner {
         let mut dispatcher = Dispatcher {
             queue: &mut self.queue,
             pending_models: BTreeMap::default(),
+            to_remove: VecDeque::default(),
         };
 
         for model in models {
@@ -192,11 +203,28 @@ impl Runner {
                 .unwrap();
         }
 
-        for (action_id, pending_models) in dispatcher.pending_models {
+        // Add new models
+        let pending_models = std::mem::take(&mut dispatcher.pending_models);
+        for (action_id, pending_models) in pending_models {
             self.models
                 .entry(action_id)
                 .or_default()
                 .extend(pending_models);
+        }
+
+        // Stop models
+        // We use an index here because `try_stop` might add new ids to `dispatcher.to_remove`
+        let mut index = 0;
+        while let Some(id) = dispatcher.to_remove.get(index) {
+            for model in self.models.get_mut(id).unwrap() {
+                (model.vtable.try_stop)(&mut model.state, &mut dispatcher).unwrap();
+            }
+            index += 1;
+        }
+
+        // Remove them in reverse order
+        while let Some(id) = dispatcher.to_remove.pop_back() {
+            self.models.remove(&id).unwrap();
         }
     }
 }
@@ -253,6 +281,7 @@ pub struct AnyModel {
 struct ModelVTable {
     try_call_reducer_effect:
         fn(state: &mut Box<dyn Any>, action: &AnyAction, dispatcher: &mut Dispatcher) -> Result<()>,
+    try_stop: fn(state: &mut Box<dyn Any>, dispatcher: &mut Dispatcher) -> Result<()>,
 }
 
 pub trait PrivateModel
@@ -267,6 +296,7 @@ where
         action: &AnyAction,
         dispatcher: &mut Dispatcher,
     ) -> Result<()>;
+    fn try_stop(state: &mut Box<dyn Any>, dispatcher: &mut Dispatcher) -> Result<()>;
 }
 
 impl<T> PrivateModel for T
@@ -279,6 +309,7 @@ where
         let state = self;
         let vtable = ModelVTable {
             try_call_reducer_effect: Self::try_call_reducer_effect,
+            try_stop: Self::try_stop,
         };
         AnyModel { state, vtable }
     }
@@ -299,6 +330,17 @@ where
         state.reducer(action, dispatcher)?;
         Ok(())
     }
+
+    fn try_stop(state: &mut Box<dyn Any>, dispatcher: &mut Dispatcher) -> Result<()> {
+        let Some(state) = state.downcast_mut::<Self>() else {
+            panic!("state not found");
+        };
+        let Some(action) = Self::STOP else {
+            panic!("STOP not found");
+        };
+        state.reducer(&action, dispatcher)?;
+        Ok(())
+    }
 }
 
 pub trait Model
@@ -308,6 +350,7 @@ where
     type InitParams: 'static;
     type Action: Sized + 'static;
     const START: Option<Self::Action> = None;
+    const STOP: Option<Self::Action> = None;
 
     fn init(params: Self::InitParams) -> Box<Self>;
     fn reducer(&mut self, action: &Self::Action, dispatcher: &mut Dispatcher) -> Result<()>;

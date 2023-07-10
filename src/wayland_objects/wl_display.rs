@@ -1,15 +1,16 @@
 use crate::{
     clients::{Client, RawRequest},
     object::{Object, Parser},
-    protocol_generated::{self, wl_display, WaylandId},
+    protocol_generated::{wl_display, WaylandId, WlDisplayId},
 };
 
+#[derive(Debug)]
 pub struct WlDisplay {
-    pub id: protocol_generated::WlDisplayId,
+    pub id: WlDisplayId,
 }
 
-impl WlDisplay {
-    pub fn new() -> Self {
+impl Default for WlDisplay {
+    fn default() -> Self {
         Self { id: 1.into() }
     }
 }
@@ -22,9 +23,7 @@ impl Object for WlDisplay {
     fn on(&mut self, client: &mut Client, request: RawRequest) {
         use wl_display::Request::*;
 
-        let request = Self::parse_request(request).unwrap();
-        eprintln!("WlDisplay::on {:?}", request);
-        match request {
+        match Self::parse_request(request).unwrap() {
             Sync { callback } => {}
             GetRegistry { registry } => {}
         }

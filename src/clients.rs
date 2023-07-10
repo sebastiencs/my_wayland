@@ -19,7 +19,7 @@ use crate::{
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
-struct ClientId(u64);
+pub struct ClientId(u64);
 
 pub struct Clients {
     current_id: u64,
@@ -31,6 +31,7 @@ pub struct Clients {
 pub enum ClientsAction {
     StartListen,
     NewClient { new_client: RawFd, fd: RawFd },
+    Close { id: ClientId },
 }
 
 impl Clients {
@@ -80,13 +81,18 @@ impl Model for Clients {
 
                 self.set.insert(client_id);
 
-                dispatcher.start_model_with_id(client_id, Client::new(client_id, *new_client));
+                dispatcher.start_model(client_id, Client::new(client_id, *new_client));
+            }
+            ClientsAction::Close { id } => {
+                self.set.remove(id);
+                dispatcher.stop_model::<_, Client>(*id);
             }
         }
         Ok(())
     }
 }
 
+#[derive(Debug)]
 struct ProcessInfo {
     command: String,
     cred: libc::ucred,
@@ -95,6 +101,7 @@ struct ProcessInfo {
 pub struct Client {
     id: ClientId,
     fd: RawFd,
+    reader_id: Option<ClientReaderId>,
     objects: BTreeMap<WaylandId, Box<dyn Object>>,
     info: Option<ProcessInfo>,
 }
@@ -102,7 +109,7 @@ pub struct Client {
 pub enum ClientAction {
     Start,
     MsgReceived { request: RawRequest },
-    Closed,
+    Close,
 }
 
 impl Client {
@@ -110,6 +117,7 @@ impl Client {
         Self {
             id: client_id,
             fd,
+            reader_id: None,
             objects: BTreeMap::default(),
             info: None,
         }
@@ -150,27 +158,41 @@ impl Model for Client {
     type InitParams = ();
     type Action = ClientAction;
     const START: Option<Self::Action> = Some(Self::Action::Start);
+    const STOP: Option<Self::Action> = Some(Self::Action::Close);
 
     fn init(params: Self::InitParams) -> Box<Self> {
         todo!()
     }
 
     fn reducer(&mut self, action: &ClientAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        use crate::wayland_objects::wl_display::WlDisplay;
+
         match action {
             ClientAction::Start => {
                 self.read_process_info();
+                log::info!(
+                    "new client_id={:?} command={:?}",
+                    self.id,
+                    self.info.as_ref().map(|p| &p.command)
+                );
+
+                let display: WlDisplay = WlDisplay::default();
+                self.objects.insert(display.id(), Box::new(display));
 
                 let (client_reader_id, client_reader) = ClientReader::new(self.fd, self.id);
-                dispatcher.start_model_with_id(client_reader_id, client_reader);
+                self.reader_id = Some(client_reader_id);
+                dispatcher.start_model(client_reader_id, client_reader);
             }
             ClientAction::MsgReceived { request } => {
-                let mut obj = crate::wayland_objects::wl_display::WlDisplay {
-                    id: crate::protocol_generated::WlDisplayId::from(0),
-                };
+                let mut obj = self.objects.remove(&request.object_id()).unwrap();
                 obj.on(self, request.clone());
+                self.objects.insert(obj.id(), obj);
             }
-            ClientAction::Closed => {
-                eprintln!("client_id={:?} CLOSED", self.id);
+            ClientAction::Close => {
+                log::info!("client_id={:?} closed", self.id);
+                if let Some(id) = self.reader_id {
+                    dispatcher.stop_model::<_, ClientReader>(id)
+                };
             }
         };
 
@@ -249,6 +271,7 @@ struct ClientReader {
 enum ClientReaderAction {
     Start,
     ReadMsg { fd: RawFd, buffer: Box<[u8]> },
+    Stop,
 }
 
 impl ClientReader {
@@ -282,7 +305,6 @@ impl ClientReader {
             // Consider EOF reached after 2
             // https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
             if self.neof == 2 {
-                dispatcher.dispatch_to(self.client_id, ClientAction::Closed);
                 return true;
             }
         }
@@ -301,12 +323,18 @@ impl ClientReader {
         let RecvmsgCompleted { fd, buffer } = result.unwrap();
         AnyAction::from(ClientReaderAction::ReadMsg { fd, buffer })
     }
+
+    fn close(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        dispatcher.dispatch(ClientsAction::Close { id: self.client_id });
+        Ok(())
+    }
 }
 
 impl Model for ClientReader {
     type InitParams = ();
     type Action = ClientReaderAction;
     const START: Option<Self::Action> = Some(Self::Action::Start);
+    const STOP: Option<Self::Action> = Some(Self::Action::Stop);
 
     fn init(params: Self::InitParams) -> Box<Self> {
         todo!()
@@ -317,7 +345,7 @@ impl Model for ClientReader {
             Self::Action::Start => self.read(dispatcher),
             Self::Action::ReadMsg { fd, buffer } => {
                 if self.is_eof(buffer, dispatcher) {
-                    return Ok(());
+                    return self.close(dispatcher);
                 }
                 self.read_buffer.append(buffer);
                 loop {
@@ -333,6 +361,7 @@ impl Model for ClientReader {
                     self.read_buffer.consume_msg();
                 }
             }
+            Self::Action::Stop => Ok(()),
         }
     }
 }
