@@ -1,5 +1,5 @@
 pub fn init() -> Result<(), std::io::Error> {
-    let udev = udev::Udev::new()?;
+    let _udev = udev::Udev::new()?;
 
     let monitor = udev::MonitorBuilder::new()?
         .match_subsystem("input")?

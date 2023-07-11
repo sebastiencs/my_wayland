@@ -1,5 +1,5 @@
 #![feature(array_chunks)]
-#![allow(dead_code, unused_variables)]
+#![allow(dead_code)]
 
 macro_rules! wayland_id {
     ($($name:ident,)+) => ($(

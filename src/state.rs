@@ -106,8 +106,8 @@ pub enum Redispatcher<R> {
 impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Fun { ptr } => f.write_str("ptr"),
-            Self::WithId { id, ptr, name } => {
+            Self::Fun { ptr: _ } => f.write_str("ptr"),
+            Self::WithId { id, ptr: _, name } => {
                 let index = name.rfind("::").map(|i| i + 2).unwrap_or(0);
                 f.write_fmt(format_args!("{}({:?})", name.get(index..).unwrap(), id))
             }
@@ -400,11 +400,11 @@ mod backend {
         type InitParams = ();
         type Action = BackendAction;
 
-        fn init(params: Self::InitParams) -> Box<Self> {
+        fn init(_params: Self::InitParams) -> Box<Self> {
             todo!()
         }
 
-        fn reducer(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<()> {
+        fn reducer(&mut self, action: Self::Action, _dispatcher: &mut Dispatcher) -> Result<()> {
             match action {
                 Self::Action::NewDrmDevice => todo!(),
                 Self::Action::NewConnector => todo!(),
@@ -431,11 +431,11 @@ mod frontend {
         type InitParams = ();
         type Action = FrontendAction;
 
-        fn init(params: Self::InitParams) -> Box<Self> {
+        fn init(_params: Self::InitParams) -> Box<Self> {
             todo!()
         }
 
-        fn reducer(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<()> {
+        fn reducer(&mut self, action: Self::Action, _dispatcher: &mut Dispatcher) -> Result<()> {
             match action {
                 Self::Action::Push => todo!(),
                 Self::Action::Click => todo!(),

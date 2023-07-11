@@ -253,7 +253,7 @@ impl SubmissionQueueEntry {
                 id,
                 fd,
                 data,
-                dispatch_to,
+                dispatch_to: _,
             } => {
                 self.opcode = IORING_OP_RECVMSG;
                 self.fd = *fd;
@@ -264,7 +264,7 @@ impl SubmissionQueueEntry {
             Operation::Accept {
                 id,
                 fd,
-                dispatch_to,
+                dispatch_to: _,
             } => {
                 self.opcode = IORING_OP_ACCEPT;
                 self.fd = *fd;
@@ -658,7 +658,7 @@ impl IoUring {
             };
 
             if nto_submit > 0 {
-                let (head_ref, tail_ref) = self.sq_refs();
+                let (_head_ref, tail_ref) = self.sq_refs();
                 tail_ref.store(self.sq_tail_local, Release);
             }
 

@@ -28,5 +28,5 @@ impl Object for WlCallback {
         self.id.into()
     }
 
-    fn on(&mut self, client: &mut Client, request: RawRequest, dispatcher: &mut Dispatcher) {}
+    fn on(&mut self, _: &mut Client, _: RawRequest, _: &mut Dispatcher) {}
 }

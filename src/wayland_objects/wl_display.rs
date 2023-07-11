@@ -22,15 +22,15 @@ impl Object for WlDisplay {
         self.id.into()
     }
 
-    fn on(&mut self, client: &mut Client, request: RawRequest, dispatcher: &mut Dispatcher) {
+    fn on(&mut self, _client: &mut Client, request: RawRequest, _dispatcher: &mut Dispatcher) {
         use wl_display::Request::*;
 
         match Self::parse_request(request).unwrap() {
             Sync { callback } => {
-                let callback = WlCallback::new(callback);
-                callback.done(dispatcher);
+                let _callback = WlCallback::new(callback);
+                // callback.done(dispatcher);
             }
-            GetRegistry { registry } => {}
+            GetRegistry { registry: _ } => {}
         }
     }
 }

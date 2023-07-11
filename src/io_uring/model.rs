@@ -64,7 +64,7 @@ impl Model for IoUringState {
     type InitParams = ();
     type Action = IoUringAction;
 
-    fn init(params: Self::InitParams) -> Box<Self> {
+    fn init(_params: Self::InitParams) -> Box<Self> {
         Box::new(IoUringState {
             ring: IoUring::new(256).unwrap(),
             need_submit: false,
@@ -81,7 +81,7 @@ impl Model for IoUringState {
             IoUringAction::Completion => {
                 while let Some(completed) = self.completed.pop_front() {
                     let Completed {
-                        user_data,
+                        user_data: _,
                         id,
                         result,
                     } = completed;
@@ -99,7 +99,7 @@ impl Model for IoUringState {
                     match op {
                         Operation::NoOp => {}
                         Operation::Recvmsg {
-                            id,
+                            id: _,
                             fd,
                             data,
                             dispatch_to: to,
@@ -109,7 +109,7 @@ impl Model for IoUringState {
                             dispatcher.redispatch_to(to, Ok(RecvmsgCompleted { fd, buffer }));
                         }
                         Operation::Accept {
-                            id,
+                            id: _,
                             fd,
                             dispatch_to: to,
                         } => {
@@ -117,7 +117,7 @@ impl Model for IoUringState {
                             dispatcher.redispatch_to(to, Ok(AcceptCompleted { new_client, fd }));
                         }
                         Operation::ReadWrite {
-                            id,
+                            id: _,
                             buffer,
                             fd,
                             mut nbytes_processed,

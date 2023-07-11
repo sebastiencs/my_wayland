@@ -30,7 +30,7 @@ pub struct Clients {
 #[derive(Debug)]
 pub enum ClientsAction {
     StartListen,
-    NewClient { new_client: RawFd, fd: RawFd },
+    NewClient { new_client: RawFd },
     Close { id: ClientId },
 }
 
@@ -42,8 +42,8 @@ impl Clients {
     }
 
     fn on_accept(result: std::io::Result<AcceptCompleted>) -> AnyAction {
-        let AcceptCompleted { fd, new_client } = result.unwrap();
-        AnyAction::from(ClientsAction::NewClient { fd, new_client })
+        let AcceptCompleted { fd: _, new_client } = result.unwrap();
+        AnyAction::from(ClientsAction::NewClient { new_client })
     }
 
     fn dispatch_accept(&self, dispatcher: &mut Dispatcher) {
@@ -58,7 +58,7 @@ impl Model for Clients {
     type InitParams = ();
     type Action = ClientsAction;
 
-    fn init(params: Self::InitParams) -> Box<Self> {
+    fn init(_params: Self::InitParams) -> Box<Self> {
         let unix = UnixListener::bind("/var/run/user/1000/wayland-1").unwrap();
         Box::new(Self {
             current_id: 0,
@@ -67,13 +67,12 @@ impl Model for Clients {
         })
     }
 
-    #[allow(clippy::needless_late_init)]
     fn reducer(&mut self, action: ClientsAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         match action {
             ClientsAction::StartListen => {
                 self.dispatch_accept(dispatcher);
             }
-            ClientsAction::NewClient { fd, new_client } => {
+            ClientsAction::NewClient { new_client } => {
                 self.dispatch_accept(dispatcher);
 
                 let client_id = self.next_id();
@@ -160,7 +159,7 @@ impl Model for Client {
     const START: Option<Self::Action> = Some(Self::Action::Start);
     const STOP: Option<Self::Action> = Some(Self::Action::Close);
 
-    fn init(params: Self::InitParams) -> Box<Self> {
+    fn init(_params: Self::InitParams) -> Box<Self> {
         todo!()
     }
 
@@ -233,7 +232,7 @@ impl Buffer {
     }
 
     fn get_whole_message(&self) -> Option<&[u8]> {
-        let [obj_id, word] = self.get_header()?;
+        let [_obj_id, word] = self.get_header()?;
         let len = (word >> 16) as usize;
         // let req = (word & 0xFFFF) as usize;
         // dbg!(obj_id, len, req);
@@ -245,7 +244,7 @@ impl Buffer {
     }
 
     fn consume_msg(&mut self) {
-        let [obj_id, word] = self.get_header().unwrap();
+        let [_obj_id, word] = self.get_header().unwrap();
         let len = (word >> 16) as usize;
 
         if self.pos == len {
@@ -271,7 +270,7 @@ struct ClientReader {
 
 enum ClientReaderAction {
     Start,
-    ReadMsg { fd: RawFd, buffer: Box<[u8]> },
+    ReadMsg { buffer: Box<[u8]> },
     Stop,
 }
 
@@ -297,7 +296,7 @@ impl ClientReader {
         ClientReaderId(id)
     }
 
-    fn is_eof(&mut self, buffer: &[u8], dispatcher: &mut Dispatcher) -> bool {
+    fn is_eof(&mut self, buffer: &[u8]) -> bool {
         if !buffer.is_empty() {
             self.neof = 0;
         } else {
@@ -321,8 +320,8 @@ impl ClientReader {
     }
 
     fn on_recvmsg(result: std::io::Result<RecvmsgCompleted>) -> AnyAction {
-        let RecvmsgCompleted { fd, buffer } = result.unwrap();
-        AnyAction::from(ClientReaderAction::ReadMsg { fd, buffer })
+        let RecvmsgCompleted { fd: _, buffer } = result.unwrap();
+        AnyAction::from(ClientReaderAction::ReadMsg { buffer })
     }
 
     fn close(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
@@ -337,15 +336,15 @@ impl Model for ClientReader {
     const START: Option<Self::Action> = Some(Self::Action::Start);
     const STOP: Option<Self::Action> = Some(Self::Action::Stop);
 
-    fn init(params: Self::InitParams) -> Box<Self> {
+    fn init(_params: Self::InitParams) -> Box<Self> {
         todo!()
     }
 
     fn reducer(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         match action {
             Self::Action::Start => self.read(dispatcher),
-            Self::Action::ReadMsg { fd, buffer } => {
-                if self.is_eof(&buffer, dispatcher) {
+            Self::Action::ReadMsg { buffer } => {
+                if self.is_eof(&buffer) {
                     return self.close(dispatcher);
                 }
                 self.read_buffer.append(&buffer);
@@ -430,15 +429,15 @@ impl RawEvent {
         }
     }
 
-    pub fn fixed(&mut self, fixed: f32) {
+    pub fn fixed(&mut self, _fixed: f32) {
         todo!()
     }
 
-    pub fn array(&mut self, array: crate::protocol_generated::Array) {
+    pub fn array(&mut self, _array: crate::protocol_generated::Array) {
         todo!()
     }
 
-    pub fn fd(&mut self, fd: RawFd) {
+    pub fn fd(&mut self, _fd: RawFd) {
         todo!()
     }
 
