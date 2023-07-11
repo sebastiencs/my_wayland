@@ -1,4 +1,4 @@
-#![allow(dead_code, unused_imports, unused_mut)]
+#![allow(dead_code, unused_imports, unused_mut, clippy::let_and_return)]
 #![allow(clippy::enum_variant_names)]
 
 use {

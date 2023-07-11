@@ -68,7 +68,7 @@ impl Model for Clients {
     }
 
     #[allow(clippy::needless_late_init)]
-    fn reducer(&mut self, action: &ClientsAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn reducer(&mut self, action: ClientsAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         match action {
             ClientsAction::StartListen => {
                 self.dispatch_accept(dispatcher);
@@ -81,11 +81,11 @@ impl Model for Clients {
 
                 self.set.insert(client_id);
 
-                dispatcher.start_model(client_id, Client::new(client_id, *new_client));
+                dispatcher.start_model(client_id, Client::new(client_id, new_client));
             }
             ClientsAction::Close { id } => {
-                self.set.remove(id);
-                dispatcher.stop_model::<_, Client>(*id);
+                self.set.remove(&id);
+                dispatcher.stop_model::<_, Client>(id);
             }
         }
         Ok(())
@@ -164,7 +164,7 @@ impl Model for Client {
         todo!()
     }
 
-    fn reducer(&mut self, action: &ClientAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn reducer(&mut self, action: ClientAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         use crate::wayland_objects::wl_display::WlDisplay;
 
         dispatcher.set_client_fd(self.fd);
@@ -186,7 +186,7 @@ impl Model for Client {
             }
             ClientAction::MsgReceived { request } => {
                 let mut obj = self.objects.remove(&request.object_id()).unwrap();
-                obj.on(self, request.clone(), dispatcher);
+                obj.on(self, request, dispatcher);
                 self.objects.insert(obj.id(), obj);
             }
             ClientAction::Close => {
@@ -341,14 +341,14 @@ impl Model for ClientReader {
         todo!()
     }
 
-    fn reducer(&mut self, action: &Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn reducer(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         match action {
             Self::Action::Start => self.read(dispatcher),
             Self::Action::ReadMsg { fd, buffer } => {
-                if self.is_eof(buffer, dispatcher) {
+                if self.is_eof(&buffer, dispatcher) {
                     return self.close(dispatcher);
                 }
-                self.read_buffer.append(buffer);
+                self.read_buffer.append(&buffer);
                 loop {
                     let msg: &[u8] = match self.read_buffer.get_whole_message() {
                         Some(msg) => msg,

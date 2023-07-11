@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, VecDeque},
-    os::fd::RawFd,
+    os::fd::RawFd, io::ErrorKind::UnexpectedEof,
 };
 
 use log::error;
@@ -74,7 +74,7 @@ impl Model for IoUringState {
         })
     }
 
-    fn reducer(&mut self, action: &IoUringAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn reducer(&mut self, action: IoUringAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         log::trace!("io_uring action={:?}", action);
         match action {
             IoUringAction::Completion => {
@@ -101,21 +101,19 @@ impl Model for IoUringState {
                             id,
                             fd,
                             data,
-                            dispatch_to,
+                            dispatch_to: to,
                         } => {
                             let nbytes = result as usize;
                             let buffer = Box::from(&data.buffer_read[..nbytes]);
-                            let action = dispatch_to.make(Ok(RecvmsgCompleted { fd, buffer }));
-                            dispatcher.dispatch_any(action);
+                            dispatcher.redispatch_to(to, Ok(RecvmsgCompleted { fd, buffer }));
                         }
                         Operation::Accept {
                             id,
                             fd,
-                            dispatch_to,
+                            dispatch_to: to,
                         } => {
                             let new_client: RawFd = result;
-                            let action = dispatch_to.make(Ok(AcceptCompleted { new_client, fd }));
-                            dispatcher.dispatch_any(action);
+                            dispatcher.redispatch_to(to, Ok(AcceptCompleted { new_client, fd }));
                         }
                         Operation::ReadWrite {
                             id,
@@ -125,33 +123,26 @@ impl Model for IoUringState {
                             offset,
                             mut neof,
                             kind,
-                            dispatch_to,
+                            dispatch_to: to,
                         } => {
                             // Number of bytes read/writen in this call
                             let nbytes = result as usize;
                             nbytes_processed += nbytes;
 
                             if nbytes_processed == buffer.len() {
-                                let action =
-                                    dispatch_to.make(Ok(ReadWriteCompleted { fd, offset, buffer }));
-                                dispatcher.dispatch_any(action);
+                                dispatcher.redispatch_to(
+                                    to,
+                                    Ok(ReadWriteCompleted { fd, offset, buffer }),
+                                );
                                 continue;
                             }
 
                             // Handle partial read/write
 
                             assert!(nbytes_processed < buffer.len());
-                            if nbytes == 0 {
-                                // Try twice
-                                // https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
-                                if neof == 1 {
-                                    // EOF reached
-                                    let action = dispatch_to
-                                        .make(Err(std::io::ErrorKind::UnexpectedEof.into()));
-                                    dispatcher.dispatch_any(action);
-                                    continue;
-                                }
-                                neof += 1;
+                            if Self::is_eof(nbytes, &mut neof) {
+                                dispatcher.redispatch_to(to, Err(UnexpectedEof.into()));
+                                continue;
                             }
 
                             let id = self.next_id();
@@ -163,7 +154,7 @@ impl Model for IoUringState {
                                 nbytes_processed,
                                 neof,
                                 buffer,
-                                dispatch_to,
+                                dispatch_to: to,
                             });
                         }
                     }
@@ -187,7 +178,6 @@ impl Model for IoUringState {
                 length,
                 dispatch_to,
             } => {
-                let (fd, offset, length, dispatch_to) = (*fd, *offset, *length, *dispatch_to);
                 let id = self.next_id();
                 let buffer = Self::make_buffer(length);
 
@@ -208,9 +198,7 @@ impl Model for IoUringState {
                 buffer,
                 dispatch_to,
             } => {
-                let (fd, offset, dispatch_to) = (*fd, *offset, *dispatch_to);
                 let id = self.next_id();
-                let buffer = buffer.clone();
 
                 self.push_op(Operation::ReadWrite {
                     id,
@@ -224,9 +212,7 @@ impl Model for IoUringState {
                 });
             }
             IoUringAction::Recvmsg { fd, dispatch_to } => {
-                let (fd, dispatch_to) = (*fd, *dispatch_to);
                 let id = self.next_id();
-
                 let buffer_read = vec![0; 32 * 1024];
                 let buffer_aux = vec![0; 32 * 1024];
 
@@ -252,9 +238,7 @@ impl Model for IoUringState {
                 });
             }
             IoUringAction::Accept { fd, dispatch_to } => {
-                let (fd, dispatch_to) = (*fd, *dispatch_to);
                 let id = self.next_id();
-
                 self.push_op(Operation::Accept {
                     id,
                     fd,
@@ -282,5 +266,18 @@ impl IoUringState {
         self.to_push.push_back(op);
         self.ring
             .push_entries(|| self.to_push.pop_front(), &mut self.pending);
+    }
+
+    fn is_eof(nbytes: usize, neof: &mut u8) -> bool {
+        if nbytes == 0 {
+            // Try twice
+            // https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
+            if *neof == 1 {
+                // EOF reached
+                return true;
+            }
+            *neof += 1;
+        }
+        false
     }
 }

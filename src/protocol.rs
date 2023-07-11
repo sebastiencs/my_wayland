@@ -284,7 +284,7 @@ pub fn gen() -> std::io::Result<()> {
     let derive_str =
         "#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into)]";
 
-    writeln!(f, "#![allow(dead_code, unused_imports, unused_mut)]")?;
+    writeln!(f, "#![allow(dead_code, unused_imports, unused_mut, clippy::let_and_return)]")?;
     writeln!(f, "#![allow(clippy::enum_variant_names)]\n")?;
     writeln!(f, "use std::os::unix::io::RawFd;")?;
     writeln!(

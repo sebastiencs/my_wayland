@@ -10,7 +10,7 @@ type Result<T> = std::result::Result<T, ()>;
 
 pub struct Dispatcher<'a> {
     queue: &'a mut VecDeque<AnyAction>,
-    pending_models: BTreeMap<ActionId, Vec<AnyModel>>,
+    pending_models: BTreeMap<ActionId, AnyModel>,
     to_remove: VecDeque<ActionId>,
 
     client_fd: Option<RawFd>,
@@ -34,8 +34,8 @@ impl Dispatcher<'_> {
         self.queue.push_back(AnyAction::from_id(id, action));
     }
 
-    pub fn dispatch_any(&mut self, action: Option<AnyAction>) {
-        if let Some(action) = action {
+    pub fn redispatch_to<R>(&mut self, redispatcher: Redispatcher<R>, action: R) {
+        if let Some(action) = redispatcher.make(action) {
             self.queue.push_back(action);
         };
     }
@@ -46,8 +46,8 @@ impl Dispatcher<'_> {
         M: Model,
     {
         let action_id = ActionId::of_with::<M::Action, _>(id);
-        let models = self.pending_models.entry(action_id).or_default();
-        models.push(Box::new(model).into_vtable());
+        self.pending_models
+            .insert(action_id, Box::new(model).into_vtable());
     }
 
     pub fn start_model<I, M>(&mut self, id: I, model: M)
@@ -87,10 +87,6 @@ impl Dispatcher<'_> {
             self.client_fd = None;
         }
     }
-
-    // pub fn send_event<T: EventWriter>(&mut self, event: T::Event) {
-    //     let raw = T::to_raw_event(&self, event);
-    // }
 }
 
 pub enum Redispatcher<R> {
@@ -180,7 +176,7 @@ impl ActionId {
 }
 
 pub struct Runner {
-    models: BTreeMap<ActionId, Vec<AnyModel>>,
+    models: BTreeMap<ActionId, AnyModel>,
     queue: VecDeque<AnyAction>,
 }
 
@@ -196,9 +192,8 @@ impl Runner {
     where
         M: Model,
     {
-        let models = self.models.entry(ActionId::of::<M::Action>()).or_default();
-
-        models.push(model.into_vtable());
+        self.models
+            .insert(ActionId::of::<M::Action>(), model.into_vtable());
     }
 
     pub fn run(&mut self) {
@@ -220,7 +215,7 @@ impl Runner {
     fn dispatch_action(&mut self, action: AnyAction) {
         assert_ne!(action.id, ActionId::of::<AnyAction>());
 
-        let Some(models) = self.models.get_mut(action.action_id()) else {
+        let Some(model) = self.models.get_mut(action.action_id()) else {
             eprintln!("action not found1 {}", action.type_name);
             return;
         };
@@ -232,28 +227,21 @@ impl Runner {
             client_fd: None,
         };
 
-        for model in models {
-            (model.vtable.try_call_reducer_effect)(&mut model.state, &action, &mut dispatcher)
-                .unwrap();
-            dispatcher.clear_client_fd();
-        }
+        (model.vtable.try_call_reducer)(&mut model.state, action, &mut dispatcher).unwrap();
+        dispatcher.clear_client_fd();
 
         // Add new models
         let pending_models = std::mem::take(&mut dispatcher.pending_models);
-        for (action_id, pending_models) in pending_models {
-            self.models
-                .entry(action_id)
-                .or_default()
-                .extend(pending_models);
+        for (action_id, pending_model) in pending_models {
+            self.models.insert(action_id, pending_model);
         }
 
         // Stop models
         // We use an index here because `try_stop` might add new ids to `dispatcher.to_remove`
         let mut index = 0;
         while let Some(id) = dispatcher.to_remove.get(index) {
-            for model in self.models.get_mut(id).unwrap() {
-                (model.vtable.try_stop)(&mut model.state, &mut dispatcher).unwrap();
-            }
+            let model = self.models.get_mut(id).unwrap();
+            (model.vtable.try_stop)(&mut model.state, &mut dispatcher).unwrap();
             index += 1;
         }
 
@@ -314,8 +302,8 @@ pub struct AnyModel {
 }
 
 struct ModelVTable {
-    try_call_reducer_effect:
-        fn(state: &mut Box<dyn Any>, action: &AnyAction, dispatcher: &mut Dispatcher) -> Result<()>,
+    try_call_reducer:
+        fn(state: &mut Box<dyn Any>, action: AnyAction, dispatcher: &mut Dispatcher) -> Result<()>,
     try_stop: fn(state: &mut Box<dyn Any>, dispatcher: &mut Dispatcher) -> Result<()>,
 }
 
@@ -326,9 +314,9 @@ where
     type Action: 'static;
 
     fn into_vtable(self: Box<Self>) -> AnyModel;
-    fn try_call_reducer_effect(
+    fn try_call_reducer(
         state: &mut Box<dyn Any>,
-        action: &AnyAction,
+        action: AnyAction,
         dispatcher: &mut Dispatcher,
     ) -> Result<()>;
     fn try_stop(state: &mut Box<dyn Any>, dispatcher: &mut Dispatcher) -> Result<()>;
@@ -343,26 +331,26 @@ where
     fn into_vtable(self: Box<Self>) -> AnyModel {
         let state = self;
         let vtable = ModelVTable {
-            try_call_reducer_effect: Self::try_call_reducer_effect,
+            try_call_reducer: Self::try_call_reducer,
             try_stop: Self::try_stop,
         };
         AnyModel { state, vtable }
     }
 
-    fn try_call_reducer_effect(
+    fn try_call_reducer(
         state: &mut Box<dyn Any>,
-        action: &AnyAction,
+        action: AnyAction,
         dispatcher: &mut Dispatcher,
     ) -> Result<()> {
         let Some(state) = state.downcast_mut::<Self>() else {
             eprintln!("state not found");
             return Ok(());
         };
-        let Some(action) = action.ptr.downcast_ref::<Self::Action>() else {
+        let Ok(action) = action.ptr.downcast::<Self::Action>() else {
             eprintln!("action not found2");
             return Ok(());
         };
-        state.reducer(action, dispatcher)?;
+        state.reducer(*action, dispatcher)?;
         Ok(())
     }
 
@@ -373,7 +361,7 @@ where
         let Some(action) = Self::STOP else {
             panic!("STOP not found");
         };
-        state.reducer(&action, dispatcher)?;
+        state.reducer(action, dispatcher)?;
         Ok(())
     }
 }
@@ -388,7 +376,7 @@ where
     const STOP: Option<Self::Action> = None;
 
     fn init(params: Self::InitParams) -> Box<Self>;
-    fn reducer(&mut self, action: &Self::Action, dispatcher: &mut Dispatcher) -> Result<()>;
+    fn reducer(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<()>;
 }
 
 mod backend {
@@ -413,7 +401,7 @@ mod backend {
             todo!()
         }
 
-        fn reducer(&mut self, action: &Self::Action, dispatcher: &mut Dispatcher) -> Result<()> {
+        fn reducer(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<()> {
             match action {
                 Self::Action::NewDrmDevice => todo!(),
                 Self::Action::NewConnector => todo!(),
@@ -444,7 +432,7 @@ mod frontend {
             todo!()
         }
 
-        fn reducer(&mut self, action: &Self::Action, dispatcher: &mut Dispatcher) -> Result<()> {
+        fn reducer(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<()> {
             match action {
                 Self::Action::Push => todo!(),
                 Self::Action::Click => todo!(),
