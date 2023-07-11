@@ -67,7 +67,7 @@ impl Model for Clients {
         })
     }
 
-    fn reducer(&mut self, action: ClientsAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn process(&mut self, action: ClientsAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         match action {
             ClientsAction::StartListen => {
                 self.dispatch_accept(dispatcher);
@@ -76,13 +76,13 @@ impl Model for Clients {
                 self.dispatch_accept(dispatcher);
 
                 let client_id = self.next_id();
-                log::trace!("new_client id={:?} fd={:?}", client_id, new_client);
-
                 self.set.insert(client_id);
-
                 dispatcher.start_model(client_id, Client::new(client_id, new_client));
+
+                log::trace!("new_client id={:?} fd={:?}", client_id, new_client);
             }
             ClientsAction::Close { id } => {
+                log::trace!("client {:?} closed", id);
                 self.set.remove(&id);
                 dispatcher.stop_model::<_, Client>(id);
             }
@@ -163,7 +163,7 @@ impl Model for Client {
         todo!()
     }
 
-    fn reducer(&mut self, action: ClientAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn process(&mut self, action: ClientAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         use crate::wayland_objects::wl_display::WlDisplay;
 
         dispatcher.set_client_fd(self.fd);
@@ -340,7 +340,7 @@ impl Model for ClientReader {
         todo!()
     }
 
-    fn reducer(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         match action {
             Self::Action::Start => self.read(dispatcher),
             Self::Action::ReadMsg { buffer } => {

@@ -38,24 +38,6 @@ mod udev;
 mod wayland_objects;
 mod xkb;
 
-fn parse_request(bytes: &[u8]) -> std::io::Result<()> {
-    if bytes.len() < 8 {
-        eprintln!("ERROR len={}", bytes.len());
-        return Err(std::io::ErrorKind::UnexpectedEof.into());
-    }
-    let sender_id = u32::from_ne_bytes(bytes[..4].try_into().unwrap());
-    let word = u32::from_ne_bytes(bytes[4..8].try_into().unwrap());
-
-    let msg_size = word >> 16; // upper 16-bits
-    let request_opcode = word & 0xFFFF; // lower 16-bits
-
-    dbg!(sender_id, msg_size, request_opcode);
-
-    let payload = &bytes[8..];
-
-    Ok(())
-}
-
 fn main() {
     // use std::any::Any;
 
@@ -80,8 +62,7 @@ fn main() {
     let mut runner = Runner::new();
     runner.add_model(uring);
     runner.add_model(clients);
-    runner.dispatch(ClientsAction::StartListen);
-    runner.run();
+    runner.start(ClientsAction::StartListen);
 
     // println!("Hello, world! {:?}", std::mem::size_of::<Box<dyn Any>>());
     // println!("Hello, world! {:?}", std::mem::size_of::<Box<()>>());

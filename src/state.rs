@@ -8,15 +8,26 @@ use crate::{clients::RawEvent, io_uring::model::IoUringAction};
 
 type Result<T> = std::result::Result<T, ()>;
 
-pub struct Dispatcher<'a> {
-    queue: &'a mut VecDeque<AnyAction>,
-    pending_models: BTreeMap<ActionId, AnyModel>,
+pub struct Dispatcher {
+    queue: VecDeque<AnyAction>,
+    pending_models: VecDeque<(ActionId, AnyModel)>,
     to_remove: VecDeque<ActionId>,
 
     client_fd: Option<RawFd>,
 }
 
-impl Dispatcher<'_> {
+impl Default for Dispatcher {
+    fn default() -> Self {
+        Self {
+            queue: VecDeque::with_capacity(1024),
+            pending_models: VecDeque::with_capacity(1024),
+            to_remove: VecDeque::with_capacity(1024),
+            client_fd: None,
+        }
+    }
+}
+
+impl Dispatcher {
     pub fn dispatch<A>(&mut self, action: A)
     where
         A: Sized + 'static,
@@ -47,7 +58,7 @@ impl Dispatcher<'_> {
     {
         let action_id = ActionId::of_with::<M::Action, _>(id);
         self.pending_models
-            .insert(action_id, Box::new(model).into_vtable());
+            .push_back((action_id, Box::new(model).into_vtable()));
     }
 
     pub fn start_model<I, M>(&mut self, id: I, model: M)
@@ -80,6 +91,10 @@ impl Dispatcher<'_> {
 
     pub fn set_client_fd(&mut self, fd: RawFd) {
         self.client_fd = Some(fd);
+    }
+
+    fn clear(&mut self) {
+        self.clear_client_fd();
     }
 
     fn clear_client_fd(&mut self) {
@@ -180,14 +195,12 @@ impl ActionId {
 
 pub struct Runner {
     models: BTreeMap<ActionId, AnyModel>,
-    queue: VecDeque<AnyAction>,
 }
 
 impl Runner {
     pub fn new() -> Self {
         Self {
             models: BTreeMap::default(),
-            queue: VecDeque::with_capacity(1024),
         }
     }
 
@@ -199,52 +212,47 @@ impl Runner {
             .insert(ActionId::of::<M::Action>(), model.into_vtable());
     }
 
-    pub fn run(&mut self) {
+    pub fn start<A>(&mut self, action: A)
+    where
+        A: 'static
+    {
+        let mut dispatcher = Dispatcher::default();
+        dispatcher.dispatch(action);
+
         loop {
-            while let Some(action) = self.queue.pop_front() {
-                self.dispatch_action(action)
+            while let Some(action) = dispatcher.queue.pop_front() {
+                self.process_action(action, &mut dispatcher)
             }
-            self.dispatch(IoUringAction::WaitForCompletion);
+            dispatcher.dispatch(IoUringAction::WaitForCompletion);
         }
     }
 
-    pub fn dispatch<A>(&mut self, action: A)
-    where
-        A: Sized + 'static,
-    {
-        self.queue.push_back(AnyAction::from(action));
-    }
-
-    fn dispatch_action(&mut self, action: AnyAction) {
+    fn process_action(&mut self, action: AnyAction, dispatcher: &mut Dispatcher) {
         assert_ne!(action.id, ActionId::of::<AnyAction>());
 
         let Some(model) = self.models.get_mut(action.action_id()) else {
-            eprintln!("action not found1 {}", action.type_name);
+            panic!("action not found1 {}", action.type_name);
             return;
         };
+        (model.vtable.try_process)(&mut model.state, action, dispatcher).unwrap();
+        self.post_process(dispatcher);
+    }
 
-        let mut dispatcher = Dispatcher {
-            queue: &mut self.queue,
-            pending_models: BTreeMap::default(),
-            to_remove: VecDeque::default(),
-            client_fd: None,
-        };
-
-        (model.vtable.try_call_reducer)(&mut model.state, action, &mut dispatcher).unwrap();
-        dispatcher.clear_client_fd();
-
+    fn post_process(&mut self, dispatcher: &mut Dispatcher) {
         // Add new models
-        let pending_models = std::mem::take(&mut dispatcher.pending_models);
-        for (action_id, pending_model) in pending_models {
-            self.models.insert(action_id, pending_model);
+        while let Some((action_id, model)) = dispatcher.pending_models.pop_front() {
+            self.models.insert(action_id, model);
         }
+        self.maybe_stop_models(dispatcher);
+    }
 
+    fn maybe_stop_models(&mut self, dispatcher: &mut Dispatcher) {
         // Stop models
         // We use an index here because `try_stop` might add new ids to `dispatcher.to_remove`
         let mut index = 0;
         while let Some(id) = dispatcher.to_remove.get(index) {
             let model = self.models.get_mut(id).unwrap();
-            (model.vtable.try_stop)(&mut model.state, &mut dispatcher).unwrap();
+            (model.vtable.try_stop)(&mut model.state, dispatcher).unwrap();
             index += 1;
         }
 
@@ -257,8 +265,9 @@ impl Runner {
 
 pub struct AnyAction {
     id: ActionId,
-    type_name: &'static str,
     ptr: Box<dyn Any>,
+    /// For printing/debug purpose only
+    type_name: &'static str,
 }
 
 impl AnyAction {
@@ -305,7 +314,7 @@ pub struct AnyModel {
 }
 
 struct ModelVTable {
-    try_call_reducer:
+    try_process:
         fn(state: &mut Box<dyn Any>, action: AnyAction, dispatcher: &mut Dispatcher) -> Result<()>,
     try_stop: fn(state: &mut Box<dyn Any>, dispatcher: &mut Dispatcher) -> Result<()>,
 }
@@ -314,10 +323,8 @@ pub trait PrivateModel
 where
     Self: Sized + 'static,
 {
-    type Action: 'static;
-
     fn into_vtable(self: Box<Self>) -> AnyModel;
-    fn try_call_reducer(
+    fn try_process(
         state: &mut Box<dyn Any>,
         action: AnyAction,
         dispatcher: &mut Dispatcher,
@@ -329,18 +336,16 @@ impl<T> PrivateModel for T
 where
     T: Model,
 {
-    type Action = <T as Model>::Action;
-
     fn into_vtable(self: Box<Self>) -> AnyModel {
         let state = self;
         let vtable = ModelVTable {
-            try_call_reducer: Self::try_call_reducer,
+            try_process: Self::try_process,
             try_stop: Self::try_stop,
         };
         AnyModel { state, vtable }
     }
 
-    fn try_call_reducer(
+    fn try_process(
         state: &mut Box<dyn Any>,
         action: AnyAction,
         dispatcher: &mut Dispatcher,
@@ -349,11 +354,12 @@ where
             eprintln!("state not found");
             return Ok(());
         };
-        let Ok(action) = action.ptr.downcast::<Self::Action>() else {
+        let Ok(action) = action.ptr.downcast::<T::Action>() else {
             eprintln!("action not found2");
             return Ok(());
         };
-        state.reducer(*action, dispatcher)?;
+        state.process(*action, dispatcher)?;
+        dispatcher.clear();
         Ok(())
     }
 
@@ -362,9 +368,10 @@ where
             panic!("state not found");
         };
         let Some(action) = Self::STOP else {
-            panic!("STOP not found");
+            panic!("Model::STOP is not defined for {}", std::any::type_name::<T>());
         };
-        state.reducer(action, dispatcher)?;
+        state.process(action, dispatcher)?;
+        dispatcher.clear();
         Ok(())
     }
 }
@@ -379,7 +386,7 @@ where
     const STOP: Option<Self::Action> = None;
 
     fn init(params: Self::InitParams) -> Box<Self>;
-    fn reducer(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<()>;
+    fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<()>;
 }
 
 mod backend {
@@ -404,7 +411,7 @@ mod backend {
             todo!()
         }
 
-        fn reducer(&mut self, action: Self::Action, _dispatcher: &mut Dispatcher) -> Result<()> {
+        fn process(&mut self, action: Self::Action, _dispatcher: &mut Dispatcher) -> Result<()> {
             match action {
                 Self::Action::NewDrmDevice => todo!(),
                 Self::Action::NewConnector => todo!(),
@@ -435,7 +442,7 @@ mod frontend {
             todo!()
         }
 
-        fn reducer(&mut self, action: Self::Action, _dispatcher: &mut Dispatcher) -> Result<()> {
+        fn process(&mut self, action: Self::Action, _dispatcher: &mut Dispatcher) -> Result<()> {
             match action {
                 Self::Action::Push => todo!(),
                 Self::Action::Click => todo!(),

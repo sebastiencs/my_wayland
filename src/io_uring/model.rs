@@ -75,7 +75,7 @@ impl Model for IoUringState {
         })
     }
 
-    fn reducer(&mut self, action: IoUringAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn process(&mut self, action: IoUringAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         log::trace!("io_uring action={:?}", action);
         match action {
             IoUringAction::Completion => {
