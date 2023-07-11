@@ -90,52 +90,55 @@ impl Dispatcher<'_> {
 }
 
 pub enum Redispatcher<R> {
-    Fun(fn(R) -> AnyAction),
-    WithId((u64, fn(R) -> AnyAction)),
+    Fun {
+        ptr: fn(R) -> AnyAction,
+    },
+    WithId {
+        ptr: fn(R) -> AnyAction,
+        id: u64,
+        /// For printing/debug purpose only
+        /// So we know to which model we redispatch
+        name: &'static str,
+    },
     None,
 }
 
 impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Fun(_fun) => f.write_str("ptr"),
-            Self::WithId((id, _fun)) => f.write_fmt(format_args!("id={:?}", id)),
+            Self::Fun { ptr } => f.write_str("ptr"),
+            Self::WithId { id, ptr, name } => {
+                let index = name.rfind("::").map(|i| i + 2).unwrap_or(0);
+                f.write_fmt(format_args!("{}({:?})", name.get(index..).unwrap(), id))
+            }
             Self::None => f.write_str("None"),
         }
     }
 }
 
-impl<R> Clone for Redispatcher<R> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Fun(arg0) => Self::Fun(*arg0),
-            Self::WithId(arg0) => Self::WithId(*arg0),
-            Self::None => Self::None,
-        }
-    }
-}
-
-impl<R> Copy for Redispatcher<R> {}
-
 impl<R> Redispatcher<R> {
-    pub fn new(fun: fn(R) -> AnyAction) -> Self {
-        Self::Fun(fun)
+    pub fn new(ptr: fn(R) -> AnyAction) -> Self {
+        Self::Fun { ptr }
     }
 
-    pub fn new_with_id<V>(id: V, fun: fn(R) -> AnyAction) -> Self
+    pub fn new_with_id<V>(id: V, ptr: fn(R) -> AnyAction) -> Self
     where
         V: Into<u64>,
     {
-        Self::WithId((id.into(), fun))
+        Self::WithId {
+            id: id.into(),
+            ptr,
+            name: std::any::type_name::<V>(),
+        }
     }
 }
 
 impl<R> Redispatcher<R> {
     pub fn make(self, value: R) -> Option<AnyAction> {
         match self {
-            Self::Fun(fun) => Some(fun(value)),
-            Self::WithId((id, fun)) => {
-                let mut action = fun(value);
+            Self::Fun { ptr } => Some(ptr(value)),
+            Self::WithId { id, ptr, name: _ } => {
+                let mut action = ptr(value);
                 action.id.specifier = Some(id);
                 Some(action)
             }

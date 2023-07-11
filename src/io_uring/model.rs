@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
-    os::fd::RawFd, io::ErrorKind::UnexpectedEof,
+    io::ErrorKind::UnexpectedEof,
+    os::fd::RawFd,
 };
 
 use log::error;
