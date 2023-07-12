@@ -105,18 +105,10 @@ impl Model for Clients {
                 log::trace!("new_client id={:?} fd={:?}", client_id, new_client);
             }
             LibinputEvent => {
-                eprintln!("ICII");
                 self.libinput.dispatch().unwrap();
-
-                let event = unsafe {
-                    input::ffi::libinput_get_event(input::AsRaw::as_raw_mut(&self.libinput))
-                };
-
-                dbg!(event);
-
-                // for event in &mut self.libinput {
-                //     log::info!("libinput event={:?}", event);
-                // }
+                for event in &mut self.libinput {
+                    log::info!("libinput event={:?}", event);
+                }
             }
             Close { id } => {
                 log::trace!("client {:?} closed", id);

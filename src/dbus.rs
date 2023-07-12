@@ -108,7 +108,7 @@ pub fn init() -> String {
         }
     }
 
-    let serial = send_call(&mut dbus_socket, Seat { session_path });
+    let serial = send_call(&mut dbus_socket, Seat { session_path: session_path.clone() });
 
     let response = dbus_socket
         .wait_response(serial, Timeout::Infinite)
@@ -125,6 +125,30 @@ pub fn init() -> String {
         MessageType::Signal | MessageType::Call => todo!(),
     };
 
+    struct TakeControl {
+        session_path: String,
+    }
+
+    impl IntoMessage for TakeControl {
+        const MEMBER: &'static str = "TakeControl";
+        const INTERFACE: &'static str = "org.freedesktop.login1.Session";
+        const DESTINATION: &'static str = "org.freedesktop.login1";
+
+        fn into_message(self) -> MarshalledMessage {
+            let mut msg = Self::make_call_builder().on(self.session_path).build();
+            msg.body.push_param(false).unwrap();
+            msg
+        }
+    }
+
+    let serial = send_call(&mut dbus_socket, TakeControl { session_path: session_path.clone()});
+    let response = dbus_socket
+        .wait_response(serial, Timeout::Infinite)
+        .unwrap();
+
+    if !matches!(response.typ, MessageType::Reply) {
+        log::error!("Failed to take control of the session: {:?}", response.dynheader.error_name.as_ref());
+    }
 
     seat
 }
