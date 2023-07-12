@@ -19,9 +19,9 @@ macro_rules! wayland_id {
 }
 
 use crate::{
-    clients::{Clients, ClientsAction},
+    clients::{Clients, ClientsAction, ClientsInitParams},
     io_uring::model::IoUringState,
-    state::{Model, Runner},
+    state::{Dispatcher, Model, Runner},
 };
 
 mod clients;
@@ -49,20 +49,26 @@ fn main() {
 
     // log::info!("hello");
 
-    // let seat_id = dbus::init();
+    let seat_id = dbus::init();
+
+    dbg!(seat_id.as_str());
 
     // udev::init().unwrap();
-    // input::init(seat_id);
+    let libinput = input::init(seat_id);
 
     // protocol::gen().unwrap();
 
     let uring = IoUringState::init(());
-    let clients = Clients::init(());
+    let clients = Clients::init(ClientsInitParams { libinput });
 
     let mut runner = Runner::new();
     runner.add_model(uring);
     runner.add_model(clients);
-    runner.start(ClientsAction::StartListen);
+
+    let mut dispatcher = Dispatcher::default();
+    dispatcher.dispatch(ClientsAction::Start);
+
+    runner.run(dispatcher);
 
     // println!("Hello, world! {:?}", std::mem::size_of::<Box<dyn Any>>());
     // println!("Hello, world! {:?}", std::mem::size_of::<Box<()>>());

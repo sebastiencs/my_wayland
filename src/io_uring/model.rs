@@ -7,7 +7,7 @@ use std::{
 use log::error;
 
 use crate::{
-    io_uring::ring::Operation,
+    io_uring::ring::{Operation, PollCompleted},
     state::{Dispatcher, Model, Redispatcher},
 };
 
@@ -42,6 +42,10 @@ pub enum IoUringAction {
     Accept {
         fd: RawFd,
         dispatch_to: Redispatcher<std::io::Result<AcceptCompleted>>,
+    },
+    Poll {
+        fd: RawFd,
+        dispatch_to: Redispatcher<std::io::Result<PollCompleted>>,
     },
 }
 
@@ -94,10 +98,26 @@ impl Model for IoUringState {
 
                     let op = self.pending.remove(&id).unwrap();
 
-                    log::trace!("io_uring completed={:?}", op);
+                    log::trace!("io_uring result={} completed={:?}", result, op);
 
                     match op {
                         Operation::NoOp => {}
+                        Operation::Poll {
+                            id,
+                            fd,
+                            dispatch_to: to,
+                        } => {
+                            let dispatch_to = to.clone();
+                            self.pending.insert(
+                                id,
+                                Operation::Poll {
+                                    id,
+                                    fd,
+                                    dispatch_to,
+                                },
+                            );
+                            dispatcher.redispatch_to(to, Ok(PollCompleted {}))
+                        }
                         Operation::Recvmsg {
                             id: _,
                             fd,
@@ -241,6 +261,14 @@ impl Model for IoUringState {
             IoUringAction::Accept { fd, dispatch_to } => {
                 let id = self.next_id();
                 self.push_op(Operation::Accept {
+                    id,
+                    fd,
+                    dispatch_to,
+                });
+            }
+            IoUringAction::Poll { fd, dispatch_to } => {
+                let id = self.next_id();
+                self.push_op(Operation::Poll {
                     id,
                     fd,
                     dispatch_to,

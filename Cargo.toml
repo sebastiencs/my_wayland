@@ -12,7 +12,7 @@ derive_more = { version = "0.99.17", default-features = false, features = ["into
 egli = { version = "0.5.0", features = ["egl_1_5"] }
 env_logger = { version = "0.10.0", default-features = false, features = ["auto-color", "humantime"] }
 heck = "0.4.1"
-input = "0.8.2"
+input = { version = "0.8.2", features = ["log"] }
 libc = "0.2.146"
 log = "0.4"
 rustbus = "0.19.2"

@@ -80,6 +80,10 @@ pub(super) const IORING_UNREGISTER_PERSONALITY: u32 = 10;
 pub(super) const IORING_REGISTER_RESTRICTIONS: u32 = 11;
 pub(super) const IORING_REGISTER_ENABLE_RINGS: u32 = 12;
 
+pub(super) const IORING_POLL_ADD_MULTI: u32 = 1 << 0;
+pub(super) const IORING_POLL_UPDATE_EVENTS: u32 = 1 << 1;
+pub(super) const IORING_POLL_UPDATE_USER_DATA: u32 = 1 << 2;
+
 bitflags! {
     pub(super) struct EnterFlags: u32 {
         const IORING_ENTER_GETEVENTS = 1 << 0;

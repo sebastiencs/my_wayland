@@ -23,9 +23,9 @@ use super::{
     types::{
         io_uring_files_update, io_uring_params, io_uring_probe, CompletionQueueEntry, EnterFlags,
         FeaturesFlags, IoUringFd, SubmissionQueueEntry, IORING_OFF_CQ_RING, IORING_OFF_SQES,
-        IORING_OFF_SQ_RING, IORING_OP_ACCEPT, IORING_OP_NOP, IORING_OP_READ, IORING_OP_WRITE,
-        IORING_REGISTER_FILES, IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_PROBE,
-        IORING_UNREGISTER_FILES,
+        IORING_OFF_SQ_RING, IORING_OP_ACCEPT, IORING_OP_NOP, IORING_OP_POLL_ADD, IORING_OP_READ,
+        IORING_OP_WRITE, IORING_POLL_ADD_MULTI, IORING_REGISTER_FILES,
+        IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_PROBE, IORING_UNREGISTER_FILES,
     },
 };
 
@@ -68,6 +68,9 @@ pub struct AcceptCompleted {
     pub fd: RawFd,
     pub new_client: RawFd,
 }
+
+#[derive(Debug)]
+pub struct PollCompleted {}
 
 pub struct RecvmsgData {
     pub buffer_read: Vec<u8>,
@@ -131,6 +134,11 @@ pub(super) enum Operation {
         fd: RawFd,
         dispatch_to: Redispatcher<std::io::Result<AcceptCompleted>>,
     },
+    Poll {
+        id: RingId,
+        fd: RawFd,
+        dispatch_to: Redispatcher<std::io::Result<PollCompleted>>,
+    },
 
     // fd: RawFd,
     // data: Box<[u8]>,
@@ -169,6 +177,7 @@ impl Operation {
             Operation::NoOp => None,
             Operation::Recvmsg { id, .. } => Some(*id),
             Operation::Accept { id, .. } => Some(*id),
+            Operation::Poll { id, .. } => Some(*id),
         }
     }
 }
@@ -271,6 +280,17 @@ impl SubmissionQueueEntry {
                 // self.addr_splice_off_in = 0;
                 // self.off_addr2 = 0;
                 self.flags = libc::SOCK_CLOEXEC as u32;
+                self.user_data = id.to_user_data();
+            }
+            Operation::Poll {
+                id,
+                fd,
+                dispatch_to: _,
+            } => {
+                self.opcode = IORING_OP_POLL_ADD;
+                self.fd = *fd;
+                self.flags = libc::POLLIN as u32;
+                self.len = IORING_POLL_ADD_MULTI;
                 self.user_data = id.to_user_data();
             }
         }

@@ -118,6 +118,20 @@ pub enum Redispatcher<R> {
     None,
 }
 
+impl<R> Clone for Redispatcher<R> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Fun { ptr } => Self::Fun { ptr: ptr.clone() },
+            Self::WithId { ptr, id, name } => Self::WithId {
+                ptr: ptr.clone(),
+                id: id.clone(),
+                name: name.clone(),
+            },
+            Self::None => Self::None,
+        }
+    }
+}
+
 impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -212,13 +226,7 @@ impl Runner {
             .insert(ActionId::of::<M::Action>(), model.into_vtable());
     }
 
-    pub fn start<A>(&mut self, action: A)
-    where
-        A: 'static
-    {
-        let mut dispatcher = Dispatcher::default();
-        dispatcher.dispatch(action);
-
+    pub fn run(&mut self, mut dispatcher: Dispatcher) {
         loop {
             while let Some(action) = dispatcher.queue.pop_front() {
                 self.process_action(action, &mut dispatcher)

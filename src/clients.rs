@@ -11,7 +11,7 @@ use libc::getsockopt;
 use crate::{
     io_uring::{
         model::IoUringAction,
-        ring::{AcceptCompleted, RecvmsgCompleted},
+        ring::{AcceptCompleted, PollCompleted, RecvmsgCompleted},
     },
     object::{Object, ParserError},
     protocol_generated::WaylandId,
@@ -21,16 +21,22 @@ use crate::{
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
 pub struct ClientId(u64);
 
+pub struct ClientsInitParams {
+    pub libinput: input::Libinput,
+}
+
 pub struct Clients {
     current_id: u64,
     fd: UnixListener,
     set: BTreeSet<ClientId>,
+    libinput: input::Libinput,
 }
 
 #[derive(Debug)]
 pub enum ClientsAction {
-    StartListen,
+    Start,
     NewClient { new_client: RawFd },
+    LibinputEvent,
     Close { id: ClientId },
 }
 
@@ -39,6 +45,12 @@ impl Clients {
         let id = self.current_id;
         self.current_id += 1;
         ClientId(id)
+    }
+
+    fn on_libinput_event(result: std::io::Result<PollCompleted>) -> AnyAction {
+        eprintln!("on_libinput_event");
+        let PollCompleted {} = result.unwrap();
+        AnyAction::from(ClientsAction::LibinputEvent)
     }
 
     fn on_accept(result: std::io::Result<AcceptCompleted>) -> AnyAction {
@@ -52,27 +64,40 @@ impl Clients {
             dispatch_to: Redispatcher::new(Self::on_accept),
         });
     }
+
+    fn dispatch_poll_libinput(&self, dispatcher: &mut Dispatcher) {
+        dispatcher.dispatch(IoUringAction::Poll {
+            fd: self.libinput.as_raw_fd(),
+            dispatch_to: Redispatcher::new(Self::on_libinput_event),
+        });
+    }
 }
 
 impl Model for Clients {
-    type InitParams = ();
+    type InitParams = ClientsInitParams;
     type Action = ClientsAction;
 
-    fn init(_params: Self::InitParams) -> Box<Self> {
+    fn init(params: Self::InitParams) -> Box<Self> {
+        let ClientsInitParams { libinput } = params;
+
         let unix = UnixListener::bind("/var/run/user/1000/wayland-1").unwrap();
         Box::new(Self {
             current_id: 0,
             fd: unix,
             set: BTreeSet::default(),
+            libinput,
         })
     }
 
     fn process(&mut self, action: ClientsAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        use ClientsAction::*;
+
         match action {
-            ClientsAction::StartListen => {
+            Start => {
                 self.dispatch_accept(dispatcher);
+                self.dispatch_poll_libinput(dispatcher);
             }
-            ClientsAction::NewClient { new_client } => {
+            NewClient { new_client } => {
                 self.dispatch_accept(dispatcher);
 
                 let client_id = self.next_id();
@@ -81,7 +106,21 @@ impl Model for Clients {
 
                 log::trace!("new_client id={:?} fd={:?}", client_id, new_client);
             }
-            ClientsAction::Close { id } => {
+            LibinputEvent => {
+                eprintln!("ICII");
+                self.libinput.dispatch().unwrap();
+
+                let event = unsafe {
+                    input::ffi::libinput_get_event(input::AsRaw::as_raw_mut(&self.libinput))
+                };
+
+                dbg!(event);
+
+                // for event in &mut self.libinput {
+                //     log::info!("libinput event={:?}", event);
+                // }
+            }
+            Close { id } => {
                 log::trace!("client {:?} closed", id);
                 self.set.remove(&id);
                 dispatcher.stop_model::<_, Client>(id);
@@ -140,11 +179,11 @@ impl Client {
         };
         if result == -1 {
             let e = std::io::Error::last_os_error();
-            return log::warn!("Unable to `getsockopt` of new client: {:?}", e);
+            return log::error!("Unable to `getsockopt` of new client: {:?}", e);
         }
         let comm = match std::fs::read(format!("/proc/{}/comm", cred.pid)) {
             Ok(comm) => comm,
-            Err(e) => return log::warn!("Unable to read `comm` of new client: {:?}", e),
+            Err(e) => return log::error!("Unable to read `comm` of new client: {:?}", e),
         };
         let command = String::from_utf8_lossy(&comm);
         let command = command.trim().to_string();
@@ -164,11 +203,11 @@ impl Model for Client {
     }
 
     fn process(&mut self, action: ClientAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
-        use crate::wayland_objects::wl_display::WlDisplay;
+        use {crate::wayland_objects::wl_display::WlDisplay, ClientAction::*};
 
         dispatcher.set_client_fd(self.fd);
         match action {
-            ClientAction::Start => {
+            Start => {
                 self.read_process_info();
                 log::info!(
                     "new client_id={:?} command={:?}",
@@ -183,12 +222,12 @@ impl Model for Client {
                 self.reader_id = Some(client_reader_id);
                 dispatcher.start_model(client_reader_id, client_reader);
             }
-            ClientAction::MsgReceived { request } => {
+            MsgReceived { request } => {
                 let mut obj = self.objects.remove(&request.object_id()).unwrap();
                 obj.on(self, request, dispatcher);
                 self.objects.insert(obj.id(), obj);
             }
-            ClientAction::Close => {
+            Close => {
                 log::info!("client_id={:?} closed", self.id);
                 if let Some(id) = self.reader_id {
                     dispatcher.stop_model::<_, ClientReader>(id)
@@ -341,9 +380,11 @@ impl Model for ClientReader {
     }
 
     fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        use ClientReaderAction::*;
+
         match action {
-            Self::Action::Start => self.read(dispatcher),
-            Self::Action::ReadMsg { buffer } => {
+            Start => self.read(dispatcher),
+            ReadMsg { buffer } => {
                 if self.is_eof(&buffer) {
                     return self.close(dispatcher);
                 }
@@ -361,7 +402,7 @@ impl Model for ClientReader {
                     self.read_buffer.consume_msg();
                 }
             }
-            Self::Action::Stop => Ok(()),
+            Stop => Ok(()),
         }
     }
 }
