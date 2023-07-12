@@ -84,101 +84,7 @@ impl Model for IoUringState {
         match action {
             IoUringAction::Completion => {
                 while let Some(completed) = self.completed.pop_front() {
-                    let Completed {
-                        user_data: _,
-                        id,
-                        result,
-                    } = completed;
-
-                    if result < 0 {
-                        error!("Operation failed error_code={:?}", result);
-                        // return Some((user_data, Err(std::io::ErrorKind::Other.into())));
-                        panic!()
-                    }
-
-                    let op = self.pending.remove(&id).unwrap();
-
-                    log::trace!("io_uring result={} completed={:?}", result, op);
-
-                    match op {
-                        Operation::NoOp => {}
-                        Operation::Poll {
-                            id,
-                            fd,
-                            dispatch_to: to,
-                        } => {
-                            let dispatch_to = to.clone();
-                            self.pending.insert(
-                                id,
-                                Operation::Poll {
-                                    id,
-                                    fd,
-                                    dispatch_to,
-                                },
-                            );
-                            dispatcher.redispatch_to(to, Ok(PollCompleted {}))
-                        }
-                        Operation::Recvmsg {
-                            id: _,
-                            fd,
-                            data,
-                            dispatch_to: to,
-                        } => {
-                            let nbytes = result as usize;
-                            let buffer = Box::from(&data.buffer_read[..nbytes]);
-                            dispatcher.redispatch_to(to, Ok(RecvmsgCompleted { fd, buffer }));
-                        }
-                        Operation::Accept {
-                            id: _,
-                            fd,
-                            dispatch_to: to,
-                        } => {
-                            let new_client: RawFd = result;
-                            dispatcher.redispatch_to(to, Ok(AcceptCompleted { new_client, fd }));
-                        }
-                        Operation::ReadWrite {
-                            id: _,
-                            buffer,
-                            fd,
-                            mut nbytes_processed,
-                            offset,
-                            mut neof,
-                            kind,
-                            dispatch_to: to,
-                        } => {
-                            // Number of bytes read/writen in this call
-                            let nbytes = result as usize;
-                            nbytes_processed += nbytes;
-
-                            if nbytes_processed == buffer.len() {
-                                dispatcher.redispatch_to(
-                                    to,
-                                    Ok(ReadWriteCompleted { fd, offset, buffer }),
-                                );
-                                continue;
-                            }
-
-                            // Handle partial read/write
-
-                            assert!(nbytes_processed < buffer.len());
-                            if Self::is_eof(nbytes, &mut neof) {
-                                dispatcher.redispatch_to(to, Err(UnexpectedEof.into()));
-                                continue;
-                            }
-
-                            let id = self.next_id();
-                            self.push_op(Operation::ReadWrite {
-                                id,
-                                fd,
-                                offset,
-                                kind,
-                                nbytes_processed,
-                                neof,
-                                buffer,
-                                dispatch_to: to,
-                            });
-                        }
-                    }
+                    self.process_completed(completed, dispatcher);
                 }
             }
             IoUringAction::WaitForCompletion => {
@@ -308,5 +214,96 @@ impl IoUringState {
             *neof += 1;
         }
         false
+    }
+
+    fn process_completed(&mut self, completed: Completed, dispatcher: &mut Dispatcher) {
+        let Completed {
+            user_data: _,
+            id,
+            result,
+        } = completed;
+
+        if result < 0 {
+            error!("io_uring Operation failed error_code={:?}", result);
+            // return Some((user_data, Err(std::io::ErrorKind::Other.into())));
+            panic!()
+        }
+
+        let op = self.pending.remove(&id).unwrap();
+
+        log::trace!("io_uring result={} completed={:?}", result, op);
+
+        match op {
+            Operation::NoOp => {}
+            Operation::Poll {
+                id,
+                fd,
+                dispatch_to: to,
+            } => {
+                let dispatch_to = to.clone();
+                self.pending.insert(
+                    id,
+                    Operation::Poll {
+                        id,
+                        fd,
+                        dispatch_to,
+                    },
+                );
+                dispatcher.redispatch_to(to, Ok(PollCompleted {}))
+            }
+            Operation::Recvmsg {
+                id: _,
+                fd,
+                data,
+                dispatch_to: to,
+            } => {
+                let nbytes = result as usize;
+                let buffer = Box::from(&data.buffer_read[..nbytes]);
+                dispatcher.redispatch_to(to, Ok(RecvmsgCompleted { fd, buffer }));
+            }
+            Operation::Accept {
+                id: _,
+                fd,
+                dispatch_to: to,
+            } => {
+                let new_client: RawFd = result;
+                dispatcher.redispatch_to(to, Ok(AcceptCompleted { new_client, fd }));
+            }
+            Operation::ReadWrite {
+                id: _,
+                buffer,
+                fd,
+                mut nbytes_processed,
+                offset,
+                mut neof,
+                kind,
+                dispatch_to: to,
+            } => {
+                // Number of bytes read/writen in this call
+                let nbytes = result as usize;
+                nbytes_processed += nbytes;
+                if nbytes_processed == buffer.len() {
+                    dispatcher.redispatch_to(to, Ok(ReadWriteCompleted { fd, offset, buffer }));
+                    return;
+                }
+                // Handle partial read/write
+                assert!(nbytes_processed < buffer.len());
+                if Self::is_eof(nbytes, &mut neof) {
+                    dispatcher.redispatch_to(to, Err(UnexpectedEof.into()));
+                    return;
+                }
+                let id = self.next_id();
+                self.push_op(Operation::ReadWrite {
+                    id,
+                    fd,
+                    offset,
+                    kind,
+                    nbytes_processed,
+                    neof,
+                    buffer,
+                    dispatch_to: to,
+                });
+            }
+        }
     }
 }
