@@ -82,7 +82,7 @@ where
 pub fn init() -> String {
     let mut dbus_socket = rustbus::RpcConn::system_conn(Timeout::Infinite).unwrap();
 
-    let session_id = std::env::var("XDG_SESSION_ID").unwrap_or("1".to_string());
+    let session_id = std::env::var("XDG_SESSION_ID").expect("XDG_SESSION_ID not set");
 
     let serial = send_call(&mut dbus_socket, Login1ManagerGetSession(session_id));
     let response = get_reply::<Login1ManagerGetSessionResponse>(&mut dbus_socket, serial);
@@ -114,14 +114,17 @@ pub fn init() -> String {
         .wait_response(serial, Timeout::Infinite)
         .unwrap();
 
-    match response.typ {
+    let seat = match response.typ {
         MessageType::Reply => {
             let v = response.body.parser().get::<Variant>().unwrap();
             let v = v.get::<(String, ObjectPath<String>)>().unwrap();
             dbg!(&v);
-            return v.0;
+            v.0
         }
         MessageType::Error | MessageType::Invalid => todo!(),
         MessageType::Signal | MessageType::Call => todo!(),
-    }
+    };
+
+
+    seat
 }

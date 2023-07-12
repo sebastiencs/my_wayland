@@ -248,7 +248,6 @@ impl Runner {
             (model.vtable.try_stop)(&mut model.state, dispatcher).unwrap();
             index += 1;
         }
-
         // Remove them in reverse order
         while let Some(id) = dispatcher.to_remove.pop_back() {
             self.models.remove(&id).unwrap();

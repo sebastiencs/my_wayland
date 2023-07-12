@@ -6,9 +6,9 @@ pub fn init() -> Result<(), std::io::Error> {
         .match_subsystem("drm")?
         .listen()?;
 
-    for e in monitor.iter() {
-        eprintln!("EVENT={:?}", e);
-    }
+    // for e in monitor.iter() {
+    //     eprintln!("EVENT={:?}", e);
+    // }
 
     Ok(())
 }

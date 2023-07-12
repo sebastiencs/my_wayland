@@ -53,7 +53,7 @@ fn main() {
 
     dbg!(seat_id.as_str());
 
-    // udev::init().unwrap();
+    udev::init().unwrap();
     let libinput = input::init(seat_id);
 
     // protocol::gen().unwrap();
