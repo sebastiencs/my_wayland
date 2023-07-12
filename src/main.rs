@@ -61,7 +61,7 @@ fn main() {
     let uring = IoUringState::init(());
     let clients = Clients::init(ClientsInitParams { libinput });
 
-    let mut runner = Runner::new();
+    let mut runner = Runner::default();
     runner.add_model(uring);
     runner.add_model(clients);
 

@@ -89,60 +89,51 @@ impl Model for IoUringState {
             }
             IoUringAction::WaitForCompletion => {
                 let mut completed = Some(self.ring.wait_pop().unwrap());
-
                 while let Some(c) = completed {
                     self.completed.push_back(c);
                     completed = self.ring.pop();
                 }
-
                 if !self.completed.is_empty() {
                     dispatcher.dispatch(IoUringAction::Completion);
                 }
             }
-            IoUringAction::Read {
-                fd,
-                offset,
-                length,
-                dispatch_to,
-            } => {
+            IoUringAction::Read { fd, offset, length, dispatch_to } => {
                 let id = self.next_id();
                 let buffer = Self::make_buffer(length);
-
+                let kind = ReadOrWrite::Read;
+                let nbytes_processed = 0;
+                let neof = 0;
                 self.push_op(Operation::ReadWrite {
                     id,
                     fd,
                     offset,
                     buffer,
                     dispatch_to,
-                    kind: ReadOrWrite::Read,
-                    nbytes_processed: 0,
-                    neof: 0,
+                    kind,
+                    nbytes_processed,
+                    neof,
                 });
             }
-            IoUringAction::Write {
-                fd,
-                offset,
-                buffer,
-                dispatch_to,
-            } => {
+            IoUringAction::Write { fd, offset, buffer, dispatch_to } => {
                 let id = self.next_id();
-
+                let kind = ReadOrWrite::Write;
+                let nbytes_processed = 0;
+                let neof = 0;
                 self.push_op(Operation::ReadWrite {
-                    id,
                     fd,
                     offset,
                     buffer,
                     dispatch_to,
-                    kind: ReadOrWrite::Write,
-                    nbytes_processed: 0,
-                    neof: 0,
+                    id,
+                    kind,
+                    nbytes_processed,
+                    neof,
                 });
             }
             IoUringAction::Recvmsg { fd, dispatch_to } => {
                 let id = self.next_id();
                 let buffer_read = vec![0; 32 * 1024];
                 let buffer_aux = vec![0; 32 * 1024];
-
                 let mut data = Box::new(RecvmsgData {
                     iovec: libc::iovec {
                         iov_base: buffer_read.as_ptr() as *mut _,
@@ -156,29 +147,15 @@ impl Model for IoUringState {
                 data.msghdr.msg_iovlen = 1;
                 data.msghdr.msg_control = data.buffer_aux.as_ptr() as *mut _;
                 data.msghdr.msg_controllen = data.buffer_aux.len();
-
-                self.push_op(Operation::Recvmsg {
-                    id,
-                    fd,
-                    data,
-                    dispatch_to,
-                });
+                self.push_op(Operation::Recvmsg { id, fd, data, dispatch_to });
             }
             IoUringAction::Accept { fd, dispatch_to } => {
                 let id = self.next_id();
-                self.push_op(Operation::Accept {
-                    id,
-                    fd,
-                    dispatch_to,
-                });
+                self.push_op(Operation::Accept { id, fd, dispatch_to });
             }
             IoUringAction::Poll { fd, dispatch_to } => {
                 let id = self.next_id();
-                self.push_op(Operation::Poll {
-                    id,
-                    fd,
-                    dispatch_to,
-                });
+                self.push_op(Operation::Poll { id, fd, dispatch_to });
             }
         }
 
@@ -204,68 +181,40 @@ impl IoUringState {
     }
 
     fn is_eof(nbytes: usize, neof: &mut u8) -> bool {
+        // Try twice
+        // https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
+        // EOF reached when `neof` == 2
         if nbytes == 0 {
-            // Try twice
-            // https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
-            if *neof == 1 {
-                // EOF reached
-                return true;
-            }
             *neof += 1;
+            return *neof == 2;
         }
         false
     }
 
     fn process_completed(&mut self, completed: Completed, dispatcher: &mut Dispatcher) {
-        let Completed {
-            user_data: _,
-            id,
-            result,
-        } = completed;
+        let Completed { user_data: _, id, result } = completed;
 
         if result < 0 {
             error!("io_uring Operation failed error_code={:?}", result);
             // return Some((user_data, Err(std::io::ErrorKind::Other.into())));
             panic!()
         }
-
         let op = self.pending.remove(&id).unwrap();
-
         log::trace!("io_uring result={} completed={:?}", result, op);
-
         match op {
             Operation::NoOp => {}
-            Operation::Poll {
-                id,
-                fd,
-                dispatch_to: to,
-            } => {
+            Operation::Poll { id, fd, dispatch_to: to } => {
                 let dispatch_to = to.clone();
-                self.pending.insert(
-                    id,
-                    Operation::Poll {
-                        id,
-                        fd,
-                        dispatch_to,
-                    },
-                );
+                self.pending
+                    .insert(id, Operation::Poll { id, fd, dispatch_to });
                 dispatcher.redispatch_to(to, Ok(PollCompleted {}))
             }
-            Operation::Recvmsg {
-                id: _,
-                fd,
-                data,
-                dispatch_to: to,
-            } => {
+            Operation::Recvmsg { id: _, fd, data, dispatch_to: to } => {
                 let nbytes = result as usize;
                 let buffer = Box::from(&data.buffer_read[..nbytes]);
                 dispatcher.redispatch_to(to, Ok(RecvmsgCompleted { fd, buffer }));
             }
-            Operation::Accept {
-                id: _,
-                fd,
-                dispatch_to: to,
-            } => {
+            Operation::Accept { id: _, fd, dispatch_to: to } => {
                 let new_client: RawFd = result;
                 dispatcher.redispatch_to(to, Ok(AcceptCompleted { new_client, fd }));
             }

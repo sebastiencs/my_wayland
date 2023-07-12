@@ -1,1 +1,4 @@
 imports_granularity = "One"
+use_small_heuristics = "Max"
+chain_width = 60
+struct_lit_width = 60

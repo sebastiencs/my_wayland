@@ -121,12 +121,8 @@ pub enum Redispatcher<R> {
 impl<R> Clone for Redispatcher<R> {
     fn clone(&self) -> Self {
         match self {
-            Self::Fun { ptr } => Self::Fun { ptr: ptr.clone() },
-            Self::WithId { ptr, id, name } => Self::WithId {
-                ptr: ptr.clone(),
-                id: id.clone(),
-                name: name.clone(),
-            },
+            Self::Fun { ptr } => Self::Fun { ptr: *ptr },
+            Self::WithId { ptr, id, name } => Self::WithId { ptr: *ptr, id: *id, name },
             Self::None => Self::None,
         }
     }
@@ -154,11 +150,7 @@ impl<R> Redispatcher<R> {
     where
         V: Into<u64>,
     {
-        Self::WithId {
-            id: id.into(),
-            ptr,
-            name: std::any::type_name::<V>(),
-        }
+        Self::WithId { id: id.into(), ptr, name: std::any::type_name::<V>() }
     }
 }
 
@@ -189,10 +181,7 @@ impl ActionId {
     where
         T: 'static,
     {
-        Self {
-            type_id: TypeId::of::<T>(),
-            specifier: None,
-        }
+        Self { type_id: TypeId::of::<T>(), specifier: None }
     }
 
     pub fn of_with<T, S>(spec: S) -> Self
@@ -200,10 +189,7 @@ impl ActionId {
         T: 'static,
         S: Into<u64>,
     {
-        Self {
-            type_id: TypeId::of::<T>(),
-            specifier: Some(spec.into()),
-        }
+        Self { type_id: TypeId::of::<T>(), specifier: Some(spec.into()) }
     }
 }
 
@@ -211,13 +197,13 @@ pub struct Runner {
     models: BTreeMap<ActionId, AnyModel>,
 }
 
-impl Runner {
-    pub fn new() -> Self {
-        Self {
-            models: BTreeMap::default(),
-        }
+impl Default for Runner {
+    fn default() -> Self {
+        Self { models: BTreeMap::default() }
     }
+}
 
+impl Runner {
     pub fn add_model<M>(&mut self, model: Box<M>)
     where
         M: Model,
@@ -240,7 +226,6 @@ impl Runner {
 
         let Some(model) = self.models.get_mut(action.action_id()) else {
             panic!("action not found1 {}", action.type_name);
-            return;
         };
         (model.vtable.try_process)(&mut model.state, action, dispatcher).unwrap();
         self.post_process(dispatcher);
@@ -346,10 +331,7 @@ where
 {
     fn into_vtable(self: Box<Self>) -> AnyModel {
         let state = self;
-        let vtable = ModelVTable {
-            try_process: Self::try_process,
-            try_stop: Self::try_stop,
-        };
+        let vtable = ModelVTable { try_process: Self::try_process, try_stop: Self::try_stop };
         AnyModel { state, vtable }
     }
 

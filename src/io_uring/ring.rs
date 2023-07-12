@@ -258,23 +258,14 @@ impl SubmissionQueueEntry {
             Operation::NoOp => {
                 self.opcode = IORING_OP_NOP;
             }
-            Operation::Recvmsg {
-                id,
-                fd,
-                data,
-                dispatch_to: _,
-            } => {
+            Operation::Recvmsg { id, fd, data, dispatch_to: _ } => {
                 self.opcode = IORING_OP_RECVMSG;
                 self.fd = *fd;
                 self.addr_splice_off_in = &data.msghdr as *const _ as u64;
                 self.flags = libc::MSG_CMSG_CLOEXEC as u32;
                 self.user_data = id.to_user_data();
             }
-            Operation::Accept {
-                id,
-                fd,
-                dispatch_to: _,
-            } => {
+            Operation::Accept { id, fd, dispatch_to: _ } => {
                 self.opcode = IORING_OP_ACCEPT;
                 self.fd = *fd;
                 // self.addr_splice_off_in = 0;
@@ -282,11 +273,7 @@ impl SubmissionQueueEntry {
                 self.flags = libc::SOCK_CLOEXEC as u32;
                 self.user_data = id.to_user_data();
             }
-            Operation::Poll {
-                id,
-                fd,
-                dispatch_to: _,
-            } => {
+            Operation::Poll { id, fd, dispatch_to: _ } => {
                 self.opcode = IORING_OP_POLL_ADD;
                 self.fd = *fd;
                 self.flags = libc::POLLIN as u32;
@@ -492,11 +479,8 @@ impl IoUring {
 
     /// Update a single entry
     pub(super) fn register_file_update(&self, files: &[i32], offset: usize) -> std::io::Result<()> {
-        let update = io_uring_files_update {
-            offset: offset as u32,
-            resv: 0,
-            fds: files.as_ptr() as u64,
-        };
+        let update =
+            io_uring_files_update { offset: offset as u32, resv: 0, fds: files.as_ptr() as u64 };
         io_uring_register(
             self.fd,
             IORING_REGISTER_FILES_UPDATE,
@@ -506,11 +490,7 @@ impl IoUring {
     }
 
     pub(super) fn register_files_update(&self, files: &[i32]) -> std::io::Result<()> {
-        let update = io_uring_files_update {
-            offset: 0,
-            resv: 0,
-            fds: files.as_ptr() as u64,
-        };
+        let update = io_uring_files_update { offset: 0, resv: 0, fds: files.as_ptr() as u64 };
         io_uring_register(
             self.fd,
             IORING_REGISTER_FILES_UPDATE,

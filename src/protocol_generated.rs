@@ -116,12 +116,8 @@ pub mod wl_display {
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
-                0 => Sync {
-                    callback: req.id()?,
-                },
-                1 => GetRegistry {
-                    registry: req.id()?,
-                },
+                0 => Sync { callback: req.id()? },
+                1 => GetRegistry { registry: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -163,11 +159,7 @@ pub mod wl_display {
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
-                Error {
-                    object_id,
-                    code,
-                    message,
-                } => {
+                Error { object_id, code, message } => {
                     let mut raw = RawEvent::new(self.id(), 0, 3);
                     raw.id(object_id);
                     raw.uint(code);
@@ -241,10 +233,7 @@ pub mod wl_registry {
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
-                0 => Bind {
-                    name: req.uint()?,
-                    id: req.id()?,
-                },
+                0 => Bind { name: req.uint()?, id: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -289,11 +278,7 @@ pub mod wl_registry {
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
-                Global {
-                    name,
-                    interface,
-                    version,
-                } => {
+                Global { name, interface, version } => {
                     let mut raw = RawEvent::new(self.id(), 0, 3);
                     raw.uint(name);
                     raw.string(interface);
@@ -505,11 +490,7 @@ pub mod wl_shm {
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
-                0 => CreatePool {
-                    id: req.id()?,
-                    fd: req.fd()?,
-                    size: req.int()?,
-                },
+                0 => CreatePool { id: req.id()?, fd: req.fd()?, size: req.int()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -968,20 +949,11 @@ pub mod wl_data_offer {
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
-                0 => Accept {
-                    serial: req.uint()?,
-                    mime_type: req.string()?,
-                },
-                1 => Receive {
-                    mime_type: req.string()?,
-                    fd: req.fd()?,
-                },
+                0 => Accept { serial: req.uint()?, mime_type: req.string()? },
+                1 => Receive { mime_type: req.string()?, fd: req.fd()? },
                 2 => Destroy,
                 3 => Finish,
-                4 => SetActions {
-                    dnd_actions: req.uint()?,
-                    preferred_action: req.uint()?,
-                },
+                4 => SetActions { dnd_actions: req.uint()?, preferred_action: req.uint()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -1133,13 +1105,9 @@ pub mod wl_data_source {
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
-                0 => Offer {
-                    mime_type: req.string()?,
-                },
+                0 => Offer { mime_type: req.string()? },
                 1 => Destroy,
-                2 => SetActions {
-                    dnd_actions: req.uint()?,
-                },
+                2 => SetActions { dnd_actions: req.uint()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -1365,10 +1333,7 @@ pub mod wl_data_device {
                     icon: req.id()?,
                     serial: req.uint()?,
                 },
-                1 => SetSelection {
-                    source: req.id()?,
-                    serial: req.uint()?,
-                },
+                1 => SetSelection { source: req.id()?, serial: req.uint()? },
                 2 => Release,
                 _ => return Err(ParserError::InvalidRequest),
             };
@@ -1473,13 +1438,7 @@ pub mod wl_data_device {
                     raw.id(id);
                     raw
                 }
-                Enter {
-                    serial,
-                    surface,
-                    x,
-                    y,
-                    id,
-                } => {
+                Enter { serial, surface, x, y, id } => {
                     let mut raw = RawEvent::new(self.id(), 1, 5);
                     raw.uint(serial);
                     raw.id(surface);
@@ -1557,10 +1516,7 @@ pub mod wl_data_device_manager {
             use Request::*;
             let request = match req.request_id {
                 0 => CreateDataSource { id: req.id()? },
-                1 => GetDataDevice {
-                    id: req.id()?,
-                    seat: req.id()?,
-                },
+                1 => GetDataDevice { id: req.id()?, seat: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -1638,10 +1594,7 @@ pub mod wl_shell {
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
-                0 => GetShellSurface {
-                    id: req.id()?,
-                    surface: req.id()?,
-                },
+                0 => GetShellSurface { id: req.id()?, surface: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -1865,18 +1818,9 @@ pub mod wl_shell_surface {
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
-                0 => Pong {
-                    serial: req.uint()?,
-                },
-                1 => Move {
-                    seat: req.id()?,
-                    serial: req.uint()?,
-                },
-                2 => Resize {
-                    seat: req.id()?,
-                    serial: req.uint()?,
-                    edges: req.uint()?,
-                },
+                0 => Pong { serial: req.uint()? },
+                1 => Move { seat: req.id()?, serial: req.uint()? },
+                2 => Resize { seat: req.id()?, serial: req.uint()?, edges: req.uint()? },
                 3 => SetToplevel,
                 4 => SetTransient {
                     parent: req.id()?,
@@ -1898,12 +1842,8 @@ pub mod wl_shell_surface {
                     flags: req.uint()?,
                 },
                 7 => SetMaximized { output: req.id()? },
-                8 => SetTitle {
-                    title: req.string()?,
-                },
-                9 => SetClass {
-                    class_: req.string()?,
-                },
+                8 => SetTitle { title: req.string()? },
+                9 => SetClass { class_: req.string()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -1963,11 +1903,7 @@ pub mod wl_shell_surface {
                     raw.uint(serial);
                     raw
                 }
-                Configure {
-                    edges,
-                    width,
-                    height,
-                } => {
+                Configure { edges, width, height } => {
                     let mut raw = RawEvent::new(self.id(), 1, 3);
                     raw.uint(edges);
                     raw.int(width);
@@ -2438,26 +2374,18 @@ pub mod wl_surface {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => Attach {
-                    buffer: req.id()?,
-                    x: req.int()?,
-                    y: req.int()?,
-                },
+                1 => Attach { buffer: req.id()?, x: req.int()?, y: req.int()? },
                 2 => Damage {
                     x: req.int()?,
                     y: req.int()?,
                     width: req.int()?,
                     height: req.int()?,
                 },
-                3 => Frame {
-                    callback: req.id()?,
-                },
+                3 => Frame { callback: req.id()? },
                 4 => SetOpaqueRegion { region: req.id()? },
                 5 => SetInputRegion { region: req.id()? },
                 6 => Commit,
-                7 => SetBufferTransform {
-                    transform: req.int()?,
-                },
+                7 => SetBufferTransform { transform: req.int()? },
                 8 => SetBufferScale { scale: req.int()? },
                 9 => DamageBuffer {
                     x: req.int()?,
@@ -2465,10 +2393,7 @@ pub mod wl_surface {
                     width: req.int()?,
                     height: req.int()?,
                 },
-                10 => Offset {
-                    x: req.int()?,
-                    y: req.int()?,
-                },
+                10 => Offset { x: req.int()?, y: req.int()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -3131,12 +3056,7 @@ pub mod wl_pointer {
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
-                Enter {
-                    serial,
-                    surface,
-                    surface_x,
-                    surface_y,
-                } => {
+                Enter { serial, surface, surface_x, surface_y } => {
                     let mut raw = RawEvent::new(self.id(), 0, 4);
                     raw.uint(serial);
                     raw.id(surface);
@@ -3150,23 +3070,14 @@ pub mod wl_pointer {
                     raw.id(surface);
                     raw
                 }
-                Motion {
-                    time,
-                    surface_x,
-                    surface_y,
-                } => {
+                Motion { time, surface_x, surface_y } => {
                     let mut raw = RawEvent::new(self.id(), 2, 3);
                     raw.uint(time);
                     raw.fixed(surface_x);
                     raw.fixed(surface_y);
                     raw
                 }
-                Button {
-                    serial,
-                    time,
-                    button,
-                    state,
-                } => {
+                Button { serial, time, button, state } => {
                     let mut raw = RawEvent::new(self.id(), 3, 4);
                     raw.uint(serial);
                     raw.uint(time);
@@ -3428,11 +3339,7 @@ pub mod wl_keyboard {
                     raw.uint(size);
                     raw
                 }
-                Enter {
-                    serial,
-                    surface,
-                    keys,
-                } => {
+                Enter { serial, surface, keys } => {
                     let mut raw = RawEvent::new(self.id(), 1, 3);
                     raw.uint(serial);
                     raw.id(surface);
@@ -3445,12 +3352,7 @@ pub mod wl_keyboard {
                     raw.id(surface);
                     raw
                 }
-                Key {
-                    serial,
-                    time,
-                    key,
-                    state,
-                } => {
+                Key { serial, time, key, state } => {
                     let mut raw = RawEvent::new(self.id(), 3, 4);
                     raw.uint(serial);
                     raw.uint(time);
@@ -3458,13 +3360,7 @@ pub mod wl_keyboard {
                     raw.uint(state);
                     raw
                 }
-                Modifiers {
-                    serial,
-                    mods_depressed,
-                    mods_latched,
-                    mods_locked,
-                    group,
-                } => {
+                Modifiers { serial, mods_depressed, mods_latched, mods_locked, group } => {
                     let mut raw = RawEvent::new(self.id(), 4, 5);
                     raw.uint(serial);
                     raw.uint(mods_depressed);
@@ -3675,14 +3571,7 @@ pub mod wl_touch {
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
-                Down {
-                    serial,
-                    time,
-                    surface,
-                    id,
-                    x,
-                    y,
-                } => {
+                Down { serial, time, surface, id, x, y } => {
                     let mut raw = RawEvent::new(self.id(), 0, 6);
                     raw.uint(serial);
                     raw.uint(time);
@@ -3960,12 +3849,7 @@ pub mod wl_output {
                     raw.int(transform);
                     raw
                 }
-                Mode {
-                    flags,
-                    width,
-                    height,
-                    refresh,
-                } => {
+                Mode { flags, width, height, refresh } => {
                     let mut raw = RawEvent::new(self.id(), 1, 4);
                     raw.uint(flags);
                     raw.int(width);
@@ -4192,11 +4076,7 @@ pub mod wl_subcompositor {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => GetSubsurface {
-                    id: req.id()?,
-                    surface: req.id()?,
-                    parent: req.id()?,
-                },
+                1 => GetSubsurface { id: req.id()?, surface: req.id()?, parent: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -4369,10 +4249,7 @@ pub mod wl_subsurface {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => SetPosition {
-                    x: req.int()?,
-                    y: req.int()?,
-                },
+                1 => SetPosition { x: req.int()?, y: req.int()? },
                 2 => PlaceAbove { sibling: req.id()? },
                 3 => PlaceBelow { sibling: req.id()? },
                 4 => SetSync,
@@ -4441,10 +4318,7 @@ pub mod wp_presentation {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => Feedback {
-                    surface: req.id()?,
-                    callback: req.id()?,
-                },
+                1 => Feedback { surface: req.id()?, callback: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -4724,10 +4598,7 @@ pub mod wp_viewporter {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => GetViewport {
-                    id: req.id()?,
-                    surface: req.id()?,
-                },
+                1 => GetViewport { id: req.id()?, surface: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -4861,10 +4732,7 @@ pub mod wp_viewport {
                     width: req.fixed()?,
                     height: req.fixed()?,
                 },
-                2 => SetDestination {
-                    width: req.int()?,
-                    height: req.int()?,
-                },
+                2 => SetDestination { width: req.int()?, height: req.int()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -4923,10 +4791,7 @@ pub mod xdg_wm_base {
         ///
         /// See the documentation of xdg_surface for more details about what an
         /// xdg_surface is and how it is used.
-        GetXdgSurface {
-            id: XdgSurfaceId,
-            surface: WlSurfaceId,
-        },
+        GetXdgSurface { id: XdgSurfaceId, surface: WlSurfaceId },
         /// Respond to a ping event
         ///
         /// A client must respond to a ping event with a pong request or
@@ -4944,13 +4809,8 @@ pub mod xdg_wm_base {
             let request = match req.request_id {
                 0 => Destroy,
                 1 => CreatePositioner { id: req.id()? },
-                2 => GetXdgSurface {
-                    id: req.id()?,
-                    surface: req.id()?,
-                },
-                3 => Pong {
-                    serial: req.uint()?,
-                },
+                2 => GetXdgSurface { id: req.id()?, surface: req.id()? },
+                3 => Pong { serial: req.uint()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -5178,37 +5038,20 @@ pub mod xdg_positioner {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => SetSize {
-                    width: req.int()?,
-                    height: req.int()?,
-                },
+                1 => SetSize { width: req.int()?, height: req.int()? },
                 2 => SetAnchorRect {
                     x: req.int()?,
                     y: req.int()?,
                     width: req.int()?,
                     height: req.int()?,
                 },
-                3 => SetAnchor {
-                    anchor: req.uint()?,
-                },
-                4 => SetGravity {
-                    gravity: req.uint()?,
-                },
-                5 => SetConstraintAdjustment {
-                    constraint_adjustment: req.uint()?,
-                },
-                6 => SetOffset {
-                    x: req.int()?,
-                    y: req.int()?,
-                },
+                3 => SetAnchor { anchor: req.uint()? },
+                4 => SetGravity { gravity: req.uint()? },
+                5 => SetConstraintAdjustment { constraint_adjustment: req.uint()? },
+                6 => SetOffset { x: req.int()?, y: req.int()? },
                 7 => SetReactive,
-                8 => SetParentSize {
-                    parent_width: req.int()?,
-                    parent_height: req.int()?,
-                },
-                9 => SetParentConfigure {
-                    serial: req.uint()?,
-                },
+                8 => SetParentSize { parent_width: req.int()?, parent_height: req.int()? },
+                9 => SetParentConfigure { serial: req.uint()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -5406,11 +5249,7 @@ pub mod xdg_surface {
         ///
         /// See the documentation of xdg_popup for more details about what an
         /// xdg_popup is and how it is used.
-        GetPopup {
-            id: XdgPopupId,
-            parent: XdgSurfaceId,
-            positioner: XdgPositionerId,
-        },
+        GetPopup { id: XdgPopupId, parent: XdgSurfaceId, positioner: XdgPositionerId },
         /// Set the new window geometry
         ///
         /// The window geometry of a surface is its "visible bounds" from the
@@ -5451,12 +5290,7 @@ pub mod xdg_surface {
         /// The width and height of the effective window geometry must be
         /// greater than zero. Setting an invalid size will raise an
         /// invalid_size error.
-        SetWindowGeometry {
-            x: i32,
-            y: i32,
-            width: i32,
-            height: i32,
-        },
+        SetWindowGeometry { x: i32, y: i32, width: i32, height: i32 },
         /// Ack a configure event
         ///
         /// When a configure event is received, if a client commits the
@@ -5503,20 +5337,14 @@ pub mod xdg_surface {
             let request = match req.request_id {
                 0 => Destroy,
                 1 => GetToplevel { id: req.id()? },
-                2 => GetPopup {
-                    id: req.id()?,
-                    parent: req.id()?,
-                    positioner: req.id()?,
-                },
+                2 => GetPopup { id: req.id()?, parent: req.id()?, positioner: req.id()? },
                 3 => SetWindowGeometry {
                     x: req.int()?,
                     y: req.int()?,
                     width: req.int()?,
                     height: req.int()?,
                 },
-                4 => AckConfigure {
-                    serial: req.uint()?,
-                },
+                4 => AckConfigure { serial: req.uint()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -5938,35 +5766,18 @@ pub mod xdg_toplevel {
             let request = match req.request_id {
                 0 => Destroy,
                 1 => SetParent { parent: req.id()? },
-                2 => SetTitle {
-                    title: req.string()?,
-                },
-                3 => SetAppId {
-                    app_id: req.string()?,
-                },
+                2 => SetTitle { title: req.string()? },
+                3 => SetAppId { app_id: req.string()? },
                 4 => ShowWindowMenu {
                     seat: req.id()?,
                     serial: req.uint()?,
                     x: req.int()?,
                     y: req.int()?,
                 },
-                5 => Move {
-                    seat: req.id()?,
-                    serial: req.uint()?,
-                },
-                6 => Resize {
-                    seat: req.id()?,
-                    serial: req.uint()?,
-                    edges: req.uint()?,
-                },
-                7 => SetMaxSize {
-                    width: req.int()?,
-                    height: req.int()?,
-                },
-                8 => SetMinSize {
-                    width: req.int()?,
-                    height: req.int()?,
-                },
+                5 => Move { seat: req.id()?, serial: req.uint()? },
+                6 => Resize { seat: req.id()?, serial: req.uint()?, edges: req.uint()? },
+                7 => SetMaxSize { width: req.int()?, height: req.int()? },
+                8 => SetMinSize { width: req.int()?, height: req.int()? },
                 9 => SetMaximized,
                 10 => UnsetMaximized,
                 11 => SetFullscreen { output: req.id()? },
@@ -6000,11 +5811,7 @@ pub mod xdg_toplevel {
         ///
         /// Clients must send an ack_configure in response to this event. See
         /// xdg_surface.configure and xdg_surface.ack_configure for details.
-        Configure {
-            width: i32,
-            height: i32,
-            states: Array,
-        },
+        Configure { width: i32, height: i32, states: Array },
         /// Surface wants to be closed
         ///
         /// The close event is sent by the compositor when the user
@@ -6066,11 +5873,7 @@ pub mod xdg_toplevel {
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
-                Configure {
-                    width,
-                    height,
-                    states,
-                } => {
+                Configure { width, height, states } => {
                     let mut raw = RawEvent::new(self.id(), 0, 3);
                     raw.int(width);
                     raw.int(height);
@@ -6325,14 +6128,8 @@ pub mod xdg_popup {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => Grab {
-                    seat: req.id()?,
-                    serial: req.uint()?,
-                },
-                2 => Reposition {
-                    positioner: req.id()?,
-                    token: req.uint()?,
-                },
+                1 => Grab { seat: req.id()?, serial: req.uint()? },
+                2 => Reposition { positioner: req.id()?, token: req.uint()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -6397,12 +6194,7 @@ pub mod xdg_popup {
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
-                Configure {
-                    x,
-                    y,
-                    width,
-                    height,
-                } => {
+                Configure { x, y, width, height } => {
                     let mut raw = RawEvent::new(self.id(), 0, 4);
                     raw.int(x);
                     raw.int(y);
@@ -6453,10 +6245,7 @@ pub mod wp_content_type_manager_v1 {
         ///
         /// Creating a wp_content_type_v1 from a wl_surface which already has one
         /// attached is a client error: already_constructed.
-        GetSurfaceContentType {
-            id: WpContentTypeV1Id,
-            surface: WlSurfaceId,
-        },
+        GetSurfaceContentType { id: WpContentTypeV1Id, surface: WlSurfaceId },
     }
     impl Parser for crate::wayland_objects::wp_content_type_manager_v1::WpContentTypeManagerV1 {
         type Request = Request;
@@ -6464,10 +6253,7 @@ pub mod wp_content_type_manager_v1 {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => GetSurfaceContentType {
-                    id: req.id()?,
-                    surface: req.id()?,
-                },
+                1 => GetSurfaceContentType { id: req.id()?, surface: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -6520,9 +6306,7 @@ pub mod wp_content_type_v1 {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => SetContentType {
-                    content_type: req.uint()?,
-                },
+                1 => SetContentType { content_type: req.uint()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -6855,9 +6639,7 @@ pub mod wp_drm_lease_request_v1 {
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
-                0 => RequestConnector {
-                    connector: req.id()?,
-                },
+                0 => RequestConnector { connector: req.id()? },
                 1 => Submit { id: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
@@ -6994,11 +6776,7 @@ pub mod ext_idle_notifier_v1 {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => GetIdleNotification {
-                    id: req.id()?,
-                    timeout: req.uint()?,
-                    seat: req.id()?,
-                },
+                1 => GetIdleNotification { id: req.id()?, timeout: req.uint()?, seat: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -7192,11 +6970,7 @@ pub mod ext_session_lock_v1 {
         ///
         /// Attempting to create more than one lock surface for a given output
         /// is a duplicate_output protocol error.
-        GetLockSurface {
-            id: ExtSessionLockSurfaceV1Id,
-            surface: WlSurfaceId,
-            output: WlOutputId,
-        },
+        GetLockSurface { id: ExtSessionLockSurfaceV1Id, surface: WlSurfaceId, output: WlOutputId },
         /// Unlock the session, destroying the object
         ///
         /// This request indicates that the session should be unlocked, for
@@ -7230,11 +7004,7 @@ pub mod ext_session_lock_v1 {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => GetLockSurface {
-                    id: req.id()?,
-                    surface: req.id()?,
-                    output: req.id()?,
-                },
+                1 => GetLockSurface { id: req.id()?, surface: req.id()?, output: req.id()? },
                 2 => UnlockAndDestroy,
                 _ => return Err(ParserError::InvalidRequest),
             };
@@ -7382,9 +7152,7 @@ pub mod ext_session_lock_surface_v1 {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => AckConfigure {
-                    serial: req.uint()?,
-                },
+                1 => AckConfigure { serial: req.uint()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -7412,11 +7180,7 @@ pub mod ext_session_lock_surface_v1 {
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
-                Configure {
-                    serial,
-                    width,
-                    height,
-                } => {
+                Configure { serial, width, height } => {
                     let mut raw = RawEvent::new(self.id(), 0, 3);
                     raw.uint(serial);
                     raw.uint(width);
@@ -7471,10 +7235,7 @@ pub mod wp_fractional_scale_manager_v1 {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => GetFractionalScale {
-                    id: req.id()?,
-                    surface: req.id()?,
-                },
+                1 => GetFractionalScale { id: req.id()?, surface: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -7630,10 +7391,7 @@ pub mod wp_tearing_control_manager_v1 {
         ///
         /// If the given wl_surface already has a wp_tearing_control_v1 object
         /// associated, the tearing_control_exists protocol error is raised.
-        GetTearingControl {
-            id: WpTearingControlV1Id,
-            surface: WlSurfaceId,
-        },
+        GetTearingControl { id: WpTearingControlV1Id, surface: WlSurfaceId },
     }
     impl Parser for crate::wayland_objects::wp_tearing_control_manager_v1::WpTearingControlManagerV1 {
         type Request = Request;
@@ -7641,10 +7399,7 @@ pub mod wp_tearing_control_manager_v1 {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => GetTearingControl {
-                    id: req.id()?,
-                    surface: req.id()?,
-                },
+                1 => GetTearingControl { id: req.id()?, surface: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -7764,10 +7519,7 @@ pub mod xdg_activation_v1 {
             let request = match req.request_id {
                 0 => Destroy,
                 1 => GetActivationToken { id: req.id()? },
-                2 => Activate {
-                    token: req.string()?,
-                    surface: req.id()?,
-                },
+                2 => Activate { token: req.string()?, surface: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -7848,13 +7600,8 @@ pub mod xdg_activation_token_v1 {
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
-                0 => SetSerial {
-                    serial: req.uint()?,
-                    seat: req.id()?,
-                },
-                1 => SetAppId {
-                    app_id: req.string()?,
-                },
+                0 => SetSerial { serial: req.uint()?, seat: req.id()? },
+                1 => SetAppId { app_id: req.string()? },
                 2 => SetSurface { surface: req.id()? },
                 3 => Commit,
                 4 => Destroy,
@@ -7932,10 +7679,7 @@ pub mod xwayland_shell_v1 {
         ///
         /// See the documentation of xwayland_surface_v1 for more details
         /// about what an xwayland_surface_v1 is and how it is used.
-        GetXwaylandSurface {
-            id: XwaylandSurfaceV1Id,
-            surface: WlSurfaceId,
-        },
+        GetXwaylandSurface { id: XwaylandSurfaceV1Id, surface: WlSurfaceId },
     }
     impl Parser for crate::wayland_objects::xwayland_shell_v1::XwaylandShellV1 {
         type Request = Request;
@@ -7943,10 +7687,7 @@ pub mod xwayland_shell_v1 {
             use Request::*;
             let request = match req.request_id {
                 0 => Destroy,
-                1 => GetXwaylandSurface {
-                    id: req.id()?,
-                    surface: req.id()?,
-                },
+                1 => GetXwaylandSurface { id: req.id()?, surface: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -8015,10 +7756,7 @@ pub mod xwayland_surface_v1 {
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
-                0 => SetSerial {
-                    serial_lo: req.uint()?,
-                    serial_hi: req.uint()?,
-                },
+                0 => SetSerial { serial_lo: req.uint()?, serial_hi: req.uint()? },
                 1 => Destroy,
                 _ => return Err(ParserError::InvalidRequest),
             };

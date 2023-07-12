@@ -80,13 +80,11 @@ impl Model for Clients {
     fn init(params: Self::InitParams) -> Box<Self> {
         let ClientsInitParams { libinput } = params;
 
-        let unix = UnixListener::bind("/var/run/user/1000/wayland-1").unwrap();
-        Box::new(Self {
-            current_id: 0,
-            fd: unix,
-            set: BTreeSet::default(),
-            libinput,
-        })
+        let fd = UnixListener::bind("/var/run/user/1000/wayland-1").unwrap();
+        let current_id = 0;
+        let set = BTreeSet::default();
+
+        Box::new(Self { current_id, fd, set, libinput })
     }
 
     fn process(&mut self, action: ClientsAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
@@ -162,11 +160,7 @@ impl Client {
     }
 
     fn read_process_info(&mut self) {
-        let mut cred = libc::ucred {
-            pid: 0,
-            uid: 0,
-            gid: 0,
-        };
+        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
         let mut len = std::mem::size_of::<libc::ucred>() as u32;
         let result = unsafe {
             getsockopt(
@@ -246,10 +240,7 @@ struct Buffer {
 
 impl Buffer {
     fn new() -> Self {
-        Self {
-            data: vec![0; 32 * 1024],
-            pos: 0,
-        }
+        Self { data: vec![0; 32 * 1024], pos: 0 }
     }
 
     fn append(&mut self, buffer: &[u8]) {
@@ -318,13 +309,7 @@ impl ClientReader {
         let id = ClientReader::next_id();
         let read_buffer = Buffer::new();
         let neof = 0;
-        let this = Self {
-            fd,
-            id,
-            client_id,
-            read_buffer,
-            neof,
-        };
+        let this = Self { fd, id, client_id, read_buffer, neof };
         (id, this)
     }
 
@@ -543,11 +528,7 @@ impl TryFrom<&[u8]> for RawRequest {
             .map(u32::from_ne_bytes)
             .collect();
 
-        Ok(Self {
-            object_id,
-            request_id,
-            arguments: Arguments { args },
-        })
+        Ok(Self { object_id, request_id, arguments: Arguments { args } })
     }
 }
 

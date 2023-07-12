@@ -1,9 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
-    os::{
-        fd::{AsRawFd, OwnedFd, RawFd},
-        unix::prelude::OpenOptionsExt,
-    },
+    os::{fd::OwnedFd, unix::prelude::OpenOptionsExt},
     path::Path,
 };
 
