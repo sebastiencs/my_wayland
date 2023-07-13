@@ -22,6 +22,7 @@ use crate::{
     clients::{Clients, ClientsAction, ClientsInitParams},
     io_uring::model::IoUringState,
     state::{Dispatcher, Model, Runner},
+    udev::Udev,
 };
 
 mod clients;
@@ -53,8 +54,8 @@ fn main() {
 
     dbg!(seat_id.as_str());
 
-    udev::init().unwrap();
-    let libinput = input::init(seat_id);
+    let udev = Udev::new().unwrap();
+    let libinput = input::Libinput::new(seat_id);
 
     // protocol::gen().unwrap();
 
@@ -63,6 +64,7 @@ fn main() {
 
     let mut runner = Runner::default();
     runner.add_model(uring);
+    runner.add_model(udev);
     runner.add_model(clients);
 
     let mut dispatcher = Dispatcher::default();

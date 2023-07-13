@@ -4,11 +4,13 @@ use std::{
         fd::{AsRawFd, RawFd},
         unix::net::UnixListener,
     },
+    path::PathBuf,
 };
 
 use libc::getsockopt;
 
 use crate::{
+    input::Libinput,
     io_uring::{
         model::IoUringAction,
         ring::{AcceptCompleted, PollCompleted, RecvmsgCompleted},
@@ -16,20 +18,21 @@ use crate::{
     object::{Object, ParserError},
     protocol_generated::WaylandId,
     state::{AnyAction, Dispatcher, Model, Redispatcher},
+    udev::UdevAction,
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
 pub struct ClientId(u64);
 
 pub struct ClientsInitParams {
-    pub libinput: input::Libinput,
+    pub libinput: Libinput,
 }
 
 pub struct Clients {
     current_id: u64,
     fd: UnixListener,
     set: BTreeSet<ClientId>,
-    libinput: input::Libinput,
+    libinput: Libinput,
 }
 
 #[derive(Debug)]
@@ -37,6 +40,7 @@ pub enum ClientsAction {
     Start,
     NewClient { new_client: RawFd },
     LibinputEvent,
+    UdevEvent,
     Close { id: ClientId },
 }
 
@@ -48,7 +52,6 @@ impl Clients {
     }
 
     fn on_libinput_event(result: std::io::Result<PollCompleted>) -> AnyAction {
-        eprintln!("on_libinput_event");
         let PollCompleted {} = result.unwrap();
         AnyAction::from(ClientsAction::LibinputEvent)
     }
@@ -80,7 +83,11 @@ impl Model for Clients {
     fn init(params: Self::InitParams) -> Box<Self> {
         let ClientsInitParams { libinput } = params;
 
-        let fd = UnixListener::bind("/var/run/user/1000/wayland-1").unwrap();
+        let filename = PathBuf::from("/var/run/user/1000/wayland-1");
+        if filename.exists() {
+            std::fs::remove_file(&filename).unwrap();
+        }
+        let fd = UnixListener::bind(filename).unwrap();
         let current_id = 0;
         let set = BTreeSet::default();
 
@@ -93,6 +100,7 @@ impl Model for Clients {
         match action {
             Start => {
                 self.dispatch_accept(dispatcher);
+                dispatcher.dispatch(UdevAction::Start);
                 self.dispatch_poll_libinput(dispatcher);
             }
             NewClient { new_client } => {
@@ -105,10 +113,26 @@ impl Model for Clients {
                 log::trace!("new_client id={:?} fd={:?}", client_id, new_client);
             }
             LibinputEvent => {
-                self.libinput.dispatch().unwrap();
-                for event in &mut self.libinput {
+                self.libinput.dispatch();
+                while let Some(event) = self.libinput.next_event() {
                     log::info!("libinput event={:?}", event);
                 }
+            }
+            UdevEvent => {
+                eprintln!("UDEV EVENT");
+                // for e in self.udev.udev_monitor.iter() {
+                //     let prop = e.property_value("ID_VENDOR_FROM_DATABASE");
+                //     dbg!(prop);
+                //     // match e.event_type() {
+                //     //     udev::EventType::Add => todo!(),
+                //     //     udev::EventType::Change => todo!(),
+                //     //     udev::EventType::Remove => todo!(),
+                //     //     udev::EventType::Bind => todo!(),
+                //     //     udev::EventType::Unbind => todo!(),
+                //     //     udev::EventType::Unknown => todo!(),
+                //     // }
+                //     // eprintln!("EVENT={:?}", e);
+                // }
             }
             Close { id } => {
                 log::trace!("client {:?} closed", id);

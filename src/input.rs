@@ -1,10 +1,11 @@
 use std::{
     fs::{File, OpenOptions},
-    os::{fd::OwnedFd, unix::prelude::OpenOptionsExt},
+    os::{
+        fd::{AsRawFd, OwnedFd},
+        unix::prelude::OpenOptionsExt,
+    },
     path::Path,
 };
-
-use input::Libinput;
 
 use {
     input::LibinputInterface,
@@ -31,16 +32,29 @@ impl LibinputInterface for Interface {
     }
 }
 
-pub fn init(seat_id: String) -> Libinput {
-    let mut input = Libinput::new_with_udev(Interface);
-    input.udev_assign_seat(&seat_id).unwrap();
+pub struct Libinput {
+    libinput: input::Libinput,
+}
 
-    // loop {
-    //     input.dispatch().unwrap();
-    //     for event in &mut input {
-    //         println!("Got event: {:?}", event);
-    //     }
-    // }
+impl AsRawFd for Libinput {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.libinput.as_raw_fd()
+    }
+}
 
-    input
+impl Libinput {
+    pub fn new(seat_id: String) -> Self {
+        // let mut input = Libinput::new_with_udev(Interface);
+        // input.udev_assign_seat(&seat_id).unwrap();
+        let libinput = input::Libinput::new_from_path(Interface);
+        Self { libinput }
+    }
+
+    pub fn dispatch(&mut self) {
+        self.libinput.dispatch().unwrap();
+    }
+
+    pub fn next_event(&mut self) -> Option<input::Event> {
+        self.libinput.next()
+    }
 }

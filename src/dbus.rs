@@ -1,8 +1,15 @@
+use std::{os::fd::AsRawFd, time::Duration};
+
 use rustbus::{
     connection::Timeout,
     message_builder::MarshalledMessage,
     wire::{unmarshal::traits::Variant, ObjectPath},
     CallBuilder, MessageBuilder, MessageType, RpcConn, Unmarshal,
+};
+
+use crate::{
+    state::{Dispatcher, Model},
+    udev::Device,
 };
 
 trait IntoMessage {
@@ -125,6 +132,11 @@ pub fn init() -> String {
         MessageType::Signal | MessageType::Call => todo!(),
     };
 
+    if std::env::var("DISPLAY").is_ok() {
+        // Don't take control on X11
+        return seat;
+    }
+
     struct TakeControl {
         session_path: String,
     }
@@ -141,14 +153,105 @@ pub fn init() -> String {
         }
     }
 
-    let serial = send_call(&mut dbus_socket, TakeControl { session_path: session_path.clone()});
+    let serial = send_call(&mut dbus_socket, TakeControl { session_path });
     let response = dbus_socket
         .wait_response(serial, Timeout::Infinite)
         .unwrap();
 
     if !matches!(response.typ, MessageType::Reply) {
-        log::error!("Failed to take control of the session: {:?}", response.dynheader.error_name.as_ref());
+        log::error!(
+            "Failed to take control of the session: {:?}",
+            response.dynheader.error_name.as_ref()
+        );
     }
 
     seat
+}
+
+pub struct Dbus {
+    // dbus: rustbus::RpcConn,
+}
+
+pub enum DbusAction {
+    Start,
+    TakeDevice(Device),
+}
+
+impl Model for Dbus {
+    type InitParams = ();
+    type Action = DbusAction;
+
+    fn init(params: Self::InitParams) -> Box<Self> {
+        todo!()
+    }
+
+    fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        use DbusAction::*;
+
+        match action {
+            Start => self.start(),
+            TakeDevice(device) => self.take_device(device, dispatcher),
+        };
+        Ok(())
+    }
+}
+
+impl Dbus {
+    fn start(&self) {
+        // let fd = self.dbus.conn().as_raw_fd();
+    }
+
+    fn take_device(&self, device: Device, dispatcher: &mut Dispatcher) {}
+}
+
+enum ThreadMsg {
+    TakeDevice { device: Device },
+}
+
+/// Run in another thread, because the crate `rustbus` doesn't easily allow
+/// to read/write messages with `io_uring`.
+fn thread_loop(
+    mut dbus: rustbus::RpcConn,
+    session_path: String,
+    recv: std::sync::mpsc::Receiver<ThreadMsg>,
+    sender: std::sync::mpsc::Sender<ThreadMsg>,
+) {
+    const TIMEOUT: Timeout = Timeout::Duration(Duration::from_secs(5));
+
+    while let Ok(msg) = recv.recv() {
+        match msg {
+            ThreadMsg::TakeDevice { device } => {
+                let session_path = session_path.clone();
+                let major = 0;
+                let minor = 0;
+                let serial = send_call(&mut dbus, TakeDevice { session_path, major, minor });
+                let response = dbus.wait_response(serial, TIMEOUT).unwrap();
+                // let a: TakeDeviceResponse = TakeDeviceResponse::unmarshal(response);
+            }
+        }
+    }
+}
+
+struct TakeDevice {
+    session_path: String,
+    major: u32,
+    minor: u32,
+}
+
+impl IntoMessage for TakeDevice {
+    const MEMBER: &'static str = "TakeDevice";
+    const INTERFACE: &'static str = "org.freedesktop.login1.Session";
+    const DESTINATION: &'static str = "org.freedesktop.login1";
+
+    fn into_message(self) -> MarshalledMessage {
+        let mut msg = Self::make_call_builder().on(self.session_path).build();
+        msg.body.push_param2(self.major, self.minor).unwrap();
+        msg
+    }
+}
+
+#[derive(Unmarshal, rustbus::Signature)]
+struct TakeDeviceResponse {
+    fd: rustbus::wire::UnixFd,
+    inactive: bool,
 }
