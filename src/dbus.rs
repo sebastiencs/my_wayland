@@ -1,14 +1,22 @@
-use std::{os::fd::AsRawFd, time::Duration};
+use std::{
+    os::fd::{AsRawFd, RawFd},
+    thread::JoinHandle,
+    time::Duration,
+};
 
-use rustbus::{
-    connection::Timeout,
-    message_builder::MarshalledMessage,
-    wire::{unmarshal::traits::Variant, ObjectPath},
-    CallBuilder, MessageBuilder, MessageType, RpcConn, Unmarshal,
+use {
+    nix::sys::eventfd::{eventfd, EfdFlags},
+    rustbus::{
+        connection::Timeout,
+        message_builder::MarshalledMessage,
+        wire::{unmarshal::traits::Variant, ObjectPath},
+        CallBuilder, MessageBuilder, MessageType, RpcConn, Unmarshal,
+    },
 };
 
 use crate::{
-    state::{Dispatcher, Model},
+    io_uring::{model::IoUringAction, ring::PollCompleted},
+    state::{AnyAction, Dispatcher, Model, Redispatcher},
     udev::Device,
 };
 
@@ -169,12 +177,19 @@ pub fn init() -> String {
 }
 
 pub struct Dbus {
-    // dbus: rustbus::RpcConn,
+    session_path: String,
+    seat: String,
+    dbus: Option<rustbus::RpcConn>,
+    thread: Option<JoinHandle<()>>,
+    // recv: std::sync::mpsc::Receiver<ThreadMsg>,
+    // sender: std::sync::mpsc::SyncSender<ThreadMsg>,
+    // recv:
 }
 
 pub enum DbusAction {
     Start,
     TakeDevice(Device),
+    EventFromThread,
 }
 
 impl Model for Dbus {
@@ -189,16 +204,35 @@ impl Model for Dbus {
         use DbusAction::*;
 
         match action {
-            Start => self.start(),
+            Start => self.start(dispatcher),
             TakeDevice(device) => self.take_device(device, dispatcher),
+            EventFromThread => todo!(),
         };
         Ok(())
     }
 }
 
+impl From<std::io::Result<PollCompleted>> for DbusAction {
+    fn from(_: std::io::Result<PollCompleted>) -> Self {
+        DbusAction::EventFromThread
+    }
+}
+
 impl Dbus {
-    fn start(&self) {
-        // let fd = self.dbus.conn().as_raw_fd();
+    fn start(&mut self, dispatcher: &mut Dispatcher) {
+        let eventfd = eventfd(0, EfdFlags::EFD_CLOEXEC).unwrap();
+        let (sender, recv) = std::sync::mpsc::sync_channel(1024);
+        let session_path = self.session_path.clone();
+        let dbus = self.dbus.take().unwrap();
+        let handle = std::thread::spawn(move || {
+            thread_loop(eventfd, dbus, session_path, recv, sender);
+        });
+        self.thread = Some(handle);
+
+        dispatcher.dispatch(IoUringAction::Poll {
+            fd: eventfd,
+            dispatch_to: Redispatcher::into::<DbusAction>(),
+        });
     }
 
     fn take_device(&self, device: Device, dispatcher: &mut Dispatcher) {}
@@ -211,10 +245,11 @@ enum ThreadMsg {
 /// Run in another thread, because the crate `rustbus` doesn't easily allow
 /// to read/write messages with `io_uring`.
 fn thread_loop(
+    eventfd: RawFd,
     mut dbus: rustbus::RpcConn,
     session_path: String,
     recv: std::sync::mpsc::Receiver<ThreadMsg>,
-    sender: std::sync::mpsc::Sender<ThreadMsg>,
+    sender: std::sync::mpsc::SyncSender<ThreadMsg>,
 ) {
     const TIMEOUT: Timeout = Timeout::Duration(Duration::from_secs(5));
 

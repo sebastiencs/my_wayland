@@ -115,6 +115,10 @@ pub enum Redispatcher<R> {
         /// So we know to which model we redispatch
         name: &'static str,
     },
+    Into {
+        ptr: fn(R) -> AnyAction,
+        name: &'static str,
+    },
     None,
 }
 
@@ -123,6 +127,7 @@ impl<R> Clone for Redispatcher<R> {
         match self {
             Self::Fun { ptr } => Self::Fun { ptr: *ptr },
             Self::WithId { ptr, id, name } => Self::WithId { ptr: *ptr, id: *id, name },
+            Self::Into { ptr, name } => Self::Into { ptr: *ptr, name },
             Self::None => Self::None,
         }
     }
@@ -130,12 +135,17 @@ impl<R> Clone for Redispatcher<R> {
 
 impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn type_name(s: &str) -> &str {
+            let index = s.rfind("::").map(|i| i + 2).unwrap_or(0);
+            s.get(index..).unwrap()
+        }
+
         match self {
             Self::Fun { ptr: _ } => f.write_str("ptr"),
             Self::WithId { id, ptr: _, name } => {
-                let index = name.rfind("::").map(|i| i + 2).unwrap_or(0);
-                f.write_fmt(format_args!("{}({:?})", name.get(index..).unwrap(), id))
+                f.write_fmt(format_args!("{}({:?})", type_name(name), id))
             }
+            Self::Into { ptr: _, name } => f.write_fmt(format_args!("{}", type_name(name))),
             Self::None => f.write_str("None"),
         }
     }
@@ -146,11 +156,25 @@ impl<R> Redispatcher<R> {
         Self::Fun { ptr }
     }
 
-    pub fn new_with_id<V>(id: V, ptr: fn(R) -> AnyAction) -> Self
+    pub fn into<T>() -> Self
+    where
+        T: From<R> + 'static,
+    {
+        fn generated<R, T: From<R> + 'static>(result: R) -> AnyAction {
+            AnyAction::from(T::from(result))
+        }
+        let ptr = generated::<R, T>;
+        let name = std::any::type_name::<T>();
+        Self::Into { ptr, name }
+    }
+
+    pub fn id<V>(id: V, ptr: fn(R) -> AnyAction) -> Self
     where
         V: Into<u64>,
     {
-        Self::WithId { id: id.into(), ptr, name: std::any::type_name::<V>() }
+        let id = id.into();
+        let name = std::any::type_name::<V>();
+        Self::WithId { id, ptr, name }
     }
 }
 
@@ -158,6 +182,7 @@ impl<R> Redispatcher<R> {
     pub fn make(self, value: R) -> Option<AnyAction> {
         match self {
             Self::Fun { ptr } => Some(ptr(value)),
+            Self::Into { ptr, name: _ } => Some(ptr(value)),
             Self::WithId { id, ptr, name: _ } => {
                 let mut action = ptr(value);
                 action.id.specifier = Some(id);

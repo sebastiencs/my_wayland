@@ -354,7 +354,7 @@ impl ClientReader {
     fn read(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         dispatcher.dispatch(IoUringAction::Recvmsg {
             fd: self.fd,
-            dispatch_to: Redispatcher::new_with_id(self.id, Self::on_recvmsg),
+            dispatch_to: Redispatcher::id(self.id, Self::on_recvmsg),
         });
         Ok(())
     }

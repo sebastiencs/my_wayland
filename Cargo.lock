@@ -389,6 +389,7 @@ dependencies = [
  "libc",
  "log",
  "mktemp",
+ "nix",
  "rand",
  "rustbus",
  "static_assertions",

@@ -26,6 +26,8 @@ xkbcommon = { version = "0.5.0", default-features = false }
 # TODO: Put them in dev dependencies
 itertools = "0.11.0"
 wayland-scanner = { path = "/home/sebastien/github/wayland-rs/wayland-scanner" }
+nix = "0.26.2"
+# nix = { version = "0.26.2", default-features = false }
 
 [dev-dependencies]
 rand = "0.8.5"
