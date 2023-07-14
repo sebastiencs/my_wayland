@@ -34,6 +34,7 @@ mod logger;
 mod object;
 mod protocol;
 mod protocol_generated;
+mod queue;
 pub mod state;
 mod udev;
 mod wayland_objects;
