@@ -94,7 +94,7 @@ fn main() {
         std::process::abort();
     }
 
-    let timer = make_timer(Duration::from_secs(5));
+    let timer = make_timer(Duration::from_secs(2));
     dispatcher.dispatch(IoUringAction::Poll {
         fd: timer.as_raw_fd(),
         dispatch_to: Redispatcher::new(on_timeout),

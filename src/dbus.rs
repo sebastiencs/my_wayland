@@ -257,6 +257,7 @@ impl Dbus {
 #[derive(Debug)]
 enum ThreadMsg {
     TakeDevice { device: Device },
+    Stop,
 }
 
 #[derive(Debug)]
@@ -291,11 +292,15 @@ fn thread_loop(
                 eprintln!("[thread] take_device {:?}", device);
                 eprintln!("[thread] response {:?}", response);
 
+                let parsed = response.body.parser().get2::<rustbus::wire::UnixFd, bool>();
+                eprintln!("[thread] parsed {:?}", parsed);
+
                 producer.push(ThreadEvent::DeviceTaken { fd: 1 }).unwrap();
                 notify_fd();
 
                 // let a: TakeDeviceResponse = TakeDeviceResponse::unmarshal(response);
             }
+            ThreadMsg::Stop => return,
         }
     }
 }
@@ -318,7 +323,7 @@ impl IntoMessage for TakeDevice {
     }
 }
 
-#[derive(Unmarshal, rustbus::Signature)]
+#[derive(Debug, Unmarshal, rustbus::Signature)]
 struct TakeDeviceResponse {
     fd: rustbus::wire::UnixFd,
     inactive: bool,
