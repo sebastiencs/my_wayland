@@ -212,7 +212,7 @@ impl Model for Dbus {
             TakeDevice(device) => self.take_device(device, dispatcher),
             EventFromThread => {
                 while let Ok(event) = self.consumer.pop() {
-                    eprintln!("NEW EVENT HERE {:?}", event);
+                    log::error!("NEW EVENT HERE {:?}", event);
                 }
             }
         };
@@ -274,6 +274,10 @@ fn thread_loop(
     recv: std::sync::mpsc::Receiver<ThreadMsg>,
     mut producer: Producer<ThreadEvent>,
 ) {
+    macro_rules! info {
+        ($($arg:tt)+) => (log::info!(target: "dbus-thread", $($arg)+))
+    }
+
     const TIMEOUT: Timeout = Timeout::Duration(Duration::from_secs(5));
     let notify_fd = || {
         nix::unistd::write(eventfd, &0u64.to_ne_bytes()).unwrap();
@@ -289,11 +293,22 @@ fn thread_loop(
                 // std::thread::sleep_ms(1000);
                 let serial = send_call(&mut dbus, TakeDevice { session_path, major, minor });
                 let response = dbus.wait_response(serial, TIMEOUT).unwrap();
-                eprintln!("[thread] take_device {:?}", device);
-                eprintln!("[thread] response {:?}", response);
+                info!("take_device {:?}", device);
+                // info!("response {:?}", response);
+                // log::info!(target: "dbus-thread", "response {:?}", response);
 
-                let parsed = response.body.parser().get2::<rustbus::wire::UnixFd, bool>();
-                eprintln!("[thread] parsed {:?}", parsed);
+                use MessageType::*;
+                match response.typ {
+                    Reply => {
+                        let parsed = response.body.parser().get2::<rustbus::wire::UnixFd, bool>();
+                        info!("parsed {:?}", parsed);
+                    }
+                    Invalid | Error => {
+                        let err = response.body.parser().get::<&str>();
+                        info!("err name={:?} {:?}", response.dynheader.error_name.as_ref(), err);
+                    }
+                    Signal | Call => unimplemented!(),
+                }
 
                 producer.push(ThreadEvent::DeviceTaken { fd: 1 }).unwrap();
                 notify_fd();
