@@ -16,6 +16,7 @@ use {
 
 use crate::{
     io_uring::{model::IoUringAction, ring::PollCompleted},
+    queue::{self, Consumer, Producer},
     state::{AnyAction, Dispatcher, Model, Redispatcher},
     udev::Device,
 };
@@ -94,7 +95,7 @@ where
     }
 }
 
-pub fn init() -> String {
+fn init() -> (String, String, RpcConn) {
     let mut dbus_socket = rustbus::RpcConn::system_conn(Timeout::Infinite).unwrap();
 
     let session_id = std::env::var("XDG_SESSION_ID").expect("XDG_SESSION_ID not set");
@@ -142,7 +143,7 @@ pub fn init() -> String {
 
     if std::env::var("DISPLAY").is_ok() {
         // Don't take control on X11
-        return seat;
+        return (session_path, seat, dbus_socket);
     }
 
     struct TakeControl {
@@ -161,7 +162,7 @@ pub fn init() -> String {
         }
     }
 
-    let serial = send_call(&mut dbus_socket, TakeControl { session_path });
+    let serial = send_call(&mut dbus_socket, TakeControl { session_path: session_path.clone() });
     let response = dbus_socket
         .wait_response(serial, Timeout::Infinite)
         .unwrap();
@@ -173,14 +174,17 @@ pub fn init() -> String {
         );
     }
 
-    seat
+    (session_path, seat, dbus_socket)
 }
 
 pub struct Dbus {
     session_path: String,
     seat: String,
-    dbus: Option<rustbus::RpcConn>,
-    thread: Option<JoinHandle<()>>,
+    // dbus: rustbus::RpcConn,
+    thread: JoinHandle<()>,
+    consumer: Consumer<ThreadEvent>,
+    sender: std::sync::mpsc::SyncSender<ThreadMsg>,
+    eventfd: RawFd,
     // recv: std::sync::mpsc::Receiver<ThreadMsg>,
     // sender: std::sync::mpsc::SyncSender<ThreadMsg>,
     // recv:
@@ -206,7 +210,11 @@ impl Model for Dbus {
         match action {
             Start => self.start(dispatcher),
             TakeDevice(device) => self.take_device(device, dispatcher),
-            EventFromThread => todo!(),
+            EventFromThread => {
+                while let Ok(event) = self.consumer.pop() {
+                    eprintln!("NEW EVENT HERE {:?}", event);
+                }
+            }
         };
         Ok(())
     }
@@ -219,27 +227,41 @@ impl From<std::io::Result<PollCompleted>> for DbusAction {
 }
 
 impl Dbus {
-    fn start(&mut self, dispatcher: &mut Dispatcher) {
-        let eventfd = eventfd(0, EfdFlags::EFD_CLOEXEC).unwrap();
-        let (sender, recv) = std::sync::mpsc::sync_channel(1024);
-        let session_path = self.session_path.clone();
-        let dbus = self.dbus.take().unwrap();
-        let handle = std::thread::spawn(move || {
-            thread_loop(eventfd, dbus, session_path, recv, sender);
-        });
-        self.thread = Some(handle);
+    pub fn new() -> Box<Self> {
+        let (session_path, seat, dbus) = init();
 
+        let eventfd = eventfd(0, EfdFlags::EFD_CLOEXEC | EfdFlags::EFD_NONBLOCK).unwrap();
+        let (sender, recv) = std::sync::mpsc::sync_channel(1024);
+        let (producer, consumer) = queue::bounded(1024);
+
+        let session_path_thread = session_path.clone();
+        let thread = std::thread::spawn(move || {
+            thread_loop(eventfd, dbus, session_path_thread, recv, producer);
+        });
+
+        Box::new(Self { session_path, seat, thread, consumer, sender, eventfd })
+    }
+
+    fn start(&mut self, dispatcher: &mut Dispatcher) {
         dispatcher.dispatch(IoUringAction::Poll {
-            fd: eventfd,
+            fd: self.eventfd,
             dispatch_to: Redispatcher::into::<DbusAction>(),
         });
     }
 
-    fn take_device(&self, device: Device, dispatcher: &mut Dispatcher) {}
+    fn take_device(&self, device: Device, dispatcher: &mut Dispatcher) {
+        self.sender.send(ThreadMsg::TakeDevice { device }).unwrap();
+    }
 }
 
+#[derive(Debug)]
 enum ThreadMsg {
     TakeDevice { device: Device },
+}
+
+#[derive(Debug)]
+enum ThreadEvent {
+    DeviceTaken { fd: RawFd },
 }
 
 /// Run in another thread, because the crate `rustbus` doesn't easily allow
@@ -249,18 +271,29 @@ fn thread_loop(
     mut dbus: rustbus::RpcConn,
     session_path: String,
     recv: std::sync::mpsc::Receiver<ThreadMsg>,
-    sender: std::sync::mpsc::SyncSender<ThreadMsg>,
+    mut producer: Producer<ThreadEvent>,
 ) {
     const TIMEOUT: Timeout = Timeout::Duration(Duration::from_secs(5));
+    let notify_fd = || {
+        nix::unistd::write(eventfd, &0u64.to_ne_bytes()).unwrap();
+    };
 
     while let Ok(msg) = recv.recv() {
         match msg {
             ThreadMsg::TakeDevice { device } => {
                 let session_path = session_path.clone();
-                let major = 0;
-                let minor = 0;
+                let major = device.major();
+                let minor = device.minor();
+
+                // std::thread::sleep_ms(1000);
                 let serial = send_call(&mut dbus, TakeDevice { session_path, major, minor });
                 let response = dbus.wait_response(serial, TIMEOUT).unwrap();
+                eprintln!("[thread] take_device {:?}", device);
+                eprintln!("[thread] response {:?}", response);
+
+                producer.push(ThreadEvent::DeviceTaken { fd: 1 }).unwrap();
+                notify_fd();
+
                 // let a: TakeDeviceResponse = TakeDeviceResponse::unmarshal(response);
             }
         }

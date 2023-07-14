@@ -43,7 +43,7 @@ impl AsRawFd for Libinput {
 }
 
 impl Libinput {
-    pub fn new(seat_id: String) -> Self {
+    pub fn new() -> Self {
         // let mut input = Libinput::new_with_udev(Interface);
         // input.udev_assign_seat(&seat_id).unwrap();
         let libinput = input::Libinput::new_from_path(Interface);

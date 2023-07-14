@@ -18,10 +18,17 @@ macro_rules! wayland_id {
     )+)
 }
 
+use std::{os::fd::AsRawFd, time::Duration};
+
+use {
+    io_uring::model::IoUringAction,
+    nix::sys::timerfd::{self, TimerFd, TimerFlags, TimerSetTimeFlags},
+};
+
 use crate::{
     clients::{Clients, ClientsAction, ClientsInitParams},
-    io_uring::model::IoUringState,
-    state::{Dispatcher, Model, Runner},
+    io_uring::{model::IoUringState, ring::PollCompleted},
+    state::{AnyAction, Dispatcher, Model, Redispatcher, Runner},
     udev::Udev,
 };
 
@@ -40,6 +47,18 @@ mod udev;
 mod wayland_objects;
 mod xkb;
 
+fn make_timer(duration: Duration) -> TimerFd {
+    let timer = timerfd::TimerFd::new(
+        timerfd::ClockId::CLOCK_MONOTONIC,
+        TimerFlags::TFD_CLOEXEC | TimerFlags::TFD_NONBLOCK,
+    )
+    .unwrap();
+    timer
+        .set(timerfd::Expiration::OneShot(duration.into()), TimerSetTimeFlags::empty())
+        .unwrap();
+    timer
+}
+
 fn main() {
     // use std::any::Any;
 
@@ -51,12 +70,10 @@ fn main() {
 
     // log::info!("hello");
 
-    let seat_id = dbus::init();
-
-    dbg!(seat_id.as_str());
+    let dbus = dbus::Dbus::new();
 
     let udev = Udev::new().unwrap();
-    let libinput = input::Libinput::new(seat_id);
+    let libinput = input::Libinput::new();
 
     // protocol::gen().unwrap();
 
@@ -65,11 +82,23 @@ fn main() {
 
     let mut runner = Runner::default();
     runner.add_model(uring);
+    runner.add_model(dbus);
     runner.add_model(udev);
     runner.add_model(clients);
 
     let mut dispatcher = Dispatcher::default();
     dispatcher.dispatch(ClientsAction::Start);
+
+    fn on_timeout(_res: std::io::Result<PollCompleted>) -> AnyAction {
+        eprintln!("ON_TIMEOUT");
+        std::process::abort();
+    }
+
+    let timer = make_timer(Duration::from_secs(5));
+    dispatcher.dispatch(IoUringAction::Poll {
+        fd: timer.as_raw_fd(),
+        dispatch_to: Redispatcher::new(on_timeout),
+    });
 
     runner.run(dispatcher);
 

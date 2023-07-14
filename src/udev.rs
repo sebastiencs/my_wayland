@@ -1,11 +1,34 @@
-use std::os::fd::{AsRawFd, RawFd};
+use std::{
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::raw::dev_t,
+    },
+    path::PathBuf,
+};
+
+use nix::sys::stat::{major, minor};
 
 use crate::{
+    dbus::DbusAction,
     io_uring::{model::IoUringAction, ring::PollCompleted},
     state::{AnyAction, Dispatcher, Model, Redispatcher},
 };
 
-pub struct Device {}
+#[derive(Debug)]
+pub struct Device {
+    pub devnum: dev_t,
+    pub path_node: PathBuf,
+}
+
+impl Device {
+    pub fn major(&self) -> u32 {
+        major(self.devnum).try_into().unwrap()
+    }
+
+    pub fn minor(&self) -> u32 {
+        minor(self.devnum).try_into().unwrap()
+    }
+}
 
 pub struct Udev {
     udev_monitor: udev::MonitorSocket,
@@ -89,6 +112,13 @@ impl Udev {
         if !device.is_initialized() {
             return;
         }
-        dbg!(device.devnum(), device.devnode());
+        let Some(devnum) = device.devnum() else {
+            return;
+        };
+        let Some(path_node) = device.devnode().map(Into::into) else {
+            return;
+        };
+        // eprintln!("device={:#?}", device);
+        dispatcher.dispatch(DbusAction::TakeDevice(Device { devnum, path_node }));
     }
 }

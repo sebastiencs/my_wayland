@@ -2,4 +2,4 @@
 mod queue;
 mod sync;
 
-pub use queue::{Consumer, Producer};
+pub use queue::{bounded, Consumer, Producer};

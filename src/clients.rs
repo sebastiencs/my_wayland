@@ -10,6 +10,7 @@ use std::{
 use libc::getsockopt;
 
 use crate::{
+    dbus::DbusAction,
     input::Libinput,
     io_uring::{
         model::IoUringAction,
@@ -100,6 +101,7 @@ impl Model for Clients {
         match action {
             Start => {
                 self.dispatch_accept(dispatcher);
+                dispatcher.dispatch(DbusAction::Start);
                 dispatcher.dispatch(UdevAction::Start);
                 self.dispatch_poll_libinput(dispatcher);
             }
