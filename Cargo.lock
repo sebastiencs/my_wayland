@@ -36,6 +36,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbe3c979c178231552ecba20214a8272df4e09f232a87aef4320cf06539aded"
 
 [[package]]
+name = "bytes"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4872d67bab6358e59559027aa3b9157c53d9358c51423c17554809a8858e0f8"
+
+[[package]]
 name = "cc"
 version = "1.0.79"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -46,6 +52,19 @@ name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
+
+[[package]]
+name = "dbus-message-parser"
+version = "4.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1cadcd65b6ff5e016ab3848a6dcebb6578ddbf3a7373093381e6590899ea750"
+dependencies = [
+ "bitflags 1.3.2",
+ "bytes",
+ "cfg-if",
+ "lazy_static",
+ "thiserror",
+]
 
 [[package]]
 name = "derive_more"
@@ -397,8 +416,6 @@ checksum = "e5ea92a5b6195c6ef2a0295ea818b312502c6fc94dde986c5553242e18fd4ce2"
 [[package]]
 name = "rustbus"
 version = "0.19.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "208e43f29ba67bb31fc726854383be3c358e48df918a0d2d2a7efb710ea3575b"
 dependencies = [
  "nix",
  "rustbus_derive",
@@ -408,8 +425,6 @@ dependencies = [
 [[package]]
 name = "rustbus_derive"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8dcb6a55a8a297bb62066b114624aac082ac1a330d90a0d5b336645208e29ae2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -464,6 +479,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bitflags 2.3.2",
+ "dbus-message-parser",
  "derive_more",
  "egli",
  "heck",

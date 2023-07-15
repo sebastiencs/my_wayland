@@ -91,7 +91,7 @@ impl Udev {
         enumerator.match_subsystem("input")?;
         enumerator.match_subsystem("drm")?;
         for device in enumerator.scan_devices()? {
-            self.handle_new_device(device, dispatcher)
+            self.handle_new_device(device, dispatcher);
         }
         Ok(())
     }
@@ -118,6 +118,7 @@ impl Udev {
         let Some(path_node) = device.devnode().map(Into::into) else {
             return;
         };
+
         // eprintln!("device={:#?}", device);
         dispatcher.dispatch(DbusAction::TakeDevice(Device { devnum, path_node }));
     }

@@ -1,7 +1,7 @@
 use std::{
+    io::IoSliceMut,
     os::fd::{AsRawFd, RawFd},
     thread::JoinHandle,
-    time::Duration,
 };
 
 use {
@@ -17,7 +17,7 @@ use {
 use crate::{
     io_uring::{model::IoUringAction, ring::PollCompleted},
     queue::{self, Consumer, Producer},
-    state::{AnyAction, Dispatcher, Model, Redispatcher},
+    state::{Dispatcher, Model, Redispatcher},
     udev::Device,
 };
 
@@ -58,7 +58,7 @@ where
     T: IntoMessage,
 {
     let mut msg = method.into_message();
-    // dbg!(&msg);
+    eprintln!("MSG={:?}", &msg);
     socket.send_message(&mut msg).unwrap().write_all().unwrap()
 }
 
@@ -278,10 +278,14 @@ fn thread_loop(
         ($($arg:tt)+) => (log::info!(target: "dbus-thread", $($arg)+))
     }
 
-    const TIMEOUT: Timeout = Timeout::Duration(Duration::from_secs(5));
+    const TIMEOUT: Timeout = Timeout::Infinite;
+    // const TIMEOUT: Timeout = Timeout::Duration(Duration::from_secs(5));
+
     let notify_fd = || {
         nix::unistd::write(eventfd, &0u64.to_ne_bytes()).unwrap();
     };
+
+    // let mut fds = BTreeSet::default();
 
     while let Ok(msg) = recv.recv() {
         match msg {
@@ -291,24 +295,67 @@ fn thread_loop(
                 let minor = device.minor();
 
                 // std::thread::sleep_ms(1000);
+                eprintln!("###################### READ #########################");
                 let serial = send_call(&mut dbus, TakeDevice { session_path, major, minor });
-                let response = dbus.wait_response(serial, TIMEOUT).unwrap();
-                info!("take_device {:?}", device);
-                // info!("response {:?}", response);
+
+                let fd = dbus.conn().as_raw_fd();
+
+                const BUFSIZE: usize = 512;
+                let mut tmpbuf = [0u8; BUFSIZE];
+
+                let iovec = IoSliceMut::new(&mut tmpbuf);
+
+                let mut cmsgspace = nix::cmsg_space!([RawFd; 10]);
+                let flags = nix::sys::socket::MsgFlags::empty();
+
+                let msg = nix::sys::socket::recvmsg::<nix::sys::socket::SockaddrStorage>(
+                    fd,
+                    &mut [iovec],
+                    Some(&mut cmsgspace),
+                    flags,
+                )
+                .unwrap();
+
+                // let nread = nix::unistd::read(fd, &mut buf).unwrap();
+                let buf = msg.iovs().next().unwrap();
+                let mut fds = Vec::with_capacity(8);
+                for a in msg.cmsgs() {
+                    match a {
+                        nix::sys::socket::ControlMessageOwned::ScmRights(fd) => fds.extend(fd),
+                        _ => todo!(),
+                    }
+                }
+
+                fds.extend([2, 3, 4]);
+
+                // let buf = &buf[..nread];
+                let (msg, offset, aaa) = dbus_message_parser::message::Message::decode_with_fds(
+                    buf.to_vec().into(),
+                    &fds,
+                )
+                .unwrap();
+                info!("send_serial={:?} nread={:?}", serial, buf.len());
+                info!("offset={:?} response={:?} values={:?}", offset, msg, msg.get_body());
+
+                // let response = dbus.wait_response(serial, TIMEOUT).unwrap();
+                // eprintln!("###################### DONE #########################");
+                // info!("response={:?}", response);
+                // info!("take_device serial={:?} minor={:?} {:?}", serial, minor, device);
                 // log::info!(target: "dbus-thread", "response {:?}", response);
 
-                use MessageType::*;
-                match response.typ {
-                    Reply => {
-                        let parsed = response.body.parser().get2::<rustbus::wire::UnixFd, bool>();
-                        info!("parsed {:?}", parsed);
-                    }
-                    Invalid | Error => {
-                        let err = response.body.parser().get::<&str>();
-                        info!("err name={:?} {:?}", response.dynheader.error_name.as_ref(), err);
-                    }
-                    Signal | Call => unimplemented!(),
-                }
+                // use MessageType::*;
+                // match response.typ {
+                //     Reply => {
+                //         let parsed = response.body.parser().get2::<rustbus::wire::UnixFd, bool>();
+                //         info!("parsed {:?}", parsed);
+                //         fds.insert(parsed.unwrap().0.take_raw_fd().unwrap());
+                //     }
+                //     Invalid | Error => {
+                //         let err = response.body.parser().get::<&str>();
+                //         info!("err name={:?} {:?}", response.dynheader.error_name.as_ref(), err);
+                //     }
+                //     Signal | Call => unimplemented!(),
+                // }
 
                 producer.push(ThreadEvent::DeviceTaken { fd: 1 }).unwrap();
                 notify_fd();
