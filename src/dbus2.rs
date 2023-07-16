@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
 };
 
@@ -78,6 +78,26 @@ pub fn init() {
         member: "Hello".into(),
     });
     msg.set_serial(1);
+
+    buffered_socket
+        .get_mut()
+        .write_all(&msg.encode().unwrap())
+        .unwrap();
+
+    // dbg!(msg);
+    let mut buf = vec![0; 32 * 1024];
+    let nread = buffered_socket.read(&mut buf).unwrap();
+    let mut start = 0;
+    while start < nread {
+        println!("NREAD={:?}", nread);
+        let (msg, offset) = Message::decode(buf[start..nread].to_vec().into()).unwrap();
+        dbg!(msg, offset);
+        start += offset;
+    }
+
+    // assert!(s.starts_with("AGREE_UNIX_FD"));
+
+    // msg.set_serial(1);
 
     // Message::method_call(destination, object_path, interface, member)
 
