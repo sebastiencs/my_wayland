@@ -44,6 +44,7 @@ mod protocol_generated;
 mod queue;
 pub mod state;
 mod udev;
+mod utils;
 mod wayland_objects;
 mod xkb;
 
@@ -93,16 +94,18 @@ fn main() {
     let mut dispatcher = Dispatcher::default();
     dispatcher.dispatch(ClientsAction::Start);
 
-    fn on_timeout(_res: std::io::Result<PollCompleted>) -> AnyAction {
-        eprintln!("ON_TIMEOUT");
-        std::process::abort();
-    }
-
     let timer = make_timer(Duration::from_secs(2));
-    dispatcher.dispatch(IoUringAction::Poll {
-        fd: timer.as_raw_fd(),
-        dispatch_to: Redispatcher::new(on_timeout),
-    });
+
+    if !utils::is_x11() {
+        fn on_timeout(_res: std::io::Result<PollCompleted>) -> AnyAction {
+            eprintln!("ON_TIMEOUT");
+            std::process::abort();
+        }
+        dispatcher.dispatch(IoUringAction::Poll {
+            fd: timer.as_raw_fd(),
+            dispatch_to: Redispatcher::new(on_timeout),
+        });
+    }
 
     runner.run(dispatcher);
 

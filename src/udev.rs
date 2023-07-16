@@ -1,4 +1,7 @@
-use std::{os::fd::AsRawFd, path::PathBuf};
+use std::{
+    os::fd::{AsRawFd, RawFd},
+    path::PathBuf,
+};
 
 use nix::sys::stat::{major, minor};
 
@@ -12,6 +15,7 @@ use crate::{
 pub struct Device {
     pub devnum: libc::dev_t,
     pub path_node: PathBuf,
+    pub fd: Option<RawFd>,
 }
 
 impl Device {
@@ -114,6 +118,7 @@ impl Udev {
         };
 
         // eprintln!("device={:#?}", device);
-        dispatcher.dispatch(DbusAction::TakeDevice(Device { devnum, path_node }));
+        let fd = None;
+        dispatcher.dispatch(DbusAction::TakeDevice(Device { devnum, path_node, fd }));
     }
 }

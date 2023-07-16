@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     os::{
         fd::{AsRawFd, RawFd},
@@ -56,11 +57,30 @@ pub enum DbusError {
     TakeSession(String),
 }
 
+#[derive(Debug)]
+enum Pending {
+    TakeDevice { device: Device },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct DbusSerial(u32);
+
+impl DbusSerial {
+    fn next(&self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
+
+    fn as_u32(&self) -> u32 {
+        self.0
+    }
+}
+
 pub struct Dbus {
     socket: UnixStream,
     session_path: String,
     seat: String,
-    current_serial: u32,
+    current_serial: DbusSerial,
+    pending: BTreeMap<DbusSerial, Pending>,
 }
 
 fn auth(buffered_socket: &mut BufReader<UnixStream>) -> Result<(), InitializationError> {
@@ -252,25 +272,22 @@ fn get_seat(
     let Some(Value::Variant(variant)) = msg.get_body().first() else {
         return make_err(&msg);
     };
-
     let Value::Struct(values) = &**variant else {
         return make_err(&msg);
     };
-
     let Some(Value::String(seat)) = values.as_ref().first() else {
         return make_err(&msg);
     };
-
     Ok(seat.clone())
 }
 
 fn take_session_control(
     buffered_socket: &mut BufReader<UnixStream>,
     session_path: &str,
-) -> Result<u32, DbusError> {
-    if std::env::var("DISPLAY").is_ok() {
+) -> Result<DbusSerial, DbusError> {
+    if crate::utils::is_x11() {
         // Don't take control on X11
-        return Ok(4);
+        return Ok(DbusSerial(4));
     }
 
     let mut msg = make_method_call(MethodCallParams {
@@ -291,7 +308,7 @@ fn take_session_control(
         return Err(DbusError::TakeSession(error_name.as_ref().to_string()));
     }
 
-    Ok(5)
+    Ok(DbusSerial(5))
 }
 
 pub fn init() -> Result<Dbus, DbusError> {
@@ -309,7 +326,8 @@ pub fn init() -> Result<Dbus, DbusError> {
     let current_serial = take_session_control(&mut socket, &session_path)?;
 
     let socket = socket.into_inner();
-    Ok(Dbus { socket, session_path, seat, current_serial })
+    let pending = BTreeMap::default();
+    Ok(Dbus { socket, session_path, seat, current_serial, pending })
 }
 
 impl Dbus {
@@ -317,28 +335,28 @@ impl Dbus {
         init().map(Box::new)
     }
 
-    pub fn next_serial(&mut self) -> u32 {
+    fn next_serial(&mut self) -> DbusSerial {
         let serial = self.current_serial;
-        self.current_serial = self.current_serial.wrapping_add(1);
+        self.current_serial = serial.next();
         serial
     }
 
-    fn take_device(&mut self, device: &Device, dispatcher: &mut Dispatcher) {
+    fn take_device(&mut self, device: &Device, dispatcher: &mut Dispatcher) -> DbusSerial {
         let major = device.major();
         let minor = device.minor();
 
+        let msg_serial = self.next_serial();
         let mut msg = make_method_call(MethodCallParams {
             destination: "org.freedesktop.login1".into(),
             object_path: self.session_path.as_str().into(),
             interface: "org.freedesktop.login1.Session".into(),
             member: "TakeDevice".into(),
         });
-        msg.set_serial(self.next_serial());
+        msg.set_serial(msg_serial.as_u32());
         msg.add_value(Value::Uint32(major));
         msg.add_value(Value::Uint32(minor));
 
         let msg = msg.encode().unwrap();
-
         let action = IoUringAction::Write {
             fd: self.socket.as_raw_fd(),
             offset: 0,
@@ -346,6 +364,37 @@ impl Dbus {
             dispatch_to: Redispatcher::None,
         };
         dispatcher.dispatch(action);
+
+        msg_serial
+    }
+
+    fn handle_message(&mut self, msg: Message, _dispatcher: &mut Dispatcher) {
+        use {dbus_message_parser::message::MessageType::*, Value::*};
+
+        let reply_serial = msg.get_reply_serial().map(DbusSerial);
+        let Some(reply_serial) = reply_serial else {
+            return;
+        };
+        let pending = self.pending.remove(&reply_serial).unwrap();
+
+        match msg.get_type() {
+            MethodCall => todo!(),
+            MethodReturn => match pending {
+                Pending::TakeDevice { mut device } => {
+                    let [UnixFD(fd), Boolean(inactive)] = msg.get_body() else {
+                        panic!();
+                    };
+                    if *inactive {
+                        return;
+                    }
+                    device.fd = Some(*fd);
+                }
+            },
+            Error => {
+                log::error!("pending={:?} error={:?}", pending, msg);
+            }
+            Signal => todo!(),
+        }
     }
 }
 
@@ -372,10 +421,11 @@ impl Model for Dbus {
                 dispatcher.start_model2(DbusReader::new(fd));
             }
             TakeDevice(device) => {
-                self.take_device(&device, dispatcher);
+                let serial = self.take_device(&device, dispatcher);
+                self.pending.insert(serial, Pending::TakeDevice { device });
             }
             MsgReceived { msg } => {
-                log::info!("MsgReceived {:?}", msg);
+                self.handle_message(msg, dispatcher);
             }
         };
 

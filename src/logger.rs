@@ -6,6 +6,10 @@ struct MyLogger {
 
 impl MyLogger {
     fn new() -> std::io::Result<Self> {
+        if crate::utils::is_x11() {
+            return Ok(Self { file: None });
+        }
+
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
