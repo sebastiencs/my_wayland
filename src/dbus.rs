@@ -1,206 +1,365 @@
 use std::{
-    io::IoSliceMut,
-    os::fd::{AsRawFd, RawFd},
-    thread::JoinHandle,
-};
-
-use {
-    nix::sys::eventfd::{eventfd, EfdFlags},
-    rustbus::{
-        connection::Timeout,
-        message_builder::MarshalledMessage,
-        wire::{unmarshal::traits::Variant, ObjectPath},
-        CallBuilder, MessageBuilder, MessageType, RpcConn, Unmarshal,
+    borrow::Cow,
+    io::{BufRead, BufReader, Read, Write},
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::net::UnixStream,
     },
 };
 
+use dbus_message_parser::encode::EncodeError;
+
 use crate::{
-    io_uring::{model::IoUringAction, ring::PollCompleted},
-    queue::{self, Consumer, Producer},
+    io_uring::{model::IoUringAction, ring::RecvmsgCompleted},
     state::{Dispatcher, Model, Redispatcher},
     udev::Device,
 };
 
-trait IntoMessage {
-    const MEMBER: &'static str;
-    const INTERFACE: &'static str;
-    const DESTINATION: &'static str;
+use {
+    dbus_message_parser::{
+        decode::DecodeError,
+        message::{Message, MessageType::Signal},
+        value::Value,
+    },
+    thiserror::Error,
+};
 
-    fn into_message(self) -> MarshalledMessage;
-
-    fn make_call_builder() -> CallBuilder {
-        MessageBuilder::new()
-            .call(Self::MEMBER)
-            .with_interface(Self::INTERFACE)
-            .at(Self::DESTINATION)
-    }
+#[derive(Error, Debug)]
+pub enum InitializationError {
+    #[error("IO Error: `{0}`")]
+    IO(#[from] std::io::Error),
+    #[error("Authentication: `{0}`")]
+    Auth(String),
+    #[error("Negociate unix fd: `{0}`")]
+    Negociate(String),
+    #[error("Decoding: `{0}`")]
+    Decoding(#[from] DecodeError),
+    #[error("Encoding: `{0}`")]
+    Encoding(#[from] EncodeError),
 }
 
-#[derive(Debug)]
-struct Login1ManagerGetSession(String);
-
-impl IntoMessage for Login1ManagerGetSession {
-    const MEMBER: &'static str = "GetSession";
-    const INTERFACE: &'static str = "org.freedesktop.login1.Manager";
-    const DESTINATION: &'static str = "org.freedesktop.login1";
-
-    fn into_message(self) -> MarshalledMessage {
-        const PATH: &str = "/org/freedesktop/login1";
-
-        let mut msg = Self::make_call_builder().on(PATH).build();
-        msg.body.push_param(self.0).unwrap();
-        msg
-    }
-}
-
-fn send_call<T>(socket: &mut RpcConn, method: T) -> u32
-where
-    T: IntoMessage,
-{
-    let mut msg = method.into_message();
-    eprintln!("MSG={:?}", &msg);
-    socket.send_message(&mut msg).unwrap().write_all().unwrap()
-}
-
-#[derive(Debug)]
-struct Login1ManagerGetSessionResponse(String);
-
-trait MessageResponse {
-    type MarshalType: for<'a> Unmarshal<'a, 'a>;
-    fn from_marshal(msg: Self::MarshalType) -> Self;
-}
-
-impl MessageResponse for Login1ManagerGetSessionResponse {
-    type MarshalType = ObjectPath<String>;
-
-    fn from_marshal(msg: Self::MarshalType) -> Self {
-        Self(msg.as_ref().to_string())
-    }
-}
-
-fn get_reply<T>(socket: &mut RpcConn, serial: u32) -> Result<T, String>
-where
-    T: MessageResponse,
-{
-    let response = socket.wait_response(serial, Timeout::Infinite).unwrap();
-    // dbg!(&response);
-
-    match response.typ {
-        MessageType::Reply => {
-            let v = response.body.parser().get::<T::MarshalType>().unwrap();
-            Ok(T::from_marshal(v))
-        }
-        MessageType::Error | MessageType::Invalid => Err(response.dynheader.error_name.unwrap()),
-        MessageType::Signal | MessageType::Call => todo!(),
-    }
-}
-
-fn init() -> (String, String, RpcConn) {
-    let mut dbus_socket = rustbus::RpcConn::system_conn(Timeout::Infinite).unwrap();
-
-    let session_id = std::env::var("XDG_SESSION_ID").expect("XDG_SESSION_ID not set");
-
-    let serial = send_call(&mut dbus_socket, Login1ManagerGetSession(session_id));
-    let response = get_reply::<Login1ManagerGetSessionResponse>(&mut dbus_socket, serial);
-    dbg!(&response);
-
-    let session_path = response.unwrap().0;
-
-    struct Seat {
-        session_path: String,
-    }
-
-    impl IntoMessage for Seat {
-        const MEMBER: &'static str = "Get";
-        const INTERFACE: &'static str = "org.freedesktop.DBus.Properties";
-        const DESTINATION: &'static str = "org.freedesktop.login1";
-
-        fn into_message(self) -> MarshalledMessage {
-            let mut msg = Self::make_call_builder().on(self.session_path).build();
-            msg.body
-                .push_param2("org.freedesktop.login1.Session", "Seat")
-                .unwrap();
-            msg
-        }
-    }
-
-    let serial = send_call(&mut dbus_socket, Seat { session_path: session_path.clone() });
-
-    let response = dbus_socket
-        .wait_response(serial, Timeout::Infinite)
-        .unwrap();
-
-    let seat = match response.typ {
-        MessageType::Reply => {
-            let v = response.body.parser().get::<Variant>().unwrap();
-            let v = v.get::<(String, ObjectPath<String>)>().unwrap();
-            dbg!(&v);
-            v.0
-        }
-        MessageType::Error | MessageType::Invalid => todo!(),
-        MessageType::Signal | MessageType::Call => todo!(),
-    };
-
-    if std::env::var("DISPLAY").is_ok() {
-        // Don't take control on X11
-        return (session_path, seat, dbus_socket);
-    }
-
-    struct TakeControl {
-        session_path: String,
-    }
-
-    impl IntoMessage for TakeControl {
-        const MEMBER: &'static str = "TakeControl";
-        const INTERFACE: &'static str = "org.freedesktop.login1.Session";
-        const DESTINATION: &'static str = "org.freedesktop.login1";
-
-        fn into_message(self) -> MarshalledMessage {
-            let mut msg = Self::make_call_builder().on(self.session_path).build();
-            msg.body.push_param(false).unwrap();
-            msg
-        }
-    }
-
-    let serial = send_call(&mut dbus_socket, TakeControl { session_path: session_path.clone() });
-    let response = dbus_socket
-        .wait_response(serial, Timeout::Infinite)
-        .unwrap();
-
-    if !matches!(response.typ, MessageType::Reply) {
-        log::error!(
-            "Failed to take control of the session: {:?}",
-            response.dynheader.error_name.as_ref()
-        );
-    }
-
-    (session_path, seat, dbus_socket)
+#[derive(Error, Debug)]
+pub enum DbusError {
+    #[error("Error during dbus initialization: `{0}`")]
+    Intialization(#[from] InitializationError),
+    #[error("Decoding: `{0}`")]
+    Decoding(#[from] DecodeError),
+    #[error("Encoding: `{0}`")]
+    Encoding(#[from] EncodeError),
+    #[error("IO Error: `{0}`")]
+    IO(#[from] std::io::Error),
+    #[error("Session name not found: `{0}`")]
+    SessionNameNotFound(String),
+    #[error("Seat not found: `{0}`")]
+    SeatNotFound(String),
+    #[error("Failed to take session control: `{0}`")]
+    TakeSession(String),
 }
 
 pub struct Dbus {
+    socket: UnixStream,
     session_path: String,
     seat: String,
-    // dbus: rustbus::RpcConn,
-    thread: JoinHandle<()>,
-    consumer: Consumer<ThreadEvent>,
-    sender: std::sync::mpsc::SyncSender<ThreadMsg>,
-    eventfd: RawFd,
-    // recv: std::sync::mpsc::Receiver<ThreadMsg>,
-    // sender: std::sync::mpsc::SyncSender<ThreadMsg>,
-    // recv:
+    current_serial: u32,
+}
+
+fn auth(buffered_socket: &mut BufReader<UnixStream>) -> Result<(), InitializationError> {
+    let uid: String = {
+        let uid = nix::unistd::getuid().as_raw().to_string();
+        uid.as_bytes().iter().map(|b| format!("{:x}", b)).collect()
+    };
+
+    buffered_socket
+        .get_mut()
+        .write_all(format!("\0AUTH EXTERNAL {}\r\n", uid).as_bytes())?;
+
+    let mut s = String::with_capacity(32);
+    buffered_socket.read_line(&mut s)?;
+
+    if !s.starts_with("OK") {
+        return Err(InitializationError::Auth(s));
+    }
+
+    Ok(())
+}
+
+fn negociate_unix_fds(
+    buffered_socket: &mut BufReader<UnixStream>,
+) -> Result<(), InitializationError> {
+    buffered_socket
+        .get_mut()
+        .write_all("NEGOTIATE_UNIX_FD\r\n".as_bytes())?;
+
+    let mut s = String::with_capacity(32);
+    buffered_socket.read_line(&mut s)?;
+
+    if !s.starts_with("AGREE_UNIX_FD") {
+        return Err(InitializationError::Negociate(s));
+    }
+
+    Ok(())
+}
+
+fn send_begin(buffered_socket: &mut BufReader<UnixStream>) -> Result<(), InitializationError> {
+    buffered_socket
+        .get_mut()
+        .write_all("BEGIN\r\n".as_bytes())?;
+    Ok(())
+}
+
+struct MethodCallParams<'a> {
+    destination: Cow<'a, str>,
+    object_path: Cow<'a, str>,
+    interface: Cow<'a, str>,
+    member: Cow<'a, str>,
+}
+
+fn make_method_call(params: MethodCallParams) -> Message {
+    let MethodCallParams { destination, object_path, interface, member } = params;
+    Message::method_call(
+        destination.as_ref().try_into().unwrap(),
+        object_path.as_ref().try_into().unwrap(),
+        interface.as_ref().try_into().unwrap(),
+        member.as_ref().try_into().unwrap(),
+    )
+}
+
+struct GetParams<'a> {
+    destination: Cow<'a, str>,
+    object_path: Cow<'a, str>,
+    interface: Cow<'a, str>,
+    property: &'a str,
+}
+
+fn make_get(params: GetParams) -> Message {
+    let GetParams { destination, object_path, interface, property } = params;
+    Message::property_get(
+        destination.as_ref().try_into().unwrap(),
+        object_path.as_ref().try_into().unwrap(),
+        interface.as_ref().try_into().unwrap(),
+        property,
+    )
+}
+
+fn read_u32(slice: &[u8]) -> u32 {
+    u32::from_ne_bytes(slice.try_into().unwrap())
+}
+
+fn read_sync(
+    buffered_socket: &mut BufReader<UnixStream>,
+    buffer: &mut Vec<u8>,
+) -> Result<Message, InitializationError> {
+    const HEADER_LENGTH: usize = 16;
+
+    buffered_socket.read_exact(&mut buffer[..HEADER_LENGTH])?;
+    let body_length = read_u32(&buffer[4..8]);
+    let headers_length = read_u32(&buffer[12..16]);
+
+    let dyn_header_len = headers_length + (headers_length.wrapping_neg() & 7);
+    let remaining = (dyn_header_len + body_length) as usize;
+    let total = HEADER_LENGTH + remaining;
+
+    if buffer.len() < total {
+        buffer.resize(total, 0);
+    }
+
+    buffered_socket.read_exact(&mut buffer[HEADER_LENGTH..total])?;
+
+    let (msg, _offset) = Message::decode(buffer.clone().into())?;
+    Ok(msg)
+}
+
+/// Say hello and read acquired name
+fn say_hello(
+    buffered_socket: &mut BufReader<UnixStream>,
+) -> Result<Option<String>, InitializationError> {
+    let mut msg = make_method_call(MethodCallParams {
+        destination: "org.freedesktop.DBus".into(),
+        object_path: "/org/freedesktop/DBus".into(),
+        interface: "org.freedesktop.DBus".into(),
+        member: "Hello".into(),
+    });
+    msg.set_serial(1);
+
+    buffered_socket.get_mut().write_all(&msg.encode()?)?;
+
+    let mut buffer = vec![0u8; 32 * 1024];
+    let mut acquired_name = None;
+    loop {
+        let msg = read_sync(buffered_socket, &mut buffer)?;
+        if let Signal = msg.get_type() {
+            if msg.get_member().map(|m| m.as_ref()) == Some("NameAcquired") {
+                if let Some(Value::String(s)) = msg.get_body().first() {
+                    acquired_name = Some(s.clone());
+                }
+            }
+        };
+        if buffered_socket.buffer().is_empty() {
+            break;
+        }
+    }
+
+    Ok(acquired_name)
+}
+
+fn get_session_path(buffered_socket: &mut BufReader<UnixStream>) -> Result<String, DbusError> {
+    let session_id = std::env::var("XDG_SESSION_ID").expect("XDG_SESSION_ID not set");
+
+    let mut msg = make_method_call(MethodCallParams {
+        destination: "org.freedesktop.login1".into(),
+        object_path: "/org/freedesktop/login1".into(),
+        interface: "org.freedesktop.login1.Manager".into(),
+        member: "GetSession".into(),
+    });
+    msg.set_serial(2);
+    msg.add_value(Value::String(session_id));
+
+    buffered_socket.get_mut().write_all(&msg.encode()?)?;
+
+    let mut buffer = vec![0u8; 32 * 1024];
+    let msg = read_sync(buffered_socket, &mut buffer)?;
+
+    let Some(Value::ObjectPath(obj_session_path)) = msg.get_body().first() else {
+        return Err(DbusError::SessionNameNotFound(format!("{:?}", msg)));
+    };
+
+    let session_path: String = obj_session_path.clone().into();
+
+    Ok(session_path)
+}
+
+fn get_seat(
+    buffered_socket: &mut BufReader<UnixStream>,
+    session_path: &str,
+) -> Result<String, DbusError> {
+    let make_err = |msg: &Message| Err::<String, _>(DbusError::SeatNotFound(format!("{:?}", msg)));
+
+    let mut msg = make_method_call(MethodCallParams {
+        destination: "org.freedesktop.login1".into(),
+        object_path: session_path.into(),
+        interface: "org.freedesktop.DBus.Properties".into(),
+        member: "Get".into(),
+    });
+    msg.set_serial(3);
+    msg.add_value(Value::String("org.freedesktop.login1.Session".into()));
+    msg.add_value(Value::String("Seat".into()));
+
+    buffered_socket.get_mut().write_all(&msg.encode()?)?;
+
+    let mut buffer = vec![0u8; 32 * 1024];
+    let msg = read_sync(buffered_socket, &mut buffer)?;
+
+    let Some(Value::Variant(variant)) = msg.get_body().first() else {
+        return make_err(&msg);
+    };
+
+    let Value::Struct(values) = &**variant else {
+        return make_err(&msg);
+    };
+
+    let Some(Value::String(seat)) = values.as_ref().first() else {
+        return make_err(&msg);
+    };
+
+    Ok(seat.clone())
+}
+
+fn take_session_control(
+    buffered_socket: &mut BufReader<UnixStream>,
+    session_path: &str,
+) -> Result<u32, DbusError> {
+    if std::env::var("DISPLAY").is_ok() {
+        // Don't take control on X11
+        return Ok(4);
+    }
+
+    let mut msg = make_method_call(MethodCallParams {
+        destination: "org.freedesktop.login1".into(),
+        object_path: session_path.into(),
+        interface: "org.freedesktop.login1.Session".into(),
+        member: "TakeControl".into(),
+    });
+    msg.set_serial(4);
+    msg.add_value(Value::Boolean(false)); // Force
+
+    buffered_socket.get_mut().write_all(&msg.encode()?)?;
+
+    let mut buffer = vec![0u8; 32 * 1024];
+    let msg = read_sync(buffered_socket, &mut buffer)?;
+
+    if let Some(error_name) = msg.get_error_name() {
+        return Err(DbusError::TakeSession(error_name.as_ref().to_string()));
+    }
+
+    Ok(5)
+}
+
+pub fn init() -> Result<Dbus, DbusError> {
+    const SYSTEM_PATH: &str = "/run/dbus/system_bus_socket";
+    let socket = UnixStream::connect(SYSTEM_PATH)?;
+    let mut socket = BufReader::new(socket);
+
+    auth(&mut socket)?;
+    negociate_unix_fds(&mut socket)?;
+    send_begin(&mut socket)?;
+    say_hello(&mut socket)?;
+
+    let session_path = get_session_path(&mut socket)?;
+    let seat = get_seat(&mut socket, &session_path)?;
+    let current_serial = take_session_control(&mut socket, &session_path)?;
+
+    let socket = socket.into_inner();
+    Ok(Dbus { socket, session_path, seat, current_serial })
+}
+
+impl Dbus {
+    pub fn new() -> Result<Box<Self>, DbusError> {
+        init().map(Box::new)
+    }
+
+    pub fn next_serial(&mut self) -> u32 {
+        let serial = self.current_serial;
+        self.current_serial = self.current_serial.wrapping_add(1);
+        serial
+    }
+
+    fn take_device(&mut self, device: &Device, dispatcher: &mut Dispatcher) {
+        let major = device.major();
+        let minor = device.minor();
+
+        let mut msg = make_method_call(MethodCallParams {
+            destination: "org.freedesktop.login1".into(),
+            object_path: self.session_path.as_str().into(),
+            interface: "org.freedesktop.login1.Session".into(),
+            member: "TakeDevice".into(),
+        });
+        msg.set_serial(self.next_serial());
+        msg.add_value(Value::Uint32(major));
+        msg.add_value(Value::Uint32(minor));
+
+        let msg = msg.encode().unwrap();
+
+        let action = IoUringAction::Write {
+            fd: self.socket.as_raw_fd(),
+            offset: 0,
+            buffer: Box::from(&msg[..]),
+            dispatch_to: Redispatcher::None,
+        };
+        dispatcher.dispatch(action);
+    }
 }
 
 pub enum DbusAction {
     Start,
     TakeDevice(Device),
-    EventFromThread,
+    MsgReceived { msg: Message },
 }
 
 impl Model for Dbus {
     type InitParams = ();
     type Action = DbusAction;
 
-    fn init(params: Self::InitParams) -> Box<Self> {
+    fn init(_params: Self::InitParams) -> Box<Self> {
         todo!()
     }
 
@@ -208,185 +367,175 @@ impl Model for Dbus {
         use DbusAction::*;
 
         match action {
-            Start => self.start(dispatcher),
-            TakeDevice(device) => self.take_device(device, dispatcher),
-            EventFromThread => {
-                while let Ok(event) = self.consumer.pop() {
-                    log::error!("NEW EVENT HERE {:?}", event);
-                }
+            Start => {
+                let fd = self.socket.as_raw_fd();
+                dispatcher.start_model2(DbusReader::new(fd));
+            }
+            TakeDevice(device) => {
+                self.take_device(&device, dispatcher);
+            }
+            MsgReceived { msg } => {
+                log::info!("MsgReceived {:?}", msg);
             }
         };
+
         Ok(())
     }
 }
 
-impl From<std::io::Result<PollCompleted>> for DbusAction {
-    fn from(_: std::io::Result<PollCompleted>) -> Self {
-        DbusAction::EventFromThread
-    }
-}
+const DBUS_READER_ID: u64 = 1;
 
-impl Dbus {
-    pub fn new() -> Box<Self> {
-        let (session_path, seat, dbus) = init();
-
-        let eventfd = eventfd(0, EfdFlags::EFD_CLOEXEC | EfdFlags::EFD_NONBLOCK).unwrap();
-        let (sender, recv) = std::sync::mpsc::sync_channel(1024);
-        let (producer, consumer) = queue::bounded(1024);
-
-        let session_path_thread = session_path.clone();
-        let thread = std::thread::spawn(move || {
-            thread_loop(eventfd, dbus, session_path_thread, recv, producer);
-        });
-
-        Box::new(Self { session_path, seat, thread, consumer, sender, eventfd })
-    }
-
-    fn start(&mut self, dispatcher: &mut Dispatcher) {
-        dispatcher.dispatch(IoUringAction::Poll {
-            fd: self.eventfd,
-            dispatch_to: Redispatcher::into::<DbusAction>(),
-        });
-    }
-
-    fn take_device(&self, device: Device, dispatcher: &mut Dispatcher) {
-        self.sender.send(ThreadMsg::TakeDevice { device }).unwrap();
-    }
+struct DbusReader {
+    fd: RawFd,
+    read_buffer: DbusBuffer,
+    fds: Vec<RawFd>,
+    neof: usize,
 }
 
 #[derive(Debug)]
-enum ThreadMsg {
-    TakeDevice { device: Device },
+enum DbusReaderAction {
+    Start,
+    ReadMsg { buffer: Box<[u8]>, fds: Box<[RawFd]> },
     Stop,
 }
 
-#[derive(Debug)]
-enum ThreadEvent {
-    DeviceTaken { fd: RawFd },
-}
+impl Model for DbusReader {
+    type InitParams = ();
+    type Action = DbusReaderAction;
+    const START: Option<Self::Action> = Some(Self::Action::Start);
+    const STOP: Option<Self::Action> = Some(Self::Action::Stop);
 
-/// Run in another thread, because the crate `rustbus` doesn't easily allow
-/// to read/write messages with `io_uring`.
-fn thread_loop(
-    eventfd: RawFd,
-    mut dbus: rustbus::RpcConn,
-    session_path: String,
-    recv: std::sync::mpsc::Receiver<ThreadMsg>,
-    mut producer: Producer<ThreadEvent>,
-) {
-    macro_rules! info {
-        ($($arg:tt)+) => (log::info!(target: "dbus-thread", $($arg)+))
+    fn init(_params: Self::InitParams) -> Box<Self> {
+        todo!()
     }
 
-    const TIMEOUT: Timeout = Timeout::Infinite;
-    // const TIMEOUT: Timeout = Timeout::Duration(Duration::from_secs(5));
+    fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        use DbusReaderAction::*;
 
-    let notify_fd = || {
-        nix::unistd::write(eventfd, &0u64.to_ne_bytes()).unwrap();
-    };
-
-    // let mut fds = BTreeSet::default();
-
-    while let Ok(msg) = recv.recv() {
-        match msg {
-            ThreadMsg::TakeDevice { device } => {
-                let session_path = session_path.clone();
-                let major = device.major();
-                let minor = device.minor();
-
-                // std::thread::sleep_ms(1000);
-                eprintln!("###################### READ #########################");
-                let serial = send_call(&mut dbus, TakeDevice { session_path, major, minor });
-
-                let fd = dbus.conn().as_raw_fd();
-
-                const BUFSIZE: usize = 512;
-                let mut tmpbuf = [0u8; BUFSIZE];
-
-                let iovec = IoSliceMut::new(&mut tmpbuf);
-
-                let mut cmsgspace = nix::cmsg_space!([RawFd; 10]);
-                let flags = nix::sys::socket::MsgFlags::empty();
-
-                let msg = nix::sys::socket::recvmsg::<nix::sys::socket::SockaddrStorage>(
-                    fd,
-                    &mut [iovec],
-                    Some(&mut cmsgspace),
-                    flags,
-                )
-                .unwrap();
-
-                // let nread = nix::unistd::read(fd, &mut buf).unwrap();
-                let buf = msg.iovs().next().unwrap();
-                let mut fds = Vec::with_capacity(8);
-                for a in msg.cmsgs() {
-                    match a {
-                        nix::sys::socket::ControlMessageOwned::ScmRights(fd) => fds.extend(fd),
-                        _ => todo!(),
-                    }
+        match action {
+            Start => self.read(dispatcher),
+            ReadMsg { buffer, fds } => {
+                if self.is_eof(&buffer) {
+                    return self.close(dispatcher);
                 }
-
-                fds.extend([2, 3, 4]);
-
-                // let buf = &buf[..nread];
-                let (msg, offset, aaa) = dbus_message_parser::message::Message::decode_with_fds(
-                    buf.to_vec().into(),
-                    &fds,
-                )
-                .unwrap();
-                info!("send_serial={:?} nread={:?}", serial, buf.len());
-                info!("offset={:?} response={:?} values={:?}", offset, msg, msg.get_body());
-
-                // let response = dbus.wait_response(serial, TIMEOUT).unwrap();
-                // eprintln!("###################### DONE #########################");
-                // info!("response={:?}", response);
-                // info!("take_device serial={:?} minor={:?} {:?}", serial, minor, device);
-                // log::info!(target: "dbus-thread", "response {:?}", response);
-
-                // use MessageType::*;
-                // match response.typ {
-                //     Reply => {
-                //         let parsed = response.body.parser().get2::<rustbus::wire::UnixFd, bool>();
-                //         info!("parsed {:?}", parsed);
-                //         fds.insert(parsed.unwrap().0.take_raw_fd().unwrap());
-                //     }
-                //     Invalid | Error => {
-                //         let err = response.body.parser().get::<&str>();
-                //         info!("err name={:?} {:?}", response.dynheader.error_name.as_ref(), err);
-                //     }
-                //     Signal | Call => unimplemented!(),
-                // }
-
-                producer.push(ThreadEvent::DeviceTaken { fd: 1 }).unwrap();
-                notify_fd();
-
-                // let a: TakeDeviceResponse = TakeDeviceResponse::unmarshal(response);
+                self.read_buffer.append(&buffer);
+                self.fds.extend(fds.iter());
+                loop {
+                    let msg: &[u8] = match self.read_buffer.get_whole_message() {
+                        Some(msg) => msg,
+                        None => return self.read(dispatcher),
+                    };
+                    let (msg, _offset) =
+                        match Message::decode_with_fds(msg.to_vec().into(), &self.fds) {
+                            Ok((msg, offset, _)) => (msg, offset),
+                            Err(e) => panic!("{:?}", e),
+                        };
+                    if let Some(nfds) = msg.get_unix_fds() {
+                        self.fds.drain(0..nfds as usize);
+                    }
+                    dispatcher.dispatch(DbusAction::MsgReceived { msg });
+                    self.read_buffer.consume_msg();
+                }
             }
-            ThreadMsg::Stop => return,
+            Stop => Ok(()),
         }
     }
 }
 
-struct TakeDevice {
-    session_path: String,
-    major: u32,
-    minor: u32,
+struct DbusBuffer {
+    data: Vec<u8>,
+    pos: usize,
 }
 
-impl IntoMessage for TakeDevice {
-    const MEMBER: &'static str = "TakeDevice";
-    const INTERFACE: &'static str = "org.freedesktop.login1.Session";
-    const DESTINATION: &'static str = "org.freedesktop.login1";
+impl DbusBuffer {
+    fn new() -> Self {
+        Self { data: vec![0; 128 * 1024], pos: 0 }
+    }
 
-    fn into_message(self) -> MarshalledMessage {
-        let mut msg = Self::make_call_builder().on(self.session_path).build();
-        msg.body.push_param2(self.major, self.minor).unwrap();
-        msg
+    fn append(&mut self, buffer: &[u8]) {
+        let pos = self.pos;
+        let buffer_len = buffer.len();
+
+        if self.data.len() < pos + buffer_len {
+            self.data.resize(pos + buffer_len, 0);
+        }
+
+        self.data[pos..pos + buffer_len].copy_from_slice(buffer);
+        self.pos += buffer_len;
+    }
+
+    fn get_whole_message(&self) -> Option<&[u8]> {
+        const HEADER_LENGTH: usize = 16;
+        let data = &self.data[..self.pos];
+
+        let header = data.get(..HEADER_LENGTH)?;
+        let body_length = read_u32(&header[4..8]);
+        let headers_length = read_u32(&header[12..16]);
+
+        let dyn_header_len = headers_length + (headers_length.wrapping_neg() & 7);
+        let remaining = (dyn_header_len + body_length) as usize;
+        let total = HEADER_LENGTH + remaining;
+
+        data.get(..total)
+    }
+
+    fn len(&self) -> usize {
+        self.pos
+    }
+
+    fn consume_msg(&mut self) {
+        let msg = self.get_whole_message().unwrap();
+        let len = msg.len();
+
+        if self.pos == len {
+            self.pos = 0;
+        } else {
+            assert!(self.pos > len);
+            self.data.copy_within(len..self.pos, 0);
+            self.pos -= len;
+        }
     }
 }
 
-#[derive(Debug, Unmarshal, rustbus::Signature)]
-struct TakeDeviceResponse {
-    fd: rustbus::wire::UnixFd,
-    inactive: bool,
+impl From<std::io::Result<RecvmsgCompleted>> for DbusReaderAction {
+    fn from(value: std::io::Result<RecvmsgCompleted>) -> Self {
+        let RecvmsgCompleted { fd: _, buffer, fds } = value.unwrap();
+        Self::ReadMsg { buffer, fds }
+    }
+}
+
+impl DbusReader {
+    fn new(fd: RawFd) -> Self {
+        let read_buffer = DbusBuffer::new();
+        let neof = 0;
+        let fds = Vec::with_capacity(16);
+        Self { fd, read_buffer, neof, fds }
+    }
+
+    fn is_eof(&mut self, buffer: &[u8]) -> bool {
+        if !buffer.is_empty() {
+            self.neof = 0;
+        } else {
+            self.neof += 1;
+            // Number of EOF (len == 0) received
+            // Consider EOF reached after 2
+            // https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
+            if self.neof == 2 {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn read(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        dispatcher.dispatch(IoUringAction::Recvmsg {
+            fd: self.fd,
+            dispatch_to: Redispatcher::into::<DbusReaderAction>(),
+        });
+        Ok(())
+    }
+
+    fn close(&self, _dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        todo!()
+    }
 }

@@ -10,7 +10,7 @@ use std::{
 use libc::getsockopt;
 
 use crate::{
-    dbus2::DbusAction,
+    dbus::DbusAction,
     input::Libinput,
     io_uring::{
         model::IoUringAction,

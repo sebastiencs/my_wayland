@@ -34,7 +34,6 @@ use crate::{
 
 mod clients;
 mod dbus;
-mod dbus2;
 mod egl;
 mod input;
 mod io_uring;
@@ -75,7 +74,7 @@ fn main() {
 
     // log::info!("hello");
 
-    let dbus = dbus2::Dbus::new().unwrap();
+    let dbus = dbus::Dbus::new().unwrap();
 
     let udev = Udev::new().unwrap();
     let libinput = input::Libinput::new();

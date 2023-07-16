@@ -1,22 +1,16 @@
-use std::{
-    os::{
-        fd::{AsRawFd, RawFd},
-        unix::raw::dev_t,
-    },
-    path::PathBuf,
-};
+use std::{os::fd::AsRawFd, path::PathBuf};
 
 use nix::sys::stat::{major, minor};
 
 use crate::{
-    dbus2::DbusAction,
+    dbus::DbusAction,
     io_uring::{model::IoUringAction, ring::PollCompleted},
     state::{AnyAction, Dispatcher, Model, Redispatcher},
 };
 
 #[derive(Debug)]
 pub struct Device {
-    pub devnum: dev_t,
+    pub devnum: libc::dev_t,
     pub path_node: PathBuf,
 }
 
@@ -44,7 +38,7 @@ impl Model for Udev {
     type InitParams = ();
     type Action = UdevAction;
 
-    fn init(params: Self::InitParams) -> Box<Self> {
+    fn init(_params: Self::InitParams) -> Box<Self> {
         todo!()
     }
 
