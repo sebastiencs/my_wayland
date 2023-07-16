@@ -1,10 +1,20 @@
 use std::{
     borrow::Cow,
+    collections::VecDeque,
     io::{BufRead, BufReader, Read, Write},
-    os::unix::net::UnixStream,
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::net::UnixStream,
+    },
 };
 
 use dbus_message_parser::encode::EncodeError;
+
+use crate::{
+    io_uring::{model::IoUringAction, ring::RecvmsgCompleted},
+    state::{Dispatcher, Model, Redispatcher},
+    udev::Device,
+};
 
 use {
     dbus_message_parser::{
@@ -49,8 +59,9 @@ pub enum DbusError {
 
 pub struct Dbus {
     socket: UnixStream,
-    session_name: String,
-    seat: String
+    session_path: String,
+    seat: String,
+    current_serial: u32,
 }
 
 fn auth(buffered_socket: &mut BufReader<UnixStream>) -> Result<(), InitializationError> {
@@ -192,7 +203,7 @@ fn say_hello(
     Ok(acquired_name)
 }
 
-fn get_session_name(buffered_socket: &mut BufReader<UnixStream>) -> Result<String, DbusError> {
+fn get_session_path(buffered_socket: &mut BufReader<UnixStream>) -> Result<String, DbusError> {
     let session_id = std::env::var("XDG_SESSION_ID").expect("XDG_SESSION_ID not set");
 
     let mut msg = make_method_call(MethodCallParams {
@@ -209,27 +220,24 @@ fn get_session_name(buffered_socket: &mut BufReader<UnixStream>) -> Result<Strin
     let mut buffer = vec![0u8; 32 * 1024];
     let msg = read_sync(buffered_socket, &mut buffer)?;
 
-    let Some(Value::ObjectPath(obj_session_name)) = msg.get_body().first() else {
-        let body_str = format!("{:?}", msg.get_body());
-        return Err(DbusError::SessionNameNotFound(body_str));
+    let Some(Value::ObjectPath(obj_session_path)) = msg.get_body().first() else {
+        return Err(DbusError::SessionNameNotFound(format!("{:?}", msg)));
     };
 
-    let session_name: String = obj_session_name.clone().into();
+    let session_path: String = obj_session_path.clone().into();
 
-    Ok(session_name)
+    Ok(session_path)
 }
 
 fn get_seat(
     buffered_socket: &mut BufReader<UnixStream>,
-    session_name: &str,
-) -> Result<String, DbusError>  {
-    let make_err = |msg: &Message| {
-        Err::<String, _>(DbusError::SeatNotFound(format!("{:?}", msg)))
-    };
+    session_path: &str,
+) -> Result<String, DbusError> {
+    let make_err = |msg: &Message| Err::<String, _>(DbusError::SeatNotFound(format!("{:?}", msg)));
 
     let mut msg = make_method_call(MethodCallParams {
         destination: "org.freedesktop.login1".into(),
-        object_path: session_name.into(),
+        object_path: session_path.into(),
         interface: "org.freedesktop.DBus.Properties".into(),
         member: "Get".into(),
     });
@@ -259,11 +267,16 @@ fn get_seat(
 
 fn take_session_control(
     buffered_socket: &mut BufReader<UnixStream>,
-    session_name: &str,
-) -> Result<(), DbusError> {
+    session_path: &str,
+) -> Result<u32, DbusError> {
+    if std::env::var("DISPLAY").is_ok() {
+        // Don't take control on X11
+        return Ok(4);
+    }
+
     let mut msg = make_method_call(MethodCallParams {
         destination: "org.freedesktop.login1".into(),
-        object_path: session_name.into(),
+        object_path: session_path.into(),
         interface: "org.freedesktop.login1.Session".into(),
         member: "TakeControl".into(),
     });
@@ -279,7 +292,7 @@ fn take_session_control(
         return Err(DbusError::TakeSession(error_name.as_ref().to_string()));
     }
 
-    Ok(())
+    Ok(5)
 }
 
 pub fn init() -> Result<Dbus, DbusError> {
@@ -292,16 +305,238 @@ pub fn init() -> Result<Dbus, DbusError> {
     send_begin(&mut socket)?;
     say_hello(&mut socket)?;
 
-    let session_name = get_session_name(&mut socket)?;
-    let seat = get_seat(&mut socket, &session_name)?;
-    take_session_control(&mut socket, &session_name)?;
+    let session_path = get_session_path(&mut socket)?;
+    let seat = get_seat(&mut socket, &session_path)?;
+    let current_serial = take_session_control(&mut socket, &session_path)?;
 
     let socket = socket.into_inner();
-    Ok(Dbus { socket, session_name, seat })
+    Ok(Dbus { socket, session_path, seat, current_serial })
 }
 
 impl Dbus {
-    pub fn new() -> Result<Self, DbusError> {
-        init()
+    pub fn new() -> Result<Box<Self>, DbusError> {
+        init().map(Box::new)
+    }
+
+    pub fn next_serial(&mut self) -> u32 {
+        let serial = self.current_serial;
+        self.current_serial = self.current_serial.wrapping_add(1);
+        serial
+    }
+
+    fn take_device(&mut self, device: &Device, dispatcher: &mut Dispatcher) {
+        let major = device.major();
+        let minor = device.minor();
+
+        let mut msg = make_method_call(MethodCallParams {
+            destination: "org.freedesktop.login1".into(),
+            object_path: self.session_path.as_str().into(),
+            interface: "org.freedesktop.login1.Session".into(),
+            member: "TakeDevice".into(),
+        });
+        msg.set_serial(self.next_serial());
+        msg.add_value(Value::Uint32(major));
+        msg.add_value(Value::Uint32(minor));
+
+        let msg = msg.encode().unwrap();
+
+        let action = IoUringAction::Write {
+            fd: self.socket.as_raw_fd(),
+            offset: 0,
+            buffer: Box::from(&msg[..]),
+            dispatch_to: Redispatcher::None,
+        };
+        dispatcher.dispatch(action);
+    }
+}
+
+pub enum DbusAction {
+    Start,
+    TakeDevice(Device),
+    MsgReceived { msg: Message },
+}
+
+impl Model for Dbus {
+    type InitParams = ();
+    type Action = DbusAction;
+
+    fn init(params: Self::InitParams) -> Box<Self> {
+        todo!()
+    }
+
+    fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        use DbusAction::*;
+
+        match action {
+            Start => {
+                let fd = self.socket.as_raw_fd();
+                dispatcher.start_model2(DbusReader::new(fd));
+            }
+            TakeDevice(device) => {
+                self.take_device(&device, dispatcher);
+            }
+            MsgReceived { msg } => {
+                log::info!("MsgReceived {:?}", msg);
+            }
+        };
+
+        Ok(())
+    }
+}
+
+const DBUS_READER_ID: u64 = 1;
+
+struct DbusReader {
+    fd: RawFd,
+    read_buffer: DbusBuffer,
+    fds: Vec<RawFd>,
+    neof: usize,
+}
+
+#[derive(Debug)]
+enum DbusReaderAction {
+    Start,
+    ReadMsg { buffer: Box<[u8]>, fds: Box<[RawFd]> },
+    Stop,
+}
+
+impl Model for DbusReader {
+    type InitParams = ();
+    type Action = DbusReaderAction;
+    const START: Option<Self::Action> = Some(Self::Action::Start);
+    const STOP: Option<Self::Action> = Some(Self::Action::Stop);
+
+    fn init(_params: Self::InitParams) -> Box<Self> {
+        todo!()
+    }
+
+    fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        use DbusReaderAction::*;
+
+        match action {
+            Start => self.read(dispatcher),
+            ReadMsg { buffer, fds } => {
+                if self.is_eof(&buffer) {
+                    return self.close(dispatcher);
+                }
+                self.read_buffer.append(&buffer);
+                self.fds.extend(fds.iter());
+                loop {
+                    let msg: &[u8] = match self.read_buffer.get_whole_message() {
+                        Some(msg) => msg,
+                        None => return self.read(dispatcher),
+                    };
+                    let (msg, _offset) =
+                        match Message::decode_with_fds(msg.to_vec().into(), &self.fds) {
+                            Ok((msg, offset, _)) => (msg, offset),
+                            Err(e) => panic!("{:?}", e),
+                        };
+                    if let Some(nfds) = msg.get_unix_fds() {
+                        self.fds.drain(0..nfds as usize);
+                    }
+                    dispatcher.dispatch(DbusAction::MsgReceived { msg });
+                    self.read_buffer.consume_msg();
+                }
+            }
+            Stop => Ok(()),
+        }
+    }
+}
+
+struct DbusBuffer {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+impl DbusBuffer {
+    fn new() -> Self {
+        Self { data: vec![0; 128 * 1024], pos: 0 }
+    }
+
+    fn append(&mut self, buffer: &[u8]) {
+        let pos = self.pos;
+        let buffer_len = buffer.len();
+
+        if self.data.len() < pos + buffer_len {
+            self.data.resize(pos + buffer_len, 0);
+        }
+
+        self.data[pos..pos + buffer_len].copy_from_slice(buffer);
+        self.pos += buffer_len;
+    }
+
+    fn get_whole_message(&self) -> Option<&[u8]> {
+        const HEADER_LENGTH: usize = 16;
+        let data = &self.data[..self.pos];
+
+        let header = data.get(..HEADER_LENGTH)?;
+        let body_length = read_u32(&header[4..8]);
+        let headers_length = read_u32(&header[12..16]);
+
+        let dyn_header_len = headers_length + (headers_length.wrapping_neg() & 7);
+        let remaining = (dyn_header_len + body_length) as usize;
+        let total = HEADER_LENGTH + remaining;
+
+        data.get(..total)
+    }
+
+    fn len(&self) -> usize {
+        self.pos
+    }
+
+    fn consume_msg(&mut self) {
+        let msg = self.get_whole_message().unwrap();
+        let len = msg.len();
+
+        if self.pos == len {
+            self.pos = 0;
+        } else {
+            assert!(self.pos > len);
+            self.data.copy_within(len..self.pos, 0);
+            self.pos -= len;
+        }
+    }
+}
+
+impl From<std::io::Result<RecvmsgCompleted>> for DbusReaderAction {
+    fn from(value: std::io::Result<RecvmsgCompleted>) -> Self {
+        let RecvmsgCompleted { fd: _, buffer, fds } = value.unwrap();
+        Self::ReadMsg { buffer, fds }
+    }
+}
+
+impl DbusReader {
+    fn new(fd: RawFd) -> Self {
+        let read_buffer = DbusBuffer::new();
+        let neof = 0;
+        let fds = Vec::with_capacity(16);
+        Self { fd, read_buffer, neof, fds }
+    }
+
+    fn is_eof(&mut self, buffer: &[u8]) -> bool {
+        if !buffer.is_empty() {
+            self.neof = 0;
+        } else {
+            self.neof += 1;
+            // Number of EOF (len == 0) received
+            // Consider EOF reached after 2
+            // https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
+            if self.neof == 2 {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn read(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        dispatcher.dispatch(IoUringAction::Recvmsg {
+            fd: self.fd,
+            dispatch_to: Redispatcher::into::<DbusReaderAction>(),
+        });
+        Ok(())
+    }
+
+    fn close(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        todo!()
     }
 }

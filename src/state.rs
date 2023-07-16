@@ -70,6 +70,16 @@ impl Dispatcher {
         self.dispatch_to(id, M::START.unwrap());
     }
 
+    pub fn start_model2<M>(&mut self, model: M)
+    where
+        M: Model,
+    {
+        let action_id = ActionId::of::<M::Action>();
+        self.pending_models
+            .push_back((action_id, Box::new(model).into_vtable()));
+        self.dispatch(M::START.unwrap());
+    }
+
     pub fn stop_model<I, M>(&mut self, id: I)
     where
         I: Into<u64> + Copy,

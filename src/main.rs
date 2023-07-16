@@ -63,6 +63,10 @@ fn make_timer(duration: Duration) -> TimerFd {
 fn main() {
     // use std::any::Any;
 
+    // dbus2::init().unwrap();
+
+    // return;
+
     logger::install();
 
     // egl::init();
@@ -71,7 +75,7 @@ fn main() {
 
     // log::info!("hello");
 
-    let dbus = dbus::Dbus::new();
+    let dbus = dbus2::Dbus::new().unwrap();
 
     let udev = Udev::new().unwrap();
     let libinput = input::Libinput::new();

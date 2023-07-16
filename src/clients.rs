@@ -10,7 +10,7 @@ use std::{
 use libc::getsockopt;
 
 use crate::{
-    dbus::DbusAction,
+    dbus2::DbusAction,
     input::Libinput,
     io_uring::{
         model::IoUringAction,
@@ -362,7 +362,7 @@ impl ClientReader {
     }
 
     fn on_recvmsg(result: std::io::Result<RecvmsgCompleted>) -> AnyAction {
-        let RecvmsgCompleted { fd: _, buffer } = result.unwrap();
+        let RecvmsgCompleted { fd: _, buffer, fds: _ } = result.unwrap();
         AnyAction::from(ClientReaderAction::ReadMsg { buffer })
     }
 

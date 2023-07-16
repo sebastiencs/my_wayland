@@ -61,6 +61,7 @@ pub struct ReadWriteCompleted {
 pub struct RecvmsgCompleted {
     pub fd: RawFd,
     pub buffer: Box<[u8]>,
+    pub fds: Box<[RawFd]>,
 }
 
 #[derive(Debug)]
@@ -92,7 +93,6 @@ impl Debug for RecvmsgData {
     }
 }
 
-#[derive(Debug)]
 pub(super) enum Operation {
     // ReadFixed {
     //     fd: RawFd,
@@ -168,6 +168,53 @@ pub(super) enum Operation {
     //     spec: &'a mut timespec,
     // },
     NoOp,
+}
+
+impl Debug for Operation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReadWrite {
+                id,
+                fd,
+                offset,
+                buffer,
+                kind,
+                nbytes_processed,
+                neof,
+                dispatch_to,
+            } => f
+                .debug_struct("ReadWrite")
+                .field("id", id)
+                .field("fd", fd)
+                .field("offset", offset)
+                .field("buffer", &buffer.len())
+                .field("kind", kind)
+                .field("nbytes", nbytes_processed)
+                .field("neof", neof)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
+            Self::Recvmsg { id, fd, data, dispatch_to } => f
+                .debug_struct("Recvmsg")
+                .field("id", id)
+                .field("fd", fd)
+                .field("data", data)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
+            Self::Accept { id, fd, dispatch_to } => f
+                .debug_struct("Accept")
+                .field("id", id)
+                .field("fd", fd)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
+            Self::Poll { id, fd, dispatch_to } => f
+                .debug_struct("Poll")
+                .field("id", id)
+                .field("fd", fd)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
+            Self::NoOp => write!(f, "NoOp"),
+        }
+    }
 }
 
 impl Operation {

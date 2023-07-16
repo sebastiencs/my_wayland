@@ -9,7 +9,7 @@ use std::{
 use nix::sys::stat::{major, minor};
 
 use crate::{
-    dbus::DbusAction,
+    dbus2::DbusAction,
     io_uring::{model::IoUringAction, ring::PollCompleted},
     state::{AnyAction, Dispatcher, Model, Redispatcher},
 };

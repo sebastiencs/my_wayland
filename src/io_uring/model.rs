@@ -1,10 +1,11 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     io::ErrorKind::UnexpectedEof,
+    ops::Range,
     os::fd::RawFd,
 };
 
-use log::error;
+use {libc::cmsghdr, log::error};
 
 use crate::{
     io_uring::ring::{Operation, PollCompleted},
@@ -19,7 +20,6 @@ use super::{
     types::empty_msghdr,
 };
 
-#[derive(Debug)]
 pub enum IoUringAction {
     Completion,
     WaitForCompletion,
@@ -47,6 +47,44 @@ pub enum IoUringAction {
         fd: RawFd,
         dispatch_to: Redispatcher<std::io::Result<PollCompleted>>,
     },
+}
+
+impl std::fmt::Debug for IoUringAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Completion => write!(f, "Completion"),
+            Self::WaitForCompletion => write!(f, "WaitForCompletion"),
+            Self::Read { fd, offset, length, dispatch_to } => f
+                .debug_struct("Read")
+                .field("fd", fd)
+                .field("offset", offset)
+                .field("length", length)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
+            Self::Write { fd, offset, buffer, dispatch_to } => f
+                .debug_struct("Write")
+                .field("fd", fd)
+                .field("offset", offset)
+                .field("buffer_len", &buffer.len())
+                .field("dispatch_to", dispatch_to)
+                .finish(),
+            Self::Recvmsg { fd, dispatch_to } => f
+                .debug_struct("Recvmsg")
+                .field("fd", fd)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
+            Self::Accept { fd, dispatch_to } => f
+                .debug_struct("Accept")
+                .field("fd", fd)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
+            Self::Poll { fd, dispatch_to } => f
+                .debug_struct("Poll")
+                .field("fd", fd)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
+        }
+    }
 }
 
 pub struct IoUringState {
@@ -212,7 +250,10 @@ impl IoUringState {
             Operation::Recvmsg { id: _, fd, data, dispatch_to: to } => {
                 let nbytes = result as usize;
                 let buffer = Box::from(&data.buffer_read[..nbytes]);
-                dispatcher.redispatch_to(to, Ok(RecvmsgCompleted { fd, buffer }));
+                let fds = read_fds(&data.buffer_aux[..data.msghdr.msg_controllen])
+                    .unwrap_or_else(|_| Vec::new())
+                    .into();
+                dispatcher.redispatch_to(to, Ok(RecvmsgCompleted { fd, buffer, fds }));
             }
             Operation::Accept { id: _, fd, dispatch_to: to } => {
                 let new_client: RawFd = result;
@@ -255,4 +296,55 @@ impl IoUringState {
             }
         }
     }
+}
+
+fn read_fds(mut data: &[u8]) -> std::io::Result<Vec<RawFd>> {
+    fn align(size: usize) -> usize {
+        const ALIGN: usize = std::mem::size_of::<usize>() - 1;
+        (size + ALIGN) & !ALIGN
+    }
+
+    let mut fds = Vec::default();
+
+    while !data.is_empty() {
+        let (header, msg_data) = read_cmsg(data)?;
+        data = &data[align(header.cmsg_len)..];
+
+        if header.cmsg_type != libc::SCM_RIGHTS {
+            continue;
+        }
+
+        let chunks = msg_data
+            .array_chunks::<4>()
+            .map(|chunk| i32::from_ne_bytes(*chunk));
+        fds.extend(chunks);
+    }
+
+    Ok(fds)
+}
+
+fn read_cmsg(data: &[u8]) -> std::io::Result<(cmsghdr, &[u8])> {
+    use std::io::ErrorKind::InvalidData;
+
+    const HEADER_LENGTH: usize = 16;
+    static_assertions::assert_eq_size!(usize, libc::size_t);
+    static_assertions::assert_eq_size!(i32, libc::c_int);
+
+    let read_n = |range: Range<usize>| -> std::io::Result<&[u8]> {
+        data.get(range).ok_or_else(|| InvalidData.into())
+    };
+    if data.len() < HEADER_LENGTH {
+        return Err(InvalidData.into());
+    }
+    let header = cmsghdr {
+        cmsg_len: usize::from_ne_bytes(read_n(0..8)?.try_into().unwrap()),
+        cmsg_level: i32::from_ne_bytes(read_n(8..12)?.try_into().unwrap()),
+        cmsg_type: i32::from_ne_bytes(read_n(12..16)?.try_into().unwrap()),
+    };
+    if header.cmsg_len < HEADER_LENGTH {
+        return Err(InvalidData.into());
+    }
+    let msg = read_n(HEADER_LENGTH..header.cmsg_len)?;
+
+    Ok((header, msg))
 }
