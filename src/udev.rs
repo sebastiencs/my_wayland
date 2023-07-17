@@ -1,5 +1,9 @@
 use std::{
-    os::fd::{AsRawFd, RawFd},
+    collections::BTreeMap,
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::prelude::OsStrExt,
+    },
     path::PathBuf,
 };
 
@@ -15,7 +19,7 @@ use crate::{
 pub struct Device {
     pub devnum: libc::dev_t,
     pub path_node: PathBuf,
-    pub fd: Option<RawFd>,
+    pub fd: RawFd,
 }
 
 impl Device {
@@ -30,17 +34,19 @@ impl Device {
 
 pub struct Udev {
     udev_monitor: udev::MonitorSocket,
-    // fd: RawFd,
+    pending: BTreeMap<libc::dev_t, udev::Device>,
 }
 
 pub enum UdevAction {
     Start,
     Event,
+    DeviceTaken { fd: RawFd, inactive: bool, devnum: libc::dev_t },
 }
 
 impl Model for Udev {
     type InitParams = ();
     type Action = UdevAction;
+    const START: Option<Self::Action> = Some(Self::Action::Start);
 
     fn init(_params: Self::InitParams) -> Box<Self> {
         todo!()
@@ -57,6 +63,14 @@ impl Model for Udev {
                     self.handle_event(event, dispatcher)
                 }
             }
+            UdevAction::DeviceTaken { fd, inactive, devnum } => {
+                let device = self.pending.remove(&devnum).unwrap();
+                self.on_taken(device, fd, inactive, devnum);
+                // let Some(path_node) = device.devnode().map(PathBuf::from) else {
+                //     return Ok(());
+                // };
+                // log::warn!("DEVICE TAKEN devum={:?} fd={:?} inactive={:?} {:?}", devnum, fd, inactive, path_node);
+            }
         }
         Ok(())
     }
@@ -68,8 +82,9 @@ impl Udev {
             .match_subsystem("input")?
             .match_subsystem("drm")?
             .listen()?;
+        let pending = BTreeMap::default();
 
-        Ok(Box::new(Udev { udev_monitor }))
+        Ok(Box::new(Udev { udev_monitor, pending }))
     }
 
     fn on_udev_event(result: std::io::Result<PollCompleted>) -> AnyAction {
@@ -84,7 +99,7 @@ impl Udev {
         });
     }
 
-    fn enumerate(&self, dispatcher: &mut Dispatcher) -> std::io::Result<()> {
+    fn enumerate(&mut self, dispatcher: &mut Dispatcher) -> std::io::Result<()> {
         let mut enumerator = udev::Enumerator::new()?;
         enumerator.match_subsystem("input")?;
         enumerator.match_subsystem("drm")?;
@@ -94,7 +109,7 @@ impl Udev {
         Ok(())
     }
 
-    fn handle_event(&self, event: udev::Event, dispatcher: &mut Dispatcher) {
+    fn handle_event(&mut self, event: udev::Event, dispatcher: &mut Dispatcher) {
         use udev::EventType::*;
 
         match event.event_type() {
@@ -106,19 +121,43 @@ impl Udev {
         }
     }
 
-    fn handle_new_device(&self, device: udev::Device, dispatcher: &mut Dispatcher) {
+    fn handle_new_device(&mut self, device: udev::Device, dispatcher: &mut Dispatcher) {
+        let Some(subsystem) = device.subsystem() else {
+            return;
+        };
+
+        match subsystem.as_bytes() {
+            b"input" => self.handle_new_input(device, dispatcher),
+            b"drm" => self.handle_new_drm(device, dispatcher),
+            _ => {}
+        }
+    }
+
+    fn handle_new_input(&mut self, device: udev::Device, dispatcher: &mut Dispatcher) {
         if !device.is_initialized() {
             return;
         }
         let Some(devnum) = device.devnum() else {
             return;
         };
-        let Some(path_node) = device.devnode().map(Into::into) else {
+        dispatcher.dispatch(DbusAction::TakeDevice { devnum });
+        self.pending.insert(devnum, device);
+    }
+
+    fn handle_new_drm(&mut self, device: udev::Device, dispatcher: &mut Dispatcher) {
+        if !device.is_initialized() {
+            return;
+        }
+        let Some(devnum) = device.devnum() else {
             return;
         };
+        dispatcher.dispatch(DbusAction::TakeDevice { devnum });
+        self.pending.insert(devnum, device);
+    }
 
-        // eprintln!("device={:#?}", device);
-        let fd = None;
-        dispatcher.dispatch(DbusAction::TakeDevice(Device { devnum, path_node, fd }));
+    fn on_taken(&mut self, device: udev::Device, fd: RawFd, inactive: bool, devnum: libc::dev_t) {
+        if inactive {
+            return;
+        }
     }
 }

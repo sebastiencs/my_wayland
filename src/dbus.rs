@@ -13,7 +13,7 @@ use dbus_message_parser::encode::EncodeError;
 use crate::{
     io_uring::{model::IoUringAction, ring::RecvmsgCompleted},
     state::{Dispatcher, Model, Redispatcher},
-    udev::Device,
+    udev::UdevAction,
 };
 
 use {
@@ -59,7 +59,7 @@ pub enum DbusError {
 
 #[derive(Debug)]
 enum Pending {
-    TakeDevice { device: Device },
+    TakeDevice { devnum: libc::dev_t },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -341,9 +341,9 @@ impl Dbus {
         serial
     }
 
-    fn take_device(&mut self, device: &Device, dispatcher: &mut Dispatcher) -> DbusSerial {
-        let major = device.major();
-        let minor = device.minor();
+    fn take_device(&mut self, devnum: libc::dev_t, dispatcher: &mut Dispatcher) -> DbusSerial {
+        let major: u32 = nix::sys::stat::major(devnum).try_into().unwrap();
+        let minor: u32 = nix::sys::stat::minor(devnum).try_into().unwrap();
 
         let msg_serial = self.next_serial();
         let mut msg = make_method_call(MethodCallParams {
@@ -368,7 +368,7 @@ impl Dbus {
         msg_serial
     }
 
-    fn handle_message(&mut self, msg: Message, _dispatcher: &mut Dispatcher) {
+    fn handle_message(&mut self, msg: Message, dispatcher: &mut Dispatcher) {
         use {dbus_message_parser::message::MessageType::*, Value::*};
 
         let reply_serial = msg.get_reply_serial().map(DbusSerial);
@@ -380,14 +380,12 @@ impl Dbus {
         match msg.get_type() {
             MethodCall => todo!(),
             MethodReturn => match pending {
-                Pending::TakeDevice { mut device } => {
+                Pending::TakeDevice { devnum } => {
                     let [UnixFD(fd), Boolean(inactive)] = msg.get_body() else {
                         panic!();
                     };
-                    if *inactive {
-                        return;
-                    }
-                    device.fd = Some(*fd);
+                    let (fd, inactive) = (*fd, *inactive);
+                    dispatcher.dispatch(UdevAction::DeviceTaken { fd, inactive, devnum });
                 }
             },
             Error => {
@@ -400,13 +398,14 @@ impl Dbus {
 
 pub enum DbusAction {
     Start,
-    TakeDevice(Device),
+    TakeDevice { devnum: libc::dev_t },
     MsgReceived { msg: Message },
 }
 
 impl Model for Dbus {
     type InitParams = ();
     type Action = DbusAction;
+    const START: Option<Self::Action> = Some(Self::Action::Start);
 
     fn init(_params: Self::InitParams) -> Box<Self> {
         todo!()
@@ -420,9 +419,9 @@ impl Model for Dbus {
                 let fd = self.socket.as_raw_fd();
                 dispatcher.start_model2(DbusReader::new(fd));
             }
-            TakeDevice(device) => {
-                let serial = self.take_device(&device, dispatcher);
-                self.pending.insert(serial, Pending::TakeDevice { device });
+            TakeDevice { devnum } => {
+                let serial = self.take_device(devnum, dispatcher);
+                self.pending.insert(serial, Pending::TakeDevice { devnum });
             }
             MsgReceived { msg } => {
                 self.handle_message(msg, dispatcher);
@@ -432,8 +431,6 @@ impl Model for Dbus {
         Ok(())
     }
 }
-
-const DBUS_READER_ID: u64 = 1;
 
 struct DbusReader {
     fd: RawFd,

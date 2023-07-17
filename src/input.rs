@@ -7,6 +7,8 @@ use std::{
     path::Path,
 };
 
+use crate::state::{Dispatcher, Model};
+
 use {
     input::LibinputInterface,
     libc::{O_RDONLY, O_RDWR, O_WRONLY},
@@ -56,5 +58,25 @@ impl Libinput {
 
     pub fn next_event(&mut self) -> Option<input::Event> {
         self.libinput.next()
+    }
+}
+
+#[derive(Debug)]
+pub enum LibinputAction {
+    Start,
+}
+
+impl Model for Libinput {
+    type InitParams = ();
+    type Action = LibinputAction;
+
+    const START: Option<Self::Action> = Some(Self::Action::Start);
+
+    fn init(_params: Self::InitParams) -> Box<Self> {
+        todo!()
+    }
+
+    fn process(&mut self, _action: Self::Action, _dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        todo!()
     }
 }

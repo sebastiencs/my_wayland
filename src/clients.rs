@@ -10,7 +10,7 @@ use std::{
 use libc::getsockopt;
 
 use crate::{
-    dbus::DbusAction,
+    dbus::Dbus,
     input::Libinput,
     io_uring::{
         model::IoUringAction,
@@ -19,7 +19,7 @@ use crate::{
     object::{Object, ParserError},
     protocol_generated::WaylandId,
     state::{AnyAction, Dispatcher, Model, Redispatcher},
-    udev::UdevAction,
+    udev::Udev,
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
@@ -101,8 +101,8 @@ impl Model for Clients {
         match action {
             Start => {
                 self.dispatch_accept(dispatcher);
-                dispatcher.dispatch(DbusAction::Start);
-                dispatcher.dispatch(UdevAction::Start);
+                dispatcher.start::<Dbus>();
+                dispatcher.start::<Udev>();
                 self.dispatch_poll_libinput(dispatcher);
             }
             NewClient { new_client } => {

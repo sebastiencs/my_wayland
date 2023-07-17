@@ -51,6 +51,13 @@ impl Dispatcher {
         };
     }
 
+    pub fn start<M>(&mut self)
+    where
+        M: Model,
+    {
+        self.dispatch(M::START.unwrap());
+    }
+
     pub fn add_model<I, M>(&mut self, id: I, model: M)
     where
         I: Into<u64>,
