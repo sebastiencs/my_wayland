@@ -11,10 +11,9 @@ use libc::getsockopt;
 
 use crate::{
     dbus::Dbus,
-    input::Libinput,
     io_uring::{
         model::IoUringAction,
-        ring::{AcceptCompleted, PollCompleted, RecvmsgCompleted},
+        ring::{AcceptCompleted, RecvmsgCompleted},
     },
     object::{Object, ParserError},
     protocol_generated::WaylandId,
@@ -25,15 +24,12 @@ use crate::{
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
 pub struct ClientId(u64);
 
-pub struct ClientsInitParams {
-    pub libinput: Libinput,
-}
+pub struct ClientsInitParams {}
 
 pub struct Clients {
     current_id: u64,
     fd: UnixListener,
     set: BTreeSet<ClientId>,
-    libinput: Libinput,
 }
 
 #[derive(Debug)]
@@ -52,11 +48,6 @@ impl Clients {
         ClientId(id)
     }
 
-    fn on_libinput_event(result: std::io::Result<PollCompleted>) -> AnyAction {
-        let PollCompleted {} = result.unwrap();
-        AnyAction::from(ClientsAction::LibinputEvent)
-    }
-
     fn on_accept(result: std::io::Result<AcceptCompleted>) -> AnyAction {
         let AcceptCompleted { fd: _, new_client } = result.unwrap();
         AnyAction::from(ClientsAction::NewClient { new_client })
@@ -68,13 +59,6 @@ impl Clients {
             dispatch_to: Redispatcher::new(Self::on_accept),
         });
     }
-
-    fn dispatch_poll_libinput(&self, dispatcher: &mut Dispatcher) {
-        dispatcher.dispatch(IoUringAction::Poll {
-            fd: self.libinput.as_raw_fd(),
-            dispatch_to: Redispatcher::new(Self::on_libinput_event),
-        });
-    }
 }
 
 impl Model for Clients {
@@ -82,7 +66,7 @@ impl Model for Clients {
     type Action = ClientsAction;
 
     fn init(params: Self::InitParams) -> Box<Self> {
-        let ClientsInitParams { libinput } = params;
+        let ClientsInitParams {} = params;
 
         let filename = PathBuf::from("/var/run/user/1000/wayland-1");
         if filename.exists() {
@@ -92,7 +76,7 @@ impl Model for Clients {
         let current_id = 0;
         let set = BTreeSet::default();
 
-        Box::new(Self { current_id, fd, set, libinput })
+        Box::new(Self { current_id, fd, set })
     }
 
     fn process(&mut self, action: ClientsAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
@@ -103,7 +87,6 @@ impl Model for Clients {
                 self.dispatch_accept(dispatcher);
                 dispatcher.start::<Dbus>();
                 dispatcher.start::<Udev>();
-                self.dispatch_poll_libinput(dispatcher);
             }
             NewClient { new_client } => {
                 self.dispatch_accept(dispatcher);
@@ -115,10 +98,10 @@ impl Model for Clients {
                 log::trace!("new_client id={:?} fd={:?}", client_id, new_client);
             }
             LibinputEvent => {
-                self.libinput.dispatch();
-                while let Some(event) = self.libinput.next_event() {
-                    log::info!("libinput event={:?}", event);
-                }
+                // self.libinput.dispatch();
+                // while let Some(event) = self.libinput.next_event() {
+                //     log::info!("libinput event={:?}", event);
+                // }
             }
             UdevEvent => {
                 eprintln!("UDEV EVENT");

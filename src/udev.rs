@@ -7,10 +7,21 @@ use std::{
     path::PathBuf,
 };
 
-use nix::sys::stat::{major, minor};
+use {
+    libc::SOCK_NONBLOCK,
+    nix::{
+        fcntl::{
+            self,
+            FcntlArg::{self, F_GETFL},
+            FdFlag, OFlag,
+        },
+        sys::stat::{major, minor},
+    },
+};
 
 use crate::{
     dbus::DbusAction,
+    input::LibinputAction,
     io_uring::{model::IoUringAction, ring::PollCompleted},
     state::{AnyAction, Dispatcher, Model, Redispatcher},
 };
@@ -32,9 +43,14 @@ impl Device {
     }
 }
 
+enum PendingControl {
+    Drm(udev::Device),
+    Input(udev::Device),
+}
+
 pub struct Udev {
     udev_monitor: udev::MonitorSocket,
-    pending: BTreeMap<libc::dev_t, udev::Device>,
+    pending: BTreeMap<libc::dev_t, PendingControl>,
 }
 
 pub enum UdevAction {
@@ -64,8 +80,13 @@ impl Model for Udev {
                 }
             }
             UdevAction::DeviceTaken { fd, inactive, devnum } => {
-                let device = self.pending.remove(&devnum).unwrap();
-                self.on_taken(device, fd, inactive, devnum);
+                match self.pending.remove(&devnum).unwrap() {
+                    PendingControl::Drm(device) => self.on_drm_taken(device, fd, inactive, devnum),
+                    PendingControl::Input(device) => {
+                        self.on_input_taken(device, fd, inactive, devnum, dispatcher)
+                    }
+                }
+                // self.on_taken(device, fd, inactive, devnum);
                 // let Some(path_node) = device.devnode().map(PathBuf::from) else {
                 //     return Ok(());
                 // };
@@ -141,7 +162,7 @@ impl Udev {
             return;
         };
         dispatcher.dispatch(DbusAction::TakeDevice { devnum });
-        self.pending.insert(devnum, device);
+        self.pending.insert(devnum, PendingControl::Input(device));
     }
 
     fn handle_new_drm(&mut self, device: udev::Device, dispatcher: &mut Dispatcher) {
@@ -152,10 +173,44 @@ impl Udev {
             return;
         };
         dispatcher.dispatch(DbusAction::TakeDevice { devnum });
-        self.pending.insert(devnum, device);
+        self.pending.insert(devnum, PendingControl::Drm(device));
     }
 
-    fn on_taken(&mut self, device: udev::Device, fd: RawFd, inactive: bool, devnum: libc::dev_t) {
+    fn on_input_taken(
+        &mut self,
+        device: udev::Device,
+        fd: RawFd,
+        inactive: bool,
+        devnum: libc::dev_t,
+        dispatcher: &mut Dispatcher,
+    ) {
+        if inactive {
+            return;
+        }
+
+        let Some(devnode) = device.devnode().and_then(|devnode| devnode.to_str()) else {
+            return;
+        };
+        let devnode = devnode.to_string();
+
+        let flags = fcntl::fcntl(fd, F_GETFL).unwrap();
+        eprintln!("{:032b}", flags);
+        let flags = unsafe { OFlag::from_bits_unchecked(flags) };
+        let res = fcntl::fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK | flags)).unwrap();
+        eprintln!("RES={:?}", res);
+
+        eprintln!("ON TAKEN {:?} devnum={:?}", devnode, devnum);
+
+        dispatcher.dispatch(LibinputAction::OpenInput { devnode, fd, devnum });
+    }
+
+    fn on_drm_taken(
+        &mut self,
+        device: udev::Device,
+        fd: RawFd,
+        inactive: bool,
+        devnum: libc::dev_t,
+    ) {
         if inactive {
             return;
         }

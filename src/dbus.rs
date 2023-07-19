@@ -290,6 +290,8 @@ fn take_session_control(
         return Ok(DbusSerial(4));
     }
 
+    log::info!("Taking session control: {}", session_path);
+
     let mut msg = make_method_call(MethodCallParams {
         destination: "org.freedesktop.login1".into(),
         object_path: session_path.into(),

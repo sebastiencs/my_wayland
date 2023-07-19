@@ -83,12 +83,13 @@ fn main() {
     // protocol::gen().unwrap();
 
     let uring = IoUringState::init(());
-    let clients = Clients::init(ClientsInitParams { libinput });
+    let clients = Clients::init(ClientsInitParams {});
 
     let mut runner = Runner::default();
     runner.add_model(uring);
     runner.add_model(dbus);
     runner.add_model(udev);
+    runner.add_model(libinput);
     runner.add_model(clients);
 
     let mut dispatcher = Dispatcher::default();

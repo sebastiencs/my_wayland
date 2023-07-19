@@ -1,55 +1,55 @@
 use std::{
-    fs::{File, OpenOptions},
-    os::{
-        fd::{AsRawFd, OwnedFd},
-        unix::prelude::OpenOptionsExt,
-    },
+    collections::BTreeMap,
+    os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd},
     path::Path,
+    sync::{Arc, Mutex},
 };
 
-use crate::state::{Dispatcher, Model};
-
-use {
-    input::LibinputInterface,
-    libc::{O_RDONLY, O_RDWR, O_WRONLY},
+use crate::{
+    io_uring::{model::IoUringAction, ring::PollCompleted},
+    state::{Dispatcher, Model, Redispatcher},
 };
 
-struct Interface;
+use {input::LibinputInterface, nix::unistd::close};
+
+struct Interface {
+    dev_to_fd: Arc<Mutex<BTreeMap<u64, RawFd>>>,
+}
 
 impl LibinputInterface for Interface {
     #[allow(clippy::bad_bit_mask)]
     fn open_restricted(&mut self, path: &Path, flags: i32) -> Result<OwnedFd, i32> {
-        eprintln!("OPEN_RESTRICTED {:?} {:?}", path, flags);
-        OpenOptions::new()
-            .custom_flags(flags)
-            .read((flags & O_RDONLY != 0) | (flags & O_RDWR != 0))
-            .write((flags & O_WRONLY != 0) | (flags & O_RDWR != 0))
-            .open(path)
-            .map(|file| file.into())
-            .map_err(|err| err.raw_os_error().unwrap())
+        let Ok(stat) = nix::sys::stat::stat(path) else {
+            log::error!("Failed to `stat(2)` {:?}", path);
+            return Err(-1);
+        };
+        // TODO: Handle errors
+        let fd = {
+            let dev_to_fd = self.dev_to_fd.lock().unwrap();
+            dev_to_fd.get(&stat.st_rdev).copied().unwrap()
+        };
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+        Ok(borrowed_fd.try_clone_to_owned().unwrap())
     }
+
     fn close_restricted(&mut self, fd: OwnedFd) {
-        eprintln!("CLOSE_RESTRICTED");
-        drop(File::from(fd));
+        if let Err(e) = close(fd.as_raw_fd()) {
+            log::error!("Failed to close libinput fd: {:?}", e);
+        }
     }
 }
 
 pub struct Libinput {
     libinput: input::Libinput,
-}
-
-impl AsRawFd for Libinput {
-    fn as_raw_fd(&self) -> std::os::fd::RawFd {
-        self.libinput.as_raw_fd()
-    }
+    dev_to_fd: Arc<Mutex<BTreeMap<u64, RawFd>>>,
 }
 
 impl Libinput {
-    pub fn new() -> Self {
-        // let mut input = Libinput::new_with_udev(Interface);
-        // input.udev_assign_seat(&seat_id).unwrap();
-        let libinput = input::Libinput::new_from_path(Interface);
-        Self { libinput }
+    pub fn new() -> Box<Self> {
+        let dev_to_fd = Arc::default();
+        let libinput =
+            input::Libinput::new_from_path(Interface { dev_to_fd: Arc::clone(&dev_to_fd) });
+        Box::new(Self { libinput, dev_to_fd })
     }
 
     pub fn dispatch(&mut self) {
@@ -59,11 +59,32 @@ impl Libinput {
     pub fn next_event(&mut self) -> Option<input::Event> {
         self.libinput.next()
     }
+
+    fn dispatch_poll_libinput(&self, dispatcher: &mut Dispatcher) {
+        dispatcher.dispatch(IoUringAction::Poll {
+            fd: self.libinput.as_raw_fd(),
+            dispatch_to: Redispatcher::into::<LibinputAction>(),
+        });
+    }
+
+    fn insert_device_fd(&mut self, fd: RawFd, devnum: u64) {
+        let mut dev_to_fd = self.dev_to_fd.lock().unwrap();
+        dev_to_fd.insert(devnum, fd);
+    }
 }
 
 #[derive(Debug)]
 pub enum LibinputAction {
     Start,
+    Event,
+    OpenInput { devnode: String, fd: RawFd, devnum: u64 },
+}
+
+impl From<std::io::Result<PollCompleted>> for LibinputAction {
+    fn from(result: std::io::Result<PollCompleted>) -> Self {
+        let PollCompleted {} = result.unwrap();
+        Self::Event
+    }
 }
 
 impl Model for Libinput {
@@ -76,7 +97,22 @@ impl Model for Libinput {
         todo!()
     }
 
-    fn process(&mut self, _action: Self::Action, _dispatcher: &mut Dispatcher) -> Result<(), ()> {
-        todo!()
+    fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        use LibinputAction::*;
+
+        match action {
+            Start => {
+                self.dispatch_poll_libinput(dispatcher);
+            }
+            Event => {
+                log::info!("LIBINPUT EVENT")
+            }
+            OpenInput { devnode, fd, devnum } => {
+                self.insert_device_fd(fd, devnum);
+                let device = self.libinput.path_add_device(&devnode);
+                dbg!(&device);
+            }
+        }
+        Ok(())
     }
 }
