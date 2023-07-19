@@ -5,6 +5,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use input::AsRaw;
+
 use crate::{
     io_uring::{model::IoUringAction, ring::PollCompleted},
     state::{Dispatcher, Model, Redispatcher},
@@ -18,7 +20,7 @@ struct Interface {
 
 impl LibinputInterface for Interface {
     #[allow(clippy::bad_bit_mask)]
-    fn open_restricted(&mut self, path: &Path, flags: i32) -> Result<OwnedFd, i32> {
+    fn open_restricted(&mut self, path: &Path, _flags: i32) -> Result<OwnedFd, i32> {
         let Ok(stat) = nix::sys::stat::stat(path) else {
             log::error!("Failed to `stat(2)` {:?}", path);
             return Err(-1);
@@ -49,6 +51,8 @@ impl Libinput {
         let dev_to_fd = Arc::default();
         let libinput =
             input::Libinput::new_from_path(Interface { dev_to_fd: Arc::clone(&dev_to_fd) });
+        set_logger(&libinput);
+
         Box::new(Self { libinput, dev_to_fd })
     }
 
@@ -109,10 +113,84 @@ impl Model for Libinput {
             }
             OpenInput { devnode, fd, devnum } => {
                 self.insert_device_fd(fd, devnum);
-                let device = self.libinput.path_add_device(&devnode);
-                dbg!(&device);
+                let device = match self.libinput.path_add_device(&devnode) {
+                    Some(device) => device,
+                    None => {
+                        log::error!("Failed to get {:?}", devnode);
+                        return Ok(());
+                    }
+                };
+
+                #[derive(Debug)]
+                struct D {
+                    sysname: String,
+                    name: String,
+                    output_name: Option<String>,
+                    id_vendor: u32,
+                    id_product: u32,
+                }
+
+                let d = D {
+                    sysname: device.sysname().to_string(),
+                    name: device.name().to_string(),
+                    output_name: device.output_name().map(Into::into),
+                    id_vendor: device.id_vendor(),
+                    id_product: device.id_product(),
+                };
+
+                dbg!(&d);
+
+                // device.
             }
         }
         Ok(())
+    }
+}
+
+unsafe extern "C" fn log_handler(
+    _libinput: *mut input::ffi::libinput,
+    priority: input::ffi::libinput_log_priority,
+    format: *const libc::c_char,
+    args: std::ffi::VaList,
+) {
+    extern "C" {
+        fn vasprintf(
+            strp: *mut *mut libc::c_char,
+            fmt: *const libc::c_char,
+            ap: std::ffi::VaList,
+        ) -> libc::c_int;
+    }
+
+    let s = {
+        let mut strp = std::ptr::null_mut();
+        if vasprintf(&mut strp, format, args) == -1 {
+            return log::error!("Unable to format libinput logs");
+        }
+        std::ffi::CStr::from_ptr(strp)
+    };
+
+    let priority = match priority {
+        input::ffi::libinput_log_priority_LIBINPUT_LOG_PRIORITY_DEBUG => log::Level::Debug,
+        input::ffi::libinput_log_priority_LIBINPUT_LOG_PRIORITY_INFO => log::Level::Info,
+        _ => log::Level::Error,
+    };
+
+    log::log!(priority, "libinput: {}", s.to_string_lossy().trim());
+    libc::free(s.as_ptr() as *mut _);
+}
+
+#[link(name = "input")]
+extern "C" {
+    pub fn libinput_log_set_handler(libinput: *mut libc::c_void, log_handler: *mut libc::c_void);
+}
+
+fn set_logger(libinput: &input::Libinput) {
+    unsafe {
+        libinput_log_set_handler(libinput.as_raw() as *mut _, log_handler as _);
+
+        input::ffi::libinput_log_set_priority(
+            libinput.as_raw() as *mut _,
+            input::ffi::libinput_log_priority_LIBINPUT_LOG_PRIORITY_DEBUG,
+        );
     }
 }
