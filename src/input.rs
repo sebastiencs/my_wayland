@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd},
+    os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -30,8 +30,7 @@ impl LibinputInterface for Interface {
             let dev_to_fd = self.dev_to_fd.lock().unwrap();
             dev_to_fd.get(&stat.st_rdev).copied().unwrap()
         };
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
-        Ok(borrowed_fd.try_clone_to_owned().unwrap())
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
     fn close_restricted(&mut self, fd: OwnedFd) {
@@ -43,6 +42,8 @@ impl LibinputInterface for Interface {
 
 pub struct Libinput {
     libinput: input::Libinput,
+    /// We put that in an `Arc<Mutex<_>>` because not sure if libinput
+    /// open the files in another thread or not
     dev_to_fd: Arc<Mutex<BTreeMap<u64, RawFd>>>,
 }
 
@@ -121,24 +122,24 @@ impl Model for Libinput {
                     }
                 };
 
-                #[derive(Debug)]
-                struct D {
-                    sysname: String,
-                    name: String,
-                    output_name: Option<String>,
-                    id_vendor: u32,
-                    id_product: u32,
-                }
+                // #[derive(Debug)]
+                // struct D {
+                //     sysname: String,
+                //     name: String,
+                //     output_name: Option<String>,
+                //     id_vendor: u32,
+                //     id_product: u32,
+                // }
 
-                let d = D {
-                    sysname: device.sysname().to_string(),
-                    name: device.name().to_string(),
-                    output_name: device.output_name().map(Into::into),
-                    id_vendor: device.id_vendor(),
-                    id_product: device.id_product(),
-                };
+                // let d = D {
+                //     sysname: device.sysname().to_string(),
+                //     name: device.name().to_string(),
+                //     output_name: device.output_name().map(Into::into),
+                //     id_vendor: device.id_vendor(),
+                //     id_product: device.id_product(),
+                // };
 
-                dbg!(&d);
+                // dbg!(&d);
 
                 // device.
             }
@@ -153,6 +154,14 @@ unsafe extern "C" fn log_handler(
     format: *const libc::c_char,
     args: std::ffi::VaList,
 ) {
+    #[derive(derive_more::Deref, derive_more::From)]
+    struct ForeignStr<'a>(&'a std::ffi::CStr);
+    impl<'a> Drop for ForeignStr<'a> {
+        fn drop(&mut self) {
+            unsafe { libc::free(self.as_ptr() as *mut _) }
+        }
+    }
+
     extern "C" {
         fn vasprintf(
             strp: *mut *mut libc::c_char,
@@ -161,12 +170,12 @@ unsafe extern "C" fn log_handler(
         ) -> libc::c_int;
     }
 
-    let s = {
+    let s: ForeignStr = {
         let mut strp = std::ptr::null_mut();
         if vasprintf(&mut strp, format, args) == -1 {
             return log::error!("Unable to format libinput logs");
         }
-        std::ffi::CStr::from_ptr(strp)
+        std::ffi::CStr::from_ptr(strp).into()
     };
 
     let priority = match priority {
@@ -176,15 +185,17 @@ unsafe extern "C" fn log_handler(
     };
 
     log::log!(priority, "libinput: {}", s.to_string_lossy().trim());
-    libc::free(s.as_ptr() as *mut _);
-}
-
-#[link(name = "input")]
-extern "C" {
-    pub fn libinput_log_set_handler(libinput: *mut libc::c_void, log_handler: *mut libc::c_void);
 }
 
 fn set_logger(libinput: &input::Libinput) {
+    #[link(name = "input")]
+    extern "C" {
+        pub fn libinput_log_set_handler(
+            libinput: *mut libc::c_void,
+            log_handler: *mut libc::c_void,
+        );
+    }
+
     unsafe {
         libinput_log_set_handler(libinput.as_raw() as *mut _, log_handler as _);
 

@@ -34,6 +34,7 @@ use crate::{
 
 mod clients;
 mod dbus;
+mod drm;
 mod egl;
 mod input;
 mod io_uring;

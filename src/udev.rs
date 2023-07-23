@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     os::{
-        fd::{AsRawFd, RawFd},
+        fd::{AsFd, AsRawFd, BorrowedFd, RawFd},
         unix::prelude::OsStrExt,
     },
     path::PathBuf,
@@ -21,6 +21,7 @@ use {
 
 use crate::{
     dbus::DbusAction,
+    drm::Drm,
     input::LibinputAction,
     io_uring::{model::IoUringAction, ring::PollCompleted},
     state::{AnyAction, Dispatcher, Model, Redispatcher},
@@ -172,6 +173,13 @@ impl Udev {
         let Some(devnum) = device.devnum() else {
             return;
         };
+
+        // From xf86drm.h
+        // #define DRM_DIR_NAME  "/dev/dri"
+        // #define DRM_PRIMARY_MINOR_NAME  "card"
+        // #define DRM_CONTROL_MINOR_NAME  "controlD"
+        // #define DRM_RENDER_MINOR_NAME   "renderD"
+        // #define DRM_PROC_NAME "/proc/dri/" /* For backward Linux compatibility */
         dispatcher.dispatch(DbusAction::TakeDevice { devnum });
         self.pending.insert(devnum, PendingControl::Drm(device));
     }
@@ -187,19 +195,11 @@ impl Udev {
         if inactive {
             return;
         }
-
         let Some(devnode) = device.devnode().and_then(|devnode| devnode.to_str()) else {
             return;
         };
         let devnode = devnode.to_string();
-
-        let flags = fcntl::fcntl(fd, F_GETFL).unwrap();
-        eprintln!("{:032b}", flags);
-        let flags = unsafe { OFlag::from_bits_unchecked(flags) };
-        let res = fcntl::fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK | flags)).unwrap();
-        eprintln!("RES={:?}", res);
-
-        eprintln!("ON TAKEN {:?} devnum={:?}", devnode, devnum);
+        set_non_blocking(fd);
 
         dispatcher.dispatch(LibinputAction::OpenInput { devnode, fd, devnum });
     }
@@ -214,5 +214,51 @@ impl Udev {
         if inactive {
             return;
         }
+
+        eprintln!("DRM TAKEN {:?}", device.devnode());
+
+        Drm::create_drm(fd, device);
+
+        // use drm::Device;
+        // use drm::control::Device as CT;
+
+        // struct MyDrm {
+        //     fd: RawFd,
+        //     device: udev::Device,
+        // }
+
+        // impl AsFd for MyDrm {
+        //     fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        //         unsafe { BorrowedFd::borrow_raw(self.fd) }
+        //     }
+        // }
+
+        // impl drm::Device for MyDrm {}
+        // impl drm::control::Device for MyDrm {}
+
+        // let drm = MyDrm {
+        //     fd,
+        //     device,
+        // };
+
+        // dbg!(drm.get_bus_id());
+        // dbg!(drm.get_driver());
+        // dbg!(drm.plane_handles());
+        // dbg!(drm.resource_handles());
+
+        // let resources = drm.resource_handles().unwrap();
+
+        // for conn in resources.connectors() {
+        //     dbg!(drm.get_connector(*conn, false));
+        // }
+    }
+}
+
+fn set_non_blocking(fd: RawFd) {
+    let flags = fcntl::fcntl(fd, F_GETFL).unwrap();
+    let flags = unsafe { OFlag::from_bits_unchecked(flags) };
+
+    if !flags.contains(OFlag::O_NONBLOCK) {
+        fcntl::fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK | flags)).unwrap();
     }
 }
