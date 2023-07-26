@@ -83,8 +83,8 @@ fn main() {
 
     // protocol::gen().unwrap();
 
-    let uring = IoUringState::init(());
-    let clients = Clients::init(ClientsInitParams {});
+    let uring = Box::<IoUringState>::default();
+    let clients = Clients::new();
 
     let mut runner = Runner::default();
     runner.add_model(uring);

@@ -93,14 +93,9 @@ impl From<std::io::Result<PollCompleted>> for LibinputAction {
 }
 
 impl Model for Libinput {
-    type InitParams = ();
     type Action = LibinputAction;
 
     const START: Option<Self::Action> = Some(Self::Action::Start);
-
-    fn init(_params: Self::InitParams) -> Box<Self> {
-        todo!()
-    }
 
     fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         use LibinputAction::*;

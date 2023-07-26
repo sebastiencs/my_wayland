@@ -405,13 +405,8 @@ pub enum DbusAction {
 }
 
 impl Model for Dbus {
-    type InitParams = ();
     type Action = DbusAction;
     const START: Option<Self::Action> = Some(Self::Action::Start);
-
-    fn init(_params: Self::InitParams) -> Box<Self> {
-        todo!()
-    }
 
     fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         use DbusAction::*;
@@ -449,14 +444,9 @@ enum DbusReaderAction {
 }
 
 impl Model for DbusReader {
-    type InitParams = ();
     type Action = DbusReaderAction;
     const START: Option<Self::Action> = Some(Self::Action::Start);
     const STOP: Option<Self::Action> = Some(Self::Action::Stop);
-
-    fn init(_params: Self::InitParams) -> Box<Self> {
-        todo!()
-    }
 
     fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         use DbusReaderAction::*;

@@ -42,6 +42,18 @@ pub enum ClientsAction {
 }
 
 impl Clients {
+    pub fn new() -> Box<Self> {
+        let filename = PathBuf::from("/var/run/user/1000/wayland-1");
+        if filename.exists() {
+            std::fs::remove_file(&filename).unwrap();
+        }
+        let fd = UnixListener::bind(filename).unwrap();
+        let current_id = 0;
+        let set = BTreeSet::default();
+
+        Box::new(Self { current_id, fd, set })
+    }
+
     fn next_id(&mut self) -> ClientId {
         let id = self.current_id;
         self.current_id += 1;
@@ -62,22 +74,7 @@ impl Clients {
 }
 
 impl Model for Clients {
-    type InitParams = ClientsInitParams;
     type Action = ClientsAction;
-
-    fn init(params: Self::InitParams) -> Box<Self> {
-        let ClientsInitParams {} = params;
-
-        let filename = PathBuf::from("/var/run/user/1000/wayland-1");
-        if filename.exists() {
-            std::fs::remove_file(&filename).unwrap();
-        }
-        let fd = UnixListener::bind(filename).unwrap();
-        let current_id = 0;
-        let set = BTreeSet::default();
-
-        Box::new(Self { current_id, fd, set })
-    }
 
     fn process(&mut self, action: ClientsAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         use ClientsAction::*;
@@ -188,14 +185,9 @@ impl Client {
 }
 
 impl Model for Client {
-    type InitParams = ();
     type Action = ClientAction;
     const START: Option<Self::Action> = Some(Self::Action::Start);
     const STOP: Option<Self::Action> = Some(Self::Action::Close);
-
-    fn init(_params: Self::InitParams) -> Box<Self> {
-        todo!()
-    }
 
     fn process(&mut self, action: ClientAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         use {crate::wayland_objects::wl_display::WlDisplay, ClientAction::*};
@@ -356,14 +348,9 @@ impl ClientReader {
 }
 
 impl Model for ClientReader {
-    type InitParams = ();
     type Action = ClientReaderAction;
     const START: Option<Self::Action> = Some(Self::Action::Start);
     const STOP: Option<Self::Action> = Some(Self::Action::Stop);
-
-    fn init(_params: Self::InitParams) -> Box<Self> {
-        todo!()
-    }
 
     fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         use ClientReaderAction::*;

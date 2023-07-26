@@ -411,12 +411,10 @@ pub trait Model
 where
     Self: Sized + 'static,
 {
-    type InitParams: 'static;
     type Action: Sized + 'static;
     const START: Option<Self::Action> = None;
     const STOP: Option<Self::Action> = None;
 
-    fn init(params: Self::InitParams) -> Box<Self>;
     fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<()>;
 }
 
@@ -435,12 +433,7 @@ mod backend {
 
     impl Model for BackendState {
         // type State = BackendState;
-        type InitParams = ();
         type Action = BackendAction;
-
-        fn init(_params: Self::InitParams) -> Box<Self> {
-            todo!()
-        }
 
         fn process(&mut self, action: Self::Action, _dispatcher: &mut Dispatcher) -> Result<()> {
             match action {
@@ -466,12 +459,7 @@ mod frontend {
 
     impl Model for FrontendState {
         // type State = FrontendState;
-        type InitParams = ();
         type Action = FrontendAction;
-
-        fn init(_params: Self::InitParams) -> Box<Self> {
-            todo!()
-        }
 
         fn process(&mut self, action: Self::Action, _dispatcher: &mut Dispatcher) -> Result<()> {
             match action {

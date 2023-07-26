@@ -98,24 +98,21 @@ pub struct IoUringState {
     current_ring_id: u32,
 }
 
-pub struct IoUringModel;
-
-// impl Model<IoUringAction> for IoUringState {
-impl Model for IoUringState {
-    // type State = IoUringState;
-    type InitParams = ();
-    type Action = IoUringAction;
-
-    fn init(_params: Self::InitParams) -> Box<Self> {
-        Box::new(IoUringState {
+impl Default for IoUringState {
+    fn default() -> Self {
+        IoUringState {
             ring: IoUring::new(256).unwrap(),
             need_submit: false,
             pending: BTreeMap::default(),
             completed: VecDeque::with_capacity(128),
             current_ring_id: 0,
             to_push: VecDeque::with_capacity(32),
-        })
+        }
     }
+}
+
+impl Model for IoUringState {
+    type Action = IoUringAction;
 
     fn process(&mut self, action: IoUringAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         log::trace!("io_uring action={:?}", action);

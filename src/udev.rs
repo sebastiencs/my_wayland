@@ -58,13 +58,8 @@ pub enum UdevAction {
 }
 
 impl Model for Udev {
-    type InitParams = ();
     type Action = UdevAction;
     const START: Option<Self::Action> = Some(Self::Action::Start);
-
-    fn init(_params: Self::InitParams) -> Box<Self> {
-        todo!()
-    }
 
     fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
         match action {
