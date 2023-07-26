@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     path::Path,
     sync::{Arc, Mutex},
 };

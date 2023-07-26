@@ -130,6 +130,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "edid-rs"
+version = "0.1.0"
+source = "git+https://gitlab.com/sebastiencs/edid-rs.git#e9a5fc3f7662346eea471ba24936472f51f3697c"
+
+[[package]]
 name = "egli"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -516,6 +521,7 @@ dependencies = [
  "dbus-message-parser",
  "derive_more",
  "drm",
+ "edid-rs",
  "egli",
  "heck",
  "input",

@@ -1,22 +1,19 @@
 use std::{
     collections::BTreeMap,
     os::{
-        fd::{AsFd, AsRawFd, BorrowedFd, RawFd},
+        fd::{AsRawFd, RawFd},
         unix::prelude::OsStrExt,
     },
     path::PathBuf,
 };
 
-use {
-    libc::SOCK_NONBLOCK,
-    nix::{
-        fcntl::{
-            self,
-            FcntlArg::{self, F_GETFL},
-            FdFlag, OFlag,
-        },
-        sys::stat::{major, minor},
+use nix::{
+    fcntl::{
+        self,
+        FcntlArg::{self, F_GETFL},
+        OFlag,
     },
+    sys::stat::{major, minor},
 };
 
 use crate::{
@@ -82,7 +79,7 @@ impl Model for Udev {
             }
             UdevAction::DeviceTaken { fd, inactive, devnum } => {
                 match self.pending.remove(&devnum).unwrap() {
-                    PendingControl::Drm(device) => self.on_drm_taken(device, fd, inactive, devnum),
+                    PendingControl::Drm(device) => self.on_drm_taken(device, fd, inactive),
                     PendingControl::Input(device) => {
                         self.on_input_taken(device, fd, inactive, devnum, dispatcher)
                     }
@@ -204,53 +201,15 @@ impl Udev {
         dispatcher.dispatch(LibinputAction::OpenInput { devnode, fd, devnum });
     }
 
-    fn on_drm_taken(
-        &mut self,
-        device: udev::Device,
-        fd: RawFd,
-        inactive: bool,
-        devnum: libc::dev_t,
-    ) {
+    fn on_drm_taken(&mut self, device: udev::Device, fd: RawFd, inactive: bool) {
         if inactive {
             return;
         }
 
         eprintln!("DRM TAKEN {:?}", device.devnode());
 
-        Drm::create_drm(fd, device);
-
-        // use drm::Device;
-        // use drm::control::Device as CT;
-
-        // struct MyDrm {
-        //     fd: RawFd,
-        //     device: udev::Device,
-        // }
-
-        // impl AsFd for MyDrm {
-        //     fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
-        //         unsafe { BorrowedFd::borrow_raw(self.fd) }
-        //     }
-        // }
-
-        // impl drm::Device for MyDrm {}
-        // impl drm::control::Device for MyDrm {}
-
-        // let drm = MyDrm {
-        //     fd,
-        //     device,
-        // };
-
-        // dbg!(drm.get_bus_id());
-        // dbg!(drm.get_driver());
-        // dbg!(drm.plane_handles());
-        // dbg!(drm.resource_handles());
-
-        // let resources = drm.resource_handles().unwrap();
-
-        // for conn in resources.connectors() {
-        //     dbg!(drm.get_connector(*conn, false));
-        // }
+        let drm = Drm::create_drm(fd, device);
+        dbg!(drm);
     }
 }
 

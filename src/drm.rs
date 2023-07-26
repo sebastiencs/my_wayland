@@ -1,31 +1,35 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     os::fd::{AsFd, FromRawFd, OwnedFd, RawFd},
 };
 
 use drm::{
     buffer::DrmFourcc,
     control::{
-        self, crtc, encoder, plane,
+        self, connector, crtc, encoder, plane,
         property::{self, ValueType},
-        Device as CT, PlaneType, ResourceHandles,
+        Device as CT, ModeTypeFlags, PlaneType, ResourceHandles,
     },
     Device,
 };
 
 const KNOWN_FORMATS: &[DrmFourcc] = &[DrmFourcc::Argb8888, DrmFourcc::Xrgb8888];
 
+#[derive(Debug)]
 pub struct Drm {
     fd: DrmFd,
     device: udev::Device,
-    planes: HashMap<plane::Handle, Plane>,
-    crtcs: HashMap<crtc::Handle, Crtc>,
-    encoders: HashMap<encoder::Handle, Encoder>,
+    planes: BTreeMap<plane::Handle, Plane>,
+    crtcs: BTreeMap<crtc::Handle, Crtc>,
+    encoders: BTreeMap<encoder::Handle, Encoder>,
+    connectors: BTreeMap<connector::Handle, Connector>,
     cursor_height: u64,
     cursor_width: u64,
     resources: ResourceHandles,
+    driver: Driver,
 }
 
+#[derive(Debug)]
 pub struct DrmFd {
     fd: OwnedFd,
 }
@@ -43,16 +47,15 @@ fn get_props<T: control::ResourceHandle>(
     drm: &DrmFd,
     plane: T,
 ) -> BTreeMap<String, (u64, property::Info)> {
-    let mut container = BTreeMap::default();
-
-    let props = drm.get_properties(plane).unwrap();
-    for (prop, value) in props {
-        let prop = drm.get_property(prop).unwrap();
-        let name = prop.name().to_str().expect("invalid name");
-        container.insert(name.to_string(), (value, prop));
-    }
-
-    container
+    drm.get_properties(plane)
+        .unwrap()
+        .into_iter()
+        .map(|(prop, value)| {
+            let prop = drm.get_property(prop).unwrap();
+            let name = prop.name().to_str().expect("invalid name");
+            (name.to_string(), (value, prop))
+        })
+        .collect()
 }
 
 struct Geometry {
@@ -99,6 +102,35 @@ struct Encoder {
     possible_crtcs: HashSet<crtc::Handle>,
 }
 
+#[derive(Debug)]
+struct Connector {
+    handler: connector::Handle,
+    edid: Option<edid_rs::EDID>,
+    crtcs: BTreeSet<crtc::Handle>,
+    preferred_mode: Option<control::Mode>,
+    state: connector::State,
+    // status:
+    // props:
+}
+
+#[derive(Debug)]
+pub struct Driver {
+    pub name: String,
+    pub date: String,
+    pub desc: String,
+}
+
+impl From<drm::Driver> for Driver {
+    fn from(value: drm::Driver) -> Self {
+        let drm::Driver { name, date, desc } = value;
+        Self {
+            name: name.to_string_lossy().to_string(),
+            date: date.to_string_lossy().to_string(),
+            desc: desc.to_string_lossy().to_string(),
+        }
+    }
+}
+
 impl Drm {
     pub fn create_drm(fd: RawFd, device: udev::Device) -> Self {
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -109,36 +141,39 @@ impl Drm {
         let resources = drm.resource_handles().unwrap();
 
         let (cursor_height, cursor_width) = {
-            let height = drm
-                .get_driver_capability(drm::DriverCapability::CursorHeight)
-                .unwrap();
-            let width = drm
-                .get_driver_capability(drm::DriverCapability::CursorWidth)
-                .unwrap();
+            use drm::DriverCapability::{CursorHeight, CursorWidth};
+
+            let height = drm.get_driver_capability(CursorHeight).unwrap_or(64);
+            let width = drm.get_driver_capability(CursorWidth).unwrap_or(64);
             (height, width)
         };
 
-        dbg!(drm.get_bus_id());
-        dbg!(drm.get_driver());
+        let driver = drm.get_driver().unwrap().into();
 
-        let planes: HashMap<plane::Handle, Plane> = drm
+        let planes: BTreeMap<plane::Handle, Plane> = drm
             .plane_handles()
             .unwrap()
             .iter()
             .map(|plane| Self::make_plane(&drm, *plane))
             .collect();
 
-        let crtcs: HashMap<crtc::Handle, Crtc> = resources
+        let crtcs: BTreeMap<crtc::Handle, Crtc> = resources
             .crtcs()
             .iter()
             .enumerate()
             .map(|(index, crtc)| Self::make_crtc(&drm, index, *crtc, &planes))
             .collect();
 
-        let encoders: HashMap<encoder::Handle, Encoder> = resources
+        let encoders: BTreeMap<encoder::Handle, Encoder> = resources
             .encoders()
             .iter()
             .map(|encoder| Self::make_encoder(&drm, *encoder, &crtcs))
+            .collect();
+
+        let connectors: BTreeMap<connector::Handle, Connector> = resources
+            .connectors()
+            .iter()
+            .map(|connector| Self::make_connector(&drm, *connector, &encoders))
             .collect();
 
         Self {
@@ -150,6 +185,8 @@ impl Drm {
             cursor_height,
             cursor_width,
             resources,
+            driver,
+            connectors,
         }
     }
 
@@ -157,7 +194,7 @@ impl Drm {
         drm: &DrmFd,
         index: usize,
         crtc: crtc::Handle,
-        planes: &HashMap<plane::Handle, Plane>,
+        planes: &BTreeMap<plane::Handle, Plane>,
     ) -> (crtc::Handle, Crtc) {
         let possible_planes: HashSet<_> = planes
             .iter()
@@ -182,7 +219,7 @@ impl Drm {
     fn make_encoder(
         drm: &DrmFd,
         encoder: encoder::Handle,
-        crtcs: &HashMap<crtc::Handle, Crtc>,
+        crtcs: &BTreeMap<crtc::Handle, Crtc>,
     ) -> (encoder::Handle, Encoder) {
         let info = drm.get_encoder(encoder).unwrap();
         let possible_crtcs: HashSet<_> = crtcs
@@ -255,5 +292,48 @@ impl Drm {
         };
 
         (handle, plane)
+    }
+
+    // fn make_plane(drm: &DrmFd, plane: plane::Handle) -> (plane::Handle, Plane) {
+    fn make_connector(
+        drm: &DrmFd,
+        connector_handle: connector::Handle,
+        encoders: &BTreeMap<encoder::Handle, Encoder>,
+    ) -> (connector::Handle, Connector) {
+        let connector = drm.get_connector(connector_handle, true).unwrap();
+
+        let props = get_props(drm, connector_handle);
+
+        let edid = props
+            .get("EDID")
+            .and_then(|(value, _)| drm.get_property_blob(*value).ok())
+            .map(std::io::Cursor::new)
+            .and_then(|mut blob| edid_rs::parse(&mut blob).ok());
+
+        let crtcs: BTreeSet<_> = connector
+            .encoders()
+            .iter()
+            .filter_map(|encoder| encoders.get(encoder))
+            .flat_map(|encoder| encoder.possible_crtcs.iter().copied())
+            .collect();
+
+        let preferred_mode = connector
+            .modes()
+            .iter()
+            .find(|mode| mode.mode_type().contains(ModeTypeFlags::PREFERRED))
+            .or_else(|| connector.modes().first())
+            .cloned();
+
+        let state = connector.state();
+
+        let connector = Connector {
+            handler: connector_handle,
+            edid,
+            crtcs,
+            preferred_mode,
+            state,
+        };
+
+        (connector_handle, connector)
     }
 }

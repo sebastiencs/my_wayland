@@ -27,6 +27,8 @@ wayland-scanner = { path = "/home/sebastien/github/wayland-rs/wayland-scanner" }
 nix = "0.26.2"
 owo-colors = "3.5.0"
 dbus-message-parser = "4.3.1"
+drm = { path = "/home/sebastien/github/drm-rs" }
+edid-rs = { git = "https://gitlab.com/sebastiencs/edid-rs.git" }
 
 [dev-dependencies]
 rand = "0.8.5"
