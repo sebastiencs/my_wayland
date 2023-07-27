@@ -64,7 +64,7 @@ impl Model for Udev {
 
     fn process(
         &mut self,
-        _state: &mut State,
+        state: &mut State,
         action: Self::Action,
         dispatcher: &mut Dispatcher,
     ) -> Result<(), ()> {
@@ -80,7 +80,7 @@ impl Model for Udev {
             }
             UdevAction::DeviceTaken { fd, inactive, devnum } => {
                 match self.pending.remove(&devnum).unwrap() {
-                    PendingControl::Drm(device) => self.on_drm_taken(device, fd, inactive),
+                    PendingControl::Drm(device) => self.on_drm_taken(device, fd, inactive, state),
                     PendingControl::Input(device) => {
                         self.on_input_taken(device, fd, inactive, devnum, dispatcher)
                     }
@@ -202,7 +202,7 @@ impl Udev {
         dispatcher.dispatch(LibinputAction::OpenInput { devnode, fd, devnum });
     }
 
-    fn on_drm_taken(&mut self, device: udev::Device, fd: RawFd, inactive: bool) {
+    fn on_drm_taken(&mut self, device: udev::Device, fd: RawFd, inactive: bool, state: &mut State) {
         if inactive {
             return;
         }
@@ -210,7 +210,7 @@ impl Udev {
         eprintln!("DRM TAKEN {:?}", device.devnode());
 
         let drm = Drm::create_drm(fd, device);
-        dbg!(drm);
+        state.drm.insert(drm);
     }
 }
 

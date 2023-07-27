@@ -1,4 +1,4 @@
-use crate::protocol_generated::WaylandId;
+use crate::{protocol_generated::WaylandId, input::Input, drm::Drm};
 
 use {crate::object::Object, std::marker::PhantomData};
 
@@ -166,10 +166,14 @@ where
 }
 
 index_map_id!(ObjectId);
+index_map_id!(InputId);
+index_map_id!(DrmId);
 
 #[derive(Default)]
 pub struct State {
     pub objects: IndexMap<ObjectId, Box<dyn Object>>,
+    pub inputs: IndexMap<InputId, Input>,
+    pub drm: IndexMap<DrmId, Drm>,
 }
 
 impl State {

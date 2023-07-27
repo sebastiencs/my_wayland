@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     path::Path,
     sync::{Arc, Mutex},
@@ -10,7 +10,7 @@ use input::AsRaw;
 use crate::{
     io_uring::{model::IoUringAction, ring::PollCompleted},
     runner::{Dispatcher, Model, Redispatcher},
-    state::State,
+    state::{State, InputId},
 };
 
 use {input::LibinputInterface, nix::unistd::close};
@@ -46,6 +46,7 @@ pub struct Libinput {
     /// We put that in an `Arc<Mutex<_>>` because not sure if libinput
     /// open the files in another thread or not
     dev_to_fd: Arc<Mutex<BTreeMap<u64, RawFd>>>,
+    inputs: BTreeSet<InputId>,
 }
 
 impl Libinput {
@@ -54,8 +55,9 @@ impl Libinput {
         let libinput =
             input::Libinput::new_from_path(Interface { dev_to_fd: Arc::clone(&dev_to_fd) });
         set_logger(&libinput);
+        let inputs = Default::default();
 
-        Box::new(Self { libinput, dev_to_fd })
+        Box::new(Self { libinput, dev_to_fd, inputs })
     }
 
     pub fn dispatch(&mut self) {
@@ -100,7 +102,7 @@ impl Model for Libinput {
 
     fn process(
         &mut self,
-        _state: &mut State,
+        state: &mut State,
         action: Self::Action,
         dispatcher: &mut Dispatcher,
     ) -> Result<(), ()> {
@@ -123,30 +125,16 @@ impl Model for Libinput {
                     }
                 };
 
-                // #[derive(Debug)]
-                // struct D {
-                //     sysname: String,
-                //     name: String,
-                //     output_name: Option<String>,
-                //     id_vendor: u32,
-                //     id_product: u32,
-                // }
-
-                // let d = D {
-                //     sysname: device.sysname().to_string(),
-                //     name: device.name().to_string(),
-                //     output_name: device.output_name().map(Into::into),
-                //     id_vendor: device.id_vendor(),
-                //     id_product: device.id_product(),
-                // };
-
-                // dbg!(&d);
-
-                // device.
+                let input_id = state.inputs.insert(Input { device });
+                self.inputs.insert(input_id);
             }
         }
         Ok(())
     }
+}
+
+pub struct Input {
+    device: input::Device,
 }
 
 unsafe extern "C" fn log_handler(
