@@ -3,6 +3,7 @@ use crate::{
     object::Object,
     protocol_generated::{WaylandId, WlCallbackId},
     runner::Dispatcher,
+    state::State,
 };
 
 use crate::protocol_generated::wl_callback::*;
@@ -28,5 +29,5 @@ impl Object for WlCallback {
         self.id.into()
     }
 
-    fn on(&mut self, _: &mut Client, _: RawRequest, _: &mut Dispatcher) {}
+    fn on(&mut self, _: &mut Client, _: &mut State, _: RawRequest, _: &mut Dispatcher) {}
 }

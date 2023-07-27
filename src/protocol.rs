@@ -282,7 +282,7 @@ pub fn gen() -> std::io::Result<()> {
         .collect::<Vec<_>>();
 
     let derive_str =
-        "#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into)]";
+        "#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into)]";
 
     writeln!(f, "#![allow(dead_code, unused_imports, unused_mut, clippy::let_and_return)]")?;
     writeln!(f, "#![allow(clippy::enum_variant_names)]\n")?;

@@ -18,14 +18,12 @@ use crate::{
     object::{Object, ParserError},
     protocol_generated::WaylandId,
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
-    state::State,
+    state::{ObjectId, State},
     udev::Udev,
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
 pub struct ClientId(u64);
-
-pub struct ClientsInitParams {}
 
 pub struct Clients {
     current_id: u64,
@@ -142,7 +140,7 @@ pub struct Client {
     id: ClientId,
     fd: RawFd,
     reader_id: Option<ClientReaderId>,
-    objects: BTreeMap<WaylandId, Box<dyn Object>>,
+    objects: BTreeMap<WaylandId, ObjectId>,
     info: Option<ProcessInfo>,
 }
 
@@ -188,6 +186,12 @@ impl Client {
 
         self.info = Some(ProcessInfo { command, cred })
     }
+
+    fn insert_object<O: Object>(&mut self, state: &mut State, object: O) -> WaylandId {
+        let (wayland_id, object_id) = state.insert_object(object);
+        self.objects.insert(wayland_id, object_id);
+        wayland_id
+    }
 }
 
 impl Model for Client {
@@ -197,7 +201,7 @@ impl Model for Client {
 
     fn process(
         &mut self,
-        _state: &mut State,
+        state: &mut State,
         action: ClientAction,
         dispatcher: &mut Dispatcher,
     ) -> Result<(), ()> {
@@ -214,16 +218,18 @@ impl Model for Client {
                 );
 
                 let display: WlDisplay = WlDisplay::default();
-                self.objects.insert(display.id(), Box::new(display));
+                self.insert_object(state, display);
 
                 let (client_reader_id, client_reader) = ClientReader::new(self.fd, self.id);
                 self.reader_id = Some(client_reader_id);
                 dispatcher.start_model(client_reader_id, client_reader);
             }
             MsgReceived { request } => {
-                let mut obj = self.objects.remove(&request.object_id()).unwrap();
-                obj.on(self, request, dispatcher);
-                self.objects.insert(obj.id(), obj);
+                let obj_id = self.objects.get(&request.object_id()).unwrap();
+
+                let mut obj = state.objects.grab(*obj_id);
+                obj.on(self, state, request, dispatcher);
+                state.objects.release(obj);
             }
             Close => {
                 log::info!("client_id={:?} closed", self.id);

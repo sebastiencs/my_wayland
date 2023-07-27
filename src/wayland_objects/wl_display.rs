@@ -3,6 +3,7 @@ use crate::{
     object::{Object, Parser},
     protocol_generated::{wl_display, WaylandId, WlDisplayId},
     runner::Dispatcher,
+    state::State,
     wayland_objects::wl_callback::WlCallback,
 };
 
@@ -22,7 +23,13 @@ impl Object for WlDisplay {
         self.id.into()
     }
 
-    fn on(&mut self, _client: &mut Client, request: RawRequest, _dispatcher: &mut Dispatcher) {
+    fn on(
+        &mut self,
+        _client: &mut Client,
+        _state: &mut State,
+        request: RawRequest,
+        _dispatcher: &mut Dispatcher,
+    ) {
         use wl_display::Request::*;
 
         match Self::parse_request(request).unwrap() {
