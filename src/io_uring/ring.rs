@@ -16,7 +16,7 @@ use {
 
 use libc::msghdr;
 
-use crate::{io_uring::types::IORING_OP_RECVMSG, state::Redispatcher};
+use crate::{io_uring::types::IORING_OP_RECVMSG, runner::Redispatcher};
 
 use super::{
     syscalls::{io_uring_enter, io_uring_register, io_uring_setup, mmap, munmap},

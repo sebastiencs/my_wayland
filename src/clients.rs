@@ -17,7 +17,8 @@ use crate::{
     },
     object::{Object, ParserError},
     protocol_generated::WaylandId,
-    state::{AnyAction, Dispatcher, Model, Redispatcher},
+    runner::{AnyAction, Dispatcher, Model, Redispatcher},
+    state::State,
     udev::Udev,
 };
 
@@ -76,7 +77,12 @@ impl Clients {
 impl Model for Clients {
     type Action = ClientsAction;
 
-    fn process(&mut self, action: ClientsAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn process(
+        &mut self,
+        _state: &mut State,
+        action: ClientsAction,
+        dispatcher: &mut Dispatcher,
+    ) -> Result<(), ()> {
         use ClientsAction::*;
 
         match action {
@@ -189,7 +195,12 @@ impl Model for Client {
     const START: Option<Self::Action> = Some(Self::Action::Start);
     const STOP: Option<Self::Action> = Some(Self::Action::Close);
 
-    fn process(&mut self, action: ClientAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn process(
+        &mut self,
+        _state: &mut State,
+        action: ClientAction,
+        dispatcher: &mut Dispatcher,
+    ) -> Result<(), ()> {
         use {crate::wayland_objects::wl_display::WlDisplay, ClientAction::*};
 
         dispatcher.set_client_fd(self.fd);
@@ -352,7 +363,12 @@ impl Model for ClientReader {
     const START: Option<Self::Action> = Some(Self::Action::Start);
     const STOP: Option<Self::Action> = Some(Self::Action::Stop);
 
-    fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn process(
+        &mut self,
+        _state: &mut State,
+        action: Self::Action,
+        dispatcher: &mut Dispatcher,
+    ) -> Result<(), ()> {
         use ClientReaderAction::*;
 
         match action {

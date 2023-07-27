@@ -2,7 +2,7 @@ use crate::{
     clients::{Client, RawRequest},
     object::{Object, Parser},
     protocol_generated::{wl_display, WaylandId, WlDisplayId},
-    state::Dispatcher,
+    runner::Dispatcher,
     wayland_objects::wl_callback::WlCallback,
 };
 

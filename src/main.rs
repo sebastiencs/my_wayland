@@ -18,6 +18,23 @@ macro_rules! wayland_id {
     )+)
 }
 
+macro_rules! index_map_id {
+    ($name:ident) => {
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+        pub struct $name(u32);
+        impl From<usize> for $name {
+            fn from(value: usize) -> Self {
+                Self(value.try_into().unwrap())
+            }
+        }
+        impl From<$name> for usize {
+            fn from(value: $name) -> usize {
+                value.0 as usize
+            }
+        }
+    };
+}
+
 use std::{os::fd::AsRawFd, time::Duration};
 
 use {
@@ -25,10 +42,12 @@ use {
     nix::sys::timerfd::{self, TimerFd, TimerFlags, TimerSetTimeFlags},
 };
 
+use state::State;
+
 use crate::{
-    clients::{Clients, ClientsAction, ClientsInitParams},
+    clients::{Clients, ClientsAction},
     io_uring::{model::IoUringState, ring::PollCompleted},
-    state::{AnyAction, Dispatcher, Model, Redispatcher, Runner},
+    runner::{AnyAction, Dispatcher, Redispatcher, Runner},
     udev::Udev,
 };
 
@@ -43,7 +62,8 @@ mod object;
 mod protocol;
 mod protocol_generated;
 mod queue;
-pub mod state;
+pub mod runner;
+mod state;
 mod udev;
 mod utils;
 mod wayland_objects;
@@ -76,6 +96,8 @@ fn main() {
 
     // log::info!("hello");
 
+    let state = State::default();
+
     let dbus = dbus::Dbus::new().unwrap();
 
     let udev = Udev::new().unwrap();
@@ -86,7 +108,7 @@ fn main() {
     let uring = Box::<IoUringState>::default();
     let clients = Clients::new();
 
-    let mut runner = Runner::default();
+    let mut runner = Runner::with_state(state);
     runner.add_model(uring);
     runner.add_model(dbus);
     runner.add_model(udev);

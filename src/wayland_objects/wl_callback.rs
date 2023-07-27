@@ -2,7 +2,7 @@ use crate::{
     clients::{Client, EventWriter, RawRequest},
     object::Object,
     protocol_generated::{WaylandId, WlCallbackId},
-    state::Dispatcher,
+    runner::Dispatcher,
 };
 
 use crate::protocol_generated::wl_callback::*;

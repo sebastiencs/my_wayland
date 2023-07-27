@@ -9,7 +9,8 @@ use input::AsRaw;
 
 use crate::{
     io_uring::{model::IoUringAction, ring::PollCompleted},
-    state::{Dispatcher, Model, Redispatcher},
+    runner::{Dispatcher, Model, Redispatcher},
+    state::State,
 };
 
 use {input::LibinputInterface, nix::unistd::close};
@@ -97,7 +98,12 @@ impl Model for Libinput {
 
     const START: Option<Self::Action> = Some(Self::Action::Start);
 
-    fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn process(
+        &mut self,
+        _state: &mut State,
+        action: Self::Action,
+        dispatcher: &mut Dispatcher,
+    ) -> Result<(), ()> {
         use LibinputAction::*;
 
         match action {

@@ -1,7 +1,7 @@
 use crate::{
     clients::{Client, RawRequest},
     protocol_generated::WaylandId,
-    state::Dispatcher,
+    runner::Dispatcher,
 };
 
 pub trait Object {

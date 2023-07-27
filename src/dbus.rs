@@ -12,7 +12,8 @@ use dbus_message_parser::encode::EncodeError;
 
 use crate::{
     io_uring::{model::IoUringAction, ring::RecvmsgCompleted},
-    state::{Dispatcher, Model, Redispatcher},
+    runner::{Dispatcher, Model, Redispatcher},
+    state::State,
     udev::UdevAction,
 };
 
@@ -408,7 +409,12 @@ impl Model for Dbus {
     type Action = DbusAction;
     const START: Option<Self::Action> = Some(Self::Action::Start);
 
-    fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn process(
+        &mut self,
+        _state: &mut State,
+        action: Self::Action,
+        dispatcher: &mut Dispatcher,
+    ) -> Result<(), ()> {
         use DbusAction::*;
 
         match action {
@@ -448,7 +454,12 @@ impl Model for DbusReader {
     const START: Option<Self::Action> = Some(Self::Action::Start);
     const STOP: Option<Self::Action> = Some(Self::Action::Stop);
 
-    fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn process(
+        &mut self,
+        _state: &mut State,
+        action: Self::Action,
+        dispatcher: &mut Dispatcher,
+    ) -> Result<(), ()> {
         use DbusReaderAction::*;
 
         match action {

@@ -21,7 +21,8 @@ use crate::{
     drm::Drm,
     input::LibinputAction,
     io_uring::{model::IoUringAction, ring::PollCompleted},
-    state::{AnyAction, Dispatcher, Model, Redispatcher},
+    runner::{AnyAction, Dispatcher, Model, Redispatcher},
+    state::State,
 };
 
 #[derive(Debug)]
@@ -61,7 +62,12 @@ impl Model for Udev {
     type Action = UdevAction;
     const START: Option<Self::Action> = Some(Self::Action::Start);
 
-    fn process(&mut self, action: Self::Action, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn process(
+        &mut self,
+        _state: &mut State,
+        action: Self::Action,
+        dispatcher: &mut Dispatcher,
+    ) -> Result<(), ()> {
         match action {
             UdevAction::Start => {
                 self.dispatch_poll(dispatcher);

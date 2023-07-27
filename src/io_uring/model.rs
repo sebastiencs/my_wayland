@@ -9,7 +9,8 @@ use {libc::cmsghdr, log::error};
 
 use crate::{
     io_uring::ring::{Operation, PollCompleted},
-    state::{Dispatcher, Model, Redispatcher},
+    runner::{Dispatcher, Model, Redispatcher},
+    state::State,
 };
 
 use super::{
@@ -114,7 +115,12 @@ impl Default for IoUringState {
 impl Model for IoUringState {
     type Action = IoUringAction;
 
-    fn process(&mut self, action: IoUringAction, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn process(
+        &mut self,
+        _state: &mut State,
+        action: IoUringAction,
+        dispatcher: &mut Dispatcher,
+    ) -> Result<(), ()> {
         log::trace!("io_uring action={:?}", action);
         match action {
             IoUringAction::Completion => {
