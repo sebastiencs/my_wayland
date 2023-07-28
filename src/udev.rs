@@ -19,6 +19,7 @@ use nix::{
 use crate::{
     dbus::DbusAction,
     drm::Drm,
+    egl::EglInstance,
     input::LibinputAction,
     io_uring::{model::IoUringAction, ring::PollCompleted},
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
@@ -209,7 +210,7 @@ impl Udev {
 
         eprintln!("DRM TAKEN {:?}", device.devnode());
 
-        let drm = Drm::create_drm(fd, device);
+        let drm = Drm::create_drm(fd, device, &state.egl);
         state.drm.insert(drm);
     }
 }

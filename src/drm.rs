@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
-    os::fd::{AsFd, FromRawFd, OwnedFd, RawFd},
+    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
 };
 
 use drm::{
@@ -12,6 +12,8 @@ use drm::{
     },
     Device,
 };
+
+use crate::egl::{self, EglInstance};
 
 const KNOWN_FORMATS: &[DrmFourcc] = &[DrmFourcc::Argb8888, DrmFourcc::Xrgb8888];
 
@@ -37,6 +39,40 @@ pub struct DrmFd {
 impl AsFd for DrmFd {
     fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
         self.fd.as_fd()
+    }
+}
+
+impl AsRawFd for DrmFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl DrmFd {
+    pub fn create_lease(&self) -> std::io::Result<DrmFd> {
+        const DRM_IOCTL_MODE_CREATE_LEASE: usize = 0xC6;
+        nix::ioctl_readwrite!(
+            create_lease,
+            b'd',
+            DRM_IOCTL_MODE_CREATE_LEASE,
+            drm_ffi::drm_mode_create_lease
+        );
+
+        let mut params = drm_ffi::drm_mode_create_lease {
+            object_ids: 0,
+            object_count: 0,
+            flags: libc::O_CLOEXEC as u32,
+            lessee_id: 0,
+            fd: 0,
+        };
+        let fd = self.fd.as_raw_fd();
+
+        let lease = unsafe {
+            create_lease(fd, &mut params)?;
+            OwnedFd::from_raw_fd(params.fd as i32)
+        };
+
+        Ok(DrmFd { fd: lease })
     }
 }
 
@@ -132,7 +168,7 @@ impl From<drm::Driver> for Driver {
 }
 
 impl Drm {
-    pub fn create_drm(fd: RawFd, device: udev::Device) -> Self {
+    pub fn create_drm(fd: RawFd, device: udev::Device, egl: &EglInstance) -> Self {
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let drm = DrmFd { fd };
 
@@ -175,6 +211,17 @@ impl Drm {
             .iter()
             .map(|connector| Self::make_connector(&drm, *connector, &encoders))
             .collect();
+
+        // let lease = drm.create_lease().unwrap();
+        // dbg!(lease);
+
+        let gbm = crate::gbm::GbmDevice::new(&drm).unwrap();
+
+        egl::make_display(egl, &gbm);
+
+        // egl.get_platform_display(EGL_PLATFORM_GBM_KHR, native_display, attrib_list);
+
+        // egl = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, dpy.gbm, NULL);
 
         Self {
             fd: drm,

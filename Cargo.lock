@@ -103,7 +103,7 @@ version = "0.9.0"
 dependencies = [
  "bitflags 1.3.2",
  "bytemuck",
- "drm-ffi",
+ "drm-ffi 0.5.0",
  "drm-fourcc",
  "nix",
 ]
@@ -112,7 +112,17 @@ dependencies = [
 name = "drm-ffi"
 version = "0.5.0"
 dependencies = [
- "drm-sys",
+ "drm-sys 0.4.0",
+ "nix",
+]
+
+[[package]]
+name = "drm-ffi"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1352481b7b90e27a8a1bf8ef6b33cf18b98dba7c410e75c24bb3eef2f0d8d525"
+dependencies = [
+ "drm-sys 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nix",
 ]
 
@@ -130,19 +140,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "drm-sys"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1369f1679d6b706d234c4c1e0613c415c2c74b598a09ad28080ba2474b72e42d"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "edid-rs"
 version = "0.1.0"
 source = "git+https://gitlab.com/sebastiencs/edid-rs.git#e9a5fc3f7662346eea471ba24936472f51f3697c"
-
-[[package]]
-name = "egli"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8713355fe0618276bb5a225b115335bca1bfe0848f71fcb7eb27fa0c971bb378"
-dependencies = [
- "bitflags 1.3.2",
- "libc",
-]
 
 [[package]]
 name = "either"
@@ -230,6 +239,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "khronos-egl"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1382b16c04aeb821453d6215a3c80ba78f24c6595c5aa85653378aabe0c83e3"
+dependencies = [
+ "libc",
+ "libloading",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -240,6 +259,16 @@ name = "libc"
 version = "0.2.146"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f92be4933c13fd498862a9e02a3055f8a8d9c039ce33db97306fd5a6caa7f29b"
+
+[[package]]
+name = "libloading"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d580318f95776505201b28cf98eb1fa5e4be3b689633ba6a3e6cd880ff22d8cb"
+dependencies = [
+ "cfg-if",
+ "windows-sys",
+]
 
 [[package]]
 name = "libudev-sys"
@@ -521,12 +550,14 @@ dependencies = [
  "dbus-message-parser",
  "derive_more",
  "drm",
+ "drm-ffi 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "edid-rs",
- "egli",
  "heck",
  "input",
  "itertools",
+ "khronos-egl",
  "libc",
+ "libloading",
  "log",
  "loom",
  "mktemp",

@@ -35,7 +35,7 @@ macro_rules! index_map_id {
     };
 }
 
-use std::{os::fd::AsRawFd, time::Duration};
+use std::{os::fd::AsRawFd, sync::Arc, time::Duration};
 
 use {
     io_uring::model::IoUringAction,
@@ -55,6 +55,7 @@ mod clients;
 mod dbus;
 mod drm;
 mod egl;
+mod gbm;
 mod input;
 mod io_uring;
 mod logger;
@@ -86,7 +87,44 @@ fn main() {
 
     // dbus2::init().unwrap();
 
+    // egl::init();
+
     // return;
+
+    // use khronos_egl::api::EGL1_5;
+    // let lib = unsafe {
+    //     libloading::Library::new("libEGL.so.1").expect("unable to find libEGL.so.1")
+    // };
+
+    // const EGL_PLATFORM_GBM_KHR: u32 = 0x31D7;
+
+    // let egl = unsafe {
+    //     khronos_egl::DynamicInstance::<khronos_egl::EGL1_5>::load_required()
+    //         .expect("Unable to load libEGL.so or libEGL.so.1")
+    // };
+
+    // let egl = Arc::new(egl);
+
+    // // let egl2 = egl.clone();
+
+    // egl.bind_api(khronos_egl::OPENGL_ES_API)
+    //    .expect("unable to select OpenGL API");
+
+    let egl = egl::init();
+
+    // egl.get_platform_display(EGL_PLATFORM_GBM_KHR, native_display, &[]);
+
+    // let get_platform_display_ext = egl.get_proc_address("eglGetPlatformDisplayEXT").unwrap();
+
+    // eglCreatePlatformWindowSurface
+
+    // return;
+
+    // egl.
+
+    // egl.
+
+    // khronos_egl::Instance::new(khronos_egl::Static);
 
     logger::install();
 
@@ -96,7 +134,12 @@ fn main() {
 
     // log::info!("hello");
 
-    let state = State::default();
+    let state = State {
+        objects: Default::default(),
+        inputs: Default::default(),
+        drm: Default::default(),
+        egl,
+    };
 
     let dbus = dbus::Dbus::new().unwrap();
 

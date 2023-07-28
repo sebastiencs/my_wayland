@@ -10,7 +10,7 @@ use input::AsRaw;
 use crate::{
     io_uring::{model::IoUringAction, ring::PollCompleted},
     runner::{Dispatcher, Model, Redispatcher},
-    state::{State, InputId},
+    state::{InputId, State},
 };
 
 use {input::LibinputInterface, nix::unistd::close};
