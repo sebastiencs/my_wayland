@@ -115,6 +115,7 @@ extern "C" {
     pub fn gbm_bo_get_modifier(bo: *mut gbm_bo) -> u64;
     pub fn gbm_bo_write(bo: *mut gbm_bo, buf: *mut libc::c_void, count: libc::size_t) -> i32;
     pub fn gbm_bo_unmap(bo: *mut gbm_bo, map_data: *mut u8);
+    pub fn gbm_surface_release_buffer(gbm_surface: *mut gbm_surface, gbm_bo: *mut gbm_bo);
     pub fn gbm_bo_map(
         bo: *mut gbm_bo,
         x: u32,
@@ -126,6 +127,9 @@ extern "C" {
         map_data: *mut *mut u8,
     ) -> *mut u8;
 }
+
+// void
+// gbm_surface_release_buffer(struct gbm_surface *surface, struct gbm_bo *bo);
 
 // int
 // gbm_bo_write(struct gbm_bo *bo, const void *buf, size_t count);

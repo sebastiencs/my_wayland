@@ -120,50 +120,59 @@ pub fn make_display(
         .create_platform_window_surface(display, config, gbm_surface.raw(), &[ATTRIB_NONE])
         .unwrap();
 
-    eprintln!("A10");
     egl.make_current(display, Some(egl_surface), Some(egl_surface), Some(egl_context))
         .unwrap();
-    eprintln!("A11");
 
-    unsafe {
-        glClearColor(0.5, 0.0, 0.0, 1.0);
-        glClear(GL_COLOR_BUFFER_BIT);
+    let mut previous = None;
+
+    for i in 0..100 {
+        println!("I={:?}", i);
+
+        let i = i as f32;
+        unsafe {
+            glClearColor(0.5, i / 100.0, 0.0, 1.0);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+
+        egl.swap_buffers(display, egl_surface).unwrap();
+
+        dbg!(egl);
+        dbg!(display);
+        dbg!(egl_surface);
+        dbg!(egl_context);
+
+        let bo = gbm_surface.lock_front_buffer();
+
+        // let mut buffer = Vec::new();
+        // for i in 0..1280 {
+        //     for _ in 0..720 {
+        //         buffer.push(if i % 2 == 0 { 100 } else { 255 });
+        //     }
+        // }
+        // eprintln!("A2");
+        // bo.write(&buffer);
+        // eprintln!("A3");
+
+        // let handle = drm::buffer::Buffer::handle(&bo);
+        // dbg!(handle);
+
+        let fb = gbm.add_framebuffer(&bo, 24, 32).unwrap();
+        let mode = connector.preferred_mode.unwrap();
+
+        dbg!(&connector.crtcs);
+
+        drm_fd
+            .set_crtc(crtc, Some(fb), (0, 0), &[connector.handler], Some(mode))
+            .unwrap();
+
+        if let Some((fb, bo)) = previous.take() {
+            gbm.destroy_framebuffer(fb).unwrap();
+            gbm_surface.release_buffer(bo);
+        }
+        previous = Some((fb, bo));
+
+        std::thread::sleep_ms(20);
     }
-
-    egl.swap_buffers(display, egl_surface).unwrap();
-
-    dbg!(egl);
-    dbg!(display);
-    dbg!(egl_surface);
-    dbg!(egl_context);
-
-    eprintln!("A12");
-
-    let bo = gbm_surface.lock_front_buffer();
-
-    // let mut buffer = Vec::new();
-    // for i in 0..1280 {
-    //     for _ in 0..720 {
-    //         buffer.push(if i % 2 == 0 { 100 } else { 255 });
-    //     }
-    // }
-    // eprintln!("A2");
-    // bo.write(&buffer);
-    // eprintln!("A3");
-
-    // let handle = drm::buffer::Buffer::handle(&bo);
-    // dbg!(handle);
-
-    let fb = gbm.add_framebuffer(&bo, 24, 32).unwrap();
-    let mode = connector.preferred_mode.unwrap();
-
-    dbg!(&connector.crtcs);
-
-    // let handle = connect
-
-    drm_fd
-        .set_crtc(crtc, Some(fb), (0, 0), &[connector.handler], Some(mode))
-        .unwrap();
 }
 
 // static void swap_buffers () {

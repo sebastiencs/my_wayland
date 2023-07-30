@@ -124,6 +124,10 @@ impl GbmSurface {
         assert!(!bo.is_null());
         BufferObject { bo }
     }
+
+    pub fn release_buffer(&self, bo: BufferObject) {
+        unsafe { sys::gbm_surface_release_buffer(self.surface, bo.raw()) }
+    }
 }
 
 #[derive(Debug)]
