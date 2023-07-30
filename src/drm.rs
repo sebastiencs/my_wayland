@@ -49,7 +49,7 @@ impl AsRawFd for DrmFd {
 }
 
 impl DrmFd {
-    pub fn create_lease(&self) -> std::io::Result<DrmFd> {
+    pub fn try_create_lease(&self) -> std::io::Result<DrmFd> {
         const DRM_IOCTL_MODE_CREATE_LEASE: usize = 0xC6;
         nix::ioctl_readwrite!(
             create_lease,
@@ -139,12 +139,12 @@ struct Encoder {
 }
 
 #[derive(Debug)]
-struct Connector {
-    handler: connector::Handle,
-    edid: Option<edid_rs::EDID>,
-    crtcs: BTreeSet<crtc::Handle>,
-    preferred_mode: Option<control::Mode>,
-    state: connector::State,
+pub struct Connector {
+    pub handler: connector::Handle,
+    pub edid: Option<edid_rs::EDID>,
+    pub crtcs: BTreeSet<crtc::Handle>,
+    pub preferred_mode: Option<control::Mode>,
+    pub state: connector::State,
     // status:
     // props:
 }
@@ -217,7 +217,22 @@ impl Drm {
 
         let gbm = crate::gbm::GbmDevice::new(&drm).unwrap();
 
-        egl::make_display(egl, &gbm);
+        let (_, connector) = connectors
+            .iter()
+            .find(|c| c.1.state == connector::State::Connected)
+            .unwrap();
+
+        // for crtc in &connector.crtcs {
+        //     dbg!(crtcs.get(crtc));
+        // }
+
+        let crtc = connector
+            .crtcs
+            .iter()
+            .find(|c| crtcs.get(c).unwrap().active)
+            .unwrap();
+
+        egl::make_display(&drm, egl, &gbm, connector, *crtc);
 
         // egl.get_platform_display(EGL_PLATFORM_GBM_KHR, native_display, attrib_list);
 
