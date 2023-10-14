@@ -289,6 +289,7 @@ impl<T: Copy> Queue<T> {
         } else {
             let buffer: &mut [T] = unsafe {
                 #[allow(clippy::cast_ref_to_mut)]
+                #[allow(invalid_reference_casting)]
                 &mut *(&self.buffer[..] as *const [Elem<T>] as *mut [T])
             };
 
