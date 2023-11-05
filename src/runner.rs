@@ -9,10 +9,14 @@ use crate::{clients::RawEvent, io_uring::model::IoUringAction, State};
 type Result<T> = std::result::Result<T, ()>;
 
 pub struct Dispatcher {
+    /// Actions to dispatch
     queue: VecDeque<AnyAction>,
-    pending_models: VecDeque<(ActionId, AnyModel)>,
-    to_remove: VecDeque<ActionId>,
+    /// Models to add
+    pending_add: VecDeque<(ActionId, AnyModel)>,
+    /// Models to remove
+    pending_remove: VecDeque<ActionId>,
 
+    // TODO: Move somewhere else (outside of `Dispatcher`)
     client_fd: Option<RawFd>,
 }
 
@@ -20,8 +24,8 @@ impl Default for Dispatcher {
     fn default() -> Self {
         Self {
             queue: VecDeque::with_capacity(1024),
-            pending_models: VecDeque::with_capacity(1024),
-            to_remove: VecDeque::with_capacity(1024),
+            pending_add: VecDeque::with_capacity(1024),
+            pending_remove: VecDeque::with_capacity(1024),
             client_fd: None,
         }
     }
@@ -64,7 +68,7 @@ impl Dispatcher {
         M: Model,
     {
         let action_id = ActionId::of_with::<M::Action, _>(id);
-        self.pending_models
+        self.pending_add
             .push_back((action_id, Box::new(model).into_vtable()));
     }
 
@@ -82,7 +86,7 @@ impl Dispatcher {
         M: Model,
     {
         let action_id = ActionId::of::<M::Action>();
-        self.pending_models
+        self.pending_add
             .push_back((action_id, Box::new(model).into_vtable()));
         self.dispatch(M::START.unwrap());
     }
@@ -93,9 +97,10 @@ impl Dispatcher {
         M: Model,
     {
         let action_id = ActionId::of_with::<M::Action, _>(id);
-        self.to_remove.push_back(action_id);
+        self.pending_remove.push_back(action_id);
     }
 
+    // TODO: Move somewhere else (outside of `Dispatcher`)
     pub fn send_raw(&mut self, event: RawEvent) {
         let action = IoUringAction::Write {
             fd: self.client_fd.unwrap(),
@@ -106,6 +111,7 @@ impl Dispatcher {
         self.dispatch(action);
     }
 
+    // TODO: Move somewhere else (outside of `Dispatcher`)
     pub fn set_client_fd(&mut self, fd: RawFd) {
         self.client_fd = Some(fd);
     }
@@ -114,6 +120,7 @@ impl Dispatcher {
         self.clear_client_fd();
     }
 
+    // TODO: Move somewhere else (outside of `Dispatcher`)
     fn clear_client_fd(&mut self) {
         if self.client_fd.is_some() {
             self.client_fd = None;
@@ -130,11 +137,13 @@ pub enum Redispatcher<R> {
         id: u64,
         /// For printing/debug purpose only
         /// So we know to which model we redispatch
-        name: &'static str,
+        type_name: &'static str,
     },
     Into {
         ptr: fn(R) -> AnyAction,
-        name: &'static str,
+        /// For printing/debug purpose only
+        /// So we know to which model we redispatch
+        type_name: &'static str,
     },
     None,
 }
@@ -143,8 +152,10 @@ impl<R> Clone for Redispatcher<R> {
     fn clone(&self) -> Self {
         match self {
             Self::Fun { ptr } => Self::Fun { ptr: *ptr },
-            Self::WithId { ptr, id, name } => Self::WithId { ptr: *ptr, id: *id, name },
-            Self::Into { ptr, name } => Self::Into { ptr: *ptr, name },
+            Self::WithId { ptr, id, type_name: name } => {
+                Self::WithId { ptr: *ptr, id: *id, type_name: name }
+            }
+            Self::Into { ptr, type_name: name } => Self::Into { ptr: *ptr, type_name: name },
             Self::None => Self::None,
         }
     }
@@ -159,10 +170,12 @@ impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
 
         match self {
             Self::Fun { ptr: _ } => f.write_str("ptr"),
-            Self::WithId { id, ptr: _, name } => {
+            Self::WithId { id, ptr: _, type_name: name } => {
                 f.write_fmt(format_args!("{}({:?})", type_name(name), id))
             }
-            Self::Into { ptr: _, name } => f.write_fmt(format_args!("{}", type_name(name))),
+            Self::Into { ptr: _, type_name: name } => {
+                f.write_fmt(format_args!("{}", type_name(name)))
+            }
             Self::None => f.write_str("None"),
         }
     }
@@ -177,12 +190,12 @@ impl<R> Redispatcher<R> {
     where
         T: From<R> + 'static,
     {
-        fn generated<R, T: From<R> + 'static>(result: R) -> AnyAction {
+        fn auto_generated<R, T: From<R> + 'static>(result: R) -> AnyAction {
             AnyAction::from(T::from(result))
         }
-        let ptr = generated::<R, T>;
+        let ptr = auto_generated::<R, T>;
         let name = std::any::type_name::<T>();
-        Self::Into { ptr, name }
+        Self::Into { ptr, type_name: name }
     }
 
     pub fn id<V>(id: V, ptr: fn(R) -> AnyAction) -> Self
@@ -191,7 +204,7 @@ impl<R> Redispatcher<R> {
     {
         let id = id.into();
         let name = std::any::type_name::<V>();
-        Self::WithId { id, ptr, name }
+        Self::WithId { id, ptr, type_name: name }
     }
 }
 
@@ -199,8 +212,8 @@ impl<R> Redispatcher<R> {
     pub fn make(self, value: R) -> Option<AnyAction> {
         match self {
             Self::Fun { ptr } => Some(ptr(value)),
-            Self::Into { ptr, name: _ } => Some(ptr(value)),
-            Self::WithId { id, ptr, name: _ } => {
+            Self::Into { ptr, type_name: _ } => Some(ptr(value)),
+            Self::WithId { id, ptr, type_name: _ } => {
                 let mut action = ptr(value);
                 action.id.specifier = Some(id);
                 Some(action)
@@ -215,6 +228,10 @@ impl<R> Redispatcher<R> {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ActionId {
     type_id: TypeId,
+    /// This is an additional information about the action's model.
+    /// It could be a `PeerId`, `ClientId`, etc, or any model
+    /// having different instances alive.
+    /// So the action go straight to the model instance.
     specifier: Option<u64>,
 }
 
@@ -273,24 +290,31 @@ impl Runner {
     }
 
     fn post_process(&mut self, dispatcher: &mut Dispatcher) {
-        // Add new models
-        while let Some((action_id, model)) = dispatcher.pending_models.pop_front() {
-            self.models.insert(action_id, model);
-        }
-        self.maybe_stop_models(dispatcher);
+        self.maybe_add_models(dispatcher);
+        self.maybe_remove_models(dispatcher);
     }
 
-    fn maybe_stop_models(&mut self, dispatcher: &mut Dispatcher) {
+    fn maybe_add_models(&mut self, dispatcher: &mut Dispatcher) {
+        // Add new models
+        while let Some((action_id, model)) = dispatcher.pending_add.pop_front() {
+            self.models.insert(action_id, model);
+        }
+    }
+
+    fn maybe_remove_models(&mut self, dispatcher: &mut Dispatcher) {
         // Stop models
-        // We use an index here because `try_stop` might add new ids to `dispatcher.to_remove`
+        if dispatcher.pending_remove.is_empty() {
+            return;
+        }
+        // We use an index here because `try_stop` might add new ids to `dispatcher.pending_remove`
         let mut index = 0;
-        while let Some(id) = dispatcher.to_remove.get(index) {
+        while let Some(id) = dispatcher.pending_remove.get(index) {
             let AnyModel { model, vtable } = self.models.get_mut(id).unwrap();
             (vtable.try_stop)(model, &mut self.state, dispatcher).unwrap();
             index += 1;
         }
         // Remove them in reverse order
-        while let Some(id) = dispatcher.to_remove.pop_back() {
+        while let Some(id) = dispatcher.pending_remove.pop_back() {
             self.models.remove(&id).unwrap();
         }
     }
