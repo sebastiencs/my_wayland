@@ -29,9 +29,7 @@ impl MyLogger {
 fn redirect_to_file(file: Option<&std::fs::File>) -> std::io::Result<()> {
     use {nix::fcntl::OFlag, std::os::fd::AsRawFd};
 
-    let Some(file) = file else {
-        return Ok(())
-    };
+    let Some(file) = file else { return Ok(()) };
 
     // Redirect std{out,err} to the file
     nix::unistd::dup3(file.as_raw_fd(), 1, OFlag::O_CLOEXEC)?;

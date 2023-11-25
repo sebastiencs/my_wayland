@@ -22,11 +22,11 @@ xkbcommon = { version = "0.5.0", default-features = false }
 
 # TODO: Put them in dev dependencies
 itertools = "0.11.0"
-wayland-scanner = { path = "/home/sebastien/github/wayland-rs/wayland-scanner" }
+wayland-scanner = { git = "https://github.com/sebastiencs/wayland-rs.git", branch = "my_wayland" }
 nix = "0.26.2"
 owo-colors = "3.5.0"
 dbus-message-parser = "4.3.1"
-drm = { path = "/home/sebastien/github/drm-rs" }
+drm = { git = "https://github.com/sebastiencs/drm-rs.git", branch = "my_wayland" }
 drm-ffi = "0.5"
 edid-rs = { git = "https://gitlab.com/sebastiencs/edid-rs.git" }
 khronos-egl = { version = "5", features = ["dynamic"] }
