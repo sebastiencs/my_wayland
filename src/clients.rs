@@ -311,6 +311,7 @@ struct ClientReader {
 enum ClientReaderAction {
     Start,
     ReadMsg { buffer: Box<[u8]> },
+    ErrorOnSocket { error: std::io::Error },
     Stop,
 }
 
@@ -354,8 +355,14 @@ impl ClientReader {
     }
 
     fn on_recvmsg(result: std::io::Result<RecvmsgCompleted>) -> AnyAction {
-        let RecvmsgCompleted { fd: _, buffer, fds: _ } = result.unwrap();
-        AnyAction::from(ClientReaderAction::ReadMsg { buffer })
+        match result {
+            Ok(RecvmsgCompleted { fd: _, buffer, fds: _ }) => {
+                AnyAction::from(ClientReaderAction::ReadMsg { buffer })
+            }
+            Err(error) => {
+                AnyAction::from(ClientReaderAction::ErrorOnSocket { error })
+            },
+        }
     }
 
     fn close(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
@@ -396,6 +403,11 @@ impl Model for ClientReader {
                     dispatcher.dispatch_to(self.client_id, ClientAction::MsgReceived { request });
                     self.read_buffer.consume_msg();
                 }
+            }
+            ErrorOnSocket { error } => {
+                log::error!("An error occured on the socket of {:?}: {:?}", self.client_id, error);
+                // Dispatch an action stop our Model
+                return self.close(dispatcher);
             }
             Stop => Ok(()),
         }
