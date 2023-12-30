@@ -45,7 +45,7 @@ pub(super) fn io_uring_enter(
         };
 
         if res < 0 {
-            if let libc::EAGAIN | libc::EINTR = res {
+            if let libc::EAGAIN | libc::EINTR = res.abs() {
                 continue;
             };
             return Err(std::io::Error::last_os_error());
