@@ -50,9 +50,10 @@ pub fn make_display(
     connector: &crate::drm::Connector,
     crtc: drm::control::crtc::Handle,
 ) {
-    let display = egl
-        .get_platform_display(EGL_PLATFORM_GBM_KHR, gbm.gbm_device, &[ATTRIB_NONE])
-        .unwrap();
+    let display = unsafe {
+        egl.get_platform_display(EGL_PLATFORM_GBM_KHR, gbm.gbm_device, &[ATTRIB_NONE])
+            .unwrap()
+    };
 
     let (major, minor) = egl.initialize(display).unwrap();
 
@@ -116,9 +117,10 @@ pub fn make_display(
     // let egl_context = egl.create_context(display, configs[0], None, &[egl::NONE]).unwrap();
     let gbm_surface = gbm.create_surface(connector.preferred_mode.as_ref().unwrap());
 
-    let egl_surface = egl
-        .create_platform_window_surface(display, config, gbm_surface.raw(), &[ATTRIB_NONE])
-        .unwrap();
+    let egl_surface = unsafe {
+        egl.create_platform_window_surface(display, config, gbm_surface.raw(), &[ATTRIB_NONE])
+            .unwrap()
+    };
 
     egl.make_current(display, Some(egl_surface), Some(egl_surface), Some(egl_context))
         .unwrap();

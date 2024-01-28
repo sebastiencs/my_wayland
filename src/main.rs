@@ -35,7 +35,10 @@ macro_rules! index_map_id {
     };
 }
 
-use std::{os::fd::AsRawFd, time::Duration};
+use std::{
+    os::fd::{AsFd, AsRawFd},
+    time::Duration,
+};
 
 use {
     io_uring::model::IoUringAction,
@@ -169,7 +172,7 @@ fn main() {
             std::process::abort();
         }
         dispatcher.dispatch(IoUringAction::Poll {
-            fd: timer.as_raw_fd(),
+            fd: timer.as_fd().as_raw_fd(),
             dispatch_to: Redispatcher::new(on_timeout),
         });
     }

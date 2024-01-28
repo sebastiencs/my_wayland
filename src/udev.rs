@@ -74,7 +74,8 @@ impl Model for Udev {
                 self.enumerate(dispatcher).expect("Failed to enumerate");
             }
             UdevAction::Event => {
-                for event in self.udev_monitor.iter() {
+                // TODO: Remove `collect()`
+                for event in self.udev_monitor.iter().collect::<Vec<_>>() {
                     self.handle_event(event, dispatcher)
                 }
             }
@@ -216,7 +217,7 @@ impl Udev {
 
 fn set_non_blocking(fd: RawFd) {
     let flags = fcntl::fcntl(fd, F_GETFL).unwrap();
-    let flags = unsafe { OFlag::from_bits_unchecked(flags) };
+    let flags = OFlag::from_bits_retain(flags);
 
     if !flags.contains(OFlag::O_NONBLOCK) {
         fcntl::fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK | flags)).unwrap();
