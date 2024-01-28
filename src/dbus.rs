@@ -435,6 +435,8 @@ impl Model for Dbus {
     }
 }
 
+/// Responsible for reading dbus socket, parsing messages
+/// and sending them to `Dbus`
 struct DbusReader {
     fd: RawFd,
     read_buffer: DbusBuffer,
@@ -463,17 +465,20 @@ impl Model for DbusReader {
         use DbusReaderAction::*;
 
         match action {
-            Start => self.read(dispatcher),
+            Start => self.dispatch_read(dispatcher),
             ReadMsg { buffer, fds } => {
                 if self.is_eof(&buffer) {
-                    return self.close(dispatcher);
+                    return self.dispatch_close(dispatcher);
                 }
                 self.read_buffer.append(&buffer);
                 self.fds.extend(fds.iter());
                 loop {
                     let msg: &[u8] = match self.read_buffer.get_whole_message() {
                         Some(msg) => msg,
-                        None => return self.read(dispatcher),
+                        None => {
+                            self.dispatch_read(dispatcher);
+                            return Ok(());
+                        }
                     };
                     let (msg, _offset) =
                         match Message::decode_with_fds(msg.to_vec().into(), &self.fds) {
@@ -487,11 +492,16 @@ impl Model for DbusReader {
                     self.read_buffer.consume_msg();
                 }
             }
-            Stop => Ok(()),
-        }
+            Stop => {
+                // TODO: Close fd
+            }
+        };
+
+        Ok(())
     }
 }
 
+/// Store and parse dbus messages
 struct DbusBuffer {
     data: Vec<u8>,
     pos: usize,
@@ -577,15 +587,14 @@ impl DbusReader {
         false
     }
 
-    fn read(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn dispatch_read(&self, dispatcher: &mut Dispatcher) {
         dispatcher.dispatch(IoUringAction::Recvmsg {
             fd: self.fd,
             dispatch_to: Redispatcher::into::<DbusReaderAction>(),
         });
-        Ok(())
     }
 
-    fn close(&self, _dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn dispatch_close(&self, _dispatcher: &mut Dispatcher) -> Result<(), ()> {
         todo!()
     }
 }

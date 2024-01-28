@@ -175,11 +175,15 @@ impl Client {
         };
         if result == -1 {
             let e = std::io::Error::last_os_error();
-            return log::error!("Unable to `getsockopt` of new client: {:?}", e);
+            log::error!("Unable to `getsockopt` of new client: {:?}", e);
+            return;
         }
         let comm = match std::fs::read(format!("/proc/{}/comm", cred.pid)) {
             Ok(comm) => comm,
-            Err(e) => return log::error!("Unable to read `comm` of new client: {:?}", e),
+            Err(e) => {
+                log::error!("Unable to read `comm` of new client: {:?}", e);
+                return;
+            }
         };
         let command = String::from_utf8_lossy(&comm);
         let command = command.trim().to_string();
@@ -271,6 +275,7 @@ impl Model for Client {
     }
 }
 
+/// Store and parse clients messages
 struct Buffer {
     data: Vec<u8>,
     pos: usize,
@@ -293,10 +298,11 @@ impl Buffer {
             return None;
         }
 
-        let fst = u32::from_ne_bytes(self.data[0..4].try_into().unwrap());
-        let snd = u32::from_ne_bytes(self.data[4..8].try_into().unwrap());
+        let object_id = u32::from_ne_bytes(self.data[0..4].try_into().unwrap());
+        let word = u32::from_ne_bytes(self.data[4..8].try_into().unwrap());
 
-        Some([fst, snd])
+        // word is 2 u16: [len; request]
+        Some([object_id, word])
     }
 
     fn get_whole_message(&self) -> Option<&[u8]> {
@@ -328,6 +334,8 @@ impl Buffer {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
 struct ClientReaderId(u64);
 
+/// Responsible for reading client's fd, parsing the message, and
+/// notify `Client`.
 struct ClientReader {
     fd: RawFd,
     id: ClientReaderId,
@@ -374,12 +382,11 @@ impl ClientReader {
         false
     }
 
-    fn read(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn dispatch_read(&self, dispatcher: &mut Dispatcher) {
         dispatcher.dispatch(IoUringAction::Recvmsg {
             fd: self.fd,
             dispatch_to: Redispatcher::id(self.id, Self::on_recvmsg),
         });
-        Ok(())
     }
 
     fn on_recvmsg(result: std::io::Result<RecvmsgCompleted>) -> AnyAction {
@@ -391,9 +398,8 @@ impl ClientReader {
         }
     }
 
-    fn close(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn dispatch_close(&self, dispatcher: &mut Dispatcher) {
         dispatcher.dispatch(ClientsAction::Close { id: self.client_id });
-        Ok(())
     }
 }
 
@@ -411,16 +417,22 @@ impl Model for ClientReader {
         use ClientReaderAction::*;
 
         match action {
-            Start => self.read(dispatcher),
+            Start => {
+                self.dispatch_read(dispatcher);
+            }
             ReadMsg { buffer } => {
                 if self.is_eof(&buffer) {
-                    return self.close(dispatcher);
+                    self.dispatch_close(dispatcher);
+                    return Ok(());
                 }
                 self.read_buffer.append(&buffer);
                 loop {
                     let msg: &[u8] = match self.read_buffer.get_whole_message() {
                         Some(msg) => msg,
-                        None => return self.read(dispatcher),
+                        None => {
+                            self.dispatch_read(dispatcher);
+                            return Ok(());
+                        }
                     };
                     let request: RawRequest = match msg.try_into() {
                         Ok(request) => request,
@@ -433,10 +445,14 @@ impl Model for ClientReader {
             ErrorOnSocket { error } => {
                 log::error!("An error occured on the socket of {:?}: {:?}", self.client_id, error);
                 // Dispatch an action stop our Model
-                return self.close(dispatcher);
+                self.dispatch_close(dispatcher);
             }
-            Stop => Ok(()),
-        }
+            Stop => {
+                // TODO: Close file descriptor
+            }
+        };
+
+        Ok(())
     }
 }
 
