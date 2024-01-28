@@ -194,6 +194,33 @@ impl Client {
     }
 }
 
+/// A specialized `Dispatcher`
+///
+/// Difference is that this one contains the client fd, so we can send events
+#[derive(derive_more::Deref, derive_more::DerefMut)]
+pub struct ClientDispatcher<'a> {
+    #[deref]
+    #[deref_mut]
+    dispatcher: &'a mut Dispatcher,
+    client_fd: RawFd,
+}
+
+impl<'a> ClientDispatcher<'a> {
+    fn make(client: &Client, dispatcher: &'a mut Dispatcher) -> Self {
+        Self { dispatcher, client_fd: client.fd }
+    }
+
+    pub fn send_event(&mut self, event: RawEvent) {
+        let action = IoUringAction::Write {
+            fd: self.client_fd,
+            offset: 0,
+            buffer: event.into_bytes(),
+            dispatch_to: Redispatcher::None,
+        };
+        self.dispatch(action);
+    }
+}
+
 impl Model for Client {
     type Action = ClientAction;
     const START: Option<Self::Action> = Some(Self::Action::Start);
@@ -207,7 +234,8 @@ impl Model for Client {
     ) -> Result<(), ()> {
         use {crate::wayland_objects::wl_display::WlDisplay, ClientAction::*};
 
-        dispatcher.set_client_fd(self.fd);
+        let mut dispatcher = ClientDispatcher::make(self, dispatcher);
+
         match action {
             Start => {
                 self.read_process_info();
@@ -228,7 +256,7 @@ impl Model for Client {
                 let obj_id = self.objects.get(&request.object_id()).unwrap();
 
                 let mut obj = state.objects.grab(*obj_id);
-                obj.on(self, state, request, dispatcher);
+                obj.on(self, state, request, &mut dispatcher);
                 state.objects.release(obj);
             }
             Close => {
@@ -422,8 +450,8 @@ pub struct RawEvent {
 pub trait EventWriter {
     type Event: 'static;
     fn to_raw_event(&self, event: Self::Event) -> RawEvent;
-    fn send_event(&self, event: Self::Event, dispatcher: &mut Dispatcher) {
-        dispatcher.send_raw(self.to_raw_event(event));
+    fn send_event(&self, event: Self::Event, dispatcher: &mut ClientDispatcher) {
+        dispatcher.send_event(self.to_raw_event(event));
     }
 }
 

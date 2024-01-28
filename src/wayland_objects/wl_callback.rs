@@ -1,8 +1,7 @@
 use crate::{
-    clients::{Client, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     object::Object,
     protocol_generated::{WaylandId, WlCallbackId},
-    runner::Dispatcher,
     state::State,
 };
 
@@ -18,7 +17,7 @@ impl WlCallback {
         Self { id }
     }
 
-    pub fn done(&self, dispatcher: &mut Dispatcher) {
+    pub fn done(&self, dispatcher: &mut ClientDispatcher) {
         let callback_data = self.id.into();
         self.send_event(Event::Done { callback_data }, dispatcher);
     }
@@ -29,5 +28,5 @@ impl Object for WlCallback {
         self.id.into()
     }
 
-    fn on(&mut self, _: &mut Client, _: &mut State, _: RawRequest, _: &mut Dispatcher) {}
+    fn on(&mut self, _: &mut Client, _: &mut State, _: RawRequest, _: &mut ClientDispatcher) {}
 }

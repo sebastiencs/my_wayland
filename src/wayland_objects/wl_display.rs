@@ -1,8 +1,7 @@
 use crate::{
-    clients::{Client, RawRequest},
+    clients::{Client, ClientDispatcher, RawRequest},
     object::{Object, Parser},
     protocol_generated::{wl_display, WaylandId, WlDisplayId},
-    runner::Dispatcher,
     state::State,
     wayland_objects::wl_callback::WlCallback,
 };
@@ -28,7 +27,7 @@ impl Object for WlDisplay {
         _client: &mut Client,
         _state: &mut State,
         request: RawRequest,
-        _dispatcher: &mut Dispatcher,
+        _dispatcher: &mut ClientDispatcher,
     ) {
         use wl_display::Request::*;
 

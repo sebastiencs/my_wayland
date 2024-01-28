@@ -1,10 +1,9 @@
 use std::{
     any::{Any, TypeId},
     collections::{BTreeMap, VecDeque},
-    os::fd::RawFd,
 };
 
-use crate::{clients::RawEvent, io_uring::model::IoUringAction, State};
+use crate::{io_uring::model::IoUringAction, State};
 
 type Result<T> = std::result::Result<T, ()>;
 
@@ -15,9 +14,6 @@ pub struct Dispatcher {
     pending_add: VecDeque<(ActionId, AnyModel)>,
     /// Models to remove
     pending_remove: VecDeque<ActionId>,
-
-    // TODO: Move somewhere else (outside of `Dispatcher`)
-    client_fd: Option<RawFd>,
 }
 
 impl Default for Dispatcher {
@@ -26,7 +22,6 @@ impl Default for Dispatcher {
             queue: VecDeque::with_capacity(1024),
             pending_add: VecDeque::with_capacity(1024),
             pending_remove: VecDeque::with_capacity(1024),
-            client_fd: None,
         }
     }
 }
@@ -98,33 +93,6 @@ impl Dispatcher {
     {
         let action_id = ActionId::of_with::<M::Action, _>(id);
         self.pending_remove.push_back(action_id);
-    }
-
-    // TODO: Move somewhere else (outside of `Dispatcher`)
-    pub fn send_raw(&mut self, event: RawEvent) {
-        let action = IoUringAction::Write {
-            fd: self.client_fd.unwrap(),
-            offset: 0,
-            buffer: event.into_bytes(),
-            dispatch_to: Redispatcher::None,
-        };
-        self.dispatch(action);
-    }
-
-    // TODO: Move somewhere else (outside of `Dispatcher`)
-    pub fn set_client_fd(&mut self, fd: RawFd) {
-        self.client_fd = Some(fd);
-    }
-
-    fn clear(&mut self) {
-        self.clear_client_fd();
-    }
-
-    // TODO: Move somewhere else (outside of `Dispatcher`)
-    fn clear_client_fd(&mut self) {
-        if self.client_fd.is_some() {
-            self.client_fd = None;
-        }
     }
 }
 
@@ -424,7 +392,6 @@ where
             return Ok(());
         };
         model.process(state, *action, dispatcher)?;
-        dispatcher.clear();
         Ok(())
     }
 
@@ -440,7 +407,6 @@ where
             panic!("Model::STOP is not defined for {}", std::any::type_name::<T>());
         };
         model.process(state, action, dispatcher)?;
-        dispatcher.clear();
         Ok(())
     }
 }
