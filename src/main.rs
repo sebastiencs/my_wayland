@@ -35,7 +35,7 @@ macro_rules! index_map_id {
     };
 }
 
-use std::{os::fd::AsRawFd, sync::Arc, time::Duration};
+use std::{os::fd::AsRawFd, time::Duration};
 
 use {
     io_uring::model::IoUringAction,

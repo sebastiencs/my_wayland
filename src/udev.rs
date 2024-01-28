@@ -19,7 +19,6 @@ use nix::{
 use crate::{
     dbus::DbusAction,
     drm::Drm,
-    egl::EglInstance,
     input::LibinputAction,
     io_uring::{model::IoUringAction, ring::PollCompleted},
     runner::{AnyAction, Dispatcher, Model, Redispatcher},

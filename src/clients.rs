@@ -359,9 +359,7 @@ impl ClientReader {
             Ok(RecvmsgCompleted { fd: _, buffer, fds: _ }) => {
                 AnyAction::from(ClientReaderAction::ReadMsg { buffer })
             }
-            Err(error) => {
-                AnyAction::from(ClientReaderAction::ErrorOnSocket { error })
-            },
+            Err(error) => AnyAction::from(ClientReaderAction::ErrorOnSocket { error }),
         }
     }
 
