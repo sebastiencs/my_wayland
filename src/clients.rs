@@ -545,30 +545,18 @@ impl RawEvent {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, derive_more::Deref, derive_more::DerefMut)]
 pub struct RawRequest {
     pub object_id: u32,
     pub request_id: u16,
+    #[deref]
+    #[deref_mut]
     pub arguments: Arguments,
 }
 
 impl RawRequest {
     pub fn object_id(&self) -> WaylandId {
         WaylandId::from(self.object_id)
-    }
-}
-
-impl std::ops::Deref for RawRequest {
-    type Target = Arguments;
-
-    fn deref(&self) -> &Self::Target {
-        &self.arguments
-    }
-}
-
-impl std::ops::DerefMut for RawRequest {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.arguments
     }
 }
 

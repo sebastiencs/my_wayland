@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use {
     drm::buffer::DrmFourcc,
@@ -81,6 +81,7 @@ pub fn make_display(
     let exts = egl.query_string(Some(display), egl::EXTENSIONS).unwrap();
     let exts: HashSet<String> = exts
         .to_string_lossy()
+        .trim()
         .split(' ')
         .map(|s| s.trim().to_string())
         .collect();
@@ -167,13 +168,12 @@ pub fn make_display(
             .set_crtc(crtc, Some(fb), (0, 0), &[connector.handler], Some(mode))
             .unwrap();
 
-        if let Some((fb, bo)) = previous.take() {
+        if let Some((fb, bo)) = previous.replace((fb, bo)) {
             gbm.destroy_framebuffer(fb).unwrap();
             gbm_surface.release_buffer(bo);
         }
-        previous = Some((fb, bo));
 
-        std::thread::sleep_ms(20);
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

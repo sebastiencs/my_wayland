@@ -15,23 +15,12 @@ pub struct IndexMap<K, V> {
     _phantom: PhantomData<K>,
 }
 
+#[derive(derive_more::Deref, derive_more::DerefMut)]
 pub struct Grab<K, V> {
     key: K,
+    #[deref]
+    #[deref_mut]
     value: V,
-}
-
-impl<K, V> std::ops::Deref for Grab<K, V> {
-    type Target = V;
-
-    fn deref(&self) -> &Self::Target {
-        &self.value
-    }
-}
-
-impl<K, V> std::ops::DerefMut for Grab<K, V> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.value
-    }
 }
 
 impl<K, V> std::fmt::Debug for IndexMap<K, V>
