@@ -13,7 +13,7 @@ use drm::{
     Device,
 };
 
-use crate::egl::{self, EglInstance};
+use crate::egl::{self, EglContext, EglInstance};
 
 const KNOWN_FORMATS: &[DrmFourcc] = &[DrmFourcc::Argb8888, DrmFourcc::Xrgb8888];
 
@@ -232,7 +232,9 @@ impl Drm {
             .find(|c| crtcs.get(c).unwrap().active)
             .unwrap();
 
-        egl::make_display(&drm, egl, &gbm, connector, *crtc);
+        let egl_context = EglContext::make(egl, gbm);
+
+        // egl::make_display(&drm, egl, &gbm, connector, *crtc);
 
         // egl.get_platform_display(EGL_PLATFORM_GBM_KHR, native_display, attrib_list);
 

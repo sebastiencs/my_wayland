@@ -1,4 +1,8 @@
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use {
     drm::buffer::DrmFourcc,
@@ -41,6 +45,56 @@ pub fn init() -> EglInstance {
 
     // let extensions: BTreeSet<&'static str> = query_extensions().unwrap().split(' ').collect();
     // dbg!(extensions);
+}
+
+pub struct EglContext {
+    egl: EglInstance,
+    display: khronos_egl::Display,
+    extensions: BTreeSet<String>,
+    config: egl::Config,
+    context: egl::Context,
+    gbm: GbmDevice,
+}
+
+impl EglContext {
+    pub fn make(egl: &EglInstance, gbm: GbmDevice) -> Self {
+        let display = unsafe {
+            egl.get_platform_display(EGL_PLATFORM_GBM_KHR, gbm.gbm_device, &[ATTRIB_NONE])
+                .unwrap()
+        };
+        let (_major, _minor) = egl.initialize(display).unwrap();
+
+        let config = Self::find_config_xrgb8888(egl, display).unwrap();
+
+        let extensions = egl.query_string(Some(display), egl::EXTENSIONS).unwrap();
+        let extensions: BTreeSet<String> = extensions
+            .to_string_lossy()
+            .trim()
+            .split(' ')
+            .map(|s| s.trim().to_string())
+            .collect();
+
+        let context = egl
+            .create_context(display, config, None, &[egl::CONTEXT_CLIENT_VERSION, 2, egl::NONE])
+            .unwrap();
+
+        Self { egl: egl.clone(), display, extensions, config, context, gbm }
+    }
+
+    fn find_config_xrgb8888(
+        egl: &EglInstance,
+        display: khronos_egl::Display,
+    ) -> Option<egl::Config> {
+        let mut configs = Vec::with_capacity(egl.get_config_count(display).unwrap());
+        egl.get_configs(display, &mut configs).unwrap();
+        configs.into_iter().find(|config| {
+            let attr = egl
+                .get_config_attrib(display, *config, egl::NATIVE_VISUAL_ID)
+                .unwrap();
+            let drm = DrmFourcc::try_from(attr as u32).unwrap();
+            drm == drm::buffer::DrmFourcc::Xrgb8888
+        })
+    }
 }
 
 pub fn make_display(
