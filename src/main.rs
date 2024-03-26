@@ -35,6 +35,39 @@ macro_rules! index_map_id {
     };
 }
 
+/// Cache any data
+macro_rules! cache {
+    ($F:ty, $compute:expr) => {{
+        // Initializer is `const`.
+        // Note that the macro `thread_local!` uses internally the
+        // unstable `#[thread_local]`.
+        // We use `ManuallyDrop` to avoid dealing with destructor state
+        // so it's fast.
+        // The destructor won't be run, but we don't care.
+        //
+        // See
+        // https://github.com/rust-lang/rust/blob/635c4a5e612b0ee8af6615635599702d3dce9906/library/std/src/sys/common/thread_local/fast_local.rs#
+
+        use std::cell::RefCell;
+        use std::mem::ManuallyDrop;
+
+        thread_local! {
+            static CACHE: ManuallyDrop<RefCell<Option<Box<$F>>>> =
+                const { ManuallyDrop::new(RefCell::new(Option::None)) };
+        }
+
+        CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if let Some(cached) = cache.as_ref() {
+                return (**cached).clone();
+            }
+            let data = $compute;
+            let _ = cache.insert(Box::new(data.clone()));
+            data
+        })
+    }};
+}
+
 use std::{
     os::fd::{AsFd, AsRawFd},
     time::Duration,

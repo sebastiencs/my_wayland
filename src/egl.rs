@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -16,7 +16,10 @@ use {
 
 use drm::control::Device;
 
-use crate::{drm::{DrmFd, Format, FORMATS_MAP}, gbm::GbmDevice};
+use crate::{
+    drm::{DrmFd, Format, FORMATS_MAP},
+    gbm::GbmDevice,
+};
 
 const EGL_PLATFORM_GBM_KHR: u32 = 0x31D7;
 
@@ -31,7 +34,7 @@ pub fn init() -> EglInstance {
     let egl: EglInstance = Arc::new(egl);
 
     egl.bind_api(khronos_egl::OPENGL_ES_API)
-       .expect("unable to select OpenGL API");
+        .expect("unable to select OpenGL API");
 
     egl
 
@@ -54,7 +57,7 @@ pub struct EglModifier {
 pub struct EglFormat {
     pub format: &'static Format,
     pub implicit_external_only: bool,
-    pub modifiers: HashMap<u64, EglModifier>,
+    pub modifiers: BTreeMap<u64, EglModifier>,
 }
 
 #[derive(Debug)]
@@ -92,7 +95,15 @@ impl EglContext {
 
         let formats = Self::query_formats(egl, &display);
 
-        Self { egl: egl.clone(), display, extensions, config, context, gbm, formats }
+        Self {
+            egl: egl.clone(),
+            display,
+            extensions,
+            config,
+            context,
+            gbm,
+            formats,
+        }
     }
 
     fn query_formats(
@@ -101,24 +112,31 @@ impl EglContext {
     ) -> HashMap<DrmFourcc, EglFormat> {
         let mut nformats = 0;
         unsafe {
-            egl.query_dma_buf_formats_ext(*display, 0, &mut [], &mut nformats).unwrap();
+            query_dma_buf_formats_ext(egl, *display, 0, &mut [], &mut nformats).unwrap();
         }
         let mut formats = vec![0i32; nformats as usize];
         unsafe {
-            egl.query_dma_buf_formats_ext(*display, nformats, &mut formats, &mut nformats).unwrap();
+            query_dma_buf_formats_ext(egl, *display, nformats, &mut formats, &mut nformats)
+                .unwrap();
         }
         assert_eq!(nformats as usize, formats.len());
 
-        formats.iter().filter_map(|fmt| {
-            let format = FORMATS_MAP.get(&DrmFourcc::try_from(*fmt as u32).ok()?)?;
-            let (modifiers, external_only) = Self::query_modifiers(egl, display, *fmt, format);
+        formats
+            .iter()
+            .filter_map(|fmt| {
+                let format = FORMATS_MAP.get(&DrmFourcc::try_from(*fmt as u32).ok()?)?;
+                let (modifiers, external_only) = Self::query_modifiers(egl, display, *fmt, format);
 
-            Some((format.drm, EglFormat {
-                format: *format,
-                implicit_external_only: external_only,
-                modifiers
-            }))
-        }).collect()
+                Some((
+                    format.drm,
+                    EglFormat {
+                        format: *format,
+                        implicit_external_only: external_only,
+                        modifiers,
+                    },
+                ))
+            })
+            .collect()
     }
 
     fn query_modifiers(
@@ -126,22 +144,45 @@ impl EglContext {
         display: &khronos_egl::Display,
         gl_format: egl::Int,
         format: &Format,
-    ) -> (HashMap<u64, EglModifier>, bool) {
+    ) -> (BTreeMap<u64, EglModifier>, bool) {
         const INVALID_MODIFIER: u64 = 0x00ff_ffff_ffff_ffff;
 
         let mut nmodifiers = 0;
         unsafe {
-            egl.query_dma_buf_modifiers_ext(*display, gl_format, nmodifiers, &mut [], &mut [], &mut nmodifiers).unwrap();
+            query_dma_buf_modifiers_ext(
+                egl,
+                *display,
+                gl_format,
+                nmodifiers,
+                &mut [],
+                &mut [],
+                &mut nmodifiers,
+            )
+            .unwrap();
         }
         let mut modifiers = vec![0u64; nmodifiers as usize];
         let mut external_only = vec![0; nmodifiers as usize];
         unsafe {
-            egl.query_dma_buf_modifiers_ext(*display, gl_format, nmodifiers, &mut modifiers, &mut external_only, &mut nmodifiers).unwrap();
+            query_dma_buf_modifiers_ext(
+                egl,
+                *display,
+                gl_format,
+                nmodifiers,
+                &mut modifiers,
+                &mut external_only,
+                &mut nmodifiers,
+            )
+            .unwrap();
         }
 
-        let mut map = modifiers.iter().copied().zip(external_only).map(|(modifier, external_only)| {
-            (modifier, EglModifier { modifier, external_only: external_only == egl::TRUE })
-        }).collect::<HashMap<_, _>>();
+        let mut map = modifiers
+            .iter()
+            .copied()
+            .zip(external_only)
+            .map(|(modifier, external_only)| {
+                (modifier, EglModifier { modifier, external_only: external_only == egl::TRUE })
+            })
+            .collect::<BTreeMap<_, _>>();
 
         let mut external_only = format.external_only_guess;
         if !modifiers.is_empty() {
@@ -335,4 +376,74 @@ const GL_COLOR_BUFFER_BIT: GLbitfield = 0x00004000;
 extern "C" {
     pub fn glClear(mask: GLbitfield);
     pub fn glClearColor(red: GLfloat, green: GLfloat, blue: GLfloat, alpha: GLfloat);
+}
+
+mod util {
+    pub(super) fn ptr_or_null<T>(v: &mut [T]) -> *mut T {
+        if v.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            v.as_mut_ptr()
+        }
+    }
+}
+
+pub unsafe fn query_dma_buf_formats_ext(
+    egl: &EglInstance,
+    display: egl::Display,
+    max_formats: egl::Int,
+    formats: &mut [egl::Int],
+    num_formats: &mut egl::Int,
+) -> Result<(), ()> {
+    type FunSignature =
+        extern "C" fn(egl::EGLDisplay, egl::Int, *mut egl::Int, *mut egl::Int) -> u32;
+    let query_dma_buf_formats_ext: FunSignature = cache!(FunSignature, {
+        let ptr: extern "system" fn() = egl.get_proc_address("eglQueryDmaBufFormatsEXT").unwrap();
+        std::mem::transmute::<_, FunSignature>(ptr)
+    });
+    let ptr = util::ptr_or_null(formats);
+    let result = query_dma_buf_formats_ext(display.as_ptr(), max_formats, ptr, num_formats);
+    if result == egl::TRUE {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+pub unsafe fn query_dma_buf_modifiers_ext(
+    egl: &EglInstance,
+    display: egl::Display,
+    format: egl::Int,
+    max_modifiers: egl::Int,
+    modifiers: &mut [u64],
+    external_only: &mut [egl::Boolean],
+    num_modifiers: &mut egl::Int,
+) -> Result<(), ()> {
+    type FunSignature = extern "C" fn(
+        display: egl::EGLDisplay,
+        format: egl::Int,
+        max_modifiers: egl::Int,
+        modifiers: *mut u64,
+        external_only: *mut egl::Boolean,
+        num_modifiers: *mut egl::Int,
+    ) -> u32;
+    let query_dma_buf_modifiers_ext: FunSignature = cache!(FunSignature, {
+        let ptr: extern "system" fn() = egl.get_proc_address("eglQueryDmaBufModifiersEXT").unwrap();
+        std::mem::transmute::<_, FunSignature>(ptr)
+    });
+    let ptr = util::ptr_or_null(modifiers);
+    let external_only_ptr = util::ptr_or_null(external_only);
+    let result = query_dma_buf_modifiers_ext(
+        display.as_ptr(),
+        format,
+        max_modifiers,
+        ptr,
+        external_only_ptr,
+        num_modifiers,
+    );
+    if result == egl::TRUE {
+        Ok(())
+    } else {
+        Err(())
+    }
 }

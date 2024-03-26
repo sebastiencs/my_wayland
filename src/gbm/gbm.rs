@@ -108,11 +108,7 @@ impl GbmDevice {
         BufferObject { bo }
     }
 
-    pub fn create_bo(
-        &self,
-        mode: &drm::control::Mode,
-        flags: UseFlags,
-    ) -> BufferObject {
+    pub fn create_bo(&self, mode: &drm::control::Mode, flags: UseFlags) -> BufferObject {
         const LINEAR_MODIFIER: u64 = 0;
 
         let (width, height) = mode.size();

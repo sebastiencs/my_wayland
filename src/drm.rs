@@ -3,16 +3,18 @@ use std::{
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
 };
 
-use drm::{
-    buffer::DrmFourcc,
-    control::{
-        self, connector, crtc, encoder, plane,
-        property::{self, ValueType},
-        Device as CT, ModeTypeFlags, PlaneType, ResourceHandles,
+use {
+    drm::{
+        buffer::DrmFourcc,
+        control::{
+            self, connector, crtc, encoder, plane,
+            property::{self, ValueType},
+            Device as CT, ModeTypeFlags, PlaneType, ResourceHandles,
+        },
+        Device,
     },
-    Device,
+    once_cell::sync::Lazy,
 };
-use once_cell::sync::Lazy;
 
 use crate::egl::{self, EglContext, EglInstance};
 
@@ -41,13 +43,10 @@ pub static XRGB8888: &Format = &Format {
     has_alpha: false,
 };
 
-pub static FORMATS: &[Format] = &[
-    *ARGB8888, *XRGB8888,
-];
+pub static FORMATS: &[Format] = &[*ARGB8888, *XRGB8888];
 
-pub static FORMATS_MAP: Lazy<HashMap<DrmFourcc, &'static Format>> = Lazy::new(|| {
-    FORMATS.iter().map(|format| (format.drm, format)).collect()
-});
+pub static FORMATS_MAP: Lazy<HashMap<DrmFourcc, &'static Format>> =
+    Lazy::new(|| FORMATS.iter().map(|format| (format.drm, format)).collect());
 
 pub const KNOWN_FORMATS: &[DrmFourcc] = &[DrmFourcc::Argb8888, DrmFourcc::Xrgb8888];
 
@@ -339,12 +338,16 @@ impl Drm {
         let in_use = Self::find_first_valid_connector(&connectors, &crtcs, &planes)
             .expect("Failed to find connector");
 
-        let primary_plane = planes
-            .values()
+        let primary_plane = in_use
+            .planes
+            .iter()
             .find(|p| matches!(p.kind, PlaneType::Primary))
             .unwrap();
 
         let mut changes = control::atomic::AtomicModeReq::new();
+
+        dbg!(primary_plane.handle);
+        dbg!(primary_plane.fb_handle());
 
         changes.add_property(
             primary_plane.handle,
