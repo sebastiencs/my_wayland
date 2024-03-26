@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
 };
 
@@ -12,10 +12,44 @@ use drm::{
     },
     Device,
 };
+use once_cell::sync::Lazy;
 
 use crate::egl::{self, EglContext, EglInstance};
 
-const KNOWN_FORMATS: &[DrmFourcc] = &[DrmFourcc::Argb8888, DrmFourcc::Xrgb8888];
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Format {
+    pub name: &'static str,
+    pub bpp: u32,
+    pub drm: DrmFourcc,
+    pub external_only_guess: bool,
+    pub has_alpha: bool,
+}
+
+pub static ARGB8888: &Format = &Format {
+    name: "argb8888",
+    bpp: 4,
+    drm: DrmFourcc::Argb8888,
+    external_only_guess: false,
+    has_alpha: true,
+};
+
+pub static XRGB8888: &Format = &Format {
+    name: "xrgb8888",
+    bpp: 4,
+    drm: DrmFourcc::Xrgb8888,
+    external_only_guess: false,
+    has_alpha: false,
+};
+
+pub static FORMATS: &[Format] = &[
+    *ARGB8888, *XRGB8888,
+];
+
+pub static FORMATS_MAP: Lazy<HashMap<DrmFourcc, &'static Format>> = Lazy::new(|| {
+    FORMATS.iter().map(|format| (format.drm, format)).collect()
+});
+
+pub const KNOWN_FORMATS: &[DrmFourcc] = &[DrmFourcc::Argb8888, DrmFourcc::Xrgb8888];
 
 #[derive(Debug)]
 pub struct Drm {
@@ -29,6 +63,7 @@ pub struct Drm {
     cursor_width: u64,
     resources: ResourceHandles,
     driver: Driver,
+    egl_context: EglContext,
 }
 
 #[derive(Debug)]
@@ -94,11 +129,24 @@ fn get_props<T: control::ResourceHandle>(
         .collect()
 }
 
+#[derive(Clone)]
+struct Property<T> {
+    value: T,
+    handle: control::property::Handle,
+}
+
+impl<T> Property<T> {
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+}
+
+#[derive(Clone)]
 struct Geometry {
-    pub x: u64,
-    pub y: u64,
-    pub width: u64,
-    pub height: u64,
+    pub x: Property<u64>,
+    pub y: Property<u64>,
+    pub width: Property<u64>,
+    pub height: Property<u64>,
 }
 
 impl std::fmt::Debug for Geometry {
@@ -106,12 +154,15 @@ impl std::fmt::Debug for Geometry {
         let Self { x, y, width, height } = self;
         f.write_fmt(format_args!(
             "Geometry {{ x: {:?}, y: {:?}, width: {:?}, height: {:?} }}",
-            x, y, width, height
+            x.value(),
+            y.value(),
+            width.value(),
+            height.value()
         ))
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Plane {
     pub handle: plane::Handle,
     pub kind: PlaneType,
@@ -123,7 +174,16 @@ struct Plane {
     pub fb_handle: Option<control::framebuffer::Handle>,
 }
 
-#[derive(Debug)]
+impl Plane {
+    pub fn fb_handle(&self) -> Option<control::property::Handle> {
+        let handle = self.fb_handle?;
+        let handle: control::RawResourceHandle = handle.into();
+        let handle: control::property::Handle = handle.into();
+        Some(handle)
+    }
+}
+
+#[derive(Clone, Debug)]
 struct Crtc {
     handle: crtc::Handle,
     index: usize,
@@ -138,7 +198,7 @@ struct Encoder {
     possible_crtcs: HashSet<crtc::Handle>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Connector {
     pub handler: connector::Handle,
     pub edid: Option<edid_rs::EDID>,
@@ -165,6 +225,13 @@ impl From<drm::Driver> for Driver {
             desc: desc.to_string_lossy().to_string(),
         }
     }
+}
+
+#[derive(Debug)]
+struct ConnectorInUse {
+    crtc: Crtc,
+    connector: Connector,
+    planes: Vec<Plane>,
 }
 
 impl Drm {
@@ -212,27 +279,35 @@ impl Drm {
             .map(|connector| Self::make_connector(&drm, *connector, &encoders))
             .collect();
 
-        // let lease = drm.create_lease().unwrap();
-        // dbg!(lease);
+        for c in connectors.values() {
+            let connector::State::Connected = c.state else {
+                continue;
+            };
+
+            for crtc in &c.crtcs {
+                let crtc = crtcs.get(crtc).unwrap();
+                if !crtc.active {
+                    continue;
+                }
+                // let planes = crtc.possible_planes.clone();
+                eprintln!("connector {:?} crtc={:?}", c, crtc);
+                // eprintln!("connector {:?} crtc={:?}", c.handler, crtc);
+                // eprintln!("connector {:?} crtc={:?} planes={:?}", c.handler, crtc, planes);
+            }
+        }
 
         let gbm = crate::gbm::GbmDevice::new(&drm).unwrap();
 
-        let (_, connector) = connectors
-            .iter()
-            .find(|c| c.1.state == connector::State::Connected)
-            .unwrap();
-
-        // for crtc in &connector.crtcs {
-        //     dbg!(crtcs.get(crtc));
-        // }
-
-        let crtc = connector
-            .crtcs
-            .iter()
-            .find(|c| crtcs.get(c).unwrap().active)
-            .unwrap();
-
         let egl_context = EglContext::make(egl, gbm);
+
+        // let in_use = Self::find_first_valid_connector(&connectors, &crtcs, &planes)
+        //     .expect("Failed to find connector");
+
+        let in_use = Self::init_drm(&drm, &connectors, &crtcs, &planes);
+
+        // control::atomic::AtomicModeReq;
+        // drm::
+        // drm.atomic_commit(flags, req);
 
         // egl::make_display(&drm, egl, &gbm, connector, *crtc);
 
@@ -251,7 +326,77 @@ impl Drm {
             resources,
             driver,
             connectors,
+            egl_context,
         }
+    }
+
+    fn init_drm(
+        drm: &DrmFd,
+        connectors: &BTreeMap<connector::Handle, Connector>,
+        crtcs: &BTreeMap<crtc::Handle, Crtc>,
+        planes: &BTreeMap<plane::Handle, Plane>,
+    ) {
+        let in_use = Self::find_first_valid_connector(&connectors, &crtcs, &planes)
+            .expect("Failed to find connector");
+
+        let primary_plane = planes
+            .values()
+            .find(|p| matches!(p.kind, PlaneType::Primary))
+            .unwrap();
+
+        let mut changes = control::atomic::AtomicModeReq::new();
+
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.fb_handle().unwrap(),
+            control::property::Value::Bitmask(0),
+        );
+
+        // changes.change_object(primary_plane.id, |c| {
+        //     c.change(primary_plane.fb_id, buffers[0].drm.id().0 as _);
+        //     c.change(primary_plane.crtc_id.id, crtc.id.0 as _);
+        //     c.change(primary_plane.crtc_x.id, 0);
+        //     c.change(primary_plane.crtc_y.id, 0);
+        //     c.change(primary_plane.crtc_w.id, mode.hdisplay as _);
+        //     c.change(primary_plane.crtc_h.id, mode.vdisplay as _);
+        //     c.change(primary_plane.src_x.id, 0);
+        //     c.change(primary_plane.src_y.id, 0);
+        //     c.change(primary_plane.src_w.id, (mode.hdisplay as u64) << 16);
+        //     c.change(primary_plane.src_h.id, (mode.vdisplay as u64) << 16);
+        // });
+
+        dbg!(in_use);
+    }
+
+    // TODO: Support multiple monitors/connectors
+    fn find_first_valid_connector(
+        connectors: &BTreeMap<connector::Handle, Connector>,
+        crtcs: &BTreeMap<crtc::Handle, Crtc>,
+        planes: &BTreeMap<plane::Handle, Plane>,
+    ) -> Option<ConnectorInUse> {
+        let (connector, crtc) = (|| {
+            for connector in connectors.values() {
+                let connector::State::Connected = connector.state else {
+                    continue;
+                };
+                for crtc in &connector.crtcs {
+                    let crtc = crtcs.get(crtc).unwrap();
+                    if !crtc.active {
+                        continue;
+                    }
+                    return Some((connector, crtc));
+                }
+            }
+            None
+        })()?;
+
+        let planes = crtc
+            .possible_planes
+            .iter()
+            .map(|handle| planes.get(handle).cloned().unwrap())
+            .collect::<Vec<_>>();
+
+        Some(ConnectorInUse { crtc: crtc.clone(), connector: connector.clone(), planes })
     }
 
     fn make_crtc(
@@ -329,12 +474,15 @@ impl Drm {
             .collect();
 
         let get_geometry = |x: &str, y: &str, w: &str, h: &str| {
-            let first = |&(a, _)| a;
+            let get_prop = |(value, info): &(u64, property::Info)| Property {
+                value: *value,
+                handle: info.handle(),
+            };
             Geometry {
-                x: props.get(x).map(first).unwrap(),
-                y: props.get(y).map(first).unwrap(),
-                width: props.get(w).map(first).unwrap(),
-                height: props.get(h).map(first).unwrap(),
+                x: props.get(x).map(get_prop).unwrap(),
+                y: props.get(y).map(get_prop).unwrap(),
+                width: props.get(w).map(get_prop).unwrap(),
+                height: props.get(h).map(get_prop).unwrap(),
             }
         };
 

@@ -1,13 +1,10 @@
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
 
-use {
-    drm::buffer::DrmFourcc,
-    egl::{Attrib, ATTRIB_NONE},
-};
+use {drm::buffer::DrmFourcc, egl::ATTRIB_NONE};
 // use {
 //     egli::{egl, query_extensions, query_version},
 //     std::collections::BTreeSet,
@@ -19,7 +16,7 @@ use {
 
 use drm::control::Device;
 
-use crate::{drm::DrmFd, gbm::GbmDevice};
+use crate::{drm::{DrmFd, Format, FORMATS_MAP}, gbm::GbmDevice};
 
 const EGL_PLATFORM_GBM_KHR: u32 = 0x31D7;
 
@@ -34,7 +31,7 @@ pub fn init() -> EglInstance {
     let egl: EglInstance = Arc::new(egl);
 
     egl.bind_api(khronos_egl::OPENGL_ES_API)
-        .expect("unable to select OpenGL API");
+       .expect("unable to select OpenGL API");
 
     egl
 
@@ -47,6 +44,20 @@ pub fn init() -> EglInstance {
     // dbg!(extensions);
 }
 
+#[derive(Debug)]
+pub struct EglModifier {
+    pub modifier: u64,
+    pub external_only: bool,
+}
+
+#[derive(Debug)]
+pub struct EglFormat {
+    pub format: &'static Format,
+    pub implicit_external_only: bool,
+    pub modifiers: HashMap<u64, EglModifier>,
+}
+
+#[derive(Debug)]
 pub struct EglContext {
     egl: EglInstance,
     display: khronos_egl::Display,
@@ -54,6 +65,7 @@ pub struct EglContext {
     config: egl::Config,
     context: egl::Context,
     gbm: GbmDevice,
+    formats: HashMap<DrmFourcc, EglFormat>,
 }
 
 impl EglContext {
@@ -78,7 +90,67 @@ impl EglContext {
             .create_context(display, config, None, &[egl::CONTEXT_CLIENT_VERSION, 2, egl::NONE])
             .unwrap();
 
-        Self { egl: egl.clone(), display, extensions, config, context, gbm }
+        let formats = Self::query_formats(egl, &display);
+
+        Self { egl: egl.clone(), display, extensions, config, context, gbm, formats }
+    }
+
+    fn query_formats(
+        egl: &EglInstance,
+        display: &khronos_egl::Display,
+    ) -> HashMap<DrmFourcc, EglFormat> {
+        let mut nformats = 0;
+        unsafe {
+            egl.query_dma_buf_formats_ext(*display, 0, &mut [], &mut nformats).unwrap();
+        }
+        let mut formats = vec![0i32; nformats as usize];
+        unsafe {
+            egl.query_dma_buf_formats_ext(*display, nformats, &mut formats, &mut nformats).unwrap();
+        }
+        assert_eq!(nformats as usize, formats.len());
+
+        formats.iter().filter_map(|fmt| {
+            let format = FORMATS_MAP.get(&DrmFourcc::try_from(*fmt as u32).ok()?)?;
+            let (modifiers, external_only) = Self::query_modifiers(egl, display, *fmt, format);
+
+            Some((format.drm, EglFormat {
+                format: *format,
+                implicit_external_only: external_only,
+                modifiers
+            }))
+        }).collect()
+    }
+
+    fn query_modifiers(
+        egl: &EglInstance,
+        display: &khronos_egl::Display,
+        gl_format: egl::Int,
+        format: &Format,
+    ) -> (HashMap<u64, EglModifier>, bool) {
+        const INVALID_MODIFIER: u64 = 0x00ff_ffff_ffff_ffff;
+
+        let mut nmodifiers = 0;
+        unsafe {
+            egl.query_dma_buf_modifiers_ext(*display, gl_format, nmodifiers, &mut [], &mut [], &mut nmodifiers).unwrap();
+        }
+        let mut modifiers = vec![0u64; nmodifiers as usize];
+        let mut external_only = vec![0; nmodifiers as usize];
+        unsafe {
+            egl.query_dma_buf_modifiers_ext(*display, gl_format, nmodifiers, &mut modifiers, &mut external_only, &mut nmodifiers).unwrap();
+        }
+
+        let mut map = modifiers.iter().copied().zip(external_only).map(|(modifier, external_only)| {
+            (modifier, EglModifier { modifier, external_only: external_only == egl::TRUE })
+        }).collect::<HashMap<_, _>>();
+
+        let mut external_only = format.external_only_guess;
+        if !modifiers.is_empty() {
+            external_only = map.values().any(|m| m.external_only);
+        }
+
+        map.insert(INVALID_MODIFIER, EglModifier { modifier: INVALID_MODIFIER, external_only });
+
+        (map, external_only)
     }
 
     fn find_config_xrgb8888(

@@ -85,7 +85,7 @@ impl GbmDevice {
         GbmSurface { surface }
     }
 
-    pub fn create_bo(&self, mode: &drm::control::Mode) -> BufferObject {
+    pub fn create_bo2(&self, mode: &drm::control::Mode) -> BufferObject {
         let (width, height) = mode.size();
         let (width, height) = (width as u32, height as u32);
 
@@ -101,6 +101,35 @@ impl GbmDevice {
                 std::ptr::null(),
                 0,
                 flags,
+            )
+        };
+        assert!(!bo.is_null());
+
+        BufferObject { bo }
+    }
+
+    pub fn create_bo(
+        &self,
+        mode: &drm::control::Mode,
+        flags: UseFlags,
+    ) -> BufferObject {
+        const LINEAR_MODIFIER: u64 = 0;
+
+        let (width, height) = mode.size();
+        let (width, height) = (width as u32, height as u32);
+
+        let format = drm::buffer::DrmFourcc::Xrgb8888 as u32;
+        let modifiers = [LINEAR_MODIFIER];
+
+        let bo = unsafe {
+            sys::gbm_bo_create_with_modifiers2(
+                self.gbm_device,
+                width,
+                height,
+                format,
+                modifiers.as_ptr(),
+                modifiers.len() as _,
+                flags.bits(),
             )
         };
         assert!(!bo.is_null());
