@@ -1,4 +1,13 @@
-use std::os::fd::{AsFd, AsRawFd, RawFd};
+use std::{
+    os::fd::{AsFd, AsRawFd, RawFd},
+    sync::Arc,
+};
+
+use crate::{
+    dmabuf::{DmaBuf, DmaBufId, DmaBufPlane},
+    drm::{Modifier, FORMATS_MAP},
+    utils,
+};
 
 use super::sys::{gbm_bo, gbm_surface, UseFlags};
 
@@ -85,37 +94,23 @@ impl GbmDevice {
         GbmSurface { surface }
     }
 
-    pub fn create_bo2(&self, mode: &drm::control::Mode) -> BufferObject {
-        let (width, height) = mode.size();
-        let (width, height) = (width as u32, height as u32);
-
-        let format = drm::buffer::DrmFourcc::Xrgb8888 as u32;
-        let flags = UseFlags::SCANOUT.bits() | UseFlags::RENDERING.bits() | UseFlags::WRITE.bits();
-
-        let bo = unsafe {
-            sys::gbm_bo_create_with_modifiers2(
-                self.gbm_device,
-                width,
-                height,
-                format,
-                std::ptr::null(),
-                0,
-                flags,
-            )
-        };
-        assert!(!bo.is_null());
-
-        BufferObject { bo }
-    }
-
-    pub fn create_bo(&self, mode: &drm::control::Mode, flags: UseFlags) -> BufferObject {
+    pub fn create_bo(
+        &self,
+        mode: &drm::control::Mode,
+        mut flags: UseFlags,
+        mut modifiers: &[Modifier],
+    ) -> BufferObject {
         const LINEAR_MODIFIER: u64 = 0;
 
         let (width, height) = mode.size();
         let (width, height) = (width as u32, height as u32);
 
         let format = drm::buffer::DrmFourcc::Xrgb8888 as u32;
-        let modifiers = [LINEAR_MODIFIER];
+        if modifiers == [Modifier::INVALID] {
+            modifiers = &[]
+        } else {
+            flags &= !UseFlags::LINEAR;
+        }
 
         let bo = unsafe {
             sys::gbm_bo_create_with_modifiers2(
@@ -123,14 +118,44 @@ impl GbmDevice {
                 width,
                 height,
                 format,
-                modifiers.as_ptr(),
+                utils::ptr_or_null(modifiers) as _,
                 modifiers.len() as _,
                 flags.bits(),
             )
         };
         assert!(!bo.is_null());
 
-        BufferObject { bo }
+        let dmabuf = make_dmabuf(bo);
+        BufferObject { bo, dmabuf }
+    }
+}
+
+fn make_dmabuf(bo: *mut libc::c_void) -> DmaBuf {
+    unsafe {
+        DmaBuf {
+            id: DmaBufId::next(),
+            width: sys::gbm_bo_get_width(bo) as i32,
+            height: sys::gbm_bo_get_height(bo) as i32,
+            format: {
+                let format = sys::gbm_bo_get_format(bo);
+                let format = drm_fourcc::DrmFourcc::try_from(format).unwrap();
+                FORMATS_MAP.get(&format).unwrap()
+            },
+            modifier: Modifier(sys::gbm_bo_get_modifier(bo)),
+            planes: {
+                let nplanes = sys::gbm_bo_get_plane_count(bo);
+                (0..nplanes)
+                    .map(|index| {
+                        let offset = sys::gbm_bo_get_offset(bo, index);
+                        let stride = sys::gbm_bo_get_stride_for_plane(bo, index);
+                        let fd = sys::gbm_bo_get_fd_for_plane(bo, index);
+                        assert!(fd >= 0);
+                        DmaBufPlane { offset, stride, fd: Arc::new(fd) }
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice()
+            },
+        }
     }
 }
 
@@ -145,9 +170,10 @@ impl GbmSurface {
     }
 
     pub fn lock_front_buffer(&self) -> BufferObject {
-        let bo = unsafe { sys::gbm_surface_lock_front_buffer(self.surface) };
-        assert!(!bo.is_null());
-        BufferObject { bo }
+        todo!()
+        // let bo = unsafe { sys::gbm_surface_lock_front_buffer(self.surface) };
+        // assert!(!bo.is_null());
+        // BufferObject { bo }
     }
 
     pub fn release_buffer(&self, bo: BufferObject) {
@@ -158,6 +184,7 @@ impl GbmSurface {
 #[derive(Debug)]
 pub struct BufferObject {
     bo: *mut gbm_bo,
+    dmabuf: DmaBuf,
 }
 
 impl BufferObject {
@@ -169,6 +196,10 @@ impl BufferObject {
         let res_write: i32 =
             unsafe { sys::gbm_bo_write(self.bo, buf.as_ptr() as *mut _, buf.len()) };
         dbg!(res_write);
+    }
+
+    pub fn dmabuf(&self) -> &DmaBuf {
+        &self.dmabuf
     }
 }
 

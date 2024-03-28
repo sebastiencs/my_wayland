@@ -89,6 +89,7 @@ use crate::{
 
 mod clients;
 mod dbus;
+mod dmabuf;
 mod drm;
 mod egl;
 mod gbm;

@@ -1,7 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    ops::Range,
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
 };
+
+use drm::control::FbCmd2Flags;
 
 use {
     drm::{
@@ -16,7 +19,11 @@ use {
     once_cell::sync::Lazy,
 };
 
-use crate::egl::{self, EglContext, EglInstance};
+use crate::{
+    dmabuf::DmaBuf,
+    egl::{self, EglContext, EglInstance},
+    gbm::{GbmDevice, UseFlags},
+};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Format {
@@ -49,6 +56,11 @@ pub static FORMATS_MAP: Lazy<HashMap<DrmFourcc, &'static Format>> =
     Lazy::new(|| FORMATS.iter().map(|format| (format.drm, format)).collect());
 
 pub const KNOWN_FORMATS: &[DrmFourcc] = &[DrmFourcc::Argb8888, DrmFourcc::Xrgb8888];
+
+#[derive(Debug)]
+struct DrmFrameBuffer {
+    fd: OwnedFd,
+}
 
 #[derive(Debug)]
 pub struct Drm {
@@ -87,7 +99,7 @@ impl DrmFd {
         const DRM_IOCTL_MODE_CREATE_LEASE: usize = 0xC6;
         nix::ioctl_readwrite!(
             create_lease,
-            b'd',
+            drm_ffi::DRM_IOCTL_BASE,
             DRM_IOCTL_MODE_CREATE_LEASE,
             drm_ffi::drm_mode_create_lease
         );
@@ -167,7 +179,7 @@ struct Plane {
     pub kind: PlaneType,
     pub crtc: Geometry,
     pub src: Geometry,
-    pub formats: HashSet<DrmFourcc>,
+    pub formats: HashMap<DrmFourcc, PlaneFormat>,
     pub possible_crtcs: u32,
     pub crtc_handle: Option<control::crtc::Handle>,
     pub fb_handle: Option<control::framebuffer::Handle>,
@@ -231,6 +243,39 @@ struct ConnectorInUse {
     crtc: Crtc,
     connector: Connector,
     planes: Vec<Plane>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Copy)]
+pub struct Modifier(pub u64);
+
+impl Modifier {
+    pub const INVALID: Self = Self(0x00ff_ffff_ffff_ffff);
+    pub const LINEAR: Self = Self(0);
+    pub const ZERO: Self = Self(0);
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    pub fn low(&self) -> u32 {
+        (self.0 & 0xFFFF_FFFF) as u32
+    }
+
+    pub fn high(&self) -> u32 {
+        (self.0 >> 32) as u32
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PlaneFormat {
+    format: Format,
+    modifiers: BTreeSet<Modifier>,
+}
+
+#[derive(Debug)]
+pub struct InFormat {
+    format: DrmFourcc,
+    modifiers: BTreeSet<Modifier>,
 }
 
 impl Drm {
@@ -302,7 +347,7 @@ impl Drm {
         // let in_use = Self::find_first_valid_connector(&connectors, &crtcs, &planes)
         //     .expect("Failed to find connector");
 
-        let in_use = Self::init_drm(&drm, &connectors, &crtcs, &planes);
+        let in_use = Self::init_drm(&drm, &egl_context, &connectors, &crtcs, &planes);
 
         // control::atomic::AtomicModeReq;
         // drm::
@@ -331,6 +376,7 @@ impl Drm {
 
     fn init_drm(
         drm: &DrmFd,
+        egl: &EglContext,
         connectors: &BTreeMap<connector::Handle, Connector>,
         crtcs: &BTreeMap<crtc::Handle, Crtc>,
         planes: &BTreeMap<plane::Handle, Plane>,
@@ -338,23 +384,31 @@ impl Drm {
         let in_use = Self::find_first_valid_connector(&connectors, &crtcs, &planes)
             .expect("Failed to find connector");
 
-        let primary_plane = in_use
+        let (primary_plane, modifiers) = in_use
             .planes
             .iter()
-            .find(|p| matches!(p.kind, PlaneType::Primary))
+            .find_map(|plane| {
+                let PlaneType::Primary = plane.kind else { return None };
+                let format = plane.formats.get(&DrmFourcc::Xrgb8888)?;
+                Some((plane, &format.modifiers))
+            })
             .unwrap();
 
         let mut changes = control::atomic::AtomicModeReq::new();
 
+        dbg!(primary_plane);
         dbg!(primary_plane.handle);
         dbg!(primary_plane.fb_handle());
 
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.fb_handle().unwrap(),
-            control::property::Value::Bitmask(0),
-        );
+        let v = Self::make_render_buffer(drm, egl, modifiers, &in_use, false);
 
+        dbg!(v);
+
+        // changes.add_property(
+        //     primary_plane.handle,
+        //     primary_plane.fb_handle().unwrap(),
+        //     control::property::Value::Bitmask(0),
+        // );
         // changes.change_object(primary_plane.id, |c| {
         //     c.change(primary_plane.fb_id, buffers[0].drm.id().0 as _);
         //     c.change(primary_plane.crtc_id.id, crtc.id.0 as _);
@@ -368,7 +422,162 @@ impl Drm {
         //     c.change(primary_plane.src_h.id, (mode.vdisplay as u64) << 16);
         // });
 
-        dbg!(in_use);
+        // dbg!(in_use);
+    }
+
+    fn make_render_buffer(
+        drm: &DrmFd,
+        egl: &EglContext,
+        plane_modifiers: &BTreeSet<Modifier>,
+        in_use: &ConnectorInUse,
+        is_cursor: bool,
+    ) -> std::io::Result<()> {
+        let mode = in_use.connector.preferred_mode.as_ref().unwrap();
+
+        let opengl_format = egl.opengl_formats.get(&DrmFourcc::Xrgb8888).unwrap();
+        let modifiers: Vec<_> = opengl_format
+            .write_modifiers
+            .intersection(plane_modifiers)
+            .copied()
+            .collect();
+        assert!(!modifiers.is_empty());
+
+        let mut flags = UseFlags::RENDERING | UseFlags::SCANOUT;
+        if is_cursor {
+            flags |= UseFlags::LINEAR;
+        }
+
+        let bo = egl.gbm.create_bo(&mode, flags, &modifiers);
+        let drm_fb = Self::add_framebuffer(drm, bo.dmabuf()).unwrap();
+        let image = egl.import_dmabuf(bo.dmabuf());
+        let fb = egl.make_fb_from_image(&image, bo.dmabuf());
+
+
+        Ok(())
+    }
+
+    //     dev_fb.clear();
+    //     let (dev_tex, render_tex, render_fb) = if dev.id == render_ctx.dev_id {
+    //         log::info!("[video] AAA");
+    //         let render_tex = match dev_img.to_texture() {
+    //             Ok(fb) => fb,
+    //             Err(e) => return Err(MetalError::ImportTexture(e)),
+    //         };
+    //         (None, render_tex, None)
+    //     } else {
+    //         log::info!("[video] AAA 1");
+    //         // Create a _bridge_ BO in the render device
+    //         let render_gfx_formats = render_ctx.gfx.formats();
+    //         let render_gfx_format = match render_gfx_formats.get(&format.drm) {
+    //             None => return Err(MetalError::MissingRenderFormat(format.name)),
+    //             Some(f) => f,
+    //         };
+    //         let possible_modifiers: Vec<_> = render_gfx_format
+    //             .write_modifiers
+    //             .iter()
+    //             .filter(|m| dev_gfx_format.read_modifiers.contains(*m))
+    //             .copied()
+    //             .collect();
+    //         if possible_modifiers.is_empty() {
+    //             log::warn!(
+    //                 "Render GFX modifiers: {:?}",
+    //                 render_gfx_format.write_modifiers
+    //             );
+    //             log::warn!("DEV GFX modifiers: {:?}", dev_gfx_format.read_modifiers);
+    //             return Err(MetalError::MissingRenderModifier(format.name));
+    //         }
+    //         usage = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR;
+    //         let render_bo = render_ctx.gfx.gbm().create_bo(
+    //             &self.state.dma_buf_ids,
+    //             width,
+    //             height,
+    //             format,
+    //             &possible_modifiers,
+    //             usage,
+    //         );
+    //         let render_bo = match render_bo {
+    //             Ok(b) => b,
+    //             Err(e) => return Err(MetalError::ScanoutBuffer(e)),
+    //         };
+    //         let render_img = match render_ctx.gfx.clone().dmabuf_img(render_bo.dmabuf()) {
+    //             Ok(img) => img,
+    //             Err(e) => return Err(MetalError::ImportImage(e)),
+    //         };
+    //         let render_fb = match render_img.clone().to_framebuffer() {
+    //             Ok(fb) => fb,
+    //             Err(e) => return Err(MetalError::ImportFb(e)),
+    //         };
+    //         render_fb.clear();
+    //         let render_tex = match render_img.to_texture() {
+    //             Ok(fb) => fb,
+    //             Err(e) => return Err(MetalError::ImportTexture(e)),
+    //         };
+    //         // Import the bridge BO into the current device
+    //         let dev_img = match ctx.gfx.clone().dmabuf_img(render_bo.dmabuf()) {
+    //             Ok(img) => img,
+    //             Err(e) => return Err(MetalError::ImportImage(e)),
+    //         };
+    //         let dev_tex = match dev_img.to_texture() {
+    //             Ok(fb) => fb,
+    //             Err(e) => return Err(MetalError::ImportTexture(e)),
+    //         };
+    //         (Some(dev_tex), render_tex, Some(render_fb))
+    //     };
+    //     Ok(RenderBuffer {
+    //         drm: drm_fb,
+    //         dev_fb,
+    //         dev_tex,
+    //         render_tex,
+    //         render_fb,
+    //     })
+    // }
+
+    fn add_framebuffer(drm: &DrmFd, dmabuf: &DmaBuf) -> std::io::Result<DrmFrameBuffer> {
+        let mut modifier = Modifier::ZERO;
+        let mut flags = FbCmd2Flags::empty();
+        if dmabuf.modifier != Modifier::INVALID {
+            modifier = dmabuf.modifier;
+            flags |= FbCmd2Flags::MODIFIERS;
+        }
+
+        const N: usize = 4;
+        let (mut strides, mut offsets, mut handles, mut modifiers) =
+            ([0u32; N], [0u32; N], [0u32; N], [0u64; N]);
+
+        for ((((plane, stride), offset), handle), modifiers) in dmabuf
+            .planes
+            .iter()
+            .zip(&mut strides)
+            .zip(&mut offsets)
+            .zip(&mut handles)
+            .zip(&mut modifiers)
+        {
+            *stride = plane.stride;
+            *offset = plane.offset;
+            *modifiers = modifier.0;
+            *handle = prime_fd_to_gem_handle(drm, *plane.fd).unwrap();
+        }
+
+        let framebuffer = drm_ffi::mode::add_fb2(
+            drm.as_fd(),
+            dmabuf.width as u32,
+            dmabuf.height as u32,
+            dmabuf.format.drm as u32,
+            &handles,
+            &strides,
+            &offsets,
+            &modifiers,
+            flags.bits(),
+        )
+        .unwrap();
+
+        let handles = &handles[..dmabuf.planes.len()];
+        close_gem_handles(drm, handles).unwrap();
+
+        let framebuffer =
+            DrmFrameBuffer { fd: unsafe { OwnedFd::from_raw_fd(framebuffer.fb_id as _) } };
+
+        Ok(framebuffer)
     }
 
     // TODO: Support multiple monitors/connectors
@@ -469,12 +678,32 @@ impl Drm {
         let info = drm.get_plane(plane).unwrap();
         let props = get_props(drm, plane);
 
-        let formats: HashSet<DrmFourcc> = info
-            .formats()
-            .iter()
-            .filter_map(|f| DrmFourcc::try_from(*f).ok())
-            .filter(|f| KNOWN_FORMATS.contains(f))
-            .collect();
+        let formats = match props.get("IN_FORMATS") {
+            Some((prop, _)) => get_in_formats(drm, *prop)
+                .unwrap()
+                .into_iter()
+                .filter(|format| !format.modifiers.is_empty())
+                .filter_map(|format| FORMATS_MAP.get(&format.format).map(|our| (format, our)))
+                .map(|(in_format, format)| {
+                    let plane_format =
+                        PlaneFormat { format: (*format).clone(), modifiers: in_format.modifiers };
+                    (in_format.format, plane_format)
+                })
+                .collect(),
+            None => info
+                .formats()
+                .iter()
+                .filter_map(|id| DrmFourcc::try_from(*id).ok())
+                .filter_map(|id| FORMATS_MAP.get(&id).map(|format| (id, format)))
+                .map(|(id, format)| {
+                    let plane_format = PlaneFormat {
+                        format: (*format).clone(),
+                        modifiers: [Modifier::INVALID].into_iter().collect(),
+                    };
+                    (id, plane_format)
+                })
+                .collect::<HashMap<_, _>>(),
+        };
 
         let get_geometry = |x: &str, y: &str, w: &str, h: &str| {
             let get_prop = |(value, info): &(u64, property::Info)| Property {
@@ -551,4 +780,114 @@ impl Drm {
 
         (connector_handle, connector)
     }
+}
+
+fn get_in_formats(drm: &DrmFd, prop: u64) -> std::io::Result<Vec<InFormat>> {
+    use std::io::ErrorKind::InvalidData;
+
+    let blob = drm.get_property_blob(prop).unwrap();
+
+    if blob.len() < std::mem::size_of::<drm_ffi::drm_format_modifier_blob>() {
+        return Err(InvalidData.into());
+    }
+
+    let to_u32 = |bytes: &[u8; 4]| u32::from_ne_bytes(*bytes);
+    let to_u64 = |bytes: &[u8; 8]| u64::from_ne_bytes(*bytes);
+
+    let mut blob_iter = blob.array_chunks::<4>();
+    let mut read_u32 = || -> u32 {
+        let bytes = blob_iter.next().unwrap(); // We already checked length just above
+        to_u32(bytes)
+    };
+
+    let header = drm_ffi::drm_format_modifier_blob {
+        version: read_u32(),
+        flags: read_u32(),
+        count_formats: read_u32(),
+        formats_offset: read_u32(),
+        count_modifiers: read_u32(),
+        modifiers_offset: read_u32(),
+    };
+
+    assert_eq!(header.version, 1);
+
+    let formats_start = header.formats_offset as usize;
+    let formats_end = formats_start.wrapping_add((header.count_formats as usize).wrapping_mul(4));
+    let modifiers_start = header.modifiers_offset as usize;
+    let modifiers_end = modifiers_start.wrapping_add(
+        (header.count_modifiers as usize)
+            .wrapping_mul(std::mem::size_of::<drm_ffi::drm_format_modifier>()),
+    );
+    let formats = blob
+        .get(formats_start..formats_end)
+        .ok_or_else(|| std::io::Error::from(InvalidData))?;
+    let mut formats_iter = formats.array_chunks::<4>();
+    let mut read_u32 = || -> std::io::Result<u32> {
+        let bytes = formats_iter
+            .next()
+            .ok_or_else(|| std::io::Error::from(InvalidData))?;
+        Ok(to_u32(bytes))
+    };
+
+    let mut formats = (0..header.count_formats)
+        .map(|_| {
+            let format = read_u32()?;
+            let format = DrmFourcc::try_from(format).unwrap();
+            Ok(InFormat { format, modifiers: BTreeSet::new() })
+        })
+        .collect::<Result<Vec<_>, std::io::Error>>()?;
+
+    let modifiers = blob
+        .get(modifiers_start..modifiers_end)
+        .ok_or_else(|| std::io::Error::from(InvalidData))?;
+    let mut modifiers_iter =
+        modifiers.array_chunks::<{ std::mem::size_of::<drm_ffi::drm_format_modifier>() }>();
+    let mut read_modifier = || -> std::io::Result<drm_ffi::drm_format_modifier> {
+        let bytes = modifiers_iter
+            .next()
+            .ok_or_else(|| std::io::Error::from(InvalidData))?;
+        Ok(drm_ffi::drm_format_modifier {
+            formats: to_u64(&bytes[0..8].try_into().unwrap()),
+            offset: to_u32(&bytes[8..12].try_into().unwrap()),
+            pad: to_u32(&bytes[12..16].try_into().unwrap()),
+            modifier: to_u64(&bytes[16..24].try_into().unwrap()),
+        })
+    };
+
+    for _ in 0..header.count_modifiers {
+        let drm_ffi::drm_format_modifier { formats: mut bitfields, offset, pad: _, modifier } =
+            read_modifier()?;
+
+        while bitfields != 0 {
+            let index = bitfields.trailing_zeros();
+            bitfields = (bitfields >> index + 1) << index + 1; // clear last bit
+            formats[(index + offset) as usize]
+                .modifiers
+                .insert(Modifier(modifier));
+        }
+    }
+
+    Ok(formats)
+}
+
+fn prime_fd_to_gem_handle(fd: &DrmFd, prime: RawFd) -> std::io::Result<u32> {
+    let drm_ffi::drm_prime_handle { handle, flags: _, fd: _ } = unsafe {
+        let prime = std::os::fd::BorrowedFd::borrow_raw(prime);
+        drm_ffi::gem::fd_to_handle(fd.as_fd(), prime)?
+    };
+    Ok(handle)
+}
+
+fn close_gem_handles(fd: &DrmFd, handles: &[u32]) -> std::io::Result<()> {
+    let close = |handle: u32| drm_ffi::gem::close(fd.as_fd(), handle);
+
+    if handles.iter().skip(1).all(|h| *h == handles[0]) {
+        close(handles[0]).unwrap();
+    } else {
+        let set: BTreeSet<_> = handles.iter().collect();
+        for handle in set {
+            close(*handle).unwrap();
+        }
+    }
+    Ok(())
 }
