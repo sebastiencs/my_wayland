@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    num::NonZeroU32,
     ops::Range,
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
 };
@@ -21,7 +22,7 @@ use {
 
 use crate::{
     dmabuf::DmaBuf,
-    egl::{self, EglContext, EGL},
+    egl::{self, EglContext, EglFrameBuffer, GlTexture, EGL},
     gbm::{GbmDevice, UseFlags},
 };
 
@@ -182,6 +183,8 @@ struct Plane {
     pub formats: HashMap<DrmFourcc, PlaneFormat>,
     pub possible_crtcs: u32,
     pub crtc_handle: Option<control::crtc::Handle>,
+    pub fb_id: drm::control::property::Handle,
+    pub crtc_id: drm::control::property::Handle,
     pub fb_handle: Option<control::framebuffer::Handle>,
 }
 
@@ -400,15 +403,77 @@ impl Drm {
         dbg!(primary_plane.handle);
         dbg!(primary_plane.fb_handle());
 
-        let v = Self::make_render_buffer(drm, egl, modifiers, &in_use, false);
+        let buffers: [_; 2] = std::array::from_fn(|_| {
+            Self::make_render_buffer(drm, egl, modifiers, &in_use, false).unwrap()
+        });
 
-        dbg!(v);
+        dbg!(&buffers);
 
-        // changes.add_property(
-        //     primary_plane.handle,
-        //     primary_plane.fb_handle().unwrap(),
-        //     control::property::Value::Bitmask(0),
-        // );
+        // buffers[0].drm_fb.fd.as_raw_fd();
+
+        dbg!(NonZeroU32::new(buffers[0].drm_fb.fd.as_raw_fd() as u32));
+
+        let mode = in_use.connector.preferred_mode.as_ref().unwrap();
+
+        changes.add_property(
+            dbg!(primary_plane.handle),
+            dbg!(primary_plane.fb_id),
+            control::property::Value::Object(NonZeroU32::new(
+                buffers[0].drm_fb.fd.as_raw_fd() as u32
+            )),
+        );
+        changes.add_property(
+            dbg!(primary_plane.handle),
+            dbg!(primary_plane.crtc_id),
+            control::property::Value::CRTC(Some(dbg!(in_use.crtc.handle))),
+        );
+        changes.add_property(
+            dbg!(primary_plane.handle),
+            dbg!(primary_plane.crtc.x.handle),
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            dbg!(primary_plane.handle),
+            dbg!(primary_plane.crtc.y.handle),
+            control::property::Value::UnsignedRange(0),
+        );
+        let (hdisplay, vdisplay) = mode.size();
+        changes.add_property(
+            dbg!(primary_plane.handle),
+            dbg!(primary_plane.crtc.width.handle),
+            control::property::Value::UnsignedRange(hdisplay as _),
+        );
+        changes.add_property(
+            dbg!(primary_plane.handle),
+            dbg!(primary_plane.crtc.height.handle),
+            control::property::Value::UnsignedRange(vdisplay as _),
+        );
+        changes.add_property(
+            dbg!(primary_plane.handle),
+            dbg!(primary_plane.src.x.handle),
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            dbg!(primary_plane.handle),
+            dbg!(primary_plane.src.y.handle),
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            dbg!(primary_plane.handle),
+            dbg!(primary_plane.src.width.handle),
+            control::property::Value::UnsignedRange((hdisplay as u64) << 16),
+        );
+        changes.add_property(
+            dbg!(primary_plane.handle),
+            dbg!(primary_plane.src.height.handle),
+            control::property::Value::UnsignedRange((vdisplay as u64) << 16),
+        );
+
+        drm.atomic_commit(control::AtomicCommitFlags::ALLOW_MODESET, changes)
+            .expect("Failed to set mode");
+
+        // changes.commit();
+
         // changes.change_object(primary_plane.id, |c| {
         //     c.change(primary_plane.fb_id, buffers[0].drm.id().0 as _);
         //     c.change(primary_plane.crtc_id.id, crtc.id.0 as _);
@@ -431,7 +496,7 @@ impl Drm {
         plane_modifiers: &BTreeSet<Modifier>,
         in_use: &ConnectorInUse,
         is_cursor: bool,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<RenderBuffer> {
         let mode = in_use.connector.preferred_mode.as_ref().unwrap();
 
         let opengl_format = egl.opengl_formats.get(&DrmFourcc::Xrgb8888).unwrap();
@@ -451,85 +516,11 @@ impl Drm {
         let drm_fb = Self::add_framebuffer(drm, bo.dmabuf()).unwrap();
         let image = egl.import_dmabuf(bo.dmabuf());
         let fb = egl.make_fb_from_image(&image, bo.dmabuf());
+        fb.clear();
+        let texture = image.to_texture(egl).unwrap();
 
-        Ok(())
+        Ok(RenderBuffer { drm_fb, fb, texture })
     }
-
-    //     dev_fb.clear();
-    //     let (dev_tex, render_tex, render_fb) = if dev.id == render_ctx.dev_id {
-    //         log::info!("[video] AAA");
-    //         let render_tex = match dev_img.to_texture() {
-    //             Ok(fb) => fb,
-    //             Err(e) => return Err(MetalError::ImportTexture(e)),
-    //         };
-    //         (None, render_tex, None)
-    //     } else {
-    //         log::info!("[video] AAA 1");
-    //         // Create a _bridge_ BO in the render device
-    //         let render_gfx_formats = render_ctx.gfx.formats();
-    //         let render_gfx_format = match render_gfx_formats.get(&format.drm) {
-    //             None => return Err(MetalError::MissingRenderFormat(format.name)),
-    //             Some(f) => f,
-    //         };
-    //         let possible_modifiers: Vec<_> = render_gfx_format
-    //             .write_modifiers
-    //             .iter()
-    //             .filter(|m| dev_gfx_format.read_modifiers.contains(*m))
-    //             .copied()
-    //             .collect();
-    //         if possible_modifiers.is_empty() {
-    //             log::warn!(
-    //                 "Render GFX modifiers: {:?}",
-    //                 render_gfx_format.write_modifiers
-    //             );
-    //             log::warn!("DEV GFX modifiers: {:?}", dev_gfx_format.read_modifiers);
-    //             return Err(MetalError::MissingRenderModifier(format.name));
-    //         }
-    //         usage = GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR;
-    //         let render_bo = render_ctx.gfx.gbm().create_bo(
-    //             &self.state.dma_buf_ids,
-    //             width,
-    //             height,
-    //             format,
-    //             &possible_modifiers,
-    //             usage,
-    //         );
-    //         let render_bo = match render_bo {
-    //             Ok(b) => b,
-    //             Err(e) => return Err(MetalError::ScanoutBuffer(e)),
-    //         };
-    //         let render_img = match render_ctx.gfx.clone().dmabuf_img(render_bo.dmabuf()) {
-    //             Ok(img) => img,
-    //             Err(e) => return Err(MetalError::ImportImage(e)),
-    //         };
-    //         let render_fb = match render_img.clone().to_framebuffer() {
-    //             Ok(fb) => fb,
-    //             Err(e) => return Err(MetalError::ImportFb(e)),
-    //         };
-    //         render_fb.clear();
-    //         let render_tex = match render_img.to_texture() {
-    //             Ok(fb) => fb,
-    //             Err(e) => return Err(MetalError::ImportTexture(e)),
-    //         };
-    //         // Import the bridge BO into the current device
-    //         let dev_img = match ctx.gfx.clone().dmabuf_img(render_bo.dmabuf()) {
-    //             Ok(img) => img,
-    //             Err(e) => return Err(MetalError::ImportImage(e)),
-    //         };
-    //         let dev_tex = match dev_img.to_texture() {
-    //             Ok(fb) => fb,
-    //             Err(e) => return Err(MetalError::ImportTexture(e)),
-    //         };
-    //         (Some(dev_tex), render_tex, Some(render_fb))
-    //     };
-    //     Ok(RenderBuffer {
-    //         drm: drm_fb,
-    //         dev_fb,
-    //         dev_tex,
-    //         render_tex,
-    //         render_fb,
-    //     })
-    // }
 
     fn add_framebuffer(drm: &DrmFd, dmabuf: &DmaBuf) -> std::io::Result<DrmFrameBuffer> {
         let mut modifier = Modifier::ZERO;
@@ -721,6 +712,14 @@ impl Drm {
         let crtc_geometry = get_geometry("CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H");
         let src_geometry = get_geometry("SRC_X", "SRC_Y", "SRC_W", "SRC_H");
         let possible_crtcs = info.possible_crtcs().0;
+        let fb_id = {
+            let (_, info) = props.get("FB_ID").unwrap();
+            info.handle()
+        };
+        let crtc_id = {
+            let (_, info) = props.get("CRTC_ID").unwrap();
+            info.handle()
+        };
 
         let handle = plane;
         let plane = Plane {
@@ -732,6 +731,8 @@ impl Drm {
             possible_crtcs,
             crtc_handle: info.crtc(),
             fb_handle: info.framebuffer(),
+            fb_id,
+            crtc_id,
         };
 
         (handle, plane)
@@ -889,4 +890,11 @@ fn close_gem_handles(fd: &DrmFd, handles: &[u32]) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct RenderBuffer {
+    drm_fb: DrmFrameBuffer,
+    fb: EglFrameBuffer,
+    texture: GlTexture,
 }

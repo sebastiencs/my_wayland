@@ -29,7 +29,6 @@ macro_rules! load {
     ($(
         $name:ident: $signature:ty,
     )*) => {
-        #[derive(Debug)]
         #[allow(non_snake_case)]
         pub struct DynamicMethods {
             $($name: $signature,)*
@@ -66,6 +65,15 @@ load! {
     glDeleteFramebuffers: unsafe extern "C" fn (gl::GLsizei, *const gl::GLuint),
     glGenRenderbuffers: unsafe extern "C" fn (gl::GLsizei, *mut gl::GLuint),
     glBindRenderbuffer: unsafe extern "C" fn (gl::GLenum, gl::GLuint),
+    glEGLImageTargetTexture2DOES: unsafe extern "C" fn (gl::GLenum, gl::GLeglImageOES),
+}
+
+impl std::fmt::Debug for DynamicMethods {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let size = std::mem::size_of::<Self>();
+        let ptr_size = std::mem::size_of::<*mut core::ffi::c_void>();
+        f.write_fmt(format_args!("DynamicMethods {{ loaded {} methods }}", size / ptr_size))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -75,7 +83,9 @@ pub struct EGL {
 
 impl EGL {
     pub fn new() -> Self {
-        // gl::load_glCheckFramebufferStatus(loader);
+        // gl::GenTextures(loader);
+        // gl::load_glViewport(loader);
+        // gl::load_glGenTexturesEXT(loader);
         Self { dyns: load_methods() }
     }
 
@@ -400,6 +410,7 @@ pub struct OpenGlFormat {
     pub write_modifiers: BTreeSet<Modifier>,
 }
 
+#[derive(Debug)]
 pub struct EglImage {
     image: ImageKHR,
     external_only: bool,
@@ -411,6 +422,43 @@ impl Drop for EglImage {
         if !self.destroyed {
             // panic!("destroy image here !")
         }
+    }
+}
+
+impl EglImage {
+    pub fn to_texture(self, egl: &EglContext) -> Result<GlTexture, ()> {
+        GlTexture::import_image(egl, self)
+    }
+}
+
+#[derive(Debug)]
+pub struct GlTexture {
+    image: EglImage,
+    texture: gl::Uint,
+}
+
+pub fn image_target(external_only: bool) -> gl::Enum {
+    match external_only {
+        true => gl::TEXTURE_EXTERNAL_OES as _,
+        false => gl::TEXTURE_2D as _,
+    }
+}
+
+impl GlTexture {
+    pub fn import_image(egl: &EglContext, image: EglImage) -> Result<GlTexture, ()> {
+        let DynamicMethods { glEGLImageTargetTexture2DOES, .. } = &*egl.egl.dyns;
+        let target = image_target(image.external_only);
+        let texture = unsafe {
+            let mut texture = 0;
+            gl::GenTextures(1, &mut texture);
+            gl::BindTexture(target, texture);
+            gl::TexParameteri(target, gl::TEXTURE_WRAP_S as _, gl::CLAMP_TO_EDGE);
+            gl::TexParameteri(target, gl::TEXTURE_WRAP_T as _, gl::CLAMP_TO_EDGE);
+            (glEGLImageTargetTexture2DOES)(target, image.image.ptr);
+            gl::BindTexture(target, 0);
+            texture
+        };
+        Ok(GlTexture { image, texture })
     }
 }
 
@@ -465,6 +513,7 @@ impl EglRenderBuffer {
     }
 }
 
+#[derive(Debug)]
 pub struct EglFrameBuffer {
     dyns: Arc<DynamicMethods>,
     pub width: i32,
@@ -481,16 +530,32 @@ impl Drop for EglFrameBuffer {
     }
 }
 
-// impl EglFrameBuffer {
-//     pub fn clear(&self) {
-//         self.clear_with(0.0, 0.0, 0.0, 0.0);
-//     }
+impl EglFrameBuffer {
+    pub fn clear(&self) {
+        // unsafe {
+        //     gl::ClearColor(0.0, 0.0, 0.0, 0.0);
+        //     gl::Clear(gl::COLOR_BUFFER_BIT as _);
+        // }
 
-//     pub fn clear_with(&self, r: f32, g: f32, b: f32, a: f32) {
-//         let ops = self.take_render_ops();
-//         self.render(ops, Some(&Color { r, g, b, a }));
-//     }
-// }
+        unsafe {
+            (self.dyns.glBindFramebuffer)(gl::FRAMEBUFFER as _, self.framebuffer_object);
+            (gl::Viewport)(0, 0, self.width, self.height);
+            // if let Some(c) = clear_color {
+            (gl::ClearColor)(0.1, 0.1, 0.1, 0.0);
+            (gl::Clear)(gl::COLOR_BUFFER_BIT as _);
+            // }
+            (gl::BlendFunc)(gl::ONE as _, gl::ONE_MINUS_SRC_ALPHA as _);
+        }
+        unsafe {
+            (gl::Flush)();
+        }
+    }
+
+    pub fn clear_with(&self, r: f32, g: f32, b: f32, a: f32) {
+        // let ops = self.take_render_ops();
+        // self.render(ops, Some(&Color { r, g, b, a }));
+    }
+}
 
 #[derive(Debug)]
 pub struct EglContext {
@@ -814,8 +879,9 @@ pub fn make_display(
     // let egl_context = egl.create_context(display, configs[0], None, &[egl::NONE]).unwrap();
     let gbm_surface = gbm.create_surface(connector.preferred_mode.as_ref().unwrap());
 
-    let egl_surface = egl.create_platform_window_surface(display, config, gbm_surface.raw(), &[egl::NONE as _])
-            .unwrap();
+    let egl_surface = egl
+        .create_platform_window_surface(display, config, gbm_surface.raw(), &[egl::NONE as _])
+        .unwrap();
 
     egl.make_current(display, Some(egl_surface), Some(egl_surface), Some(egl_context))
         .unwrap();
