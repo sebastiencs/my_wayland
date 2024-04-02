@@ -21,7 +21,7 @@ use {
 
 use crate::{
     dmabuf::DmaBuf,
-    egl::{self, EglContext, EglInstance},
+    egl::{self, EglContext, EGL},
     gbm::{GbmDevice, UseFlags},
 };
 
@@ -279,7 +279,7 @@ pub struct InFormat {
 }
 
 impl Drm {
-    pub fn create_drm(fd: RawFd, device: udev::Device, egl: &EglInstance) -> Self {
+    pub fn create_drm(fd: RawFd, device: udev::Device, egl: &EGL) -> Self {
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let drm = DrmFd { fd };
 
@@ -451,7 +451,6 @@ impl Drm {
         let drm_fb = Self::add_framebuffer(drm, bo.dmabuf()).unwrap();
         let image = egl.import_dmabuf(bo.dmabuf());
         let fb = egl.make_fb_from_image(&image, bo.dmabuf());
-
 
         Ok(())
     }

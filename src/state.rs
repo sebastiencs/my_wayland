@@ -1,4 +1,4 @@
-use crate::{drm::Drm, egl::EglInstance, input::Input, protocol_generated::WaylandId};
+use crate::{drm::Drm, egl::EGL, input::Input, protocol_generated::WaylandId};
 
 use {crate::object::Object, std::marker::PhantomData};
 
@@ -162,7 +162,7 @@ pub struct State {
     pub objects: IndexMap<ObjectId, Box<dyn Object>>,
     pub inputs: IndexMap<InputId, Input>,
     pub drm: IndexMap<DrmId, Drm>,
-    pub egl: EglInstance,
+    pub egl: EGL,
 }
 
 impl State {

@@ -28,8 +28,7 @@ dbus-message-parser = "4"
 drm = { git = "https://github.com/sebastiencs/drm-rs.git", branch = "my_wayland" }
 drm-ffi = "0.7.1"
 edid-rs = { git = "https://gitlab.com/sebastiencs/edid-rs.git" }
-khronos-egl = { version = "6", features = ["dynamic"] }
-libloading = "0.8"
+khronos-types = { path = "/home/sebastien/travaux/khronos-types" }
 once_cell = "1.19.0"
 drm-fourcc = { version = "2.2.0", features = ["build_bindings"] }
 

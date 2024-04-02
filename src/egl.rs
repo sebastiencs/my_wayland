@@ -1,18 +1,19 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    ffi::CStr,
     sync::Arc,
     time::Duration,
 };
 
-use {drm::buffer::DrmFourcc, egl::ATTRIB_NONE};
+use {
+    drm::buffer::DrmFourcc,
+    khronos_types::{egl, gl},
+};
+
 // use {
 //     egli::{egl, query_extensions, query_version},
 //     std::collections::BTreeSet,
 // };
-use {
-    khronos_egl::{self as egl, Dynamic, Instance, EGL1_5},
-    libloading::Library,
-};
 
 use drm::control::Device;
 
@@ -20,25 +21,355 @@ use crate::{
     dmabuf::DmaBuf,
     drm::{DrmFd, Format, Modifier, FORMATS_MAP},
     gbm::GbmDevice,
-    utils,
 };
 
 const EGL_PLATFORM_GBM_KHR: u32 = 0x31D7;
 
-pub type EglInstance = Arc<Instance<Dynamic<Library, EGL1_5>>>;
+macro_rules! load {
+    ($(
+        $name:ident: $signature:ty,
+    )*) => {
+        #[derive(Debug)]
+        #[allow(non_snake_case)]
+        pub struct DynamicMethods {
+            $($name: $signature,)*
+        }
 
-pub fn init() -> EglInstance {
-    let egl = unsafe {
-        egl::DynamicInstance::<EGL1_5>::load_required()
-            .expect("Unable to load libEGL.so or libEGL.so.1")
-    };
+        #[allow(non_snake_case)]
+        fn load_methods() -> Arc<DynamicMethods> {
+            let loader = |s: &CStr| unsafe {
+                let ptr = egl::GetProcAddress(s.as_ptr());
+                if ptr.is_null() { None } else { Some(ptr) }
+            };
+            use khronos_types::{egl::*, gl::*};
+            // The line below expand to such code:
+            // let glBindFramebuffer = load_glBindFramebuffer(loader).unwrap();
+            $(let $name = concat_idents!(load_,$name)(loader).unwrap();)*
+            Arc::new(DynamicMethods {
+                $($name,)*
+            })
+        }
+    }
+}
 
-    let egl: EglInstance = Arc::new(egl);
+load! {
+    eglCreatePlatformWindowSurfaceEXT: unsafe extern "C" fn (egl::Display, egl::Config, *mut core::ffi::c_void, *const egl::Int) -> egl::Surface,
+    eglCreateImageKHR: unsafe extern "C" fn (egl::Display, egl::Context, egl::Enum, egl::ClientBuffer, *const egl::Int) -> egl::ImageKHR,
+    glEGLImageTargetRenderbufferStorageOES: unsafe extern "C" fn (gl::Enum, gl::EglImageOES),
+    eglQueryDmaBufFormatsEXT: unsafe extern "C" fn (egl::Display, egl::Int, *mut egl::Int, *mut egl::Int) -> egl::Boolean,
+    eglQueryDmaBufModifiersEXT: unsafe extern "C" fn (egl::Display, egl::Int, egl::Int, *mut egl::Uint64KHR, *mut egl::Boolean, *mut egl::Int) -> egl::Boolean,
+    glDeleteRenderbuffers: unsafe extern "C" fn (gl::GLsizei, *const gl::GLuint),
+    glGenFramebuffers: unsafe extern "C" fn (gl::GLsizei, *mut gl::GLuint),
+    glBindFramebuffer: unsafe extern "C" fn (gl::GLenum, gl::GLuint),
+    glFramebufferRenderbuffer: unsafe extern "C" fn (gl::GLenum, gl::GLenum, gl::GLenum, gl::GLuint),
+    glCheckFramebufferStatus: unsafe extern "C" fn (gl::GLenum) -> gl::GLenum,
+    glDeleteFramebuffers: unsafe extern "C" fn (gl::GLsizei, *const gl::GLuint),
+    glGenRenderbuffers: unsafe extern "C" fn (gl::GLsizei, *mut gl::GLuint),
+    glBindRenderbuffer: unsafe extern "C" fn (gl::GLenum, gl::GLuint),
+}
 
-    egl.bind_api(khronos_egl::OPENGL_ES_API)
-        .expect("unable to select OpenGL API");
+#[derive(Clone, Debug)]
+pub struct EGL {
+    dyns: Arc<DynamicMethods>,
+}
 
+impl EGL {
+    pub fn new() -> Self {
+        // gl::load_glCheckFramebufferStatus(loader);
+        Self { dyns: load_methods() }
+    }
+
+    fn error_on<T: PartialEq>(result: T, error_value: T) -> Result<T, egl::Error> {
+        if result == error_value {
+            Err(Self::last_error().unwrap_err())
+        } else {
+            Ok(result)
+        }
+    }
+
+    fn error_if(is_error: bool) -> Result<(), egl::Error> {
+        if is_error {
+            Err(Self::last_error().unwrap_err())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ok_on<T: PartialEq>(result: T, ok_value: T) -> Result<T, egl::Error> {
+        if result == ok_value {
+            Ok(result)
+        } else {
+            Err(Self::last_error().unwrap_err())
+        }
+    }
+
+    fn last_error() -> Result<(), egl::Error> {
+        let e = match unsafe { egl::GetError() as _ } {
+            egl::SUCCESS => return Ok(()),
+            egl::NOT_INITIALIZED => egl::Error::NotInitialized,
+            egl::BAD_ACCESS => egl::Error::BadAccess,
+            egl::BAD_ALLOC => egl::Error::BadAlloc,
+            egl::BAD_ATTRIBUTE => egl::Error::BadAttribute,
+            egl::BAD_CONTEXT => egl::Error::BadContext,
+            egl::BAD_CONFIG => egl::Error::BadConfig,
+            egl::BAD_CURRENT_SURFACE => egl::Error::BadCurrentSurface,
+            egl::BAD_DISPLAY => egl::Error::BadDisplay,
+            egl::BAD_SURFACE => egl::Error::BadSurface,
+            egl::BAD_MATCH => egl::Error::BadMatch,
+            egl::BAD_PARAMETER => egl::Error::BadParameter,
+            egl::BAD_NATIVE_PIXMAP => egl::Error::BadNativePixmap,
+            egl::BAD_NATIVE_WINDOW => egl::Error::BadNativeWindow,
+            egl::CONTEXT_LOST => egl::Error::ContextLost,
+            code => todo!("code={:?}", code),
+        };
+        Err(e)
+    }
+
+    pub fn bind_api(&self, api: i32) -> Result<(), egl::Error> {
+        let result = unsafe { egl::BindAPI(api as _) };
+        Self::error_on(result, egl::FALSE as _)?;
+        Ok(())
+    }
+
+    fn get_platform_display(
+        &self,
+        platform: egl::EGLenum,
+        native_display: egl::EGLDisplay,
+        attrib_list: &[egl::EGLAttrib],
+    ) -> Result<egl::EGLDisplay, egl::Error> {
+        Self::assert_attribs_with_none(attrib_list);
+        let display =
+            unsafe { egl::GetPlatformDisplay(platform, native_display, attrib_list.as_ptr()) };
+        Self::error_on(display, egl::NO_DISPLAY)
+    }
+
+    fn initialize(&self, display: egl::Display) -> Result<(i32, i32), egl::Error> {
+        let (mut major, mut minor) = (0, 0);
+        let result = unsafe { egl::Initialize(display, &mut major, &mut minor) };
+        Self::ok_on(result, egl::TRUE as _)?;
+        Ok((major, minor))
+    }
+
+    fn query_string(
+        &self,
+        display: Option<egl::Display>,
+        name: egl::Int,
+    ) -> Result<&'static CStr, egl::Error> {
+        let display = display.unwrap_or(egl::NO_DISPLAY);
+        let s = unsafe { egl::QueryString(display, name) };
+        Self::error_if(s.is_null())?;
+        Ok(unsafe { CStr::from_ptr(s) })
+    }
+
+    fn create_context(
+        &self,
+        display: egl::Display,
+        config: egl::Config,
+        share_context: Option<egl::Context>,
+        attrib_list: &[egl::Int],
+    ) -> Result<egl::Context, egl::Error> {
+        Self::assert_ends_with_none(attrib_list);
+        let share_context = share_context.unwrap_or(egl::NO_CONTEXT);
+        let context =
+            unsafe { egl::CreateContext(display, config, share_context, attrib_list.as_ptr()) };
+        Self::error_on(context, egl::NO_CONTEXT)
+    }
+
+    fn make_current(
+        &self,
+        display: egl::Display,
+        draw: Option<egl::Surface>,
+        read: Option<egl::Surface>,
+        context: Option<egl::Context>,
+    ) -> Result<(), egl::Error> {
+        let draw = draw.unwrap_or(egl::NO_SURFACE);
+        let read = read.unwrap_or(egl::NO_SURFACE);
+        let context = context.unwrap_or(egl::NO_CONTEXT);
+        let result = unsafe { egl::MakeCurrent(display, draw, read, context) };
+        Self::ok_on(result, egl::TRUE as _)?;
+        Ok(())
+    }
+
+    pub fn get_config_count(&self, display: egl::Display) -> Result<usize, egl::Error> {
+        let mut count = 0;
+        let result = unsafe { egl::GetConfigs(display, std::ptr::null_mut(), 0, &mut count) };
+        Self::ok_on(result, egl::TRUE as _)?;
+        Ok(count as usize)
+    }
+
+    pub fn get_configs(&self, display: egl::Display) -> Result<Vec<egl::Config>, egl::Error> {
+        let nconfigs = self.get_config_count(display)?;
+        if nconfigs == 0 {
+            return Ok(Vec::new());
+        }
+        let mut configs = Vec::<egl::Config>::with_capacity(nconfigs);
+        let mut count = 0;
+        let result =
+            unsafe { egl::GetConfigs(display, configs.as_mut_ptr(), nconfigs as _, &mut count) };
+        assert!(count as usize <= nconfigs);
+        Self::ok_on(result, egl::TRUE as _)?;
+        unsafe {
+            configs.set_len(count as _);
+        }
+        Ok(configs)
+    }
+
+    pub fn get_config_attrib(
+        &self,
+        display: egl::Display,
+        config: egl::Config,
+        attribute: egl::Int,
+    ) -> Result<egl::Int, egl::Error> {
+        let mut value = 0;
+        let result = unsafe { egl::GetConfigAttrib(display, config, attribute, &mut value) };
+        Self::ok_on(result, egl::TRUE as _)?;
+        Ok(value)
+    }
+
+    fn assert_attribs_with_none(list: &[egl::Attrib]) {
+        assert_eq!(*list.last().unwrap(), egl::NONE as _);
+    }
+    fn assert_ends_with_none(list: &[egl::Int]) {
+        assert_eq!(*list.last().unwrap(), egl::NONE);
+    }
+
+    fn create_platform_window_surface(
+        &self,
+        display: egl::Display,
+        config: egl::Config,
+        native_window: egl::NativeWindowType,
+        attrib_list: &[egl::Int],
+    ) -> Result<egl::Surface, egl::Error> {
+        Self::assert_ends_with_none(attrib_list);
+        let result = unsafe {
+            (self.dyns.eglCreatePlatformWindowSurfaceEXT)(
+                display,
+                config,
+                native_window,
+                attrib_list.as_ptr(),
+            )
+        };
+        Self::error_on(result, egl::NO_SURFACE)
+    }
+
+    fn swap_buffers(&self, display: egl::Display, surface: egl::Surface) -> Result<(), egl::Error> {
+        let result = unsafe { egl::SwapBuffers(display, surface) };
+        Self::ok_on(result, egl::TRUE as _)?;
+        Ok(())
+    }
+
+    fn create_image_khr(
+        &self,
+        display: egl::Display,
+        target: egl::Enum,
+        attrib_list: &[egl::Int],
+    ) -> Result<ImageKHR, egl::Error> {
+        Self::assert_ends_with_none(attrib_list);
+        let ptr = unsafe {
+            (self.dyns.eglCreateImageKHR)(
+                display,
+                std::ptr::null_mut(),
+                target,
+                std::ptr::null_mut(),
+                attrib_list.as_ptr(),
+            )
+        };
+        Self::error_on(ptr, egl::NO_IMAGE_KHR)?;
+        Ok(ImageKHR { ptr })
+    }
+
+    fn image_target_renderbuffer_storage_oes(
+        &self,
+        target: egl::Enum,
+        image: ImageKHR,
+    ) -> Result<(), egl::Error> {
+        unsafe { (self.dyns.glEGLImageTargetRenderbufferStorageOES)(target, image.ptr) };
+        Self::last_error()
+    }
+
+    fn query_dma_buf_formats_ext(
+        &self,
+        display: egl::Display,
+    ) -> Result<Vec<egl::Int>, egl::Error> {
+        let mut num_formats = 0;
+        let result = unsafe {
+            (self.dyns.eglQueryDmaBufFormatsEXT)(display, 0, std::ptr::null_mut(), &mut num_formats)
+        };
+        Self::ok_on(result, egl::TRUE as _)?;
+        if num_formats == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut formats: Vec<egl::Int> = vec![0; num_formats as usize];
+        let max_formats = num_formats;
+        let mut num_formats = 0;
+        let result = unsafe {
+            (self.dyns.eglQueryDmaBufFormatsEXT)(
+                display,
+                max_formats,
+                formats.as_mut_ptr(),
+                &mut num_formats,
+            )
+        };
+        Self::ok_on(result, egl::TRUE as _)?;
+        assert_eq!(max_formats, num_formats);
+        Ok(formats)
+    }
+
+    fn query_dma_buf_modifiers_ext(
+        &self,
+        display: egl::Display,
+        format: egl::Int,
+    ) -> Result<(Vec<u64>, Vec<egl::Boolean>), egl::Error> {
+        let mut num_modifiers = 0;
+        let result = unsafe {
+            (self.dyns.eglQueryDmaBufModifiersEXT)(
+                display,
+                format,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut num_modifiers,
+            )
+        };
+        Self::ok_on(result, egl::TRUE as _)?;
+
+        let mut modifiers = vec![0u64; num_modifiers as usize];
+        let mut external_only = vec![0; num_modifiers as usize];
+        let max_modifiers = num_modifiers;
+        let mut num_modifiers = 0;
+        let result = unsafe {
+            (self.dyns.eglQueryDmaBufModifiersEXT)(
+                display,
+                format,
+                max_modifiers,
+                modifiers.as_mut_ptr(),
+                external_only.as_mut_ptr(),
+                &mut num_modifiers,
+            )
+        };
+        Self::ok_on(result, egl::TRUE as _)?;
+
+        Ok((modifiers, external_only))
+    }
+}
+
+pub fn init() -> EGL {
+    let egl = EGL::new();
+    egl.bind_api(egl::OPENGL_ES_API).unwrap();
     egl
+
+    // let egl = unsafe {
+    //     egl::DynamicInstance::<EGL1_5>::load_required()
+    //         .expect("Unable to load libEGL.so or libEGL.so.1")
+    // };
+
+    // let egl: EglInstance = Arc::new(egl);
+
+    // egl.bind_api(khronos_egl::OPENGL_ES_API)
+    //     .expect("unable to select OpenGL API");
+
+    // egl
 
     // dbg!(query_extensions().unwrap());
     // dbg!(query_version().unwrap());
@@ -85,17 +416,16 @@ impl Drop for EglImage {
 
 #[derive(Debug)]
 pub struct EglRenderBuffer {
+    dyns: Arc<DynamicMethods>,
     width: i32,
     height: i32,
     format: &'static Format,
-    pub renderbuffer_object: GLuint,
+    pub renderbuffer_object: gl::GLuint,
 }
 
 impl Drop for EglRenderBuffer {
     fn drop(&mut self) {
-        unsafe {
-            glDeleteRenderbuffers(1, &self.renderbuffer_object);
-        }
+        unsafe { (self.dyns.glDeleteRenderbuffers)(1, &self.renderbuffer_object) }
     }
 }
 
@@ -103,16 +433,30 @@ impl EglRenderBuffer {
     pub fn make_framebuffer(self) -> EglFrameBuffer {
         let mut framebuffer_object = 0;
 
+        let DynamicMethods {
+            glGenFramebuffers,
+            glBindFramebuffer,
+            glFramebufferRenderbuffer,
+            glCheckFramebufferStatus,
+            ..
+        } = &*self.dyns;
+
         unsafe {
-            glGenFramebuffers(1, &mut framebuffer_object);
-            glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_object);
-            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, self.renderbuffer_object);
-            let status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-            assert_eq!(status, GL_FRAMEBUFFER_COMPLETE);
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            (glGenFramebuffers)(1, &mut framebuffer_object);
+            (glBindFramebuffer)(gl::FRAMEBUFFER as _, framebuffer_object);
+            (glFramebufferRenderbuffer)(
+                gl::FRAMEBUFFER as _,
+                gl::COLOR_ATTACHMENT0 as _,
+                gl::RENDERBUFFER as _,
+                self.renderbuffer_object,
+            );
+            let status = (glCheckFramebufferStatus)(gl::FRAMEBUFFER as _);
+            assert_eq!(status, gl::FRAMEBUFFER_COMPLETE as _);
+            (glBindFramebuffer)(gl::FRAMEBUFFER as _, 0);
         }
 
         EglFrameBuffer {
+            dyns: self.dyns.clone(),
             width: self.width,
             height: self.height,
             render_buffer: self,
@@ -122,27 +466,39 @@ impl EglRenderBuffer {
 }
 
 pub struct EglFrameBuffer {
+    dyns: Arc<DynamicMethods>,
     pub width: i32,
     pub height: i32,
     render_buffer: EglRenderBuffer,
-    pub framebuffer_object: GLuint,
+    pub framebuffer_object: gl::GLuint,
 }
 
 impl Drop for EglFrameBuffer {
     fn drop(&mut self) {
         unsafe {
-            glDeleteFramebuffers(1, &self.framebuffer_object);
+            (self.dyns.glDeleteFramebuffers)(1, &self.framebuffer_object);
         }
     }
 }
 
+// impl EglFrameBuffer {
+//     pub fn clear(&self) {
+//         self.clear_with(0.0, 0.0, 0.0, 0.0);
+//     }
+
+//     pub fn clear_with(&self, r: f32, g: f32, b: f32, a: f32) {
+//         let ops = self.take_render_ops();
+//         self.render(ops, Some(&Color { r, g, b, a }));
+//     }
+// }
+
 #[derive(Debug)]
 pub struct EglContext {
-    egl: EglInstance,
-    display: khronos_egl::Display,
+    egl: EGL,
+    display: egl::EGLDisplay,
     extensions: BTreeSet<String>,
-    config: egl::Config,
-    context: egl::Context,
+    config: egl::EGLConfig,
+    context: egl::EGLContext,
     pub gbm: GbmDevice,
     formats: HashMap<DrmFourcc, EglFormat>,
     pub opengl_formats: HashMap<DrmFourcc, OpenGlFormat>,
@@ -150,11 +506,10 @@ pub struct EglContext {
 }
 
 impl EglContext {
-    pub fn make(egl: &EglInstance, gbm: GbmDevice) -> Self {
-        let display = unsafe {
-            egl.get_platform_display(EGL_PLATFORM_GBM_KHR, gbm.gbm_device, &[ATTRIB_NONE])
-                .unwrap()
-        };
+    pub fn make(egl: &EGL, gbm: GbmDevice) -> Self {
+        let display = egl
+            .get_platform_display(EGL_PLATFORM_GBM_KHR, gbm.gbm_device, &[egl::NONE as _])
+            .unwrap();
         let (_major, _minor) = egl.initialize(display).unwrap();
 
         let config = Self::find_config_xrgb8888(egl, display).unwrap();
@@ -230,40 +585,40 @@ impl EglContext {
         }
         const PLANE_KEYS: [PlaneKey; 4] = [
             PlaneKey {
-                fd: EGL_DMA_BUF_PLANE0_FD_EXT,
-                offset: EGL_DMA_BUF_PLANE0_OFFSET_EXT,
-                pitch: EGL_DMA_BUF_PLANE0_PITCH_EXT,
-                modifier_lo: EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT,
-                modifier_hi: EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT,
+                fd: egl::DMA_BUF_PLANE0_FD_EXT,
+                offset: egl::DMA_BUF_PLANE0_OFFSET_EXT,
+                pitch: egl::DMA_BUF_PLANE0_PITCH_EXT,
+                modifier_lo: egl::DMA_BUF_PLANE0_MODIFIER_LO_EXT,
+                modifier_hi: egl::DMA_BUF_PLANE0_MODIFIER_HI_EXT,
             },
             PlaneKey {
-                fd: EGL_DMA_BUF_PLANE1_FD_EXT,
-                offset: EGL_DMA_BUF_PLANE1_OFFSET_EXT,
-                pitch: EGL_DMA_BUF_PLANE1_PITCH_EXT,
-                modifier_lo: EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT,
-                modifier_hi: EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT,
+                fd: egl::DMA_BUF_PLANE1_FD_EXT,
+                offset: egl::DMA_BUF_PLANE1_OFFSET_EXT,
+                pitch: egl::DMA_BUF_PLANE1_PITCH_EXT,
+                modifier_lo: egl::DMA_BUF_PLANE1_MODIFIER_LO_EXT,
+                modifier_hi: egl::DMA_BUF_PLANE1_MODIFIER_HI_EXT,
             },
             PlaneKey {
-                fd: EGL_DMA_BUF_PLANE2_FD_EXT,
-                offset: EGL_DMA_BUF_PLANE2_OFFSET_EXT,
-                pitch: EGL_DMA_BUF_PLANE2_PITCH_EXT,
-                modifier_lo: EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT,
-                modifier_hi: EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT,
+                fd: egl::DMA_BUF_PLANE2_FD_EXT,
+                offset: egl::DMA_BUF_PLANE2_OFFSET_EXT,
+                pitch: egl::DMA_BUF_PLANE2_PITCH_EXT,
+                modifier_lo: egl::DMA_BUF_PLANE2_MODIFIER_LO_EXT,
+                modifier_hi: egl::DMA_BUF_PLANE2_MODIFIER_HI_EXT,
             },
             PlaneKey {
-                fd: EGL_DMA_BUF_PLANE3_FD_EXT,
-                offset: EGL_DMA_BUF_PLANE3_OFFSET_EXT,
-                pitch: EGL_DMA_BUF_PLANE3_PITCH_EXT,
-                modifier_lo: EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT,
-                modifier_hi: EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT,
+                fd: egl::DMA_BUF_PLANE3_FD_EXT,
+                offset: egl::DMA_BUF_PLANE3_OFFSET_EXT,
+                pitch: egl::DMA_BUF_PLANE3_PITCH_EXT,
+                modifier_lo: egl::DMA_BUF_PLANE3_MODIFIER_LO_EXT,
+                modifier_hi: egl::DMA_BUF_PLANE3_MODIFIER_HI_EXT,
             },
         ];
 
         let mut attribs = Vec::<egl::Int>::with_capacity(128);
         attribs.extend([egl::WIDTH, buf.width]);
         attribs.extend([egl::HEIGHT, buf.height]);
-        attribs.extend([EGL_LINUX_DRM_FOURCC_EXT, buf.format.drm as i32]);
-        attribs.extend([EGL_IMAGE_PRESERVED_KHR, egl::TRUE as i32]);
+        attribs.extend([egl::LINUX_DRM_FOURCC_EXT, buf.format.drm as i32]);
+        attribs.extend([egl::IMAGE_PRESERVED_KHR, egl::TRUE as i32]);
         for (key, plane) in PLANE_KEYS.iter().zip(buf.planes.iter()) {
             attribs.extend([key.fd, *plane.fd]);
             attribs.extend([key.pitch, plane.stride as i32]);
@@ -275,9 +630,10 @@ impl EglContext {
         }
         attribs.push(egl::NONE);
 
-        let image = unsafe {
-            create_image_khr(&self.egl, self.display, EGL_LINUX_DMA_BUF_EXT as _, &attribs).unwrap()
-        };
+        let image = self
+            .egl
+            .create_image_khr(self.display, egl::LINUX_DMA_BUF_EXT as _, &attribs)
+            .unwrap();
 
         EglImage {
             image,
@@ -291,17 +647,26 @@ impl EglContext {
         render_buffer.make_framebuffer()
     }
 
-    pub fn make_render_buffer_from_image(&self, image: &EglImage, dmabuf: &DmaBuf) -> EglRenderBuffer {
+    pub fn make_render_buffer_from_image(
+        &self,
+        image: &EglImage,
+        dmabuf: &DmaBuf,
+    ) -> EglRenderBuffer {
         let mut renderbuffer_object = 0;
 
+        let DynamicMethods { glGenRenderbuffers, glBindRenderbuffer, .. } = &*self.egl.dyns;
+
         unsafe {
-            glGenRenderbuffers(1, &mut renderbuffer_object);
-            glBindRenderbuffer(GL_RENDERBUFFER, renderbuffer_object);
-            image_target_renderbuffer_storage_oes(&self.egl, GL_RENDERBUFFER, image.image.ptr);
-            glBindRenderbuffer(GL_RENDERBUFFER, 0);
+            (glGenRenderbuffers)(1, &mut renderbuffer_object);
+            (glBindRenderbuffer)(gl::RENDERBUFFER as _, renderbuffer_object);
+            self.egl
+                .image_target_renderbuffer_storage_oes(gl::RENDERBUFFER as _, image.image)
+                .unwrap();
+            (glBindRenderbuffer)(gl::RENDERBUFFER as _, 0);
         }
 
         EglRenderBuffer {
+            dyns: self.egl.dyns.clone(),
             width: dmabuf.width,
             height: dmabuf.height,
             format: dmabuf.format,
@@ -309,20 +674,8 @@ impl EglContext {
         }
     }
 
-    fn query_formats(
-        egl: &EglInstance,
-        display: &khronos_egl::Display,
-    ) -> HashMap<DrmFourcc, EglFormat> {
-        let mut nformats = 0;
-        unsafe {
-            query_dma_buf_formats_ext(egl, *display, 0, &mut [], &mut nformats).unwrap();
-        }
-        let mut formats = vec![0i32; nformats as usize];
-        unsafe {
-            query_dma_buf_formats_ext(egl, *display, nformats, &mut formats, &mut nformats)
-                .unwrap();
-        }
-        assert_eq!(nformats as usize, formats.len());
+    fn query_formats(egl: &EGL, display: &egl::Display) -> HashMap<DrmFourcc, EglFormat> {
+        let formats = egl.query_dma_buf_formats_ext(*display).unwrap();
 
         formats
             .iter()
@@ -343,40 +696,16 @@ impl EglContext {
     }
 
     fn query_modifiers(
-        egl: &EglInstance,
-        display: &khronos_egl::Display,
+        egl: &EGL,
+        display: &egl::Display,
         gl_format: egl::Int,
         format: &Format,
     ) -> (BTreeMap<Modifier, EglModifier>, bool) {
         const INVALID_MODIFIER: u64 = 0x00ff_ffff_ffff_ffff;
 
-        let mut nmodifiers = 0;
-        unsafe {
-            query_dma_buf_modifiers_ext(
-                egl,
-                *display,
-                gl_format,
-                nmodifiers,
-                &mut [],
-                &mut [],
-                &mut nmodifiers,
-            )
+        let (modifiers, external_only) = egl
+            .query_dma_buf_modifiers_ext(*display, gl_format)
             .unwrap();
-        }
-        let mut modifiers = vec![0u64; nmodifiers as usize];
-        let mut external_only = vec![0; nmodifiers as usize];
-        unsafe {
-            query_dma_buf_modifiers_ext(
-                egl,
-                *display,
-                gl_format,
-                nmodifiers,
-                &mut modifiers,
-                &mut external_only,
-                &mut nmodifiers,
-            )
-            .unwrap();
-        }
 
         let mut map = modifiers
             .iter()
@@ -384,7 +713,7 @@ impl EglContext {
             .zip(external_only)
             .map(|(modifier, external_only)| {
                 let modifier = Modifier(modifier);
-                (modifier, EglModifier { modifier, external_only: external_only == egl::TRUE })
+                (modifier, EglModifier { modifier, external_only: external_only == egl::TRUE as _ })
             })
             .collect::<BTreeMap<_, _>>();
 
@@ -398,12 +727,9 @@ impl EglContext {
         (map, external_only)
     }
 
-    fn find_config_xrgb8888(
-        egl: &EglInstance,
-        display: khronos_egl::Display,
-    ) -> Option<egl::Config> {
-        let mut configs = Vec::with_capacity(egl.get_config_count(display).unwrap());
-        egl.get_configs(display, &mut configs).unwrap();
+    fn find_config_xrgb8888(egl: &EGL, display: egl::Display) -> Option<egl::Config> {
+        // let mut configs = Vec::with_capacity(egl.get_config_count(display).unwrap());
+        let configs = egl.get_configs(display).unwrap();
         configs.into_iter().find(|config| {
             let attr = egl
                 .get_config_attrib(display, *config, egl::NATIVE_VISUAL_ID)
@@ -416,20 +742,19 @@ impl EglContext {
 
 pub fn make_display(
     drm_fd: &DrmFd,
-    egl: &EglInstance,
+    egl: &EGL,
     gbm: &GbmDevice,
     connector: &crate::drm::Connector,
     crtc: drm::control::crtc::Handle,
 ) {
-    let display = unsafe {
-        egl.get_platform_display(EGL_PLATFORM_GBM_KHR, gbm.gbm_device, &[ATTRIB_NONE])
-            .unwrap()
-    };
+    let display = egl
+        .get_platform_display(EGL_PLATFORM_GBM_KHR, gbm.gbm_device, &[egl::NONE as _])
+        .unwrap();
 
     let (major, minor) = egl.initialize(display).unwrap();
 
-    let mut configs = Vec::with_capacity(egl.get_config_count(display).unwrap());
-    egl.get_configs(display, &mut configs).unwrap();
+    // let mut configs = Vec::with_capacity(egl.get_config_count(display).unwrap());
+    let configs = egl.get_configs(display).unwrap();
 
     dbg!(configs.len());
 
@@ -467,12 +792,12 @@ pub fn make_display(
     let attrib_list = [
         // egl::NATIVE_VISUAL_ID, format,
         egl::SURFACE_TYPE,
-        egl::WINDOW_BIT,
+        egl::EGLSurfaceTypeMask::WINDOW_BIT as _,
         // egl::RED_SIZE, 8,
         // egl::GREEN_SIZE, 8,
         // egl::BLUE_SIZE, 8,
         egl::RENDERABLE_TYPE,
-        egl::OPENGL_ES2_BIT,
+        egl::EGLRenderableTypeMask::OPENGL_ES2_BIT as _,
         egl::NONE,
     ];
 
@@ -489,10 +814,8 @@ pub fn make_display(
     // let egl_context = egl.create_context(display, configs[0], None, &[egl::NONE]).unwrap();
     let gbm_surface = gbm.create_surface(connector.preferred_mode.as_ref().unwrap());
 
-    let egl_surface = unsafe {
-        egl.create_platform_window_surface(display, config, gbm_surface.raw(), &[ATTRIB_NONE])
-            .unwrap()
-    };
+    let egl_surface = egl.create_platform_window_surface(display, config, gbm_surface.raw(), &[egl::NONE as _])
+            .unwrap();
 
     egl.make_current(display, Some(egl_surface), Some(egl_surface), Some(egl_context))
         .unwrap();
@@ -504,8 +827,8 @@ pub fn make_display(
 
         let i = i as f32;
         unsafe {
-            glClearColor(0.5, i / 100.0, 0.0, 1.0);
-            glClear(GL_COLOR_BUFFER_BIT);
+            gl::ClearColor(0.5, i / 100.0, 0.0, 1.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT as _);
         }
 
         egl.swap_buffers(display, egl_surface).unwrap();
@@ -550,7 +873,7 @@ pub fn make_display(
 
 fn get_opengl_extensions() -> BTreeSet<String> {
     let s = unsafe {
-        let ptr = glGetString(GL_EXTENSIONS);
+        let ptr = gl::GetString(gl::EXTENSIONS as _);
         assert!(!ptr.is_null());
         std::ffi::CStr::from_ptr(ptr as _)
     };
@@ -584,166 +907,7 @@ fn get_opengl_extensions() -> BTreeSet<String> {
 // 	swap_buffers ();
 // }
 
-pub type GLbitfield = libc::c_uint;
-pub type GLfloat = libc::c_float;
-pub type GLenum = libc::c_uint;
-pub type GLsizei = libc::c_int;
-pub type GLuint = libc::c_uint;
-
-const GL_COLOR_BUFFER_BIT: GLbitfield = 0x00004000;
-const GL_EXTENSIONS: GLenum = 0x1F03;
-const GL_RENDERBUFFER: GLenum = 0x8D41;
-const GL_FRAMEBUFFER: GLenum = 0x8D40;
-const GL_COLOR_ATTACHMENT0: GLenum = 0x8CE0;
-const GL_FRAMEBUFFER_COMPLETE: GLenum = 0x8CD5;
-
-#[link(name = "GLESv2")]
-extern "C" {
-    pub fn glGetString(name: GLenum) -> *const u8;
-    pub fn glClear(mask: GLbitfield);
-    pub fn glClearColor(red: GLfloat, green: GLfloat, blue: GLfloat, alpha: GLfloat);
-    pub fn glGenRenderbuffers(n: GLsizei, renderbuffers: *mut GLuint);
-    pub fn glBindRenderbuffer(target: GLenum, renderbuffer: GLuint);
-    pub fn glDeleteRenderbuffers(n: GLsizei, renderbuffers: *const GLuint);
-    pub fn glGenFramebuffers(n: GLsizei, framebuffers: *mut GLuint);
-    pub fn glBindFramebuffer(target: GLenum, framebuffer: GLuint);
-    pub fn glFramebufferRenderbuffer(
-        target: GLenum,
-        attachment: GLenum,
-        renderbuffertarget: GLenum,
-        renderbuffer: GLuint,
-    );
-    pub fn glCheckFramebufferStatus(target: GLenum) -> GLenum;
-    pub fn glDeleteFramebuffers(n: GLsizei, framebuffers: *const GLuint);
-}
-
+#[derive(Copy, Clone, Debug)]
 pub struct ImageKHR {
-    ptr: *mut u8,
+    ptr: *mut std::ffi::c_void,
 }
-
-pub unsafe fn create_image_khr(
-    egl: &EglInstance,
-    display: egl::Display,
-    target: egl::Enum,
-    attrib_list: &[egl::Int],
-) -> Result<ImageKHR, ()> {
-    type FunSignature = extern "C" fn(
-        egl::EGLDisplay,
-        egl::EGLContext,
-        egl::Enum,
-        egl::EGLClientBuffer,
-        *const egl::Int,
-    ) -> *mut u8;
-    let create_image_khr: FunSignature = cache!(FunSignature, {
-        let ptr: extern "system" fn() = egl.get_proc_address("eglCreateImageKHR").unwrap();
-        std::mem::transmute::<_, FunSignature>(ptr)
-    });
-    let attrib_ptr = utils::ptr_or_null(attrib_list);
-    let ctx = std::ptr::null_mut();
-    let buffer = std::ptr::null_mut();
-    let ptr = create_image_khr(display.as_ptr(), ctx, target, buffer, attrib_ptr);
-    if ptr.is_null() {
-        panic!()
-    }
-    Ok(ImageKHR { ptr })
-}
-
-pub unsafe fn image_target_renderbuffer_storage_oes(
-    egl: &EglInstance,
-    target: egl::Enum,
-    image: *mut u8,
-) {
-    type FunSignature = extern "C" fn(
-        egl::Enum,
-        *mut u8,
-    );
-    let image_target_renderbuffer_storage_oes: FunSignature = cache!(FunSignature, {
-        let ptr: extern "system" fn() = egl.get_proc_address("glEGLImageTargetRenderbufferStorageOES").unwrap();
-        std::mem::transmute::<_, FunSignature>(ptr)
-    });
-    image_target_renderbuffer_storage_oes(target, image);
-}
-
-pub unsafe fn query_dma_buf_formats_ext(
-    egl: &EglInstance,
-    display: egl::Display,
-    max_formats: egl::Int,
-    formats: &mut [egl::Int],
-    num_formats: &mut egl::Int,
-) -> Result<(), ()> {
-    type FunSignature =
-        extern "C" fn(egl::EGLDisplay, egl::Int, *mut egl::Int, *mut egl::Int) -> u32;
-    let query_dma_buf_formats_ext: FunSignature = cache!(FunSignature, {
-        let ptr: extern "system" fn() = egl.get_proc_address("eglQueryDmaBufFormatsEXT").unwrap();
-        std::mem::transmute::<_, FunSignature>(ptr)
-    });
-    let ptr = utils::ptr_or_null_mut(formats);
-    let result = query_dma_buf_formats_ext(display.as_ptr(), max_formats, ptr, num_formats);
-    if result == egl::TRUE {
-        Ok(())
-    } else {
-        Err(())
-    }
-}
-
-pub unsafe fn query_dma_buf_modifiers_ext(
-    egl: &EglInstance,
-    display: egl::Display,
-    format: egl::Int,
-    max_modifiers: egl::Int,
-    modifiers: &mut [u64],
-    external_only: &mut [egl::Boolean],
-    num_modifiers: &mut egl::Int,
-) -> Result<(), ()> {
-    type FunSignature = extern "C" fn(
-        display: egl::EGLDisplay,
-        format: egl::Int,
-        max_modifiers: egl::Int,
-        modifiers: *mut u64,
-        external_only: *mut egl::Boolean,
-        num_modifiers: *mut egl::Int,
-    ) -> u32;
-    let query_dma_buf_modifiers_ext: FunSignature = cache!(FunSignature, {
-        let ptr: extern "system" fn() = egl.get_proc_address("eglQueryDmaBufModifiersEXT").unwrap();
-        std::mem::transmute::<_, FunSignature>(ptr)
-    });
-    let ptr = utils::ptr_or_null_mut(modifiers);
-    let external_only_ptr = utils::ptr_or_null_mut(external_only);
-    let result = query_dma_buf_modifiers_ext(
-        display.as_ptr(),
-        format,
-        max_modifiers,
-        ptr,
-        external_only_ptr,
-        num_modifiers,
-    );
-    if result == egl::TRUE {
-        Ok(())
-    } else {
-        Err(())
-    }
-}
-
-pub const EGL_LINUX_DRM_FOURCC_EXT: egl::Int = 0x3271;
-pub const EGL_DMA_BUF_PLANE0_FD_EXT: egl::Int = 0x3272;
-pub const EGL_DMA_BUF_PLANE0_OFFSET_EXT: egl::Int = 0x3273;
-pub const EGL_DMA_BUF_PLANE0_PITCH_EXT: egl::Int = 0x3274;
-pub const EGL_DMA_BUF_PLANE1_FD_EXT: egl::Int = 0x3275;
-pub const EGL_DMA_BUF_PLANE1_OFFSET_EXT: egl::Int = 0x3276;
-pub const EGL_DMA_BUF_PLANE1_PITCH_EXT: egl::Int = 0x3277;
-pub const EGL_DMA_BUF_PLANE2_FD_EXT: egl::Int = 0x3278;
-pub const EGL_DMA_BUF_PLANE2_OFFSET_EXT: egl::Int = 0x3279;
-pub const EGL_DMA_BUF_PLANE2_PITCH_EXT: egl::Int = 0x327A;
-pub const EGL_DMA_BUF_PLANE3_FD_EXT: egl::Int = 0x3440;
-pub const EGL_DMA_BUF_PLANE3_OFFSET_EXT: egl::Int = 0x3441;
-pub const EGL_DMA_BUF_PLANE3_PITCH_EXT: egl::Int = 0x3442;
-pub const EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT: egl::Int = 0x3443;
-pub const EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT: egl::Int = 0x3444;
-pub const EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT: egl::Int = 0x3445;
-pub const EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT: egl::Int = 0x3446;
-pub const EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT: egl::Int = 0x3447;
-pub const EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT: egl::Int = 0x3448;
-pub const EGL_DMA_BUF_PLANE3_MODIFIER_LO_EXT: egl::Int = 0x3449;
-pub const EGL_DMA_BUF_PLANE3_MODIFIER_HI_EXT: egl::Int = 0x344A;
-pub const EGL_IMAGE_PRESERVED_KHR: egl::Int = 0x30D2;
-pub const EGL_LINUX_DMA_BUF_EXT: egl::Int = 0x3270;
