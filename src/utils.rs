@@ -17,3 +17,8 @@ pub fn ptr_or_null<T>(v: &[T]) -> *const T {
         v.as_ptr()
     }
 }
+
+pub fn strip_type_name(s: &str) -> &str {
+    let index = s.rfind("::").map(|i| i + 2).unwrap_or(0);
+    s.get(index..).unwrap()
+}

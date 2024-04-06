@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
 };
 
-use crate::{io_uring::model::IoUringAction, State};
+use crate::{io_uring::model::IoUringAction, utils::strip_type_name, State};
 
 type Result<T> = std::result::Result<T, ()>;
 
@@ -130,11 +130,6 @@ impl<R> Clone for Redispatcher<R> {
 
 impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fn strip_type_name(s: &str) -> &str {
-            let index = s.rfind("::").map(|i| i + 2).unwrap_or(0);
-            s.get(index..).unwrap()
-        }
-
         match self {
             Self::Fun { ptr: _, type_name } => f.write_str(strip_type_name(type_name)),
             Self::WithId { id, ptr: _, type_name } => {
@@ -150,8 +145,8 @@ impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
 
 impl<R> Redispatcher<R> {
     pub fn new<T: Model>(ptr: fn(R) -> AnyAction) -> Self {
-        let name = std::any::type_name::<T>();
-        Self::Fun { ptr, type_name: name }
+        let type_name = std::any::type_name::<T>();
+        Self::Fun { ptr, type_name }
     }
 
     pub fn new_noname(ptr: fn(R) -> AnyAction) -> Self {

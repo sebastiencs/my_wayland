@@ -31,7 +31,7 @@ impl Object for WlDisplay {
     ) {
         use wl_display::Request::*;
 
-        match Self::parse_request(request).unwrap() {
+        match Self::parse(request).unwrap() {
             Sync { callback } => {
                 let _callback = WlCallback::new(callback);
                 // callback.done(dispatcher);

@@ -3,7 +3,7 @@
 
 macro_rules! wayland_id {
     ($($name:ident,)+) => ($(
-        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into)]
+        #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into)]
         pub struct $name(pub(super) u32);
         impl From<WaylandId> for $name {
             fn from(value: WaylandId) -> Self {
@@ -13,6 +13,13 @@ macro_rules! wayland_id {
         impl From<$name> for WaylandId {
             fn from(value: $name) -> Self {
                 Self(value.0)
+            }
+        }
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let Self(this) = self;
+                // no vertical alignment
+                f.write_fmt(format_args!("{}({})", stringify!($name), this))
             }
         }
     )+)
