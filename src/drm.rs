@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     num::NonZeroU32,
-    ops::Range,
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
 };
 
@@ -22,8 +21,10 @@ use {
 
 use crate::{
     dmabuf::DmaBuf,
-    egl::{self, EglContext, EglFrameBuffer, GlTexture, EGL},
-    gbm::{GbmDevice, UseFlags},
+    egl::{EglContext, EglFrameBuffer, GlTexture, EGL},
+    gbm::UseFlags,
+    io_uring::ring::ReadWriteCompleted,
+    runner::{AnyAction, Dispatcher, Model},
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -311,7 +312,19 @@ impl Drm {
         let egl_context = EglContext::make(egl, gbm);
         let (in_use, buffers) = Self::init_drm(&drm, &egl_context, &resources);
 
-        Self { fd: drm, device, resources, egl_context, driver, in_use, buffers }
+        Self {
+            fd: drm,
+            device,
+            resources,
+            egl_context,
+            driver,
+            in_use,
+            buffers,
+        }
+    }
+
+    pub fn make_model(&self) -> DrmModel {
+        DrmModel { fd: self.fd.as_raw_fd() }
     }
 
     fn list_resources(drm: &DrmFd) -> DrmResources {
@@ -370,7 +383,11 @@ impl Drm {
         }
     }
 
-    fn init_drm(drm: &DrmFd, egl: &EglContext, drm_resources: &DrmResources) -> (ConnectorInUse, [RenderBuffer; 2]) {
+    fn init_drm(
+        drm: &DrmFd,
+        egl: &EglContext,
+        drm_resources: &DrmResources,
+    ) -> (ConnectorInUse, [RenderBuffer; 2]) {
         let DrmResources { planes, crtcs, connectors, .. } = drm_resources;
 
         let in_use = Self::find_first_valid_connector(&connectors, &crtcs, &planes)
@@ -864,4 +881,69 @@ struct RenderBuffer {
     drm_fb: DrmFrameBuffer,
     fb: EglFrameBuffer,
     texture: GlTexture,
+}
+
+/// Model to handle events
+pub struct DrmModel {
+    fd: RawFd, // Do not close, it's owned by `Drm`
+}
+
+pub enum DrmAction {
+    Start,
+    Event { event: drm_ffi::drm_event_vblank },
+    Stop,
+}
+
+impl Model for DrmModel {
+    type Action = DrmAction;
+    const START: Option<Self::Action> = Some(DrmAction::Start);
+    const STOP: Option<Self::Action> = Some(DrmAction::Stop);
+
+    fn process(
+        &mut self,
+        _state: &mut crate::state::State,
+        action: Self::Action,
+        dispatcher: &mut crate::runner::Dispatcher,
+    ) -> Result<(), ()> {
+        match action {
+            DrmAction::Start => {
+                self.dispatch_read(dispatcher);
+            }
+            DrmAction::Event { event } => {
+                self.handle_event(event);
+            }
+            DrmAction::Stop => todo!(),
+        };
+        Ok(())
+    }
+}
+
+impl DrmModel {
+    fn handle_event(&mut self, event: drm_ffi::drm_event_vblank) {
+        dbg!(event);
+        todo!()
+    }
+
+    fn dispatch_read(&self, dispatcher: &mut Dispatcher) {
+        use crate::{io_uring::model::IoUringAction, runner::Redispatcher};
+
+        dispatcher.dispatch(IoUringAction::Read {
+            fd: self.fd,
+            offset: 0,
+            length: std::mem::size_of::<drm_ffi::drm_event_vblank>(),
+            dispatch_to: Redispatcher::new::<Self>(Self::on_read_event),
+        });
+    }
+
+    fn on_read_event(result: std::io::Result<ReadWriteCompleted>) -> AnyAction {
+        let result = result.unwrap();
+        let event = result.read_as::<drm_ffi::drm_event_vblank>();
+
+        // TODO: Handle other events
+        let drm_ffi::drm_event { type_, length } = event.base;
+        assert_eq!(length as usize, result.buffer.len());
+        assert_eq!(type_, drm_ffi::DRM_EVENT_FLIP_COMPLETE);
+
+        AnyAction::from(DrmAction::Event { event })
+    }
 }

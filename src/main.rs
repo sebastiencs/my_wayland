@@ -207,7 +207,7 @@ fn main() {
         }
         dispatcher.dispatch(IoUringAction::Poll {
             fd: timer.as_fd().as_raw_fd(),
-            dispatch_to: Redispatcher::new(on_timeout),
+            dispatch_to: Redispatcher::new_noname(on_timeout),
         });
     }
 

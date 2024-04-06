@@ -57,6 +57,14 @@ pub struct ReadWriteCompleted {
     pub buffer: Box<[u8]>,
 }
 
+impl ReadWriteCompleted {
+    // Constraint to `Copy` types, for relative safety
+    pub fn read_as<T: Copy>(&self) -> T {
+        assert_eq!(self.buffer.len(), std::mem::size_of::<T>());
+        unsafe { std::ptr::read_unaligned(self.buffer.as_ptr() as _) }
+    }
+}
+
 #[derive(Debug)]
 pub struct RecvmsgCompleted {
     pub fd: RawFd,

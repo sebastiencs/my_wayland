@@ -67,7 +67,7 @@ impl Clients {
     fn dispatch_accept(&self, dispatcher: &mut Dispatcher) {
         dispatcher.dispatch(IoUringAction::Accept {
             fd: self.fd.as_raw_fd(),
-            dispatch_to: Redispatcher::new(Self::on_accept),
+            dispatch_to: Redispatcher::new::<Self>(Self::on_accept),
         });
     }
 }

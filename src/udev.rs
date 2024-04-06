@@ -81,7 +81,9 @@ impl Model for Udev {
             }
             UdevAction::DeviceTaken { fd, inactive, devnum } => {
                 match self.pending.remove(&devnum).unwrap() {
-                    PendingControl::Drm(device) => self.on_drm_taken(device, fd, inactive, state),
+                    PendingControl::Drm(device) => {
+                        self.on_drm_taken(device, fd, inactive, state, dispatcher)
+                    }
                     PendingControl::Input(device) => {
                         self.on_input_taken(device, fd, inactive, devnum, dispatcher)
                     }
@@ -116,7 +118,7 @@ impl Udev {
     fn dispatch_poll(&self, dispatcher: &mut Dispatcher) {
         dispatcher.dispatch(IoUringAction::Poll {
             fd: self.udev_monitor.as_raw_fd(),
-            dispatch_to: Redispatcher::new(Self::on_udev_event),
+            dispatch_to: Redispatcher::new::<Self>(Self::on_udev_event),
         });
     }
 
@@ -203,7 +205,14 @@ impl Udev {
         dispatcher.dispatch(LibinputAction::OpenInput { devnode, fd, devnum });
     }
 
-    fn on_drm_taken(&mut self, device: udev::Device, fd: RawFd, inactive: bool, state: &mut State) {
+    fn on_drm_taken(
+        &mut self,
+        device: udev::Device,
+        fd: RawFd,
+        inactive: bool,
+        state: &mut State,
+        dispatcher: &mut Dispatcher,
+    ) {
         if inactive {
             return;
         }
@@ -211,6 +220,10 @@ impl Udev {
         eprintln!("DRM TAKEN {:?}", device.devnode());
 
         let drm = Drm::create_drm(fd, device, &state.egl);
+
+        let drm_model = drm.make_model();
+        dispatcher.start_model2(drm_model);
+
         state.drm.insert(drm);
     }
 }

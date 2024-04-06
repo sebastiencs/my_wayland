@@ -99,6 +99,7 @@ impl Dispatcher {
 pub enum Redispatcher<R> {
     Fun {
         ptr: fn(R) -> AnyAction,
+        type_name: &'static str,
     },
     WithId {
         ptr: fn(R) -> AnyAction,
@@ -119,11 +120,9 @@ pub enum Redispatcher<R> {
 impl<R> Clone for Redispatcher<R> {
     fn clone(&self) -> Self {
         match self {
-            Self::Fun { ptr } => Self::Fun { ptr: *ptr },
-            Self::WithId { ptr, id, type_name: name } => {
-                Self::WithId { ptr: *ptr, id: *id, type_name: name }
-            }
-            Self::Into { ptr, type_name: name } => Self::Into { ptr: *ptr, type_name: name },
+            Self::Fun { ptr, type_name } => Self::Fun { ptr: *ptr, type_name },
+            Self::WithId { ptr, id, type_name } => Self::WithId { ptr: *ptr, id: *id, type_name },
+            Self::Into { ptr, type_name } => Self::Into { ptr: *ptr, type_name },
             Self::None => Self::None,
         }
     }
@@ -131,18 +130,18 @@ impl<R> Clone for Redispatcher<R> {
 
 impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fn type_name(s: &str) -> &str {
+        fn strip_type_name(s: &str) -> &str {
             let index = s.rfind("::").map(|i| i + 2).unwrap_or(0);
             s.get(index..).unwrap()
         }
 
         match self {
-            Self::Fun { ptr: _ } => f.write_str("ptr"),
-            Self::WithId { id, ptr: _, type_name: name } => {
-                f.write_fmt(format_args!("{}({:?})", type_name(name), id))
+            Self::Fun { ptr: _, type_name } => f.write_str(strip_type_name(type_name)),
+            Self::WithId { id, ptr: _, type_name } => {
+                f.write_fmt(format_args!("{}({:?})", strip_type_name(type_name), id))
             }
-            Self::Into { ptr: _, type_name: name } => {
-                f.write_fmt(format_args!("{}", type_name(name)))
+            Self::Into { ptr: _, type_name } => {
+                f.write_fmt(format_args!("{}", strip_type_name(type_name)))
             }
             Self::None => f.write_str("None"),
         }
@@ -150,8 +149,13 @@ impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
 }
 
 impl<R> Redispatcher<R> {
-    pub fn new(ptr: fn(R) -> AnyAction) -> Self {
-        Self::Fun { ptr }
+    pub fn new<T: Model>(ptr: fn(R) -> AnyAction) -> Self {
+        let name = std::any::type_name::<T>();
+        Self::Fun { ptr, type_name: name }
+    }
+
+    pub fn new_noname(ptr: fn(R) -> AnyAction) -> Self {
+        Self::Fun { ptr, type_name: "" }
     }
 
     pub fn into<T>() -> Self
@@ -179,7 +183,7 @@ impl<R> Redispatcher<R> {
 impl<R> Redispatcher<R> {
     pub fn make(self, value: R) -> Option<AnyAction> {
         match self {
-            Self::Fun { ptr } => Some(ptr(value)),
+            Self::Fun { ptr, type_name: _ } => Some(ptr(value)),
             Self::Into { ptr, type_name: _ } => Some(ptr(value)),
             Self::WithId { id, ptr, type_name: _ } => {
                 let mut action = ptr(value);
