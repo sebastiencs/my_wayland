@@ -64,9 +64,7 @@ struct DrmFrameBuffer {
 }
 
 #[derive(Debug)]
-pub struct Drm {
-    fd: DrmFd,
-    device: udev::Device,
+pub struct DrmResources {
     planes: BTreeMap<plane::Handle, Plane>,
     crtcs: BTreeMap<crtc::Handle, Crtc>,
     encoders: BTreeMap<encoder::Handle, Encoder>,
@@ -74,8 +72,17 @@ pub struct Drm {
     cursor_height: u64,
     cursor_width: u64,
     resources: ResourceHandles,
-    driver: Driver,
+}
+
+#[derive(Debug)]
+pub struct Drm {
+    fd: DrmFd,
+    device: udev::Device,
+    resources: DrmResources,
     egl_context: EglContext,
+    in_use: ConnectorInUse,
+    buffers: [RenderBuffer; 2],
+    driver: Driver,
 }
 
 #[derive(Debug)]
@@ -246,6 +253,15 @@ struct ConnectorInUse {
     crtc: Crtc,
     connector: Connector,
     planes: Vec<Plane>,
+    primary_plane_index: usize,
+}
+
+impl ConnectorInUse {
+    fn primary_plane(&self) -> (&Plane, &BTreeSet<Modifier>) {
+        let plane = &self.planes[self.primary_plane_index];
+        let format = &plane.formats[&DrmFourcc::Xrgb8888];
+        (plane, &format.modifiers)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Copy)]
@@ -285,9 +301,20 @@ impl Drm {
     pub fn create_drm(fd: RawFd, device: udev::Device, egl: &EGL) -> Self {
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let drm = DrmFd { fd };
-
         drm.set_client_capability(drm::ClientCapability::Atomic, true)
             .unwrap();
+
+        let driver = drm.get_driver().unwrap().into();
+        let resources = Self::list_resources(&drm);
+
+        let gbm = crate::gbm::GbmDevice::new(&drm).unwrap();
+        let egl_context = EglContext::make(egl, gbm);
+        let (in_use, buffers) = Self::init_drm(&drm, &egl_context, &resources);
+
+        Self { fd: drm, device, resources, egl_context, driver, in_use, buffers }
+    }
+
+    fn list_resources(drm: &DrmFd) -> DrmResources {
         let resources = drm.resource_handles().unwrap();
 
         let (cursor_height, cursor_width) = {
@@ -298,123 +325,67 @@ impl Drm {
             (height, width)
         };
 
-        let driver = drm.get_driver().unwrap().into();
-
+        let make_plane = |plane: plane::Handle| Self::make_plane(drm, plane);
         let planes: BTreeMap<plane::Handle, Plane> = drm
             .plane_handles()
             .unwrap()
             .iter()
-            .map(|plane| Self::make_plane(&drm, *plane))
+            .copied()
+            .map(make_plane)
             .collect();
 
+        let make_crtc = |(index, crtc)| Self::make_crtc(drm, index, crtc, &planes);
         let crtcs: BTreeMap<crtc::Handle, Crtc> = resources
             .crtcs()
             .iter()
+            .copied()
             .enumerate()
-            .map(|(index, crtc)| Self::make_crtc(&drm, index, *crtc, &planes))
+            .map(make_crtc)
             .collect();
 
+        let make_encoder = |encoder| Self::make_encoder(drm, encoder, &crtcs);
         let encoders: BTreeMap<encoder::Handle, Encoder> = resources
             .encoders()
             .iter()
-            .map(|encoder| Self::make_encoder(&drm, *encoder, &crtcs))
+            .copied()
+            .map(make_encoder)
             .collect();
 
+        let make_connector = |connector| Self::make_connector(drm, connector, &encoders);
         let connectors: BTreeMap<connector::Handle, Connector> = resources
             .connectors()
             .iter()
-            .map(|connector| Self::make_connector(&drm, *connector, &encoders))
+            .copied()
+            .map(make_connector)
             .collect();
 
-        for c in connectors.values() {
-            let connector::State::Connected = c.state else {
-                continue;
-            };
-
-            for crtc in &c.crtcs {
-                let crtc = crtcs.get(crtc).unwrap();
-                if !crtc.active {
-                    continue;
-                }
-                // let planes = crtc.possible_planes.clone();
-                eprintln!("connector {:?} crtc={:?}", c, crtc);
-                // eprintln!("connector {:?} crtc={:?}", c.handler, crtc);
-                // eprintln!("connector {:?} crtc={:?} planes={:?}", c.handler, crtc, planes);
-            }
-        }
-
-        let gbm = crate::gbm::GbmDevice::new(&drm).unwrap();
-
-        let egl_context = EglContext::make(egl, gbm);
-
-        // let in_use = Self::find_first_valid_connector(&connectors, &crtcs, &planes)
-        //     .expect("Failed to find connector");
-
-        let in_use = Self::init_drm(&drm, &egl_context, &connectors, &crtcs, &planes);
-
-        // control::atomic::AtomicModeReq;
-        // drm::
-        // drm.atomic_commit(flags, req);
-
-        // egl::make_display(&drm, egl, &gbm, connector, *crtc);
-
-        // egl.get_platform_display(EGL_PLATFORM_GBM_KHR, native_display, attrib_list);
-
-        // egl = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, dpy.gbm, NULL);
-
-        Self {
-            fd: drm,
-            device,
+        DrmResources {
             planes,
             crtcs,
             encoders,
+            connectors,
             cursor_height,
             cursor_width,
             resources,
-            driver,
-            connectors,
-            egl_context,
         }
     }
 
-    fn init_drm(
-        drm: &DrmFd,
-        egl: &EglContext,
-        connectors: &BTreeMap<connector::Handle, Connector>,
-        crtcs: &BTreeMap<crtc::Handle, Crtc>,
-        planes: &BTreeMap<plane::Handle, Plane>,
-    ) {
+    fn init_drm(drm: &DrmFd, egl: &EglContext, drm_resources: &DrmResources) -> (ConnectorInUse, [RenderBuffer; 2]) {
+        let DrmResources { planes, crtcs, connectors, .. } = drm_resources;
+
         let in_use = Self::find_first_valid_connector(&connectors, &crtcs, &planes)
             .expect("Failed to find connector");
 
-        let (primary_plane, modifiers) = in_use
-            .planes
-            .iter()
-            .find_map(|plane| {
-                let PlaneType::Primary = plane.kind else { return None };
-                let format = plane.formats.get(&DrmFourcc::Xrgb8888)?;
-                Some((plane, &format.modifiers))
-            })
-            .unwrap();
-
         let mut changes = control::atomic::AtomicModeReq::new();
 
-        dbg!(primary_plane);
-        dbg!(primary_plane.handle);
-        dbg!(primary_plane.fb_handle());
-
-        let buffers: [_; 2] = std::array::from_fn(|_| {
-            Self::make_render_buffer(drm, egl, modifiers, &in_use, false).unwrap()
-        });
+        let buffers: [_; 2] =
+            std::array::from_fn(|_| Self::make_render_buffer(drm, egl, &in_use, false).unwrap());
 
         dbg!(&buffers);
 
-        // buffers[0].drm_fb.fd.as_raw_fd();
-
-        dbg!(NonZeroU32::new(buffers[0].drm_fb.fd.as_raw_fd() as u32));
-
         let mode = in_use.connector.preferred_mode.as_ref().unwrap();
 
+        let (primary_plane, _) = in_use.primary_plane();
         changes.add_property(
             dbg!(primary_plane.handle),
             dbg!(primary_plane.fb_id),
@@ -472,31 +443,16 @@ impl Drm {
         drm.atomic_commit(control::AtomicCommitFlags::ALLOW_MODESET, changes)
             .expect("Failed to set mode");
 
-        // changes.commit();
-
-        // changes.change_object(primary_plane.id, |c| {
-        //     c.change(primary_plane.fb_id, buffers[0].drm.id().0 as _);
-        //     c.change(primary_plane.crtc_id.id, crtc.id.0 as _);
-        //     c.change(primary_plane.crtc_x.id, 0);
-        //     c.change(primary_plane.crtc_y.id, 0);
-        //     c.change(primary_plane.crtc_w.id, mode.hdisplay as _);
-        //     c.change(primary_plane.crtc_h.id, mode.vdisplay as _);
-        //     c.change(primary_plane.src_x.id, 0);
-        //     c.change(primary_plane.src_y.id, 0);
-        //     c.change(primary_plane.src_w.id, (mode.hdisplay as u64) << 16);
-        //     c.change(primary_plane.src_h.id, (mode.vdisplay as u64) << 16);
-        // });
-
-        // dbg!(in_use);
+        (in_use, buffers)
     }
 
     fn make_render_buffer(
         drm: &DrmFd,
         egl: &EglContext,
-        plane_modifiers: &BTreeSet<Modifier>,
         in_use: &ConnectorInUse,
         is_cursor: bool,
     ) -> std::io::Result<RenderBuffer> {
+        let (_, plane_modifiers) = in_use.primary_plane();
         let mode = in_use.connector.preferred_mode.as_ref().unwrap();
 
         let opengl_format = egl.opengl_formats.get(&DrmFourcc::Xrgb8888).unwrap();
@@ -517,7 +473,7 @@ impl Drm {
         let image = egl.import_dmabuf(bo.dmabuf());
         let fb = egl.make_fb_from_image(&image, bo.dmabuf());
         fb.clear();
-        let texture = image.to_texture(egl).unwrap();
+        let texture = image.into_texture().unwrap();
 
         Ok(RenderBuffer { drm_fb, fb, texture })
     }
@@ -576,7 +532,7 @@ impl Drm {
         crtcs: &BTreeMap<crtc::Handle, Crtc>,
         planes: &BTreeMap<plane::Handle, Plane>,
     ) -> Option<ConnectorInUse> {
-        let (connector, crtc) = (|| {
+        let (connector, crtc) = 'here: {
             for connector in connectors.values() {
                 let connector::State::Connected = connector.state else {
                     continue;
@@ -586,11 +542,11 @@ impl Drm {
                     if !crtc.active {
                         continue;
                     }
-                    return Some((connector, crtc));
+                    break 'here (connector, crtc);
                 }
             }
-            None
-        })()?;
+            return None;
+        };
 
         let planes = crtc
             .possible_planes
@@ -598,7 +554,20 @@ impl Drm {
             .map(|handle| planes.get(handle).cloned().unwrap())
             .collect::<Vec<_>>();
 
-        Some(ConnectorInUse { crtc: crtc.clone(), connector: connector.clone(), planes })
+        let primary_plane_index = planes
+            .iter()
+            .position(|plane| {
+                let PlaneType::Primary = plane.kind else { return false };
+                plane.formats.contains_key(&DrmFourcc::Xrgb8888)
+            })
+            .unwrap();
+
+        Some(ConnectorInUse {
+            crtc: crtc.clone(),
+            connector: connector.clone(),
+            planes,
+            primary_plane_index,
+        })
     }
 
     fn make_crtc(
@@ -707,19 +676,17 @@ impl Drm {
                 height: props.get(h).map(get_prop).unwrap(),
             }
         };
+        let get_handle = |s: &str| {
+            let (_, info) = &props[s];
+            info.handle()
+        };
 
         let kind = get_kind(&props).unwrap();
         let crtc_geometry = get_geometry("CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H");
         let src_geometry = get_geometry("SRC_X", "SRC_Y", "SRC_W", "SRC_H");
         let possible_crtcs = info.possible_crtcs().0;
-        let fb_id = {
-            let (_, info) = props.get("FB_ID").unwrap();
-            info.handle()
-        };
-        let crtc_id = {
-            let (_, info) = props.get("CRTC_ID").unwrap();
-            info.handle()
-        };
+        let fb_id = get_handle("FB_ID");
+        let crtc_id = get_handle("CRTC_ID");
 
         let handle = plane;
         let plane = Plane {

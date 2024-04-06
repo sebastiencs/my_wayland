@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ffi::CStr,
-    sync::Arc,
     time::Duration,
 };
 
@@ -25,68 +24,49 @@ use crate::{
 
 const EGL_PLATFORM_GBM_KHR: u32 = 0x31D7;
 
-macro_rules! load {
-    ($(
-        $name:ident: $signature:ty,
-    )*) => {
-        #[allow(non_snake_case)]
-        pub struct DynamicMethods {
-            $($name: $signature,)*
+fn load_methods() {
+    use khronos_types::{egl::load as load_egl, gl::load as load_gl};
+
+    let get_addr = |s: &CStr| unsafe {
+        let ptr = egl::GetProcAddress(s.as_ptr());
+        if ptr.is_null() {
+            None
+        } else {
+            Some(ptr)
         }
+    };
 
-        #[allow(non_snake_case)]
-        fn load_methods() -> Arc<DynamicMethods> {
-            let loader = |s: &CStr| unsafe {
-                let ptr = egl::GetProcAddress(s.as_ptr());
-                if ptr.is_null() { None } else { Some(ptr) }
-            };
-            use khronos_types::{egl::*, gl::*};
-            // The line below expand to such code:
-            // let glBindFramebuffer = load_glBindFramebuffer(loader).unwrap();
-            $(let $name = concat_idents!(load_,$name)(loader).unwrap();)*
-            Arc::new(DynamicMethods {
-                $($name,)*
-            })
-        }
-    }
-}
-
-load! {
-    eglCreatePlatformWindowSurfaceEXT: unsafe extern "C" fn (egl::Display, egl::Config, *mut core::ffi::c_void, *const egl::Int) -> egl::Surface,
-    eglCreateImageKHR: unsafe extern "C" fn (egl::Display, egl::Context, egl::Enum, egl::ClientBuffer, *const egl::Int) -> egl::ImageKHR,
-    glEGLImageTargetRenderbufferStorageOES: unsafe extern "C" fn (gl::Enum, gl::EglImageOES),
-    eglQueryDmaBufFormatsEXT: unsafe extern "C" fn (egl::Display, egl::Int, *mut egl::Int, *mut egl::Int) -> egl::Boolean,
-    eglQueryDmaBufModifiersEXT: unsafe extern "C" fn (egl::Display, egl::Int, egl::Int, *mut egl::Uint64KHR, *mut egl::Boolean, *mut egl::Int) -> egl::Boolean,
-    glDeleteRenderbuffers: unsafe extern "C" fn (gl::GLsizei, *const gl::GLuint),
-    glGenFramebuffers: unsafe extern "C" fn (gl::GLsizei, *mut gl::GLuint),
-    glBindFramebuffer: unsafe extern "C" fn (gl::GLenum, gl::GLuint),
-    glFramebufferRenderbuffer: unsafe extern "C" fn (gl::GLenum, gl::GLenum, gl::GLenum, gl::GLuint),
-    glCheckFramebufferStatus: unsafe extern "C" fn (gl::GLenum) -> gl::GLenum,
-    glDeleteFramebuffers: unsafe extern "C" fn (gl::GLsizei, *const gl::GLuint),
-    glGenRenderbuffers: unsafe extern "C" fn (gl::GLsizei, *mut gl::GLuint),
-    glBindRenderbuffer: unsafe extern "C" fn (gl::GLenum, gl::GLuint),
-    glEGLImageTargetTexture2DOES: unsafe extern "C" fn (gl::GLenum, gl::GLeglImageOES),
-}
-
-impl std::fmt::Debug for DynamicMethods {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let size = std::mem::size_of::<Self>();
-        let ptr_size = std::mem::size_of::<*mut core::ffi::c_void>();
-        f.write_fmt(format_args!("DynamicMethods {{ loaded {} methods }}", size / ptr_size))
+    for loader in [
+        load_egl::CreatePlatformWindowSurfaceEXT as unsafe fn(_) -> Option<_>,
+        load_egl::CreateImageKHR as _,
+        load_egl::QueryDmaBufFormatsEXT as _,
+        load_egl::QueryDmaBufModifiersEXT as _,
+        load_gl::EGLImageTargetRenderbufferStorageOES as _,
+        load_gl::DeleteRenderbuffers as _,
+        load_gl::GenFramebuffers as _,
+        load_gl::BindFramebuffer as _,
+        load_gl::FramebufferRenderbuffer as _,
+        load_gl::CheckFramebufferStatus as _,
+        load_gl::DeleteFramebuffers as _,
+        load_gl::GenRenderbuffers as _,
+        load_gl::BindRenderbuffer as _,
+        load_gl::EGLImageTargetTexture2DOES as _,
+    ] {
+        unsafe { loader(get_addr) }.expect("Failed to load method");
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct EGL {
-    dyns: Arc<DynamicMethods>,
-}
+pub struct EGL {}
 
 impl EGL {
     pub fn new() -> Self {
+        load_methods();
         // gl::GenTextures(loader);
         // gl::load_glViewport(loader);
         // gl::load_glGenTexturesEXT(loader);
-        Self { dyns: load_methods() }
+        // Self { dyns: load_methods() }
+        Self {}
     }
 
     fn error_on<T: PartialEq>(result: T, error_value: T) -> Result<T, egl::Error> {
@@ -252,7 +232,7 @@ impl EGL {
     ) -> Result<egl::Surface, egl::Error> {
         Self::assert_ends_with_none(attrib_list);
         let result = unsafe {
-            (self.dyns.eglCreatePlatformWindowSurfaceEXT)(
+            egl::CreatePlatformWindowSurfaceEXT(
                 display,
                 config,
                 native_window,
@@ -276,7 +256,7 @@ impl EGL {
     ) -> Result<ImageKHR, egl::Error> {
         Self::assert_ends_with_none(attrib_list);
         let ptr = unsafe {
-            (self.dyns.eglCreateImageKHR)(
+            egl::CreateImageKHR(
                 display,
                 std::ptr::null_mut(),
                 target,
@@ -293,7 +273,7 @@ impl EGL {
         target: egl::Enum,
         image: ImageKHR,
     ) -> Result<(), egl::Error> {
-        unsafe { (self.dyns.glEGLImageTargetRenderbufferStorageOES)(target, image.ptr) };
+        unsafe { gl::EGLImageTargetRenderbufferStorageOES(target, image.ptr) };
         Self::last_error()
     }
 
@@ -303,7 +283,7 @@ impl EGL {
     ) -> Result<Vec<egl::Int>, egl::Error> {
         let mut num_formats = 0;
         let result = unsafe {
-            (self.dyns.eglQueryDmaBufFormatsEXT)(display, 0, std::ptr::null_mut(), &mut num_formats)
+            egl::QueryDmaBufFormatsEXT(display, 0, std::ptr::null_mut(), &mut num_formats)
         };
         Self::ok_on(result, egl::TRUE as _)?;
         if num_formats == 0 {
@@ -314,12 +294,7 @@ impl EGL {
         let max_formats = num_formats;
         let mut num_formats = 0;
         let result = unsafe {
-            (self.dyns.eglQueryDmaBufFormatsEXT)(
-                display,
-                max_formats,
-                formats.as_mut_ptr(),
-                &mut num_formats,
-            )
+            egl::QueryDmaBufFormatsEXT(display, max_formats, formats.as_mut_ptr(), &mut num_formats)
         };
         Self::ok_on(result, egl::TRUE as _)?;
         assert_eq!(max_formats, num_formats);
@@ -330,10 +305,10 @@ impl EGL {
         &self,
         display: egl::Display,
         format: egl::Int,
-    ) -> Result<(Vec<u64>, Vec<egl::Boolean>), egl::Error> {
+    ) -> Result<(Vec<Modifier>, Vec<egl::Boolean>), egl::Error> {
         let mut num_modifiers = 0;
         let result = unsafe {
-            (self.dyns.eglQueryDmaBufModifiersEXT)(
+            egl::QueryDmaBufModifiersEXT(
                 display,
                 format,
                 0,
@@ -344,20 +319,22 @@ impl EGL {
         };
         Self::ok_on(result, egl::TRUE as _)?;
 
-        let mut modifiers = vec![0u64; num_modifiers as usize];
+        static_assertions::assert_eq_size!(Modifier, u64);
+        let mut modifiers = vec![Modifier(0); num_modifiers as usize];
         let mut external_only = vec![0; num_modifiers as usize];
         let max_modifiers = num_modifiers;
         let mut num_modifiers = 0;
         let result = unsafe {
-            (self.dyns.eglQueryDmaBufModifiersEXT)(
+            egl::QueryDmaBufModifiersEXT(
                 display,
                 format,
                 max_modifiers,
-                modifiers.as_mut_ptr(),
+                modifiers.as_mut_ptr() as _,
                 external_only.as_mut_ptr(),
                 &mut num_modifiers,
             )
         };
+        assert_eq!(modifiers.len(), num_modifiers as _);
         Self::ok_on(result, egl::TRUE as _)?;
 
         Ok((modifiers, external_only))
@@ -426,8 +403,8 @@ impl Drop for EglImage {
 }
 
 impl EglImage {
-    pub fn to_texture(self, egl: &EglContext) -> Result<GlTexture, ()> {
-        GlTexture::import_image(egl, self)
+    pub fn into_texture(self) -> Result<GlTexture, ()> {
+        GlTexture::import_image(self)
     }
 }
 
@@ -445,8 +422,7 @@ pub fn image_target(external_only: bool) -> gl::Enum {
 }
 
 impl GlTexture {
-    pub fn import_image(egl: &EglContext, image: EglImage) -> Result<GlTexture, ()> {
-        let DynamicMethods { glEGLImageTargetTexture2DOES, .. } = &*egl.egl.dyns;
+    pub fn import_image(image: EglImage) -> Result<GlTexture, ()> {
         let target = image_target(image.external_only);
         let texture = unsafe {
             let mut texture = 0;
@@ -454,7 +430,8 @@ impl GlTexture {
             gl::BindTexture(target, texture);
             gl::TexParameteri(target, gl::TEXTURE_WRAP_S as _, gl::CLAMP_TO_EDGE);
             gl::TexParameteri(target, gl::TEXTURE_WRAP_T as _, gl::CLAMP_TO_EDGE);
-            (glEGLImageTargetTexture2DOES)(target, image.image.ptr);
+            gl::EGLImageTargetTexture2DOES(target, image.image.ptr);
+            assert_eq!(gl::GetError(), gl::NO_ERROR as _);
             gl::BindTexture(target, 0);
             texture
         };
@@ -464,7 +441,6 @@ impl GlTexture {
 
 #[derive(Debug)]
 pub struct EglRenderBuffer {
-    dyns: Arc<DynamicMethods>,
     width: i32,
     height: i32,
     format: &'static Format,
@@ -473,7 +449,7 @@ pub struct EglRenderBuffer {
 
 impl Drop for EglRenderBuffer {
     fn drop(&mut self) {
-        unsafe { (self.dyns.glDeleteRenderbuffers)(1, &self.renderbuffer_object) }
+        unsafe { gl::DeleteRenderbuffers(1, &self.renderbuffer_object) }
     }
 }
 
@@ -481,30 +457,21 @@ impl EglRenderBuffer {
     pub fn make_framebuffer(self) -> EglFrameBuffer {
         let mut framebuffer_object = 0;
 
-        let DynamicMethods {
-            glGenFramebuffers,
-            glBindFramebuffer,
-            glFramebufferRenderbuffer,
-            glCheckFramebufferStatus,
-            ..
-        } = &*self.dyns;
-
         unsafe {
-            (glGenFramebuffers)(1, &mut framebuffer_object);
-            (glBindFramebuffer)(gl::FRAMEBUFFER as _, framebuffer_object);
-            (glFramebufferRenderbuffer)(
+            gl::GenFramebuffers(1, &mut framebuffer_object);
+            gl::BindFramebuffer(gl::FRAMEBUFFER as _, framebuffer_object);
+            gl::FramebufferRenderbuffer(
                 gl::FRAMEBUFFER as _,
                 gl::COLOR_ATTACHMENT0 as _,
                 gl::RENDERBUFFER as _,
                 self.renderbuffer_object,
             );
-            let status = (glCheckFramebufferStatus)(gl::FRAMEBUFFER as _);
+            let status = gl::CheckFramebufferStatus(gl::FRAMEBUFFER as _);
             assert_eq!(status, gl::FRAMEBUFFER_COMPLETE as _);
-            (glBindFramebuffer)(gl::FRAMEBUFFER as _, 0);
+            gl::BindFramebuffer(gl::FRAMEBUFFER as _, 0);
         }
 
         EglFrameBuffer {
-            dyns: self.dyns.clone(),
             width: self.width,
             height: self.height,
             render_buffer: self,
@@ -515,7 +482,6 @@ impl EglRenderBuffer {
 
 #[derive(Debug)]
 pub struct EglFrameBuffer {
-    dyns: Arc<DynamicMethods>,
     pub width: i32,
     pub height: i32,
     render_buffer: EglRenderBuffer,
@@ -525,7 +491,7 @@ pub struct EglFrameBuffer {
 impl Drop for EglFrameBuffer {
     fn drop(&mut self) {
         unsafe {
-            (self.dyns.glDeleteFramebuffers)(1, &self.framebuffer_object);
+            gl::DeleteFramebuffers(1, &self.framebuffer_object);
         }
     }
 }
@@ -538,16 +504,16 @@ impl EglFrameBuffer {
         // }
 
         unsafe {
-            (self.dyns.glBindFramebuffer)(gl::FRAMEBUFFER as _, self.framebuffer_object);
-            (gl::Viewport)(0, 0, self.width, self.height);
+            gl::BindFramebuffer(gl::FRAMEBUFFER as _, self.framebuffer_object);
+            gl::Viewport(0, 0, self.width, self.height);
             // if let Some(c) = clear_color {
-            (gl::ClearColor)(0.1, 0.1, 0.1, 0.0);
-            (gl::Clear)(gl::COLOR_BUFFER_BIT as _);
+            gl::ClearColor(0.1, 0.1, 0.1, 0.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT as _);
             // }
-            (gl::BlendFunc)(gl::ONE as _, gl::ONE_MINUS_SRC_ALPHA as _);
+            gl::BlendFunc(gl::ONE as _, gl::ONE_MINUS_SRC_ALPHA as _);
         }
         unsafe {
-            (gl::Flush)();
+            gl::Flush();
         }
     }
 
@@ -623,6 +589,8 @@ impl EglContext {
                 })
                 .collect::<HashMap<_, _>>()
         };
+
+        dbg!(&extensions, &opengl_extensions);
 
         Self {
             egl: egl.clone(),
@@ -719,19 +687,16 @@ impl EglContext {
     ) -> EglRenderBuffer {
         let mut renderbuffer_object = 0;
 
-        let DynamicMethods { glGenRenderbuffers, glBindRenderbuffer, .. } = &*self.egl.dyns;
-
         unsafe {
-            (glGenRenderbuffers)(1, &mut renderbuffer_object);
-            (glBindRenderbuffer)(gl::RENDERBUFFER as _, renderbuffer_object);
+            gl::GenRenderbuffers(1, &mut renderbuffer_object);
+            gl::BindRenderbuffer(gl::RENDERBUFFER as _, renderbuffer_object);
             self.egl
                 .image_target_renderbuffer_storage_oes(gl::RENDERBUFFER as _, image.image)
                 .unwrap();
-            (glBindRenderbuffer)(gl::RENDERBUFFER as _, 0);
+            gl::BindRenderbuffer(gl::RENDERBUFFER as _, 0);
         }
 
         EglRenderBuffer {
-            dyns: self.egl.dyns.clone(),
             width: dmabuf.width,
             height: dmabuf.height,
             format: dmabuf.format,
@@ -777,7 +742,6 @@ impl EglContext {
             .copied()
             .zip(external_only)
             .map(|(modifier, external_only)| {
-                let modifier = Modifier(modifier);
                 (modifier, EglModifier { modifier, external_only: external_only == egl::TRUE as _ })
             })
             .collect::<BTreeMap<_, _>>();
