@@ -171,6 +171,7 @@ fn write_parser(f: &mut impl Write, this_interface: &str, msgs: &[Message]) -> s
         this_interface.to_upper_camel_case()
     )?;
     writeln!(f, "    type Request = Request;")?;
+    writeln!(f, "    const INTERFACE_NAME: &'static str = \"{}\";", this_interface)?;
     writeln!(
         f,
         "    fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {{"
@@ -267,7 +268,7 @@ pub fn gen() -> std::io::Result<()> {
         // "/usr/share/wayland-protocols/unstable/xwayland-keyboard-grab/xwayland-keyboard-grab-unstable-v1.xml",
     ];
 
-    let file = File::create("/home/sebastien/tmp/testaa/src/protocol.rs")?;
+    let file = File::create("/tmp/protocol_generated.rs")?;
     let mut file = BufWriter::with_capacity(32 * 1024 * 1024, file);
 
     // let mut file = temp_file();

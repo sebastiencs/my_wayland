@@ -121,7 +121,7 @@ impl Model for IoUringState {
         action: IoUringAction,
         dispatcher: &mut Dispatcher,
     ) -> Result<(), ()> {
-        log::trace!("io_uring action={:?}", action);
+        log::trace!("action={:?}", action);
         match action {
             IoUringAction::Completion => {
                 while let Some(completed) = self.completed.pop_front() {
@@ -241,7 +241,7 @@ impl IoUringState {
             panic!()
         }
         let op = self.pending.remove(&id).unwrap();
-        log::trace!("io_uring result={} completed={:?}", result, op);
+        log::trace!("result={} completed={:?}", result, op);
         match op {
             Operation::NoOp => {}
             Operation::Poll { id, fd, dispatch_to: to } => {

@@ -17,7 +17,9 @@ pub struct WaylandId(u32);
     Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into,
 )]
 pub struct NewId(u32);
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into,
+)]
 pub struct Array;
 
 wayland_id! {
@@ -117,6 +119,7 @@ pub mod wl_display {
     }
     impl Parser for crate::wayland_objects::wl_display::WlDisplay {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_display";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -234,6 +237,7 @@ pub mod wl_registry {
     }
     impl Parser for crate::wayland_objects::wl_registry::WlRegistry {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_registry";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -359,6 +363,7 @@ pub mod wl_compositor {
     }
     impl Parser for crate::wayland_objects::wl_compositor::WlCompositor {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_compositor";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -438,6 +443,7 @@ pub mod wl_shm_pool {
     }
     impl Parser for crate::wayland_objects::wl_shm_pool::WlShmPool {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_shm_pool";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -491,6 +497,7 @@ pub mod wl_shm {
     }
     impl Parser for crate::wayland_objects::wl_shm::WlShm {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_shm";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -789,6 +796,7 @@ pub mod wl_buffer {
     }
     impl Parser for crate::wayland_objects::wl_buffer::WlBuffer {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_buffer";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -950,6 +958,7 @@ pub mod wl_data_offer {
     }
     impl Parser for crate::wayland_objects::wl_data_offer::WlDataOffer {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_data_offer";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -1106,6 +1115,7 @@ pub mod wl_data_source {
     }
     impl Parser for crate::wayland_objects::wl_data_source::WlDataSource {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_data_source";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -1328,6 +1338,7 @@ pub mod wl_data_device {
     }
     impl Parser for crate::wayland_objects::wl_data_device::WlDataDevice {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_data_device";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -1516,6 +1527,7 @@ pub mod wl_data_device_manager {
     }
     impl Parser for crate::wayland_objects::wl_data_device_manager::WlDataDeviceManager {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_data_device_manager";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -1595,6 +1607,7 @@ pub mod wl_shell {
     }
     impl Parser for crate::wayland_objects::wl_shell::WlShell {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_shell";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -1819,6 +1832,7 @@ pub mod wl_shell_surface {
     }
     impl Parser for crate::wayland_objects::wl_shell_surface::WlShellSurface {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_shell_surface";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -2374,6 +2388,7 @@ pub mod wl_surface {
     }
     impl Parser for crate::wayland_objects::wl_surface::WlSurface {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_surface";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -2563,6 +2578,7 @@ pub mod wl_seat {
     }
     impl Parser for crate::wayland_objects::wl_seat::WlSeat {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_seat";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -2741,6 +2757,7 @@ pub mod wl_pointer {
     }
     impl Parser for crate::wayland_objects::wl_pointer::WlPointer {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_pointer";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -3215,6 +3232,7 @@ pub mod wl_keyboard {
     }
     impl Parser for crate::wayland_objects::wl_keyboard::WlKeyboard {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_keyboard";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -3426,6 +3444,7 @@ pub mod wl_touch {
     }
     impl Parser for crate::wayland_objects::wl_touch::WlTouch {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_touch";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -3646,6 +3665,7 @@ pub mod wl_output {
     }
     impl Parser for crate::wayland_objects::wl_output::WlOutput {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_output";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -3990,6 +4010,7 @@ pub mod wl_region {
     }
     impl Parser for crate::wayland_objects::wl_region::WlRegion {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_region";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4076,6 +4097,7 @@ pub mod wl_subcompositor {
     }
     impl Parser for crate::wayland_objects::wl_subcompositor::WlSubcompositor {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_subcompositor";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4249,6 +4271,7 @@ pub mod wl_subsurface {
     }
     impl Parser for crate::wayland_objects::wl_subsurface::WlSubsurface {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wl_subsurface";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4318,6 +4341,7 @@ pub mod wp_presentation {
     }
     impl Parser for crate::wayland_objects::wp_presentation::WpPresentation {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_presentation";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4340,10 +4364,9 @@ pub mod wp_presentation {
         /// presentation interface. The presentation clock does not change
         /// during the lifetime of the client connection.
         ///
-        /// The clock identifier is platform dependent. On Linux/glibc,
-        /// the identifier value is one of the clockid_t values accepted
-        /// by clock_gettime(). clock_gettime() is defined by
-        /// POSIX.1-2001.
+        /// The clock identifier is platform dependent. On POSIX platforms, the
+        /// identifier value is one of the clockid_t values accepted by
+        /// clock_gettime(). clock_gettime() is defined by POSIX.1-2001.
         ///
         /// Timestamps in this clock domain are expressed as tv_sec_hi,
         /// tv_sec_lo, tv_nsec triples, each component being an unsigned
@@ -4598,6 +4621,7 @@ pub mod wp_viewporter {
     }
     impl Parser for crate::wayland_objects::wp_viewporter::WpViewporter {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_viewporter";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4726,6 +4750,7 @@ pub mod wp_viewport {
     }
     impl Parser for crate::wayland_objects::wp_viewport::WpViewport {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_viewport";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4808,6 +4833,7 @@ pub mod xdg_wm_base {
     }
     impl Parser for crate::wayland_objects::xdg_wm_base::XdgWmBase {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "xdg_wm_base";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -5038,6 +5064,7 @@ pub mod xdg_positioner {
     }
     impl Parser for crate::wayland_objects::xdg_positioner::XdgPositioner {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "xdg_positioner";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -5336,6 +5363,7 @@ pub mod xdg_surface {
     }
     impl Parser for crate::wayland_objects::xdg_surface::XdgSurface {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "xdg_surface";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -5416,6 +5444,10 @@ pub mod xdg_surface {
 /// fullscreen, and minimize, set application-specific metadata like title and
 /// id, and well as trigger user interactive operations such as interactive
 /// resize and move.
+///
+/// A xdg_toplevel by default is responsible for providing the full intended
+/// visual representation of the toplevel, which depending on the window
+/// state, may mean things like a title bar, window controls and drop shadow.
 ///
 /// Unmapping an xdg_toplevel means that the surface cannot be shown
 /// by the compositor until it is explicitly mapped again.
@@ -5765,6 +5797,7 @@ pub mod xdg_toplevel {
     }
     impl Parser for crate::wayland_objects::xdg_toplevel::XdgToplevel {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "xdg_toplevel";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6128,6 +6161,7 @@ pub mod xdg_popup {
     }
     impl Parser for crate::wayland_objects::xdg_popup::XdgPopup {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "xdg_popup";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6253,6 +6287,7 @@ pub mod wp_content_type_manager_v1 {
     }
     impl Parser for crate::wayland_objects::wp_content_type_manager_v1::WpContentTypeManagerV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_content_type_manager_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6306,6 +6341,7 @@ pub mod wp_content_type_v1 {
     }
     impl Parser for crate::wayland_objects::wp_content_type_v1::WpContentTypeV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_content_type_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6349,7 +6385,7 @@ pub mod wp_content_type_v1 {
 /// Lease device
 ///
 /// This protocol is used by Wayland compositors which act as Direct
-/// Renderering Manager (DRM) masters to lease DRM resources to Wayland
+/// Rendering Manager (DRM) masters to lease DRM resources to Wayland
 /// clients.
 ///
 /// The compositor will advertise one wp_drm_lease_device_v1 global for each
@@ -6400,6 +6436,7 @@ pub mod wp_drm_lease_device_v1 {
     }
     impl Parser for crate::wayland_objects::wp_drm_lease_device_v1::WpDrmLeaseDeviceV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_drm_lease_device_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6509,6 +6546,7 @@ pub mod wp_drm_lease_connector_v1 {
     }
     impl Parser for crate::wayland_objects::wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_drm_lease_connector_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6640,6 +6678,7 @@ pub mod wp_drm_lease_request_v1 {
     }
     impl Parser for crate::wayland_objects::wp_drm_lease_request_v1::WpDrmLeaseRequestV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_drm_lease_request_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6684,6 +6723,7 @@ pub mod wp_drm_lease_v1 {
     }
     impl Parser for crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_drm_lease_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6776,6 +6816,7 @@ pub mod ext_idle_notifier_v1 {
     }
     impl Parser for crate::wayland_objects::ext_idle_notifier_v1::ExtIdleNotifierV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "ext_idle_notifier_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6815,6 +6856,7 @@ pub mod ext_idle_notification_v1 {
     }
     impl Parser for crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "ext_idle_notification_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6883,6 +6925,7 @@ pub mod ext_session_lock_manager_v1 {
     }
     impl Parser for crate::wayland_objects::ext_session_lock_manager_v1::ExtSessionLockManagerV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "ext_session_lock_manager_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7004,6 +7047,7 @@ pub mod ext_session_lock_v1 {
     }
     impl Parser for crate::wayland_objects::ext_session_lock_v1::ExtSessionLockV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "ext_session_lock_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7152,6 +7196,7 @@ pub mod ext_session_lock_surface_v1 {
     }
     impl Parser for crate::wayland_objects::ext_session_lock_surface_v1::ExtSessionLockSurfaceV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "ext_session_lock_surface_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7235,6 +7280,7 @@ pub mod wp_fractional_scale_manager_v1 {
     }
     impl Parser for crate::wayland_objects::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_fractional_scale_manager_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7268,6 +7314,7 @@ pub mod wp_fractional_scale_v1 {
     }
     impl Parser for crate::wayland_objects::wp_fractional_scale_v1::WpFractionalScaleV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_fractional_scale_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7343,6 +7390,7 @@ pub mod wp_single_pixel_buffer_manager_v1 {
         for crate::wayland_objects::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1
     {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_single_pixel_buffer_manager_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7399,6 +7447,7 @@ pub mod wp_tearing_control_manager_v1 {
     }
     impl Parser for crate::wayland_objects::wp_tearing_control_manager_v1::WpTearingControlManagerV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_tearing_control_manager_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7444,6 +7493,7 @@ pub mod wp_tearing_control_v1 {
     }
     impl Parser for crate::wayland_objects::wp_tearing_control_v1::WpTearingControlV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "wp_tearing_control_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7518,6 +7568,7 @@ pub mod xdg_activation_v1 {
     }
     impl Parser for crate::wayland_objects::xdg_activation_v1::XdgActivationV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "xdg_activation_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7601,6 +7652,7 @@ pub mod xdg_activation_token_v1 {
     }
     impl Parser for crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "xdg_activation_token_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7687,6 +7739,7 @@ pub mod xwayland_shell_v1 {
     }
     impl Parser for crate::wayland_objects::xwayland_shell_v1::XwaylandShellV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "xwayland_shell_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7757,6 +7810,7 @@ pub mod xwayland_surface_v1 {
     }
     impl Parser for crate::wayland_objects::xwayland_surface_v1::XwaylandSurfaceV1 {
         type Request = Request;
+        const INTERFACE_NAME: &'static str = "xwayland_surface_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {

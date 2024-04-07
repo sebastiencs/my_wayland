@@ -191,6 +191,7 @@ fn main() {
     let libinput = input::Libinput::new();
 
     // protocol::gen().unwrap();
+    // return;
 
     let uring = Box::<IoUringState>::default();
     let clients = Clients::new();
