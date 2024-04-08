@@ -1,4 +1,4 @@
-use crate::{drm::Drm, egl::EGL, input::Input, protocol_generated::WaylandId};
+use crate::{drm::Drm, egl::EGL, globals::Globals, input::Input, protocol_generated::WaylandId};
 
 use {crate::object::Object, std::marker::PhantomData};
 
@@ -13,6 +13,28 @@ pub struct IndexMap<K, V> {
     map: Vec<ValueOrEmpty<V>>,
     next_empty: Option<u32>,
     _phantom: PhantomData<K>,
+}
+
+impl<K, V> std::ops::Index<K> for IndexMap<K, V>
+where
+    K: Into<usize> + Copy,
+    K: From<usize>,
+{
+    type Output = V;
+
+    fn index(&self, index: K) -> &Self::Output {
+        self.get(index)
+    }
+}
+
+impl<K, V> std::ops::IndexMut<K> for IndexMap<K, V>
+where
+    K: Into<usize> + Copy,
+    K: From<usize>,
+{
+    fn index_mut(&mut self, index: K) -> &mut Self::Output {
+        self.get_mut(index)
+    }
 }
 
 #[derive(derive_more::Deref, derive_more::DerefMut)]
@@ -162,6 +184,7 @@ pub struct State {
     pub objects: IndexMap<ObjectId, Box<dyn Object>>,
     pub inputs: IndexMap<InputId, Input>,
     pub drm: IndexMap<DrmId, Drm>,
+    pub globals: Globals,
     pub egl: EGL,
 }
 
@@ -170,5 +193,8 @@ impl State {
         let wayland_id = object.id();
         let object_id = self.objects.insert(Box::new(object));
         (wayland_id, object_id)
+    }
+    pub fn remove_object(&mut self, object_id: ObjectId) -> Box<dyn Object> {
+        self.objects.remove(object_id).unwrap()
     }
 }

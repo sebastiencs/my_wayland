@@ -6,7 +6,7 @@ use std::{
     os::fd::FromRawFd,
 };
 
-use itertools::Itertools;
+use {itertools::Itertools, wayland_scanner::protocol::Interface};
 
 use {
     heck::ToUpperCamelCase,
@@ -133,6 +133,10 @@ fn write_event_writer(
         this_interface.to_upper_camel_case()
     )?;
     writeln!(f, "    type Event = Event;")?;
+    writeln!(f, "    fn object_id(&self) -> WaylandId {{")?;
+    writeln!(f, "      use crate::object::Object;")?;
+    writeln!(f, "      self.id()")?;
+    writeln!(f, "    }}")?;
     writeln!(f, "    fn to_raw_event(&self, event: Event) -> RawEvent {{")?;
     writeln!(f, "      use Event::*;")?;
     writeln!(f, "      use crate::object::Object;")?;
@@ -171,7 +175,6 @@ fn write_parser(f: &mut impl Write, this_interface: &str, msgs: &[Message]) -> s
         this_interface.to_upper_camel_case()
     )?;
     writeln!(f, "    type Request = Request;")?;
-    writeln!(f, "    const INTERFACE_NAME: &'static str = \"{}\";", this_interface)?;
     writeln!(
         f,
         "    fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {{"
@@ -225,6 +228,19 @@ fn write_message(f: &mut impl Write, name: &str, msgs: &[Message]) -> std::io::R
             writeln!(f, "    }},")?;
         }
     }
+    writeln!(f, "  }}")?;
+    Ok(())
+}
+
+fn write_constants(f: &mut impl Write, interface: &Interface) -> std::io::Result<()> {
+    writeln!(
+        f,
+        "  impl Constants for crate::wayland_objects::{}::{} {{",
+        interface.name,
+        interface.name.to_upper_camel_case()
+    )?;
+    writeln!(f, "    const INTERFACE_NAME: &'static str = \"{}\";", interface.name)?;
+    writeln!(f, "    const INTERFACE_VERSION: u32 = {};", interface.version)?;
     writeln!(f, "  }}")?;
     Ok(())
 }
@@ -308,6 +324,11 @@ pub fn gen() -> std::io::Result<()> {
     }
     writeln!(f, "}}\n")?;
 
+    writeln!(f, "pub trait Constants {{")?;
+    writeln!(f, "  const INTERFACE_NAME: &'static str;")?;
+    writeln!(f, "  const INTERFACE_VERSION: u32;")?;
+    writeln!(f, "}}\n")?;
+
     for protocol in &protocols {
         for interface in &protocol.interfaces {
             dbg!(interface);
@@ -316,7 +337,10 @@ pub fn gen() -> std::io::Result<()> {
             write_description(f, "/// ", interface.description.as_ref())?;
             writeln!(f, "pub mod {} {{", interface.name)?;
             writeln!(f, "  use super::*;")?;
+            // writeln!(f, "  const INTERFACE_NAME: &'static str = \"{}\";", interface.name)?;
+            // writeln!(f, "  const INTERFACE_VERSION: u32 = {};", interface.version)?;
 
+            write_constants(f, interface)?;
             if !interface.requests.is_empty() {
                 write_message(f, "Request", &interface.requests)?;
                 write_parser(f, this_interface, &interface.requests)?;

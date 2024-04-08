@@ -1,4 +1,4 @@
-#![feature(array_chunks, c_variadic)]
+#![feature(array_chunks, c_variadic, iter_array_chunks)]
 #![allow(dead_code)]
 
 macro_rules! wayland_id {
@@ -85,7 +85,7 @@ use {
     nix::sys::timerfd::{self, TimerFd, TimerFlags, TimerSetTimeFlags},
 };
 
-use state::State;
+use {globals::Globals, state::State};
 
 use crate::{
     clients::{Clients, ClientsAction},
@@ -100,6 +100,7 @@ mod dmabuf;
 mod drm;
 mod egl;
 mod gbm;
+mod globals;
 mod input;
 mod io_uring;
 mod logger;
@@ -178,10 +179,14 @@ fn main() {
 
     // log::info!("hello");
 
+    let mut globals = Globals::new();
+    globals.initialize();
+
     let state = State {
         objects: Default::default(),
         inputs: Default::default(),
         drm: Default::default(),
+        globals,
         egl,
     };
 

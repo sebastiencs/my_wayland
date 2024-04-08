@@ -1,4 +1,5 @@
 use std::{
+    array::IntoIter,
     collections::{BTreeMap, BTreeSet, VecDeque},
     os::{
         fd::{AsRawFd, RawFd},
@@ -16,10 +17,11 @@ use crate::{
         ring::{AcceptCompleted, RecvmsgCompleted},
     },
     object::{Object, ParserError},
-    protocol_generated::WaylandId,
+    protocol_generated::{wl_display, Constants, WaylandId},
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     state::{ObjectId, State},
     udev::Udev,
+    wayland_objects::wl_display::WlDisplay,
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
@@ -191,10 +193,30 @@ impl Client {
         self.info = Some(ProcessInfo { command, cred })
     }
 
-    fn insert_object<O: Object>(&mut self, state: &mut State, object: O) -> WaylandId {
+    pub fn insert_object<'a, O: Object>(
+        &mut self,
+        state: &'a mut State,
+        object: O,
+    ) -> (WaylandId, &'a mut O) {
         let (wayland_id, object_id) = state.insert_object(object);
         self.objects.insert(wayland_id, object_id);
-        wayland_id
+        let object: &mut O = state.objects[object_id]
+            .as_any()
+            .downcast_mut::<O>()
+            .unwrap();
+        (wayland_id, object)
+    }
+
+    pub fn delete_id(
+        &mut self,
+        wl_display: &WlDisplay,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        id: WaylandId,
+    ) {
+        let object_id = self.objects.remove(&id).unwrap();
+        state.remove_object(object_id);
+        wl_display.send_event(wl_display::Event::DeleteId { id: id.into() }, dispatcher);
     }
 }
 
@@ -257,6 +279,7 @@ impl Model for Client {
                 dispatcher.start_model(client_reader_id, client_reader);
             }
             MsgReceived { request } => {
+                // dbg!(&request);
                 let obj_id = self.objects.get(&request.object_id()).unwrap();
 
                 let mut obj = state.objects.grab(*obj_id);
@@ -463,10 +486,13 @@ pub struct RawEvent {
     pub arguments: Arguments,
 }
 
-pub trait EventWriter {
-    type Event: 'static;
+pub trait EventWriter: Constants {
+    type Event: 'static + std::fmt::Debug;
+    /// Helper method, for loggings
+    fn object_id(&self) -> WaylandId;
     fn to_raw_event(&self, event: Self::Event) -> RawEvent;
     fn send_event(&self, event: Self::Event, dispatcher: &mut ClientDispatcher) {
+        log::trace!(target: "out", "[{}] {}::{:?}", u32::from(self.object_id()), Self::INTERFACE_NAME, event);
         dispatcher.send_event(self.to_raw_event(event));
     }
 }
@@ -505,17 +531,17 @@ impl RawEvent {
     pub fn string<S: AsRef<str>>(&mut self, s: S) {
         let s = s.as_ref();
         let len: u32 = s.len().try_into().unwrap();
-        self.push(len);
+        self.push(len + 1); // +1 for terminating null byte
 
-        for (chunk, chunk_len) in s.as_bytes().chunks(4).map(|chunk| (chunk, chunk.len())) {
-            let uint = if chunk_len == 4 {
-                u32::from_ne_bytes(chunk.try_into().unwrap())
-            } else {
-                let mut bytes = [0u8; 4];
-                bytes[..chunk_len].copy_from_slice(chunk);
-                u32::from_ne_bytes(bytes)
-            };
-            self.push(uint);
+        let null_byte = std::iter::once(0);
+        let mut iter = s.as_bytes().iter().copied().chain(null_byte).array_chunks();
+        for bytes in &mut iter {
+            self.push(u32::from_ne_bytes(bytes));
+        }
+        if let Some(remainder) = iter.into_remainder().as_ref().map(IntoIter::as_slice) {
+            let mut bytes = [0u8; 4];
+            bytes[..remainder.len()].copy_from_slice(remainder);
+            self.push(u32::from_ne_bytes(bytes));
         }
     }
 

@@ -76,12 +76,21 @@ wayland_id! {
   XwaylandSurfaceV1Id,
 }
 
+pub trait Constants {
+    const INTERFACE_NAME: &'static str;
+    const INTERFACE_VERSION: u32;
+}
+
 /// Core global object
 ///
 /// The core global object.  This is a special singleton object.  It
 /// is used for internal Wayland protocol features.
 pub mod wl_display {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_display::WlDisplay {
+        const INTERFACE_NAME: &'static str = "wl_display";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Asynchronous roundtrip
@@ -119,7 +128,6 @@ pub mod wl_display {
     }
     impl Parser for crate::wayland_objects::wl_display::WlDisplay {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_display";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -163,6 +171,10 @@ pub mod wl_display {
     }
     impl EventWriter for crate::wayland_objects::wl_display::WlDisplay {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -222,6 +234,10 @@ pub mod wl_display {
 /// the object.
 pub mod wl_registry {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_registry::WlRegistry {
+        const INTERFACE_NAME: &'static str = "wl_registry";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Bind an object to the display
@@ -237,7 +253,6 @@ pub mod wl_registry {
     }
     impl Parser for crate::wayland_objects::wl_registry::WlRegistry {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_registry";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -283,6 +298,10 @@ pub mod wl_registry {
     }
     impl EventWriter for crate::wayland_objects::wl_registry::WlRegistry {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -312,6 +331,10 @@ pub mod wl_registry {
 /// factory interfaces, the wl_callback interface is frozen at version 1.
 pub mod wl_callback {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_callback::WlCallback {
+        const INTERFACE_NAME: &'static str = "wl_callback";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Event {
         /// Done event
@@ -324,6 +347,10 @@ pub mod wl_callback {
     }
     impl EventWriter for crate::wayland_objects::wl_callback::WlCallback {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -344,6 +371,10 @@ pub mod wl_callback {
 /// surfaces into one displayable output.
 pub mod wl_compositor {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_compositor::WlCompositor {
+        const INTERFACE_NAME: &'static str = "wl_compositor";
+        const INTERFACE_VERSION: u32 = 6;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Create new surface
@@ -363,7 +394,6 @@ pub mod wl_compositor {
     }
     impl Parser for crate::wayland_objects::wl_compositor::WlCompositor {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_compositor";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -387,6 +417,10 @@ pub mod wl_compositor {
 /// a surface or for many small buffers.
 pub mod wl_shm_pool {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_shm_pool::WlShmPool {
+        const INTERFACE_NAME: &'static str = "wl_shm_pool";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Create a buffer from the pool
@@ -443,7 +477,6 @@ pub mod wl_shm_pool {
     }
     impl Parser for crate::wayland_objects::wl_shm_pool::WlShmPool {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_shm_pool";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -477,6 +510,10 @@ pub mod wl_shm_pool {
 /// that can be used for buffers.
 pub mod wl_shm {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_shm::WlShm {
+        const INTERFACE_NAME: &'static str = "wl_shm";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Create a shm pool
@@ -497,7 +534,6 @@ pub mod wl_shm {
     }
     impl Parser for crate::wayland_objects::wl_shm::WlShm {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_shm";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -521,6 +557,10 @@ pub mod wl_shm {
     }
     impl EventWriter for crate::wayland_objects::wl_shm::WlShm {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -784,6 +824,10 @@ pub mod wl_shm {
 /// factory interfaces, the wl_buffer interface is frozen at version 1.
 pub mod wl_buffer {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_buffer::WlBuffer {
+        const INTERFACE_NAME: &'static str = "wl_buffer";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy a buffer
@@ -796,7 +840,6 @@ pub mod wl_buffer {
     }
     impl Parser for crate::wayland_objects::wl_buffer::WlBuffer {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_buffer";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -826,6 +869,10 @@ pub mod wl_buffer {
     }
     impl EventWriter for crate::wayland_objects::wl_buffer::WlBuffer {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -848,6 +895,10 @@ pub mod wl_buffer {
 /// data directly from the source client.
 pub mod wl_data_offer {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_data_offer::WlDataOffer {
+        const INTERFACE_NAME: &'static str = "wl_data_offer";
+        const INTERFACE_VERSION: u32 = 3;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Accept one of the offered mime types
@@ -958,7 +1009,6 @@ pub mod wl_data_offer {
     }
     impl Parser for crate::wayland_objects::wl_data_offer::WlDataOffer {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_data_offer";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -1036,6 +1086,10 @@ pub mod wl_data_offer {
     }
     impl EventWriter for crate::wayland_objects::wl_data_offer::WlDataOffer {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -1078,6 +1132,10 @@ pub mod wl_data_offer {
 /// to requests to transfer the data.
 pub mod wl_data_source {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_data_source::WlDataSource {
+        const INTERFACE_NAME: &'static str = "wl_data_source";
+        const INTERFACE_VERSION: u32 = 3;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Add an offered mime type
@@ -1115,7 +1173,6 @@ pub mod wl_data_source {
     }
     impl Parser for crate::wayland_objects::wl_data_source::WlDataSource {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_data_source";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -1228,6 +1285,10 @@ pub mod wl_data_source {
     }
     impl EventWriter for crate::wayland_objects::wl_data_source::WlDataSource {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -1280,6 +1341,10 @@ pub mod wl_data_source {
 /// mechanisms such as copy-and-paste and drag-and-drop.
 pub mod wl_data_device {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_data_device::WlDataDevice {
+        const INTERFACE_NAME: &'static str = "wl_data_device";
+        const INTERFACE_VERSION: u32 = 3;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Start drag-and-drop operation
@@ -1338,7 +1403,6 @@ pub mod wl_data_device {
     }
     impl Parser for crate::wayland_objects::wl_data_device::WlDataDevice {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_data_device";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -1445,6 +1509,10 @@ pub mod wl_data_device {
     }
     impl EventWriter for crate::wayland_objects::wl_data_device::WlDataDevice {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -1506,6 +1574,10 @@ pub mod wl_data_device {
 /// wl_data_offer.accept and wl_data_offer.finish for details.
 pub mod wl_data_device_manager {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_data_device_manager::WlDataDeviceManager {
+        const INTERFACE_NAME: &'static str = "wl_data_device_manager";
+        const INTERFACE_VERSION: u32 = 3;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Create a new data source
@@ -1527,7 +1599,6 @@ pub mod wl_data_device_manager {
     }
     impl Parser for crate::wayland_objects::wl_data_device_manager::WlDataDeviceManager {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_data_device_manager";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -1589,6 +1660,10 @@ pub mod wl_data_device_manager {
 /// should not implement this interface.
 pub mod wl_shell {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_shell::WlShell {
+        const INTERFACE_NAME: &'static str = "wl_shell";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Create a shell surface from a surface
@@ -1607,7 +1682,6 @@ pub mod wl_shell {
     }
     impl Parser for crate::wayland_objects::wl_shell::WlShell {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_shell";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -1639,6 +1713,10 @@ pub mod wl_shell {
 /// the wl_surface object.
 pub mod wl_shell_surface {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_shell_surface::WlShellSurface {
+        const INTERFACE_NAME: &'static str = "wl_shell_surface";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Respond to a ping event
@@ -1832,7 +1910,6 @@ pub mod wl_shell_surface {
     }
     impl Parser for crate::wayland_objects::wl_shell_surface::WlShellSurface {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_shell_surface";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -1913,6 +1990,10 @@ pub mod wl_shell_surface {
     }
     impl EventWriter for crate::wayland_objects::wl_shell_surface::WlShellSurface {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -2035,6 +2116,10 @@ pub mod wl_shell_surface {
 /// switching is not allowed).
 pub mod wl_surface {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_surface::WlSurface {
+        const INTERFACE_NAME: &'static str = "wl_surface";
+        const INTERFACE_VERSION: u32 = 6;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Delete surface
@@ -2388,7 +2473,6 @@ pub mod wl_surface {
     }
     impl Parser for crate::wayland_objects::wl_surface::WlSurface {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_surface";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -2474,6 +2558,10 @@ pub mod wl_surface {
     }
     impl EventWriter for crate::wayland_objects::wl_surface::WlSurface {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -2526,6 +2614,10 @@ pub mod wl_surface {
 /// maintains a keyboard focus and a pointer focus.
 pub mod wl_seat {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_seat::WlSeat {
+        const INTERFACE_NAME: &'static str = "wl_seat";
+        const INTERFACE_VERSION: u32 = 9;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Return pointer object
@@ -2578,7 +2670,6 @@ pub mod wl_seat {
     }
     impl Parser for crate::wayland_objects::wl_seat::WlSeat {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_seat";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -2648,6 +2739,10 @@ pub mod wl_seat {
     }
     impl EventWriter for crate::wayland_objects::wl_seat::WlSeat {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -2699,6 +2794,10 @@ pub mod wl_seat {
 /// and scrolling.
 pub mod wl_pointer {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_pointer::WlPointer {
+        const INTERFACE_NAME: &'static str = "wl_pointer";
+        const INTERFACE_VERSION: u32 = 9;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Set the pointer surface
@@ -2757,7 +2856,6 @@ pub mod wl_pointer {
     }
     impl Parser for crate::wayland_objects::wl_pointer::WlPointer {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_pointer";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -3074,6 +3172,10 @@ pub mod wl_pointer {
     }
     impl EventWriter for crate::wayland_objects::wl_pointer::WlPointer {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -3223,6 +3325,10 @@ pub mod wl_pointer {
 /// associated with a seat.
 pub mod wl_keyboard {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_keyboard::WlKeyboard {
+        const INTERFACE_NAME: &'static str = "wl_keyboard";
+        const INTERFACE_VERSION: u32 = 9;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Release the keyboard object
@@ -3232,7 +3338,6 @@ pub mod wl_keyboard {
     }
     impl Parser for crate::wayland_objects::wl_keyboard::WlKeyboard {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_keyboard";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -3351,6 +3456,10 @@ pub mod wl_keyboard {
     }
     impl EventWriter for crate::wayland_objects::wl_keyboard::WlKeyboard {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -3435,6 +3544,10 @@ pub mod wl_keyboard {
 /// contact point can be identified by the ID of the sequence.
 pub mod wl_touch {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_touch::WlTouch {
+        const INTERFACE_NAME: &'static str = "wl_touch";
+        const INTERFACE_VERSION: u32 = 9;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Release the touch object
@@ -3444,7 +3557,6 @@ pub mod wl_touch {
     }
     impl Parser for crate::wayland_objects::wl_touch::WlTouch {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_touch";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -3591,6 +3703,10 @@ pub mod wl_touch {
     }
     impl EventWriter for crate::wayland_objects::wl_touch::WlTouch {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -3655,6 +3771,10 @@ pub mod wl_touch {
 /// as global during start up, or when a monitor is hotplugged.
 pub mod wl_output {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_output::WlOutput {
+        const INTERFACE_NAME: &'static str = "wl_output";
+        const INTERFACE_VERSION: u32 = 4;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Release the output object
@@ -3665,7 +3785,6 @@ pub mod wl_output {
     }
     impl Parser for crate::wayland_objects::wl_output::WlOutput {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_output";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -3849,6 +3968,10 @@ pub mod wl_output {
     }
     impl EventWriter for crate::wayland_objects::wl_output::WlOutput {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -3975,6 +4098,10 @@ pub mod wl_output {
 /// regions of a surface.
 pub mod wl_region {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_region::WlRegion {
+        const INTERFACE_NAME: &'static str = "wl_region";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy region
@@ -4010,7 +4137,6 @@ pub mod wl_region {
     }
     impl Parser for crate::wayland_objects::wl_region::WlRegion {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_region";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4057,6 +4183,10 @@ pub mod wl_region {
 /// processing to dedicated overlay hardware when possible.
 pub mod wl_subcompositor {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_subcompositor::WlSubcompositor {
+        const INTERFACE_NAME: &'static str = "wl_subcompositor";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Unbind from the subcompositor interface
@@ -4097,7 +4227,6 @@ pub mod wl_subcompositor {
     }
     impl Parser for crate::wayland_objects::wl_subcompositor::WlSubcompositor {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_subcompositor";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4168,6 +4297,10 @@ pub mod wl_subcompositor {
 /// unmapped.
 pub mod wl_subsurface {
     use super::*;
+    impl Constants for crate::wayland_objects::wl_subsurface::WlSubsurface {
+        const INTERFACE_NAME: &'static str = "wl_subsurface";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Remove sub-surface interface
@@ -4271,7 +4404,6 @@ pub mod wl_subsurface {
     }
     impl Parser for crate::wayland_objects::wl_subsurface::WlSubsurface {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wl_subsurface";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4314,6 +4446,10 @@ pub mod wl_subsurface {
 /// when the compositor misses its target vertical blanking period.
 pub mod wp_presentation {
     use super::*;
+    impl Constants for crate::wayland_objects::wp_presentation::WpPresentation {
+        const INTERFACE_NAME: &'static str = "wp_presentation";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Unbind from the presentation interface
@@ -4341,7 +4477,6 @@ pub mod wp_presentation {
     }
     impl Parser for crate::wayland_objects::wp_presentation::WpPresentation {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_presentation";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4391,6 +4526,10 @@ pub mod wp_presentation {
     }
     impl EventWriter for crate::wayland_objects::wp_presentation::WpPresentation {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -4430,6 +4569,10 @@ pub mod wp_presentation {
 /// or 'discarded' event it is automatically destroyed.
 pub mod wp_presentation_feedback {
     use super::*;
+    impl Constants for crate::wayland_objects::wp_presentation_feedback::WpPresentationFeedback {
+        const INTERFACE_NAME: &'static str = "wp_presentation_feedback";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Event {
         /// Presentation synchronized to this output
@@ -4512,6 +4655,10 @@ pub mod wp_presentation_feedback {
     }
     impl EventWriter for crate::wayland_objects::wp_presentation_feedback::WpPresentationFeedback {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -4598,6 +4745,10 @@ pub mod wp_presentation_feedback {
 /// surface size.
 pub mod wp_viewporter {
     use super::*;
+    impl Constants for crate::wayland_objects::wp_viewporter::WpViewporter {
+        const INTERFACE_NAME: &'static str = "wp_viewporter";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Unbind from the cropping and scaling interface
@@ -4621,7 +4772,6 @@ pub mod wp_viewporter {
     }
     impl Parser for crate::wayland_objects::wp_viewporter::WpViewporter {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_viewporter";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4698,6 +4848,10 @@ pub mod wp_viewporter {
 /// on the next wl_surface.commit.
 pub mod wp_viewport {
     use super::*;
+    impl Constants for crate::wayland_objects::wp_viewport::WpViewport {
+        const INTERFACE_NAME: &'static str = "wp_viewport";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Remove scaling and cropping from the surface
@@ -4750,7 +4904,6 @@ pub mod wp_viewport {
     }
     impl Parser for crate::wayland_objects::wp_viewport::WpViewport {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_viewport";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4789,6 +4942,10 @@ pub mod wp_viewport {
 /// creating transient windows such as popup menus.
 pub mod xdg_wm_base {
     use super::*;
+    impl Constants for crate::wayland_objects::xdg_wm_base::XdgWmBase {
+        const INTERFACE_NAME: &'static str = "xdg_wm_base";
+        const INTERFACE_VERSION: u32 = 6;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy xdg_wm_base
@@ -4833,7 +4990,6 @@ pub mod xdg_wm_base {
     }
     impl Parser for crate::wayland_objects::xdg_wm_base::XdgWmBase {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "xdg_wm_base";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -4870,6 +5026,10 @@ pub mod xdg_wm_base {
     }
     impl EventWriter for crate::wayland_objects::xdg_wm_base::XdgWmBase {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -4923,6 +5083,10 @@ pub mod xdg_wm_base {
 /// positioning a surface raises an invalid_positioner error.
 pub mod xdg_positioner {
     use super::*;
+    impl Constants for crate::wayland_objects::xdg_positioner::XdgPositioner {
+        const INTERFACE_NAME: &'static str = "xdg_positioner";
+        const INTERFACE_VERSION: u32 = 6;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_positioner object
@@ -5064,7 +5228,6 @@ pub mod xdg_positioner {
     }
     impl Parser for crate::wayland_objects::xdg_positioner::XdgPositioner {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "xdg_positioner";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -5254,6 +5417,10 @@ pub mod xdg_positioner {
 /// again before attaching a buffer.
 pub mod xdg_surface {
     use super::*;
+    impl Constants for crate::wayland_objects::xdg_surface::XdgSurface {
+        const INTERFACE_NAME: &'static str = "xdg_surface";
+        const INTERFACE_VERSION: u32 = 6;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_surface
@@ -5363,7 +5530,6 @@ pub mod xdg_surface {
     }
     impl Parser for crate::wayland_objects::xdg_surface::XdgSurface {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "xdg_surface";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -5409,6 +5575,10 @@ pub mod xdg_surface {
     }
     impl EventWriter for crate::wayland_objects::xdg_surface::XdgSurface {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -5462,6 +5632,10 @@ pub mod xdg_surface {
 /// Attaching a null buffer to a toplevel unmaps the surface.
 pub mod xdg_toplevel {
     use super::*;
+    impl Constants for crate::wayland_objects::xdg_toplevel::XdgToplevel {
+        const INTERFACE_NAME: &'static str = "xdg_toplevel";
+        const INTERFACE_VERSION: u32 = 6;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_toplevel
@@ -5797,7 +5971,6 @@ pub mod xdg_toplevel {
     }
     impl Parser for crate::wayland_objects::xdg_toplevel::XdgToplevel {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "xdg_toplevel";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -5907,6 +6080,10 @@ pub mod xdg_toplevel {
     }
     impl EventWriter for crate::wayland_objects::xdg_toplevel::XdgToplevel {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -6073,6 +6250,10 @@ pub mod xdg_toplevel {
 /// for the xdg_popup state to take effect.
 pub mod xdg_popup {
     use super::*;
+    impl Constants for crate::wayland_objects::xdg_popup::XdgPopup {
+        const INTERFACE_NAME: &'static str = "xdg_popup";
+        const INTERFACE_VERSION: u32 = 6;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Remove xdg_popup interface
@@ -6161,7 +6342,6 @@ pub mod xdg_popup {
     }
     impl Parser for crate::wayland_objects::xdg_popup::XdgPopup {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "xdg_popup";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6229,6 +6409,10 @@ pub mod xdg_popup {
     }
     impl EventWriter for crate::wayland_objects::xdg_popup::XdgPopup {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -6270,6 +6454,10 @@ pub mod xdg_popup {
 /// only be done by creating a new major version of the extension.
 pub mod wp_content_type_manager_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::wp_content_type_manager_v1::WpContentTypeManagerV1 {
+        const INTERFACE_NAME: &'static str = "wp_content_type_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the content type manager object
@@ -6287,7 +6475,6 @@ pub mod wp_content_type_manager_v1 {
     }
     impl Parser for crate::wayland_objects::wp_content_type_manager_v1::WpContentTypeManagerV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_content_type_manager_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6316,6 +6503,10 @@ pub mod wp_content_type_manager_v1 {
 /// the client should destroy it.
 pub mod wp_content_type_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::wp_content_type_v1::WpContentTypeV1 {
+        const INTERFACE_NAME: &'static str = "wp_content_type_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the content type object
@@ -6341,7 +6532,6 @@ pub mod wp_content_type_v1 {
     }
     impl Parser for crate::wayland_objects::wp_content_type_v1::WpContentTypeV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_content_type_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6416,6 +6606,10 @@ pub mod wp_content_type_v1 {
 /// only be done by creating a new major version of the extension.
 pub mod wp_drm_lease_device_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::wp_drm_lease_device_v1::WpDrmLeaseDeviceV1 {
+        const INTERFACE_NAME: &'static str = "wp_drm_lease_device_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Create a lease request object
@@ -6436,7 +6630,6 @@ pub mod wp_drm_lease_device_v1 {
     }
     impl Parser for crate::wayland_objects::wp_drm_lease_device_v1::WpDrmLeaseDeviceV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_drm_lease_device_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6496,6 +6689,10 @@ pub mod wp_drm_lease_device_v1 {
     }
     impl EventWriter for crate::wayland_objects::wp_drm_lease_device_v1::WpDrmLeaseDeviceV1 {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -6533,6 +6730,10 @@ pub mod wp_drm_lease_device_v1 {
 /// description event followed by a done event.
 pub mod wp_drm_lease_connector_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1 {
+        const INTERFACE_NAME: &'static str = "wp_drm_lease_connector_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy connector
@@ -6546,7 +6747,6 @@ pub mod wp_drm_lease_connector_v1 {
     }
     impl Parser for crate::wayland_objects::wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_drm_lease_connector_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6611,6 +6811,10 @@ pub mod wp_drm_lease_connector_v1 {
     }
     impl EventWriter for crate::wayland_objects::wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1 {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -6650,6 +6854,10 @@ pub mod wp_drm_lease_connector_v1 {
 /// request.
 pub mod wp_drm_lease_request_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::wp_drm_lease_request_v1::WpDrmLeaseRequestV1 {
+        const INTERFACE_NAME: &'static str = "wp_drm_lease_request_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Request a connector for this lease
@@ -6678,7 +6886,6 @@ pub mod wp_drm_lease_request_v1 {
     }
     impl Parser for crate::wayland_objects::wp_drm_lease_request_v1::WpDrmLeaseRequestV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_drm_lease_request_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6712,6 +6919,10 @@ pub mod wp_drm_lease_request_v1 {
 /// event.
 pub mod wp_drm_lease_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1 {
+        const INTERFACE_NAME: &'static str = "wp_drm_lease_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroys the lease object
@@ -6723,7 +6934,6 @@ pub mod wp_drm_lease_v1 {
     }
     impl Parser for crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_drm_lease_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6765,6 +6975,10 @@ pub mod wp_drm_lease_v1 {
     }
     impl EventWriter for crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1 {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -6790,6 +7004,10 @@ pub mod wp_drm_lease_v1 {
 /// objects to get notified when the user is idle for a given amount of time.
 pub mod ext_idle_notifier_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::ext_idle_notifier_v1::ExtIdleNotifierV1 {
+        const INTERFACE_NAME: &'static str = "ext_idle_notifier_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the manager
@@ -6816,7 +7034,6 @@ pub mod ext_idle_notifier_v1 {
     }
     impl Parser for crate::wayland_objects::ext_idle_notifier_v1::ExtIdleNotifierV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "ext_idle_notifier_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6847,6 +7064,10 @@ pub mod ext_idle_notifier_v1 {
 /// a resumed event is sent and the timeout is restarted.
 pub mod ext_idle_notification_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1 {
+        const INTERFACE_NAME: &'static str = "ext_idle_notification_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the notification object
@@ -6856,7 +7077,6 @@ pub mod ext_idle_notification_v1 {
     }
     impl Parser for crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "ext_idle_notification_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6886,6 +7106,10 @@ pub mod ext_idle_notification_v1 {
     }
     impl EventWriter for crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1 {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -6907,6 +7131,10 @@ pub mod ext_idle_notification_v1 {
 /// This interface is used to request that the session be locked.
 pub mod ext_session_lock_manager_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::ext_session_lock_manager_v1::ExtSessionLockManagerV1 {
+        const INTERFACE_NAME: &'static str = "ext_session_lock_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the session lock manager object
@@ -6925,7 +7153,6 @@ pub mod ext_session_lock_manager_v1 {
     }
     impl Parser for crate::wayland_objects::ext_session_lock_manager_v1::ExtSessionLockManagerV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "ext_session_lock_manager_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -6990,6 +7217,10 @@ pub mod ext_session_lock_manager_v1 {
 /// instance automatically.
 pub mod ext_session_lock_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::ext_session_lock_v1::ExtSessionLockV1 {
+        const INTERFACE_NAME: &'static str = "ext_session_lock_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the session lock
@@ -7047,7 +7278,6 @@ pub mod ext_session_lock_v1 {
     }
     impl Parser for crate::wayland_objects::ext_session_lock_v1::ExtSessionLockV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "ext_session_lock_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7101,6 +7331,10 @@ pub mod ext_session_lock_v1 {
     }
     impl EventWriter for crate::wayland_objects::ext_session_lock_v1::ExtSessionLockV1 {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -7149,6 +7383,10 @@ pub mod ext_session_lock_v1 {
 /// focus if the user clicks on other surfaces.
 pub mod ext_session_lock_surface_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::ext_session_lock_surface_v1::ExtSessionLockSurfaceV1 {
+        const INTERFACE_NAME: &'static str = "ext_session_lock_surface_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the lock surface object
@@ -7196,7 +7434,6 @@ pub mod ext_session_lock_surface_v1 {
     }
     impl Parser for crate::wayland_objects::ext_session_lock_surface_v1::ExtSessionLockSurfaceV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "ext_session_lock_surface_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7226,6 +7463,10 @@ pub mod ext_session_lock_surface_v1 {
     }
     impl EventWriter for crate::wayland_objects::ext_session_lock_surface_v1::ExtSessionLockSurfaceV1 {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -7257,6 +7498,12 @@ pub mod ext_session_lock_surface_v1 {
 /// A global interface for requesting surfaces to use fractional scales.
 pub mod wp_fractional_scale_manager_v1 {
     use super::*;
+    impl Constants
+        for crate::wayland_objects::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1
+    {
+        const INTERFACE_NAME: &'static str = "wp_fractional_scale_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Unbind the fractional surface scale interface
@@ -7280,7 +7527,6 @@ pub mod wp_fractional_scale_manager_v1 {
     }
     impl Parser for crate::wayland_objects::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_fractional_scale_manager_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7304,6 +7550,10 @@ pub mod wp_fractional_scale_manager_v1 {
 /// to inform the client of the preferred scale.
 pub mod wp_fractional_scale_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::wp_fractional_scale_v1::WpFractionalScaleV1 {
+        const INTERFACE_NAME: &'static str = "wp_fractional_scale_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Remove surface scale information for surface
@@ -7314,7 +7564,6 @@ pub mod wp_fractional_scale_v1 {
     }
     impl Parser for crate::wayland_objects::wp_fractional_scale_v1::WpFractionalScaleV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_fractional_scale_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7339,6 +7588,10 @@ pub mod wp_fractional_scale_v1 {
     }
     impl EventWriter for crate::wayland_objects::wp_fractional_scale_v1::WpFractionalScaleV1 {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -7358,6 +7611,12 @@ pub mod wp_fractional_scale_v1 {
 /// single-pixel buffers.
 pub mod wp_single_pixel_buffer_manager_v1 {
     use super::*;
+    impl Constants
+        for crate::wayland_objects::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1
+    {
+        const INTERFACE_NAME: &'static str = "wp_single_pixel_buffer_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the manager
@@ -7390,7 +7649,6 @@ pub mod wp_single_pixel_buffer_manager_v1 {
         for crate::wayland_objects::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1
     {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_single_pixel_buffer_manager_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7428,6 +7686,12 @@ pub mod wp_single_pixel_buffer_manager_v1 {
 /// only be done by creating a new major version of the extension.
 pub mod wp_tearing_control_manager_v1 {
     use super::*;
+    impl Constants
+        for crate::wayland_objects::wp_tearing_control_manager_v1::WpTearingControlManagerV1
+    {
+        const INTERFACE_NAME: &'static str = "wp_tearing_control_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy tearing control factory object
@@ -7447,7 +7711,6 @@ pub mod wp_tearing_control_manager_v1 {
     }
     impl Parser for crate::wayland_objects::wp_tearing_control_manager_v1::WpTearingControlManagerV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_tearing_control_manager_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7474,6 +7737,10 @@ pub mod wp_tearing_control_manager_v1 {
 /// details.
 pub mod wp_tearing_control_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::wp_tearing_control_v1::WpTearingControlV1 {
+        const INTERFACE_NAME: &'static str = "wp_tearing_control_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Set presentation hint
@@ -7493,7 +7760,6 @@ pub mod wp_tearing_control_v1 {
     }
     impl Parser for crate::wayland_objects::wp_tearing_control_v1::WpTearingControlV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "wp_tearing_control_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7531,6 +7797,10 @@ pub mod wp_tearing_control_v1 {
 /// activated.
 pub mod xdg_activation_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::xdg_activation_v1::XdgActivationV1 {
+        const INTERFACE_NAME: &'static str = "xdg_activation_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_activation object
@@ -7568,7 +7838,6 @@ pub mod xdg_activation_v1 {
     }
     impl Parser for crate::wayland_objects::xdg_activation_v1::XdgActivationV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "xdg_activation_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7594,6 +7863,10 @@ pub mod xdg_activation_v1 {
 /// the compositor will provide an invalid token.
 pub mod xdg_activation_token_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1 {
+        const INTERFACE_NAME: &'static str = "xdg_activation_token_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Specifies the seat and serial of the activating event
@@ -7652,7 +7925,6 @@ pub mod xdg_activation_token_v1 {
     }
     impl Parser for crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "xdg_activation_token_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7679,6 +7951,10 @@ pub mod xdg_activation_token_v1 {
     }
     impl EventWriter for crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1 {
         type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
         fn to_raw_event(&self, event: Event) -> RawEvent {
             use {crate::object::Object, Event::*};
             match event {
@@ -7716,6 +7992,10 @@ pub mod xdg_activation_token_v1 {
 /// set the `WL_SURFACE_ID` atom on a window.
 pub mod xwayland_shell_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::xwayland_shell_v1::XwaylandShellV1 {
+        const INTERFACE_NAME: &'static str = "xwayland_shell_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the Xwayland shell object
@@ -7739,7 +8019,6 @@ pub mod xwayland_shell_v1 {
     }
     impl Parser for crate::wayland_objects::xwayland_shell_v1::XwaylandShellV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "xwayland_shell_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
@@ -7769,6 +8048,10 @@ pub mod xwayland_shell_v1 {
 /// for the xwayland_surface_v1 state to take effect.
 pub mod xwayland_surface_v1 {
     use super::*;
+    impl Constants for crate::wayland_objects::xwayland_surface_v1::XwaylandSurfaceV1 {
+        const INTERFACE_NAME: &'static str = "xwayland_surface_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Associates a Xwayland window to a wl_surface
@@ -7810,7 +8093,6 @@ pub mod xwayland_surface_v1 {
     }
     impl Parser for crate::wayland_objects::xwayland_surface_v1::XwaylandSurfaceV1 {
         type Request = Request;
-        const INTERFACE_NAME: &'static str = "xwayland_surface_v1";
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {

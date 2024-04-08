@@ -1,6 +1,8 @@
+use std::any::Any;
+
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
-    protocol_generated::WaylandId,
+    protocol_generated::{Constants, WaylandId},
     state::State,
 };
 
@@ -13,11 +15,12 @@ pub trait Object: 'static {
         request: RawRequest,
         dispatcher: &mut ClientDispatcher,
     );
+    fn as_any(&mut self) -> &mut dyn Any;
 }
 
-pub trait Parser {
+pub trait Parser: Constants {
     type Request: 'static;
-    const INTERFACE_NAME: &'static str;
+    // const INTERFACE_NAME: &'static str;
 
     /// Helper that just log the request
     fn parse(req: RawRequest) -> Result<Self::Request, ParserError>

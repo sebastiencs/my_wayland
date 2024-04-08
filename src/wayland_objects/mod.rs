@@ -1,5 +1,8 @@
 pub mod wl_callback;
+pub mod wl_compositor;
 pub mod wl_display;
+pub mod wl_registry;
+pub mod wl_shm;
 
 macro_rules! fake_obj {
     ($({$module:ident, $name:ident },)+) => ($(
@@ -14,10 +17,7 @@ macro_rules! fake_obj {
 }
 
 fake_obj! {
-    { wl_registry, WlRegistry },
-    { wl_compositor, WlCompositor },
     { wl_shm_pool, WlShmPool },
-    { wl_shm, WlShm },
     { wl_buffer, WlBuffer },
     { wl_data_offer, WlDataOffer },
     { wl_data_source, WlDataSource },
