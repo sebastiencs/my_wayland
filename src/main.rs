@@ -227,6 +227,19 @@ fn main() {
             fd: timer.as_fd().as_raw_fd(),
             dispatch_to: Redispatcher::new_noname(on_timeout),
         });
+
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(500));
+            let output = std::process::Command::new("fish")
+                .args(&[
+                    "-c",
+                    "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 vlc",
+                    // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 alacritty",
+                ])
+                .output()
+                .unwrap();
+            eprintln!("command output={:?}", output);
+        });
     }
 
     runner.run(dispatcher);

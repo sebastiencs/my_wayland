@@ -214,7 +214,21 @@ impl State {
     pub fn remove_object(&mut self, object_id: ObjectId) -> Box<dyn Object> {
         self.objects.remove(object_id).unwrap()
     }
+    pub fn with_object<O, F, R>(&mut self, object_id: ObjectId, fun: F) -> R
+    where
+        F: FnOnce(&mut O, &mut Self) -> R,
+        O: 'static,
+    {
+        let mut object = self.objects.grab(object_id);
+        let object_ref = object.as_any().downcast_mut::<O>().unwrap();
+        let result = fun(object_ref, self);
+        self.objects.release(object);
+        result
+    }
 
+    pub fn insert_global(&mut self, global: Box<dyn Global>) {
+        self.globals.insert(global);
+    }
     pub fn with_global<F, R>(&mut self, global_name: u32, fun: F) -> R
     where
         F: FnOnce(&mut Box<dyn Global>, &mut Self) -> R,

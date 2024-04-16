@@ -142,6 +142,9 @@ pub struct Client {
     id: ClientId,
     fd: RawFd,
     reader_id: Option<ClientReaderId>,
+    /// the key `WaylandId` is the id we share with the client
+    /// the value `ObjectId` is an index in our `State::objects`
+    /// So this `objects` is just used to lookup into `State::objects`, from the client `WaylandId`
     objects: BTreeMap<WaylandId, ObjectId>,
     info: Option<ProcessInfo>,
 }
@@ -197,14 +200,14 @@ impl Client {
         &mut self,
         state: &'a mut State,
         object: O,
-    ) -> (WaylandId, &'a mut O) {
+    ) -> ((WaylandId, ObjectId), &'a mut O) {
         let (wayland_id, object_id) = state.insert_object(object);
         self.objects.insert(wayland_id, object_id);
         let object: &mut O = state.objects[object_id]
             .as_any()
             .downcast_mut::<O>()
             .unwrap();
-        (wayland_id, object)
+        ((wayland_id, object_id), object)
     }
 
     pub fn delete_id(

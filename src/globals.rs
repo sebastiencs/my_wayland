@@ -46,7 +46,7 @@ impl Globals {
         self.map.iter()
     }
 
-    fn add_global<G: Global + 'static>(&mut self, global: G) {
-        self.map.insert(Box::new(global));
+    pub fn insert(&mut self, global: Box<dyn Global>) {
+        self.map.insert(global);
     }
 }

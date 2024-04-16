@@ -23,6 +23,7 @@ use crate::{
     io_uring::{model::IoUringAction, ring::PollCompleted},
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     state::State,
+    wayland_objects::wl_output::WlOutputGlobal,
 };
 
 #[derive(Debug)]
@@ -224,7 +225,8 @@ impl Udev {
         let drm_model = drm.make_model();
         dispatcher.start_model2(drm_model);
 
-        state.drm.insert(drm);
+        let drm_id = state.drm.insert(drm);
+        state.insert_global(WlOutputGlobal::new(drm_id)); // TODO: Should we notify clients ?
     }
 }
 

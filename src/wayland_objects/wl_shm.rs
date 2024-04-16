@@ -29,11 +29,11 @@ impl Global for WlShmGlobal {
         dispatcher: &mut ClientDispatcher,
     ) {
         let id = WlShmId::from(id);
-        let (_, shm) = client.insert_object(state, WlShm { id });
+        let (_, wl_shm) = client.insert_object(state, WlShm { id });
 
         // TODO: Send other supported formats
         let format = XRGB8888;
-        shm.send_event(wl_shm::Event::Format { format: format.wayland_id }, dispatcher);
+        wl_shm.send_event(wl_shm::Event::Format { format: format.wayland_id }, dispatcher);
     }
 }
 

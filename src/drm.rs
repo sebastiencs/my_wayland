@@ -85,7 +85,7 @@ pub struct Drm {
     device: udev::Device,
     resources: DrmResources,
     egl_context: EglContext,
-    in_use: ConnectorInUse,
+    pub in_use: ConnectorInUse,
     buffers: [RenderBuffer; 2],
     driver: Driver,
 }
@@ -154,7 +154,7 @@ fn get_props<T: control::ResourceHandle>(
 }
 
 #[derive(Clone)]
-struct Property<T> {
+pub struct Property<T> {
     value: T,
     handle: control::property::Handle,
 }
@@ -166,7 +166,7 @@ impl<T> Property<T> {
 }
 
 #[derive(Clone)]
-struct Geometry {
+pub struct Geometry {
     pub x: Property<u64>,
     pub y: Property<u64>,
     pub width: Property<u64>,
@@ -187,7 +187,7 @@ impl std::fmt::Debug for Geometry {
 }
 
 #[derive(Clone, Debug)]
-struct Plane {
+pub struct Plane {
     pub handle: plane::Handle,
     pub kind: PlaneType,
     pub crtc: Geometry,
@@ -231,8 +231,11 @@ pub struct Connector {
     pub crtcs: BTreeSet<crtc::Handle>,
     pub preferred_mode: Option<control::Mode>,
     pub state: connector::State,
-    // status:
-    // props:
+    pub mm_width: u32,
+    pub mm_height: u32,
+    pub model_name: Option<String>,
+    pub manufacturer_id: String,
+    pub interface_name: String,
 }
 
 #[derive(Debug)]
@@ -254,15 +257,15 @@ impl From<drm::Driver> for Driver {
 }
 
 #[derive(Debug)]
-struct ConnectorInUse {
+pub struct ConnectorInUse {
     crtc: Crtc,
-    connector: Connector,
+    pub connector: Connector,
     planes: Vec<Plane>,
     primary_plane_index: usize,
 }
 
 impl ConnectorInUse {
-    fn primary_plane(&self) -> (&Plane, &BTreeSet<Modifier>) {
+    pub fn primary_plane(&self) -> (&Plane, &BTreeSet<Modifier>) {
         let plane = &self.planes[self.primary_plane_index];
         let format = &plane.formats[&DrmFourcc::Xrgb8888];
         (plane, &format.modifiers)
@@ -270,6 +273,7 @@ impl ConnectorInUse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Copy)]
+#[repr(transparent)]
 pub struct Modifier(pub u64);
 
 impl Modifier {
@@ -758,12 +762,45 @@ impl Drm {
 
         let state = connector.state();
 
+        let (mm_width, mm_height) = connector.size().unwrap_or((0, 0));
+
+        dbg!(&edid);
+
+        let mut manufacturer_id = String::new();
+        let mut model_name = None;
+        if let Some(edid) = &edid {
+            manufacturer_id = edid.product.manufacturer_id.0.iter().collect();
+
+            use edid_rs::MonitorDescriptor::*;
+            for desc in &edid.descriptors.0 {
+                match desc {
+                    MonitorName(name) => {
+                        model_name = Some(name.clone());
+                    }
+                    SerialNumber(_) => (),
+                    OtherString(_) => (),
+                    RangeLimits { .. } => (),
+                    Undefined(_, _) => (),
+                    ManufacturerDefined(_, _) => (),
+                }
+            }
+        }
+
+        let interface_name = {
+            format!("{}-{}", connector.interface().as_str(), connector.interface_id())
+        };
+
         let connector = Connector {
             handler: connector_handle,
             edid,
             crtcs,
             preferred_mode,
             state,
+            mm_width,
+            mm_height,
+            model_name,
+            manufacturer_id,
+            interface_name,
         };
 
         (connector_handle, connector)

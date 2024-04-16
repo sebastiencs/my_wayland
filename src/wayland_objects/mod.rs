@@ -1,6 +1,7 @@
 pub mod wl_callback;
 pub mod wl_compositor;
 pub mod wl_display;
+pub mod wl_output;
 pub mod wl_registry;
 pub mod wl_shm;
 
@@ -30,7 +31,7 @@ fake_obj! {
     { wl_pointer, WlPointer },
     { wl_keyboard, WlKeyboard },
     { wl_touch, WlTouch },
-    { wl_output, WlOutput },
+    // { wl_output, WlOutput },
     { wl_region, WlRegion },
     { wl_subcompositor, WlSubcompositor },
     { wl_subsurface, WlSubsurface },

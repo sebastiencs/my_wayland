@@ -33,7 +33,7 @@ impl Object for WlDisplay {
 
         match Self::parse(request).unwrap() {
             Sync { callback } => {
-                let (id, callback) = client.insert_object(state, WlCallback::new(callback));
+                let ((id, _), callback) = client.insert_object(state, WlCallback::new(callback));
                 callback.done(dispatcher);
                 client.delete_id(self, state, dispatcher, id);
             }
