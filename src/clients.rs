@@ -282,7 +282,8 @@ impl Model for Client {
                 dispatcher.start_model(client_reader_id, client_reader);
             }
             MsgReceived { request } => {
-                // dbg!(&request);
+                // dbg!(&request, request.object_id());
+                // dbg!(request.object_id());
                 let obj_id = self.objects.get(&request.object_id()).unwrap();
 
                 let mut obj = state.objects.grab(*obj_id);
@@ -496,6 +497,9 @@ pub trait EventWriter: Constants {
     fn to_raw_event(&self, event: Self::Event) -> RawEvent;
     fn send_event(&self, event: Self::Event, dispatcher: &mut ClientDispatcher) {
         log::trace!(target: "out", "[{}] {}::{:?}", u32::from(self.object_id()), Self::INTERFACE_NAME, event);
+        // let raw = self.to_raw_event(event);
+        // log::trace!(target: "out", "raw: {:?}", raw);
+        // dispatcher.send_event(raw);
         dispatcher.send_event(self.to_raw_event(event));
     }
 }
@@ -531,21 +535,43 @@ impl RawEvent {
         self.push(id.into());
     }
 
+    pub fn new_id_with_interface<I>(&mut self, _id: I) -> Result<I, ParserError> {
+        todo!()
+    }
+
     pub fn string<S: AsRef<str>>(&mut self, s: S) {
         let s = s.as_ref();
         let len: u32 = s.len().try_into().unwrap();
         self.push(len + 1); // +1 for terminating null byte
+
+        // let start = self.arguments.args.len();
 
         let null_byte = std::iter::once(0);
         let mut iter = s.as_bytes().iter().copied().chain(null_byte).array_chunks();
         for bytes in &mut iter {
             self.push(u32::from_ne_bytes(bytes));
         }
+
+        // let mut nremainder = 0;
+
         if let Some(remainder) = iter.into_remainder().as_ref().map(IntoIter::as_slice) {
-            let mut bytes = [0u8; 4];
-            bytes[..remainder.len()].copy_from_slice(remainder);
-            self.push(u32::from_ne_bytes(bytes));
+            if !remainder.is_empty() {
+                let mut bytes = [0u8; 4];
+                // nremainder = remainder.len();
+                bytes[..remainder.len()].copy_from_slice(remainder);
+                self.push(u32::from_ne_bytes(bytes));
+            }
         }
+
+        // eprintln!(
+        //     "string pushed s.len={:?} n_u32_pushed={:?} nremainder={:?}",
+        //     s.len(),
+        //     self.arguments.args.len() - start,
+        //     nremainder
+        // );
+        // let bytes = self.clone().into_bytes();
+        // let req: RawRequest = (&*bytes).try_into().unwrap();
+        // eprintln!("string parsed = {:?}", req);
     }
 
     pub fn fixed(&mut self, _fixed: f32) {
@@ -561,6 +587,8 @@ impl RawEvent {
     }
 
     pub fn into_bytes(self) -> Box<[u8]> {
+        // let cloned = self.clone();
+
         let mut words = self.arguments.args;
         let length = words.len() + 2;
 
@@ -570,7 +598,15 @@ impl RawEvent {
         words.push_front(word);
         words.push_front(self.object_id);
 
-        words.into_iter().flat_map(u32::to_ne_bytes).collect()
+        let bytes: Box<[u8]> = words.into_iter().flat_map(u32::to_ne_bytes).collect();
+
+        // let req: RawRequest = (&*bytes).try_into().unwrap();
+        // eprintln!("req parsed =     {:?}", req);
+        // assert_eq!(req.arguments, cloned.arguments);
+        // assert_eq!(req.object_id, cloned.object_id);
+        // assert_eq!(req.request_id, cloned.request_id);
+
+        bytes
     }
 }
 
@@ -593,6 +629,10 @@ impl TryFrom<&[u8]> for RawRequest {
     type Error = ();
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() < 8 {
+            return Err(());
+        }
+
         let object_id = u32::from_ne_bytes(value[0..4].try_into().unwrap());
         let word = u32::from_ne_bytes(value[4..8].try_into().unwrap());
 
@@ -613,7 +653,7 @@ impl TryFrom<&[u8]> for RawRequest {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Arguments {
     args: VecDeque<u32>,
 }
@@ -638,9 +678,19 @@ impl Arguments {
         self.pop().map(Into::into)
     }
 
+    pub fn new_id_with_interface<I>(&mut self) -> Result<I, ParserError>
+    where
+        I: From<u32>,
+    {
+        let _interface_name = self.string()?;
+        let _interface_version = self.uint()?;
+        self.id()
+    }
+
     pub fn string(&mut self) -> Result<String, ParserError> {
         let len = self.uint()? as usize;
-        let nwords = len / 4;
+        // let nwords = len / 4;
+        let nwords = len.next_multiple_of(4) / 4;
 
         let mut bytes = Vec::with_capacity(len);
         for _ in 0..nwords {
@@ -648,7 +698,7 @@ impl Arguments {
             bytes.extend(u32::to_ne_bytes(word));
         }
         assert!(bytes.len() >= len);
-        bytes.truncate(len);
+        bytes.truncate(len - 1);
 
         Ok(String::from_utf8(bytes).unwrap())
     }

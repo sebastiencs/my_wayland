@@ -786,9 +786,8 @@ impl Drm {
             }
         }
 
-        let interface_name = {
-            format!("{}-{}", connector.interface().as_str(), connector.interface_id())
-        };
+        let interface_name =
+            format!("{}-{}", connector.interface().as_str(), connector.interface_id());
 
         let connector = Connector {
             handler: connector_handle,

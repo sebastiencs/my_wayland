@@ -233,12 +233,18 @@ fn main() {
             let output = std::process::Command::new("fish")
                 .args(&[
                     "-c",
-                    "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 vlc",
+                    // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 vlc",
                     // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 alacritty",
+                    // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 /home/sebastien/github/client-toolkit/target/debug/examples/generic_simple_window",
+                    "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 /home/sebastien/github/wayland-rs/target/debug/examples/simple_window",
                 ])
-                .output()
+                .status()
                 .unwrap();
-            eprintln!("command output={:?}", output);
+            //     .piped()
+            //     .output()
+            //     .unwrap();
+            // eprintln!("command stdout={}", String::from_utf8(output.stdout).unwrap());
+            // eprintln!("command stderr={}", String::from_utf8(output.stderr).unwrap());
         });
     }
 

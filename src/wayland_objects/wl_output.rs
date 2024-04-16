@@ -79,12 +79,12 @@ impl WlOutput {
         let geometry = wl_output::Event::Geometry {
             x: 0,
             y: 0,
-            physical_width: in_use.connector.mm_width as _,
-            physical_height: in_use.connector.mm_height as _,
-            subpixel: 0, // Unknown
+            physical_width: in_use.connector.mm_width as i32,
+            physical_height: in_use.connector.mm_height as i32,
+            subpixel: wl_output::Subpixel::Unknown as i32,
             make: in_use.connector.manufacturer_id.clone(),
             model: in_use.connector.model_name.clone().unwrap_or_default(),
-            transform: 0,
+            transform: wl_output::Transform::Normal as i32,
         };
         self.send_event(geometry, dispatcher);
     }

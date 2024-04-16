@@ -107,14 +107,20 @@ fn write_enums(f: &mut impl Write, enums: &[Enum]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn type_to_method_name(typ: protocol::Type) -> &'static str {
+fn type_to_method_name(typ: protocol::Type, interface_name: Option<&String>) -> &'static str {
     match typ {
         protocol::Type::Int => "int",
         protocol::Type::Uint => "uint",
         protocol::Type::Fixed => "fixed",
         protocol::Type::String => "string",
         protocol::Type::Object => "id",
-        protocol::Type::NewId => "id",
+        protocol::Type::NewId => {
+            if interface_name.is_some() {
+                "id"
+            } else {
+                "new_id_with_interface"
+            }
+        }
         protocol::Type::Array => "array",
         protocol::Type::Fd => "fd",
         protocol::Type::Destructor => todo!(),
@@ -153,7 +159,7 @@ fn write_event_writer(
             event.args.len()
         )?;
         for arg in &event.args {
-            let method = type_to_method_name(arg.typ);
+            let method = type_to_method_name(arg.typ, arg.interface.as_ref());
             writeln!(f, "          raw.{}({});", method, &arg.name)?;
         }
         writeln!(f, "        raw")?;
@@ -189,7 +195,7 @@ fn write_parser(f: &mut impl Write, this_interface: &str, msgs: &[Message]) -> s
         } else {
             writeln!(f, "        {} => {} {{", index, name)?;
             for arg in &msg.args {
-                let method = type_to_method_name(arg.typ);
+                let method = type_to_method_name(arg.typ, arg.interface.as_ref());
                 writeln!(f, "          {}: req.{}()?,", &arg.name, method)?;
             }
             writeln!(f, "        }},")?;
@@ -260,6 +266,7 @@ pub fn gen() -> std::io::Result<()> {
         "/usr/share/wayland-protocols/staging/tearing-control/tearing-control-v1.xml",
         "/usr/share/wayland-protocols/staging/xdg-activation/xdg-activation-v1.xml",
         "/usr/share/wayland-protocols/staging/xwayland-shell/xwayland-shell-v1.xml",
+        "/usr/share/wayland-protocols/staging/cursor-shape/cursor-shape-v1.xml",
         // "/usr/share/wayland-protocols/unstable/fullscreen-shell/fullscreen-shell-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/input-method/input-method-unstable-v1.xml",
@@ -272,13 +279,13 @@ pub fn gen() -> std::io::Result<()> {
         // "/usr/share/wayland-protocols/unstable/primary-selection/primary-selection-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/relative-pointer/relative-pointer-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/tablet/tablet-unstable-v1.xml",
-        // "/usr/share/wayland-protocols/unstable/tablet/tablet-unstable-v2.xml",
+        "/usr/share/wayland-protocols/unstable/tablet/tablet-unstable-v2.xml",
         // "/usr/share/wayland-protocols/unstable/text-input/text-input-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/text-input/text-input-unstable-v3.xml",
         // "/usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/xdg-foreign/xdg-foreign-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/xdg-foreign/xdg-foreign-unstable-v2.xml",
-        // "/usr/share/wayland-protocols/unstable/xdg-output/xdg-output-unstable-v1.xml",
+        "/usr/share/wayland-protocols/unstable/xdg-output/xdg-output-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/xdg-shell/xdg-shell-unstable-v5.xml",
         // "/usr/share/wayland-protocols/unstable/xdg-shell/xdg-shell-unstable-v6.xml",
         // "/usr/share/wayland-protocols/unstable/xwayland-keyboard-grab/xwayland-keyboard-grab-unstable-v1.xml",

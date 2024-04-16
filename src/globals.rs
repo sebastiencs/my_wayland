@@ -2,7 +2,13 @@ use crate::{
     clients::{Client, ClientDispatcher},
     protocol_generated::NewId,
     state::{IndexMap, State},
-    wayland_objects::{wl_compositor::WlCompositorGlobal, wl_shm::WlShmGlobal},
+    wayland_objects::{
+        wl_compositor::WlCompositorGlobal, wl_seat::WlSeatGlobal, wl_shm::WlShmGlobal,
+        wl_subcompositor::WlSubcompositorGlobal,
+        wp_cursor_shape_manager_v1::WpCursorShapeManagerV1Global,
+        wp_presentation::WpPresentationGlobal, xdg_activation_v1::XdgActivationV1Global,
+        xdg_wm_base::XdgWmBaseGlobal, zxdg_output_manager_v1::ZxdgOutputManagerV1Global,
+    },
 };
 
 pub struct Globals {
@@ -37,7 +43,17 @@ impl Globals {
     }
 
     pub fn initialize(&mut self) {
-        for fun in [WlCompositorGlobal::new, WlShmGlobal::new] {
+        for fun in [
+            WlCompositorGlobal::new,
+            WlShmGlobal::new,
+            WlSubcompositorGlobal::new,
+            WlSeatGlobal::new, // TODO: `WlSeatGlobal` should be added dynamically
+            WpPresentationGlobal::new,
+            WpCursorShapeManagerV1Global::new,
+            XdgActivationV1Global::new,
+            XdgWmBaseGlobal::new,
+            ZxdgOutputManagerV1Global::new,
+        ] {
             self.map.insert(fun());
         }
     }

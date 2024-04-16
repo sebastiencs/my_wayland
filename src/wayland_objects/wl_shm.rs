@@ -1,6 +1,6 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
-    drm::{FORMATS, XRGB8888},
+    drm::{ARGB8888, FORMATS, XRGB8888},
     globals::{Global, GlobalName},
     object::{Object, Parser},
     protocol_generated::{wl_shm, Constants, NewId, WaylandId, WlShmId},
@@ -32,8 +32,9 @@ impl Global for WlShmGlobal {
         let (_, wl_shm) = client.insert_object(state, WlShm { id });
 
         // TODO: Send other supported formats
-        let format = XRGB8888;
-        wl_shm.send_event(wl_shm::Event::Format { format: format.wayland_id }, dispatcher);
+        for format in [XRGB8888, ARGB8888] {
+            wl_shm.send_event(wl_shm::Event::Format { format: format.wayland_id }, dispatcher);
+        }
     }
 }
 
