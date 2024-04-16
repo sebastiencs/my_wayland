@@ -1,32 +1,39 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    drm::{FORMATS, XRGB8888},
     globals::{Global, GlobalName},
     object::{Object, Parser},
-    protocol_generated::{Constants, WaylandId, WlShmId},
+    protocol_generated::{wl_shm, Constants, NewId, WaylandId, WlShmId},
     state::State,
 };
 
 #[derive(Debug)]
-pub struct WlShmGlobal {
-    name: GlobalName,
-}
+pub struct WlShmGlobal;
 
 impl WlShmGlobal {
-    pub fn new(name: GlobalName) -> Box<dyn Global> {
-        Box::new(Self { name })
+    pub fn new() -> Box<dyn Global> {
+        Box::new(Self {})
     }
 }
 
 impl Global for WlShmGlobal {
-    fn global_name(&self) -> GlobalName {
-        self.name.clone()
-    }
     fn interface(&self) -> (&'static str, u32) {
         (WlShm::INTERFACE_NAME, WlShm::INTERFACE_VERSION)
     }
-    fn bind(&mut self, client: &mut Client, state: &mut State, id: WaylandId, _version: u32) {
+    fn bind(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        id: NewId,
+        _version: u32,
+        dispatcher: &mut ClientDispatcher,
+    ) {
         let id = WlShmId::from(id);
-        client.insert_object(state, WlShm { id });
+        let (_, shm) = client.insert_object(state, WlShm { id });
+
+        // TODO: Send other supported formats
+        let format = XRGB8888;
+        shm.send_event(wl_shm::Event::Format { format: format.wayland_id }, dispatcher);
     }
 }
 

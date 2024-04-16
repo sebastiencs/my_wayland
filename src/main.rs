@@ -10,6 +10,11 @@ macro_rules! wayland_id {
                 Self(value.0)
             }
         }
+        impl From<NewId> for $name {
+            fn from(value: NewId) -> Self {
+                Self(value.0)
+            }
+        }
         impl From<$name> for WaylandId {
             fn from(value: $name) -> Self {
                 Self(value.0)
@@ -27,7 +32,7 @@ macro_rules! wayland_id {
 
 macro_rules! index_map_id {
     ($name:ident) => {
-        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
         pub struct $name(u32);
         impl From<usize> for $name {
             fn from(value: usize) -> Self {

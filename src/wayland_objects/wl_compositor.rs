@@ -1,30 +1,32 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
-    globals::{Global, GlobalName},
+    globals::Global,
     object::{Object, Parser},
-    protocol_generated::{Constants, WaylandId, WlCompositorId},
+    protocol_generated::{Constants, NewId, WaylandId, WlCompositorId},
     state::State,
 };
 
 #[derive(Debug)]
-pub struct WlCompositorGlobal {
-    name: GlobalName,
-}
+pub struct WlCompositorGlobal;
 
 impl WlCompositorGlobal {
-    pub fn new(name: GlobalName) -> Box<dyn Global> {
-        Box::new(Self { name })
+    pub fn new() -> Box<dyn Global> {
+        Box::new(Self {})
     }
 }
 
 impl Global for WlCompositorGlobal {
-    fn global_name(&self) -> GlobalName {
-        self.name.clone()
-    }
     fn interface(&self) -> (&'static str, u32) {
         (WlCompositor::INTERFACE_NAME, WlCompositor::INTERFACE_VERSION)
     }
-    fn bind(&mut self, client: &mut Client, state: &mut State, id: WaylandId, _version: u32) {
+    fn bind(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        id: NewId,
+        _version: u32,
+        _dispatcher: &mut ClientDispatcher,
+    ) {
         let id = WlCompositorId::from(id);
         client.insert_object(state, WlCompositor { id });
     }

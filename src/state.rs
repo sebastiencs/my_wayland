@@ -1,4 +1,10 @@
-use crate::{drm::Drm, egl::EGL, globals::Globals, input::Input, protocol_generated::WaylandId};
+use crate::{
+    drm::Drm,
+    egl::EGL,
+    globals::{Global, Globals},
+    input::Input,
+    protocol_generated::WaylandId,
+};
 
 use {crate::object::Object, std::marker::PhantomData};
 
@@ -112,7 +118,18 @@ where
         Some(value)
     }
 
-    pub fn grab(&mut self, key: K) -> Grab<K, V> {
+    pub fn iter(&self) -> impl Iterator<Item = (K, &V)> {
+        self.map.iter().enumerate().filter_map(|(index, v)| {
+            let key: K = index.into();
+            let ValueOrEmpty::Value(value) = v else {
+                return None;
+            };
+            Some((key, value))
+        })
+    }
+
+    pub fn grab<Key: Into<K>>(&mut self, key: Key) -> Grab<K, V> {
+        let key: K = key.into();
         let index: usize = key.into();
         let entry = self.map.get_mut(index).unwrap();
 
@@ -196,5 +213,15 @@ impl State {
     }
     pub fn remove_object(&mut self, object_id: ObjectId) -> Box<dyn Object> {
         self.objects.remove(object_id).unwrap()
+    }
+
+    pub fn with_global<F, R>(&mut self, global_name: u32, fun: F) -> R
+    where
+        F: FnOnce(&mut Box<dyn Global>, &mut Self) -> R,
+    {
+        let mut global = self.globals.map.grab(global_name);
+        let result = fun(&mut *global, self);
+        self.globals.map.release(global);
+        result
     }
 }

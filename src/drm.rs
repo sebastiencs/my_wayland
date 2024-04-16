@@ -24,6 +24,7 @@ use crate::{
     egl::{EglContext, EglFrameBuffer, GlTexture, EGL},
     gbm::UseFlags,
     io_uring::ring::ReadWriteCompleted,
+    protocol_generated::WaylandId,
     runner::{AnyAction, Dispatcher, Model},
 };
 
@@ -34,6 +35,7 @@ pub struct Format {
     pub drm: DrmFourcc,
     pub external_only_guess: bool,
     pub has_alpha: bool,
+    pub wayland_id: u32,
 }
 
 pub static ARGB8888: &Format = &Format {
@@ -42,6 +44,7 @@ pub static ARGB8888: &Format = &Format {
     drm: DrmFourcc::Argb8888,
     external_only_guess: false,
     has_alpha: true,
+    wayland_id: 0,
 };
 
 pub static XRGB8888: &Format = &Format {
@@ -50,6 +53,7 @@ pub static XRGB8888: &Format = &Format {
     drm: DrmFourcc::Xrgb8888,
     external_only_guess: false,
     has_alpha: false,
+    wayland_id: 1,
 };
 
 pub static FORMATS: &[Format] = &[*ARGB8888, *XRGB8888];
