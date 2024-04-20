@@ -4,6 +4,7 @@ use crate::{
     globals::{Global, Globals},
     input::Input,
     protocol_generated::WaylandId,
+    xkb::Xkb,
 };
 
 use {crate::object::Object, std::marker::PhantomData};
@@ -203,6 +204,7 @@ pub struct State {
     pub drm: IndexMap<DrmId, Drm>,
     pub globals: Globals,
     pub egl: EGL,
+    pub xkb: Xkb,
 }
 
 impl State {

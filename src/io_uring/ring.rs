@@ -24,7 +24,7 @@ use super::{
         io_uring_files_update, io_uring_params, io_uring_probe, CompletionQueueEntry, EnterFlags,
         FeaturesFlags, IoUringFd, SubmissionQueueEntry, IORING_OFF_CQ_RING, IORING_OFF_SQES,
         IORING_OFF_SQ_RING, IORING_OP_ACCEPT, IORING_OP_NOP, IORING_OP_POLL_ADD, IORING_OP_READ,
-        IORING_OP_WRITE, IORING_POLL_ADD_MULTI, IORING_REGISTER_FILES,
+        IORING_OP_SENDMSG, IORING_OP_WRITE, IORING_POLL_ADD_MULTI, IORING_REGISTER_FILES,
         IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_PROBE, IORING_UNREGISTER_FILES,
     },
 };
@@ -73,6 +73,11 @@ pub struct RecvmsgCompleted {
 }
 
 #[derive(Debug)]
+pub struct SendmsgCompleted {
+    pub fd: RawFd,
+}
+
+#[derive(Debug)]
 pub struct AcceptCompleted {
     pub fd: RawFd,
     pub new_client: RawFd,
@@ -88,6 +93,13 @@ pub struct RecvmsgData {
     pub msghdr: msghdr,
 }
 
+pub struct SendmsgData {
+    pub iovec: libc::iovec,
+    pub buffer_aux: Box<[u8]>,
+    pub buffer: Box<[u8]>,
+    pub msghdr: msghdr,
+}
+
 impl Debug for RecvmsgData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RecvmsgData")
@@ -97,6 +109,15 @@ impl Debug for RecvmsgData {
             // .field("buffer_aux_len", &self.buffer_aux.len())
             // .field("iovec", &self.iovec)
             // .field("msghdr", &self.msghdr)
+            .finish()
+    }
+}
+
+impl Debug for SendmsgData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendmsgData")
+            .field("ncontrol", &self.msghdr.msg_controllen)
+            .field("flags", &self.msghdr.msg_flags)
             .finish()
     }
 }
@@ -136,6 +157,12 @@ pub(super) enum Operation {
         fd: RawFd,
         data: Box<RecvmsgData>,
         dispatch_to: Redispatcher<std::io::Result<RecvmsgCompleted>>,
+    },
+    Sendmsg {
+        id: RingId,
+        fd: RawFd,
+        data: Box<SendmsgData>,
+        dispatch_to: Redispatcher<std::io::Result<SendmsgCompleted>>,
     },
     Accept {
         id: RingId,
@@ -208,6 +235,13 @@ impl Debug for Operation {
                 .field("data", data)
                 .field("dispatch_to", dispatch_to)
                 .finish(),
+            Self::Sendmsg { id, fd, data, dispatch_to } => f
+                .debug_struct("Recvmsg")
+                .field("id", id)
+                .field("fd", fd)
+                .field("data", data)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
             Self::Accept { id, fd, dispatch_to } => f
                 .debug_struct("Accept")
                 .field("id", id)
@@ -231,6 +265,7 @@ impl Operation {
             Operation::ReadWrite { id, .. } => Some(*id),
             Operation::NoOp => None,
             Operation::Recvmsg { id, .. } => Some(*id),
+            Operation::Sendmsg { id, .. } => Some(*id),
             Operation::Accept { id, .. } => Some(*id),
             Operation::Poll { id, .. } => Some(*id),
         }
@@ -240,7 +275,7 @@ impl Operation {
 impl SubmissionQueueEntry {
     fn apply_operation(&mut self, op: &Operation) {
         // TODO: Remove this
-        *self = Self::default();
+        *self = Self::default(); // zero-ing entry
 
         match op {
             // Operation::RegisterFiles {
@@ -318,6 +353,13 @@ impl SubmissionQueueEntry {
                 self.fd = *fd;
                 self.addr_splice_off_in = &data.msghdr as *const _ as u64;
                 self.flags = libc::MSG_CMSG_CLOEXEC as u32;
+                self.user_data = id.to_user_data();
+            }
+            Operation::Sendmsg { id, fd, data, dispatch_to: _ } => {
+                self.opcode = IORING_OP_SENDMSG;
+                self.fd = *fd;
+                self.addr_splice_off_in = &data.msghdr as *const _ as u64;
+                self.flags = libc::MSG_NOSIGNAL as u32;
                 self.user_data = id.to_user_data();
             }
             Operation::Accept { id, fd, dispatch_to: _ } => {

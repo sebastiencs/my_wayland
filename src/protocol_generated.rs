@@ -18,9 +18,17 @@ pub struct WaylandId(u32);
 )]
 pub struct NewId(u32);
 #[derive(
-    Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    derive_more::From,
+    derive_more::Into,
+    derive_more::Deref,
 )]
-pub struct Array;
+pub struct Array(pub Vec<u32>);
 
 wayland_id! {
   WlDisplayId,
@@ -102,6 +110,9 @@ pub mod wl_display {
     impl Constants for crate::wayland_objects::wl_display::WlDisplay {
         const INTERFACE_NAME: &'static str = "wl_display";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WlDisplayId {
+        type Object = crate::wayland_objects::wl_display::WlDisplay;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -250,6 +261,9 @@ pub mod wl_registry {
         const INTERFACE_NAME: &'static str = "wl_registry";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WlRegistryId {
+        type Object = crate::wayland_objects::wl_registry::WlRegistry;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Bind an object to the display
@@ -347,6 +361,9 @@ pub mod wl_callback {
         const INTERFACE_NAME: &'static str = "wl_callback";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WlCallbackId {
+        type Object = crate::wayland_objects::wl_callback::WlCallback;
+    }
     #[derive(Debug)]
     pub enum Event {
         /// Done event
@@ -386,6 +403,9 @@ pub mod wl_compositor {
     impl Constants for crate::wayland_objects::wl_compositor::WlCompositor {
         const INTERFACE_NAME: &'static str = "wl_compositor";
         const INTERFACE_VERSION: u32 = 6;
+    }
+    impl crate::object::IdToObject for WlCompositorId {
+        type Object = crate::wayland_objects::wl_compositor::WlCompositor;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -432,6 +452,9 @@ pub mod wl_shm_pool {
     impl Constants for crate::wayland_objects::wl_shm_pool::WlShmPool {
         const INTERFACE_NAME: &'static str = "wl_shm_pool";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WlShmPoolId {
+        type Object = crate::wayland_objects::wl_shm_pool::WlShmPool;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -525,6 +548,9 @@ pub mod wl_shm {
     impl Constants for crate::wayland_objects::wl_shm::WlShm {
         const INTERFACE_NAME: &'static str = "wl_shm";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WlShmId {
+        type Object = crate::wayland_objects::wl_shm::WlShm;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -840,6 +866,9 @@ pub mod wl_buffer {
         const INTERFACE_NAME: &'static str = "wl_buffer";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WlBufferId {
+        type Object = crate::wayland_objects::wl_buffer::WlBuffer;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy a buffer
@@ -910,6 +939,9 @@ pub mod wl_data_offer {
     impl Constants for crate::wayland_objects::wl_data_offer::WlDataOffer {
         const INTERFACE_NAME: &'static str = "wl_data_offer";
         const INTERFACE_VERSION: u32 = 3;
+    }
+    impl crate::object::IdToObject for WlDataOfferId {
+        type Object = crate::wayland_objects::wl_data_offer::WlDataOffer;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -1148,6 +1180,9 @@ pub mod wl_data_source {
         const INTERFACE_NAME: &'static str = "wl_data_source";
         const INTERFACE_VERSION: u32 = 3;
     }
+    impl crate::object::IdToObject for WlDataSourceId {
+        type Object = crate::wayland_objects::wl_data_source::WlDataSource;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Add an offered mime type
@@ -1356,6 +1391,9 @@ pub mod wl_data_device {
     impl Constants for crate::wayland_objects::wl_data_device::WlDataDevice {
         const INTERFACE_NAME: &'static str = "wl_data_device";
         const INTERFACE_VERSION: u32 = 3;
+    }
+    impl crate::object::IdToObject for WlDataDeviceId {
+        type Object = crate::wayland_objects::wl_data_device::WlDataDevice;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -1590,6 +1628,9 @@ pub mod wl_data_device_manager {
         const INTERFACE_NAME: &'static str = "wl_data_device_manager";
         const INTERFACE_VERSION: u32 = 3;
     }
+    impl crate::object::IdToObject for WlDataDeviceManagerId {
+        type Object = crate::wayland_objects::wl_data_device_manager::WlDataDeviceManager;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Create a new data source
@@ -1676,6 +1717,9 @@ pub mod wl_shell {
         const INTERFACE_NAME: &'static str = "wl_shell";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WlShellId {
+        type Object = crate::wayland_objects::wl_shell::WlShell;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Create a shell surface from a surface
@@ -1728,6 +1772,9 @@ pub mod wl_shell_surface {
     impl Constants for crate::wayland_objects::wl_shell_surface::WlShellSurface {
         const INTERFACE_NAME: &'static str = "wl_shell_surface";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WlShellSurfaceId {
+        type Object = crate::wayland_objects::wl_shell_surface::WlShellSurface;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -2131,6 +2178,9 @@ pub mod wl_surface {
     impl Constants for crate::wayland_objects::wl_surface::WlSurface {
         const INTERFACE_NAME: &'static str = "wl_surface";
         const INTERFACE_VERSION: u32 = 6;
+    }
+    impl crate::object::IdToObject for WlSurfaceId {
+        type Object = crate::wayland_objects::wl_surface::WlSurface;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -2630,6 +2680,9 @@ pub mod wl_seat {
         const INTERFACE_NAME: &'static str = "wl_seat";
         const INTERFACE_VERSION: u32 = 9;
     }
+    impl crate::object::IdToObject for WlSeatId {
+        type Object = crate::wayland_objects::wl_seat::WlSeat;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Return pointer object
@@ -2809,6 +2862,9 @@ pub mod wl_pointer {
     impl Constants for crate::wayland_objects::wl_pointer::WlPointer {
         const INTERFACE_NAME: &'static str = "wl_pointer";
         const INTERFACE_VERSION: u32 = 9;
+    }
+    impl crate::object::IdToObject for WlPointerId {
+        type Object = crate::wayland_objects::wl_pointer::WlPointer;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -3341,6 +3397,9 @@ pub mod wl_keyboard {
         const INTERFACE_NAME: &'static str = "wl_keyboard";
         const INTERFACE_VERSION: u32 = 9;
     }
+    impl crate::object::IdToObject for WlKeyboardId {
+        type Object = crate::wayland_objects::wl_keyboard::WlKeyboard;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Release the keyboard object
@@ -3559,6 +3618,9 @@ pub mod wl_touch {
     impl Constants for crate::wayland_objects::wl_touch::WlTouch {
         const INTERFACE_NAME: &'static str = "wl_touch";
         const INTERFACE_VERSION: u32 = 9;
+    }
+    impl crate::object::IdToObject for WlTouchId {
+        type Object = crate::wayland_objects::wl_touch::WlTouch;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -3786,6 +3848,9 @@ pub mod wl_output {
     impl Constants for crate::wayland_objects::wl_output::WlOutput {
         const INTERFACE_NAME: &'static str = "wl_output";
         const INTERFACE_VERSION: u32 = 4;
+    }
+    impl crate::object::IdToObject for WlOutputId {
+        type Object = crate::wayland_objects::wl_output::WlOutput;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -4114,6 +4179,9 @@ pub mod wl_region {
         const INTERFACE_NAME: &'static str = "wl_region";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WlRegionId {
+        type Object = crate::wayland_objects::wl_region::WlRegion;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy region
@@ -4198,6 +4266,9 @@ pub mod wl_subcompositor {
     impl Constants for crate::wayland_objects::wl_subcompositor::WlSubcompositor {
         const INTERFACE_NAME: &'static str = "wl_subcompositor";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WlSubcompositorId {
+        type Object = crate::wayland_objects::wl_subcompositor::WlSubcompositor;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -4312,6 +4383,9 @@ pub mod wl_subsurface {
     impl Constants for crate::wayland_objects::wl_subsurface::WlSubsurface {
         const INTERFACE_NAME: &'static str = "wl_subsurface";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WlSubsurfaceId {
+        type Object = crate::wayland_objects::wl_subsurface::WlSubsurface;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -4462,6 +4536,9 @@ pub mod wp_presentation {
         const INTERFACE_NAME: &'static str = "wp_presentation";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WpPresentationId {
+        type Object = crate::wayland_objects::wp_presentation::WpPresentation;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Unbind from the presentation interface
@@ -4584,6 +4661,9 @@ pub mod wp_presentation_feedback {
     impl Constants for crate::wayland_objects::wp_presentation_feedback::WpPresentationFeedback {
         const INTERFACE_NAME: &'static str = "wp_presentation_feedback";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WpPresentationFeedbackId {
+        type Object = crate::wayland_objects::wp_presentation_feedback::WpPresentationFeedback;
     }
     #[derive(Debug)]
     pub enum Event {
@@ -4761,6 +4841,9 @@ pub mod wp_viewporter {
         const INTERFACE_NAME: &'static str = "wp_viewporter";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WpViewporterId {
+        type Object = crate::wayland_objects::wp_viewporter::WpViewporter;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Unbind from the cropping and scaling interface
@@ -4864,6 +4947,9 @@ pub mod wp_viewport {
         const INTERFACE_NAME: &'static str = "wp_viewport";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WpViewportId {
+        type Object = crate::wayland_objects::wp_viewport::WpViewport;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Remove scaling and cropping from the surface
@@ -4957,6 +5043,9 @@ pub mod xdg_wm_base {
     impl Constants for crate::wayland_objects::xdg_wm_base::XdgWmBase {
         const INTERFACE_NAME: &'static str = "xdg_wm_base";
         const INTERFACE_VERSION: u32 = 6;
+    }
+    impl crate::object::IdToObject for XdgWmBaseId {
+        type Object = crate::wayland_objects::xdg_wm_base::XdgWmBase;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -5098,6 +5187,9 @@ pub mod xdg_positioner {
     impl Constants for crate::wayland_objects::xdg_positioner::XdgPositioner {
         const INTERFACE_NAME: &'static str = "xdg_positioner";
         const INTERFACE_VERSION: u32 = 6;
+    }
+    impl crate::object::IdToObject for XdgPositionerId {
+        type Object = crate::wayland_objects::xdg_positioner::XdgPositioner;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -5433,6 +5525,9 @@ pub mod xdg_surface {
         const INTERFACE_NAME: &'static str = "xdg_surface";
         const INTERFACE_VERSION: u32 = 6;
     }
+    impl crate::object::IdToObject for XdgSurfaceId {
+        type Object = crate::wayland_objects::xdg_surface::XdgSurface;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_surface
@@ -5647,6 +5742,9 @@ pub mod xdg_toplevel {
     impl Constants for crate::wayland_objects::xdg_toplevel::XdgToplevel {
         const INTERFACE_NAME: &'static str = "xdg_toplevel";
         const INTERFACE_VERSION: u32 = 6;
+    }
+    impl crate::object::IdToObject for XdgToplevelId {
+        type Object = crate::wayland_objects::xdg_toplevel::XdgToplevel;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -6266,6 +6364,9 @@ pub mod xdg_popup {
         const INTERFACE_NAME: &'static str = "xdg_popup";
         const INTERFACE_VERSION: u32 = 6;
     }
+    impl crate::object::IdToObject for XdgPopupId {
+        type Object = crate::wayland_objects::xdg_popup::XdgPopup;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Remove xdg_popup interface
@@ -6470,6 +6571,9 @@ pub mod wp_content_type_manager_v1 {
         const INTERFACE_NAME: &'static str = "wp_content_type_manager_v1";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WpContentTypeManagerV1Id {
+        type Object = crate::wayland_objects::wp_content_type_manager_v1::WpContentTypeManagerV1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the content type manager object
@@ -6518,6 +6622,9 @@ pub mod wp_content_type_v1 {
     impl Constants for crate::wayland_objects::wp_content_type_v1::WpContentTypeV1 {
         const INTERFACE_NAME: &'static str = "wp_content_type_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WpContentTypeV1Id {
+        type Object = crate::wayland_objects::wp_content_type_v1::WpContentTypeV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -6621,6 +6728,9 @@ pub mod wp_drm_lease_device_v1 {
     impl Constants for crate::wayland_objects::wp_drm_lease_device_v1::WpDrmLeaseDeviceV1 {
         const INTERFACE_NAME: &'static str = "wp_drm_lease_device_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WpDrmLeaseDeviceV1Id {
+        type Object = crate::wayland_objects::wp_drm_lease_device_v1::WpDrmLeaseDeviceV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -6746,6 +6856,9 @@ pub mod wp_drm_lease_connector_v1 {
         const INTERFACE_NAME: &'static str = "wp_drm_lease_connector_v1";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WpDrmLeaseConnectorV1Id {
+        type Object = crate::wayland_objects::wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy connector
@@ -6870,6 +6983,9 @@ pub mod wp_drm_lease_request_v1 {
         const INTERFACE_NAME: &'static str = "wp_drm_lease_request_v1";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WpDrmLeaseRequestV1Id {
+        type Object = crate::wayland_objects::wp_drm_lease_request_v1::WpDrmLeaseRequestV1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Request a connector for this lease
@@ -6934,6 +7050,9 @@ pub mod wp_drm_lease_v1 {
     impl Constants for crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1 {
         const INTERFACE_NAME: &'static str = "wp_drm_lease_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WpDrmLeaseV1Id {
+        type Object = crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7020,6 +7139,9 @@ pub mod ext_idle_notifier_v1 {
         const INTERFACE_NAME: &'static str = "ext_idle_notifier_v1";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for ExtIdleNotifierV1Id {
+        type Object = crate::wayland_objects::ext_idle_notifier_v1::ExtIdleNotifierV1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the manager
@@ -7079,6 +7201,9 @@ pub mod ext_idle_notification_v1 {
     impl Constants for crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1 {
         const INTERFACE_NAME: &'static str = "ext_idle_notification_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtIdleNotificationV1Id {
+        type Object = crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7146,6 +7271,9 @@ pub mod ext_session_lock_manager_v1 {
     impl Constants for crate::wayland_objects::ext_session_lock_manager_v1::ExtSessionLockManagerV1 {
         const INTERFACE_NAME: &'static str = "ext_session_lock_manager_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtSessionLockManagerV1Id {
+        type Object = crate::wayland_objects::ext_session_lock_manager_v1::ExtSessionLockManagerV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7232,6 +7360,9 @@ pub mod ext_session_lock_v1 {
     impl Constants for crate::wayland_objects::ext_session_lock_v1::ExtSessionLockV1 {
         const INTERFACE_NAME: &'static str = "ext_session_lock_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtSessionLockV1Id {
+        type Object = crate::wayland_objects::ext_session_lock_v1::ExtSessionLockV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7399,6 +7530,9 @@ pub mod ext_session_lock_surface_v1 {
         const INTERFACE_NAME: &'static str = "ext_session_lock_surface_v1";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for ExtSessionLockSurfaceV1Id {
+        type Object = crate::wayland_objects::ext_session_lock_surface_v1::ExtSessionLockSurfaceV1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the lock surface object
@@ -7516,6 +7650,10 @@ pub mod wp_fractional_scale_manager_v1 {
         const INTERFACE_NAME: &'static str = "wp_fractional_scale_manager_v1";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WpFractionalScaleManagerV1Id {
+        type Object =
+            crate::wayland_objects::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Unbind the fractional surface scale interface
@@ -7565,6 +7703,9 @@ pub mod wp_fractional_scale_v1 {
     impl Constants for crate::wayland_objects::wp_fractional_scale_v1::WpFractionalScaleV1 {
         const INTERFACE_NAME: &'static str = "wp_fractional_scale_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WpFractionalScaleV1Id {
+        type Object = crate::wayland_objects::wp_fractional_scale_v1::WpFractionalScaleV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7628,6 +7769,10 @@ pub mod wp_single_pixel_buffer_manager_v1 {
     {
         const INTERFACE_NAME: &'static str = "wp_single_pixel_buffer_manager_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WpSinglePixelBufferManagerV1Id {
+        type Object =
+            crate::wayland_objects::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7704,6 +7849,10 @@ pub mod wp_tearing_control_manager_v1 {
         const INTERFACE_NAME: &'static str = "wp_tearing_control_manager_v1";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WpTearingControlManagerV1Id {
+        type Object =
+            crate::wayland_objects::wp_tearing_control_manager_v1::WpTearingControlManagerV1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy tearing control factory object
@@ -7752,6 +7901,9 @@ pub mod wp_tearing_control_v1 {
     impl Constants for crate::wayland_objects::wp_tearing_control_v1::WpTearingControlV1 {
         const INTERFACE_NAME: &'static str = "wp_tearing_control_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WpTearingControlV1Id {
+        type Object = crate::wayland_objects::wp_tearing_control_v1::WpTearingControlV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7812,6 +7964,9 @@ pub mod xdg_activation_v1 {
     impl Constants for crate::wayland_objects::xdg_activation_v1::XdgActivationV1 {
         const INTERFACE_NAME: &'static str = "xdg_activation_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for XdgActivationV1Id {
+        type Object = crate::wayland_objects::xdg_activation_v1::XdgActivationV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7878,6 +8033,9 @@ pub mod xdg_activation_token_v1 {
     impl Constants for crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1 {
         const INTERFACE_NAME: &'static str = "xdg_activation_token_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for XdgActivationTokenV1Id {
+        type Object = crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -8008,6 +8166,9 @@ pub mod xwayland_shell_v1 {
         const INTERFACE_NAME: &'static str = "xwayland_shell_v1";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for XwaylandShellV1Id {
+        type Object = crate::wayland_objects::xwayland_shell_v1::XwaylandShellV1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the Xwayland shell object
@@ -8063,6 +8224,9 @@ pub mod xwayland_surface_v1 {
     impl Constants for crate::wayland_objects::xwayland_surface_v1::XwaylandSurfaceV1 {
         const INTERFACE_NAME: &'static str = "xwayland_surface_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for XwaylandSurfaceV1Id {
+        type Object = crate::wayland_objects::xwayland_surface_v1::XwaylandSurfaceV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -8140,6 +8304,9 @@ pub mod wp_cursor_shape_manager_v1 {
         const INTERFACE_NAME: &'static str = "wp_cursor_shape_manager_v1";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for WpCursorShapeManagerV1Id {
+        type Object = crate::wayland_objects::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the manager
@@ -8182,6 +8349,9 @@ pub mod wp_cursor_shape_device_v1 {
     impl Constants for crate::wayland_objects::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1 {
         const INTERFACE_NAME: &'static str = "wp_cursor_shape_device_v1";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WpCursorShapeDeviceV1Id {
+        type Object = crate::wayland_objects::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -8324,6 +8494,9 @@ pub mod zwp_tablet_manager_v2 {
         const INTERFACE_NAME: &'static str = "zwp_tablet_manager_v2";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for ZwpTabletManagerV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_manager_v2::ZwpTabletManagerV2;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Get the tablet seat
@@ -8365,6 +8538,9 @@ pub mod zwp_tablet_seat_v2 {
     impl Constants for crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2 {
         const INTERFACE_NAME: &'static str = "zwp_tablet_seat_v2";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpTabletSeatV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -8480,6 +8656,9 @@ pub mod zwp_tablet_tool_v2 {
     impl Constants for crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2 {
         const INTERFACE_NAME: &'static str = "zwp_tablet_tool_v2";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpTabletToolV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -9008,6 +9187,9 @@ pub mod zwp_tablet_v2 {
         const INTERFACE_NAME: &'static str = "zwp_tablet_v2";
         const INTERFACE_VERSION: u32 = 1;
     }
+    impl crate::object::IdToObject for ZwpTabletV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the tablet object
@@ -9132,6 +9314,9 @@ pub mod zwp_tablet_pad_ring_v2 {
     impl Constants for crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2 {
         const INTERFACE_NAME: &'static str = "zwp_tablet_pad_ring_v2";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpTabletPadRingV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -9298,6 +9483,9 @@ pub mod zwp_tablet_pad_strip_v2 {
     impl Constants for crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2 {
         const INTERFACE_NAME: &'static str = "zwp_tablet_pad_strip_v2";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpTabletPadStripV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -9482,6 +9670,9 @@ pub mod zwp_tablet_pad_group_v2 {
     impl Constants for crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2 {
         const INTERFACE_NAME: &'static str = "zwp_tablet_pad_group_v2";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpTabletPadGroupV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -9674,6 +9865,9 @@ pub mod zwp_tablet_pad_v2 {
     impl Constants for crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2 {
         const INTERFACE_NAME: &'static str = "zwp_tablet_pad_v2";
         const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpTabletPadV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -9895,6 +10089,9 @@ pub mod zxdg_output_manager_v1 {
         const INTERFACE_NAME: &'static str = "zxdg_output_manager_v1";
         const INTERFACE_VERSION: u32 = 3;
     }
+    impl crate::object::IdToObject for ZxdgOutputManagerV1Id {
+        type Object = crate::wayland_objects::zxdg_output_manager_v1::ZxdgOutputManagerV1;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_output_manager object
@@ -9939,6 +10136,9 @@ pub mod zxdg_output_v1 {
     impl Constants for crate::wayland_objects::zxdg_output_v1::ZxdgOutputV1 {
         const INTERFACE_NAME: &'static str = "zxdg_output_v1";
         const INTERFACE_VERSION: u32 = 3;
+    }
+    impl crate::object::IdToObject for ZxdgOutputV1Id {
+        type Object = crate::wayland_objects::zxdg_output_v1::ZxdgOutputV1;
     }
     #[derive(Debug)]
     pub enum Request {

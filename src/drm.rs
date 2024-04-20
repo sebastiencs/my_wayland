@@ -4,7 +4,7 @@ use std::{
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
 };
 
-use drm::control::FbCmd2Flags;
+use {drm::control::FbCmd2Flags, khronos_types::gl};
 
 use {
     drm::{
@@ -24,7 +24,6 @@ use crate::{
     egl::{EglContext, EglFrameBuffer, GlTexture, EGL},
     gbm::UseFlags,
     io_uring::ring::ReadWriteCompleted,
-    protocol_generated::WaylandId,
     runner::{AnyAction, Dispatcher, Model},
 };
 
@@ -36,6 +35,8 @@ pub struct Format {
     pub external_only_guess: bool,
     pub has_alpha: bool,
     pub wayland_id: u32,
+    pub gl_format: gl::GLint,
+    pub gl_type: gl::GLint,
 }
 
 pub static ARGB8888: &Format = &Format {
@@ -45,6 +46,8 @@ pub static ARGB8888: &Format = &Format {
     external_only_guess: false,
     has_alpha: true,
     wayland_id: 0,
+    gl_format: gl::BGRA_EXT,
+    gl_type: gl::UNSIGNED_BYTE,
 };
 
 pub static XRGB8888: &Format = &Format {
@@ -54,6 +57,8 @@ pub static XRGB8888: &Format = &Format {
     external_only_guess: false,
     has_alpha: false,
     wayland_id: 1,
+    gl_format: gl::BGRA_EXT,
+    gl_type: gl::UNSIGNED_BYTE,
 };
 
 pub static FORMATS: &[Format] = &[*ARGB8888, *XRGB8888];
@@ -409,8 +414,8 @@ impl Drm {
         dbg!(&buffers);
 
         let mode = in_use.connector.preferred_mode.as_ref().unwrap();
-
         let (primary_plane, _) = in_use.primary_plane();
+
         changes.add_property(
             dbg!(primary_plane.handle),
             dbg!(primary_plane.fb_id),

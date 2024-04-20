@@ -8,7 +8,7 @@ use crate::{
 
 #[derive(Debug)]
 pub struct WlDisplay {
-    pub id: WlDisplayId,
+    id: WlDisplayId,
 }
 
 impl Default for WlDisplay {
@@ -44,6 +44,7 @@ impl Object for WlDisplay {
             }
         }
     }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }

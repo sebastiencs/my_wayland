@@ -46,7 +46,7 @@ impl Global for WlOutputGlobal {
 
 #[derive(Debug)]
 pub struct WlOutput {
-    pub id: WlOutputId,
+    id: WlOutputId,
     drm_id: DrmId,
 }
 
@@ -62,6 +62,7 @@ impl Object for WlOutput {
             Release => todo!(),
         }
     }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }

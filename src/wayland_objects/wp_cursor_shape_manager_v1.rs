@@ -36,7 +36,7 @@ impl Global for WpCursorShapeManagerV1Global {
 
 #[derive(Debug)]
 pub struct WpCursorShapeManagerV1 {
-    pub id: WpCursorShapeManagerV1Id,
+    id: WpCursorShapeManagerV1Id,
 }
 
 impl WpCursorShapeManagerV1 {
@@ -59,6 +59,7 @@ impl Object for WpCursorShapeManagerV1 {
             GetTabletToolV2 { cursor_shape_device, tablet_tool } => todo!(),
         }
     }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }

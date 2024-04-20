@@ -1,15 +1,13 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     object::Object,
-    protocol_generated::{WaylandId, WlCallbackId},
+    protocol_generated::{wl_callback, WaylandId, WlCallbackId},
     state::State,
 };
 
-use crate::protocol_generated::wl_callback::*;
-
 #[derive(Debug)]
 pub struct WlCallback {
-    pub id: WlCallbackId,
+    id: WlCallbackId,
 }
 
 impl WlCallback {
@@ -19,7 +17,7 @@ impl WlCallback {
 
     pub fn done(&self, dispatcher: &mut ClientDispatcher) {
         let callback_data = self.id.into();
-        self.send_event(Event::Done { callback_data }, dispatcher);
+        self.send_event(wl_callback::Event::Done { callback_data }, dispatcher);
     }
 }
 

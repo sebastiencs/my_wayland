@@ -34,7 +34,7 @@ impl Global for WlSubcompositorGlobal {
 
 #[derive(Debug)]
 pub struct WlSubcompositor {
-    pub id: WlSubcompositorId,
+    id: WlSubcompositorId,
 }
 
 impl WlSubcompositor {
@@ -56,6 +56,7 @@ impl Object for WlSubcompositor {
             GetSubsurface { id, surface, parent } => todo!(),
         }
     }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }

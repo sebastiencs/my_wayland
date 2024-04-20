@@ -2,8 +2,9 @@ use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     globals::Global,
     object::{Object, Parser},
-    protocol_generated::{wl_seat, Constants, NewId, WaylandId, WlSeatId},
+    protocol_generated::{wl_keyboard, wl_seat, Constants, NewId, WaylandId, WlSeatId},
     state::State,
+    wayland_objects::wl_keyboard::WlKeyboard,
 };
 
 #[derive(Debug)]
@@ -40,7 +41,7 @@ impl Global for WlSeatGlobal {
 
 #[derive(Debug)]
 pub struct WlSeat {
-    pub id: WlSeatId,
+    id: WlSeatId,
 }
 
 impl WlSeat {
@@ -54,16 +55,30 @@ impl Object for WlSeat {
         self.id.into()
     }
 
-    fn on(&mut self, _: &mut Client, _: &mut State, req: RawRequest, _: &mut ClientDispatcher) {
+    fn on(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        req: RawRequest,
+        dispatcher: &mut ClientDispatcher,
+    ) {
         use wl_seat::Request::*;
 
         match Self::parse(req).unwrap() {
             GetPointer { id } => todo!(),
-            GetKeyboard { id } => todo!(),
+            GetKeyboard { id } => {
+                let wl_keyboard = WlKeyboard::new(id);
+
+                wl_keyboard.send_keymap(&state.xkb, dispatcher);
+                wl_keyboard.send_repeat_info(dispatcher);
+
+                client.insert_object(state, wl_keyboard);
+            }
             GetTouch { id } => todo!(),
             Release => todo!(),
         }
     }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }

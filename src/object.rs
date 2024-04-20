@@ -55,4 +55,17 @@ pub trait Parser: Constants {
 pub enum ParserError {
     Malformed,
     InvalidRequest,
+    MissingFileDescriptor,
+}
+
+pub trait IdToObject {
+    type Object: 'static;
+}
+
+impl<A, B> IdToObject for (A, B)
+where
+    A: IdToObject,
+    B: IdToObject
+{
+    type Object = (A::Object, B::Object);
 }

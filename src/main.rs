@@ -1,4 +1,4 @@
-#![feature(array_chunks, c_variadic, iter_array_chunks)]
+#![feature(array_chunks, c_variadic, iter_array_chunks, non_null_convenience)]
 #![allow(dead_code)]
 
 macro_rules! wayland_id {
@@ -184,6 +184,8 @@ fn main() {
 
     // log::info!("hello");
 
+    let xkb = xkb::Xkb::new();
+
     let mut globals = Globals::new();
     globals.initialize();
 
@@ -193,6 +195,7 @@ fn main() {
         drm: Default::default(),
         globals,
         egl,
+        xkb,
     };
 
     let dbus = dbus::Dbus::new().unwrap();

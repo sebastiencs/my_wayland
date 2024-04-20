@@ -1,6 +1,6 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
-    globals::{Global, GlobalName},
+    globals::Global,
     object::{Object, Parser},
     protocol_generated::{wp_presentation, Constants, NewId, WaylandId, WpPresentationId},
     state::State,
@@ -38,7 +38,7 @@ impl Global for WpPresentationGlobal {
 
 #[derive(Debug)]
 pub struct WpPresentation {
-    pub id: WpPresentationId,
+    id: WpPresentationId,
 }
 
 impl WpPresentation {
@@ -60,6 +60,7 @@ impl Object for WpPresentation {
             Feedback { surface, callback } => todo!(),
         }
     }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }

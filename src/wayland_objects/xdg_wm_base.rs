@@ -1,10 +1,13 @@
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
-    drm::{FORMATS, XRGB8888},
-    globals::{Global, GlobalName},
+    clients::{Client, ClientDispatcher, RawRequest},
+    globals::Global,
     object::{Object, Parser},
     protocol_generated::{xdg_wm_base, Constants, NewId, WaylandId, XdgWmBaseId},
     state::State,
+    wayland_objects::{
+        wl_surface::{Role, WlSurface},
+        xdg_surface::XdgSurface,
+    },
 };
 
 #[derive(Debug)]
@@ -26,7 +29,7 @@ impl Global for XdgWmBaseGlobal {
         state: &mut State,
         id: NewId,
         _version: u32,
-        dispatcher: &mut ClientDispatcher,
+        _dispatcher: &mut ClientDispatcher,
     ) {
         let id = XdgWmBaseId::from(id);
         client.insert_object(state, XdgWmBase { id });
@@ -35,7 +38,7 @@ impl Global for XdgWmBaseGlobal {
 
 #[derive(Debug)]
 pub struct XdgWmBase {
-    pub id: XdgWmBaseId,
+    id: XdgWmBaseId,
 }
 
 impl XdgWmBase {
@@ -49,16 +52,30 @@ impl Object for XdgWmBase {
         self.id.into()
     }
 
-    fn on(&mut self, _: &mut Client, _: &mut State, req: RawRequest, _: &mut ClientDispatcher) {
+    fn on(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        req: RawRequest,
+        _: &mut ClientDispatcher,
+    ) {
         use xdg_wm_base::Request::*;
 
         match Self::parse(req).unwrap() {
             Destroy => todo!(),
             CreatePositioner { id } => todo!(),
-            GetXdgSurface { id, surface } => todo!(),
+            GetXdgSurface { id, surface } => {
+                let wl_surface: &mut WlSurface = client.get_object(surface, state);
+                wl_surface.set_role(Role::XdgSurface).unwrap();
+                wl_surface.set_impl(id);
+
+                let xdg_surface = XdgSurface::new(id, surface);
+                client.insert_object(state, xdg_surface);
+            }
             Pong { serial } => todo!(),
         }
     }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }

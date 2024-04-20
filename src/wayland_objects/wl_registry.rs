@@ -7,7 +7,7 @@ use crate::{
 
 #[derive(Debug)]
 pub struct WlRegistry {
-    pub id: WlRegistryId,
+    id: WlRegistryId,
 }
 
 impl WlRegistry {
@@ -49,6 +49,7 @@ impl Object for WlRegistry {
             }
         }
     }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }

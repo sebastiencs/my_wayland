@@ -4,6 +4,7 @@ use crate::{
     object::{Object, Parser},
     protocol_generated::{Constants, NewId, WaylandId, WlCompositorId},
     state::State,
+    wayland_objects::wl_surface::WlSurface,
 };
 
 #[derive(Debug)]
@@ -34,7 +35,7 @@ impl Global for WlCompositorGlobal {
 
 #[derive(Debug)]
 pub struct WlCompositor {
-    pub id: WlCompositorId,
+    id: WlCompositorId,
 }
 
 impl WlCompositor {
@@ -48,14 +49,23 @@ impl Object for WlCompositor {
         self.id.into()
     }
 
-    fn on(&mut self, _: &mut Client, _: &mut State, req: RawRequest, _: &mut ClientDispatcher) {
+    fn on(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        req: RawRequest,
+        _: &mut ClientDispatcher,
+    ) {
         use crate::protocol_generated::wl_compositor::Request::*;
 
         match Self::parse(req).unwrap() {
-            CreateSurface { id } => todo!(),
+            CreateSurface { id } => {
+                client.insert_object(state, WlSurface::new(id));
+            }
             CreateRegion { id } => todo!(),
         }
     }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }

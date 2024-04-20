@@ -16,8 +16,8 @@ use crate::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted},
     },
-    object::{Object, ParserError},
-    protocol_generated::{wl_display, Constants, WaylandId},
+    object::{IdToObject, Object, ParserError},
+    protocol_generated::{wl_display, Array, Constants, WaylandId},
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     state::{ObjectId, State},
     udev::Udev,
@@ -145,13 +145,16 @@ pub struct Client {
     /// the key `WaylandId` is the id we share with the client
     /// the value `ObjectId` is an index in our `State::objects`
     /// So this `objects` is just used to lookup into `State::objects`, from the client `WaylandId`
+    // TODO: Replace `BTreeMap` with a `IndexMap` here ?
     objects: BTreeMap<WaylandId, ObjectId>,
     info: Option<ProcessInfo>,
+    pending_fds: VecDeque<RawFd>,
 }
 
 pub enum ClientAction {
     Start,
-    MsgReceived { request: RawRequest },
+    MsgReceived { request: RawRequest<'static> },
+    FdsReceived { fds: Box<[RawFd]> },
     Close,
 }
 
@@ -163,6 +166,7 @@ impl Client {
             reader_id: None,
             objects: BTreeMap::default(),
             info: None,
+            pending_fds: VecDeque::new(),
         }
     }
 
@@ -194,6 +198,26 @@ impl Client {
         let command = command.trim().to_string();
 
         self.info = Some(ProcessInfo { command, cred })
+    }
+
+    pub fn get_object<'a, O, K>(&self, id: K, state: &'a mut State) -> &'a mut O
+    where
+        K: Into<WaylandId>,
+        O: Object,
+    {
+        let id: WaylandId = id.into();
+        let obj_id = self.objects[&id];
+        state.objects[obj_id].as_any().downcast_mut().unwrap()
+    }
+
+    pub fn with_object<K, F, R>(&mut self, id: K, state: &mut State, fun: F) -> R
+    where
+        K: Into<WaylandId> + IdToObject,
+        F: FnOnce(&mut K::Object, &mut State, &mut Self) -> R,
+    {
+        let id: WaylandId = id.into();
+        let obj_id = self.objects[&id];
+        state.with_object(obj_id, |object, state| fun(object, state, self))
     }
 
     pub fn insert_object<'a, O: Object>(
@@ -239,11 +263,12 @@ impl<'a> ClientDispatcher<'a> {
         Self { dispatcher, client_fd: client.fd }
     }
 
-    pub fn send_event(&mut self, event: RawEvent) {
-        let action = IoUringAction::Write {
+    pub fn send_event(&mut self, mut event: RawEvent) {
+        let fds = event.take_fds();
+        let action = IoUringAction::Sendmsg {
             fd: self.client_fd,
-            offset: 0,
             buffer: event.into_bytes(),
+            fds,
             dispatch_to: Redispatcher::None,
         };
         self.dispatch(action);
@@ -281,13 +306,21 @@ impl Model for Client {
                 self.reader_id = Some(client_reader_id);
                 dispatcher.start_model(client_reader_id, client_reader);
             }
-            MsgReceived { request } => {
+            FdsReceived { fds } => {
+                self.pending_fds.extend(fds.into_iter());
+            }
+            MsgReceived { mut request } => {
                 // dbg!(&request, request.object_id());
                 // dbg!(request.object_id());
                 let obj_id = self.objects.get(&request.object_id()).unwrap();
 
+                let mut pending_fds = std::mem::take(&mut self.pending_fds);
+                request.fds = Some(&mut pending_fds);
+
                 let mut obj = state.objects.grab(*obj_id);
                 obj.on(self, state, request, &mut dispatcher);
+
+                self.pending_fds = pending_fds;
                 state.objects.release(obj);
             }
             Close => {
@@ -373,7 +406,7 @@ struct ClientReader {
 
 enum ClientReaderAction {
     Start,
-    ReadMsg { buffer: Box<[u8]> },
+    ReadMsg { buffer: Box<[u8]>, fds: Box<[RawFd]> },
     ErrorOnSocket { error: std::io::Error },
     Stop,
 }
@@ -409,7 +442,7 @@ impl ClientReader {
         false
     }
 
-    fn dispatch_read(&self, dispatcher: &mut Dispatcher) {
+    fn dispatch_recvmsg(&self, dispatcher: &mut Dispatcher) {
         dispatcher.dispatch(IoUringAction::Recvmsg {
             fd: self.fd,
             dispatch_to: Redispatcher::id(self.id, Self::on_recvmsg),
@@ -418,8 +451,8 @@ impl ClientReader {
 
     fn on_recvmsg(result: std::io::Result<RecvmsgCompleted>) -> AnyAction {
         match result {
-            Ok(RecvmsgCompleted { fd: _, buffer, fds: _ }) => {
-                AnyAction::from(ClientReaderAction::ReadMsg { buffer })
+            Ok(RecvmsgCompleted { fd: _, buffer, fds }) => {
+                AnyAction::from(ClientReaderAction::ReadMsg { buffer, fds })
             }
             Err(error) => AnyAction::from(ClientReaderAction::ErrorOnSocket { error }),
         }
@@ -445,19 +478,22 @@ impl Model for ClientReader {
 
         match action {
             Start => {
-                self.dispatch_read(dispatcher);
+                self.dispatch_recvmsg(dispatcher);
             }
-            ReadMsg { buffer } => {
+            ReadMsg { buffer, fds } => {
                 if self.is_eof(&buffer) {
                     self.dispatch_close(dispatcher);
                     return Ok(());
+                }
+                if !fds.is_empty() {
+                    dispatcher.dispatch_to(self.client_id, ClientAction::FdsReceived { fds });
                 }
                 self.read_buffer.append(&buffer);
                 loop {
                     let msg: &[u8] = match self.read_buffer.get_whole_message() {
                         Some(msg) => msg,
                         None => {
-                            self.dispatch_read(dispatcher);
+                            self.dispatch_recvmsg(dispatcher);
                             return Ok(());
                         }
                     };
@@ -488,6 +524,7 @@ pub struct RawEvent {
     pub object_id: u32,
     pub request_id: u16,
     pub arguments: Arguments,
+    fds: Vec<RawFd>,
 }
 
 pub trait EventWriter: Constants {
@@ -513,6 +550,7 @@ impl RawEvent {
                 // + 2 for object_id + (length | req_id) on serialization
                 args: VecDeque::with_capacity(nargs + 2),
             },
+            fds: Vec::default(),
         }
     }
 
@@ -544,46 +582,35 @@ impl RawEvent {
         let len: u32 = s.len().try_into().unwrap();
         self.push(len + 1); // +1 for terminating null byte
 
-        // let start = self.arguments.args.len();
-
         let null_byte = std::iter::once(0);
         let mut iter = s.as_bytes().iter().copied().chain(null_byte).array_chunks();
         for bytes in &mut iter {
             self.push(u32::from_ne_bytes(bytes));
         }
-
-        // let mut nremainder = 0;
-
-        if let Some(remainder) = iter.into_remainder().as_ref().map(IntoIter::as_slice) {
+        if let Some(remainder) = iter.into_remainder() {
+            let remainder = remainder.as_slice();
             if !remainder.is_empty() {
                 let mut bytes = [0u8; 4];
-                // nremainder = remainder.len();
                 bytes[..remainder.len()].copy_from_slice(remainder);
                 self.push(u32::from_ne_bytes(bytes));
             }
         }
-
-        // eprintln!(
-        //     "string pushed s.len={:?} n_u32_pushed={:?} nremainder={:?}",
-        //     s.len(),
-        //     self.arguments.args.len() - start,
-        //     nremainder
-        // );
-        // let bytes = self.clone().into_bytes();
-        // let req: RawRequest = (&*bytes).try_into().unwrap();
-        // eprintln!("string parsed = {:?}", req);
     }
 
     pub fn fixed(&mut self, _fixed: f32) {
         todo!()
     }
 
-    pub fn array(&mut self, _array: crate::protocol_generated::Array) {
-        todo!()
+    pub fn array(&mut self, array: Array) {
+        let len: u32 = array.len().try_into().unwrap();
+        self.push(len * 4); // len in number of bytes
+        for word in array.iter() {
+            self.push(*word);
+        }
     }
 
-    pub fn fd(&mut self, _fd: RawFd) {
-        todo!()
+    pub fn fd(&mut self, fd: RawFd) {
+        self.fds.push(fd)
     }
 
     pub fn into_bytes(self) -> Box<[u8]> {
@@ -608,24 +635,37 @@ impl RawEvent {
 
         bytes
     }
+
+    fn take_fds(&mut self) -> Box<[RawFd]> {
+        std::mem::take(&mut self.fds).into_boxed_slice()
+    }
 }
 
-#[derive(Clone, Debug, derive_more::Deref, derive_more::DerefMut)]
-pub struct RawRequest {
+#[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
+pub struct RawRequest<'a> {
     pub object_id: u32,
     pub request_id: u16,
     #[deref]
     #[deref_mut]
     pub arguments: Arguments,
+    pub fds: Option<&'a mut VecDeque<RawFd>>,
 }
 
-impl RawRequest {
+impl RawRequest<'_> {
     pub fn object_id(&self) -> WaylandId {
         WaylandId::from(self.object_id)
     }
+
+    pub fn fd(&mut self) -> Result<RawFd, ParserError> {
+        self.fds
+            .as_mut()
+            .unwrap()
+            .pop_front()
+            .ok_or(ParserError::MissingFileDescriptor)
+    }
 }
 
-impl TryFrom<&[u8]> for RawRequest {
+impl TryFrom<&[u8]> for RawRequest<'static> {
     type Error = ();
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
@@ -649,7 +689,12 @@ impl TryFrom<&[u8]> for RawRequest {
             .map(u32::from_ne_bytes)
             .collect();
 
-        Ok(Self { object_id, request_id, arguments: Arguments { args } })
+        Ok(Self {
+            object_id,
+            request_id,
+            arguments: Arguments { args },
+            fds: None,
+        })
     }
 }
 
@@ -708,6 +753,7 @@ impl Arguments {
     }
 
     pub fn fd(&mut self) -> Result<RawFd, ParserError> {
-        todo!()
+        // Implemented by `RawRequest`
+        unimplemented!()
     }
 }

@@ -34,7 +34,7 @@ impl Global for XdgActivationV1Global {
 
 #[derive(Debug)]
 pub struct XdgActivationV1 {
-    pub id: XdgActivationV1Id,
+    id: XdgActivationV1Id,
 }
 
 impl XdgActivationV1 {
@@ -57,6 +57,7 @@ impl Object for XdgActivationV1 {
             Activate { token, surface } => todo!(),
         }
     }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }

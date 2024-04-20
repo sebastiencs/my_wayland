@@ -8,7 +8,7 @@ use std::{
 use {libc::cmsghdr, log::error};
 
 use crate::{
-    io_uring::ring::{Operation, PollCompleted},
+    io_uring::ring::{Operation, PollCompleted, SendmsgData},
     runner::{Dispatcher, Model, Redispatcher},
     state::State,
 };
@@ -16,7 +16,7 @@ use crate::{
 use super::{
     ring::{
         AcceptCompleted, Completed, IoUring, ReadOrWrite, ReadWriteCompleted, RecvmsgCompleted,
-        RecvmsgData, RingId,
+        RecvmsgData, RingId, SendmsgCompleted,
     },
     types::empty_msghdr,
 };
@@ -39,6 +39,12 @@ pub enum IoUringAction {
     Recvmsg {
         fd: RawFd,
         dispatch_to: Redispatcher<std::io::Result<RecvmsgCompleted>>,
+    },
+    Sendmsg {
+        fd: RawFd,
+        buffer: Box<[u8]>,
+        fds: Box<[RawFd]>,
+        dispatch_to: Redispatcher<std::io::Result<SendmsgCompleted>>,
     },
     Accept {
         fd: RawFd,
@@ -72,6 +78,13 @@ impl std::fmt::Debug for IoUringAction {
             Self::Recvmsg { fd, dispatch_to } => f
                 .debug_struct("Recvmsg")
                 .field("fd", fd)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
+            Self::Sendmsg { fd, dispatch_to, buffer, fds } => f
+                .debug_struct("Sendmsg")
+                .field("fd", fd)
+                .field("buffer_len", &buffer.len())
+                .field("fds", fds)
                 .field("dispatch_to", dispatch_to)
                 .finish(),
             Self::Accept { fd, dispatch_to } => f
@@ -190,6 +203,26 @@ impl Model for IoUringState {
                 data.msghdr.msg_controllen = data.buffer_aux.len();
                 self.push_op(Operation::Recvmsg { id, fd, data, dispatch_to });
             }
+            IoUringAction::Sendmsg { fd, buffer, fds, dispatch_to } => {
+                let id = self.next_id();
+                let buffer_aux = write_fds(&*fds);
+                let mut data = Box::new(SendmsgData {
+                    iovec: libc::iovec {
+                        iov_base: buffer.as_ptr() as *mut _,
+                        iov_len: buffer.len(),
+                    },
+                    msghdr: empty_msghdr(),
+                    buffer_aux,
+                    buffer,
+                });
+                data.msghdr.msg_iov = &data.iovec as *const _ as *mut _;
+                data.msghdr.msg_iovlen = 1;
+                if !data.buffer_aux.is_empty() {
+                    data.msghdr.msg_control = data.buffer_aux.as_ptr() as *mut _;
+                    data.msghdr.msg_controllen = data.buffer_aux.len();
+                }
+                self.push_op(Operation::Sendmsg { id, fd, data, dispatch_to });
+            }
             IoUringAction::Accept { fd, dispatch_to } => {
                 let id = self.next_id();
                 self.push_op(Operation::Accept { id, fd, dispatch_to });
@@ -258,6 +291,9 @@ impl IoUringState {
                     .into();
                 dispatcher.redispatch_to(to, Ok(RecvmsgCompleted { fd, buffer, fds }));
             }
+            Operation::Sendmsg { id: _, fd, data: _, dispatch_to: to } => {
+                dispatcher.redispatch_to(to, Ok(SendmsgCompleted { fd }));
+            }
             Operation::Accept { id: _, fd, dispatch_to: to } => {
                 let new_client: RawFd = result;
                 dispatcher.redispatch_to(to, Ok(AcceptCompleted { new_client, fd }));
@@ -301,12 +337,37 @@ impl IoUringState {
     }
 }
 
-fn read_fds(mut data: &[u8]) -> std::io::Result<Vec<RawFd>> {
-    fn align(size: usize) -> usize {
-        const ALIGN: usize = std::mem::size_of::<usize>() - 1;
-        (size + ALIGN) & !ALIGN
+const CMSG_HEADER_LENGTH: usize = 16;
+
+fn align(size: usize) -> usize {
+    size.next_multiple_of(std::mem::size_of::<usize>())
+}
+
+fn write_fds(fds: &[RawFd]) -> Box<[u8]> {
+    if fds.is_empty() {
+        return Box::new([]);
     }
 
+    let header = cmsghdr {
+        cmsg_len: CMSG_HEADER_LENGTH + align(std::mem::size_of_val(fds)),
+        cmsg_level: libc::SOL_SOCKET,
+        cmsg_type: libc::SCM_RIGHTS,
+    };
+    let mut bytes = Vec::with_capacity(header.cmsg_len);
+
+    // Write header
+    bytes.extend(header.cmsg_len.to_ne_bytes());
+    bytes.extend(header.cmsg_level.to_ne_bytes());
+    bytes.extend(header.cmsg_type.to_ne_bytes());
+    // write fds
+    bytes.extend(fds.iter().copied().flat_map(i32::to_ne_bytes));
+    // paddding to alignment
+    bytes.extend(std::iter::repeat(0).take(header.cmsg_len - bytes.len()));
+
+    bytes.into_boxed_slice()
+}
+
+fn read_fds(mut data: &[u8]) -> std::io::Result<Vec<RawFd>> {
     let mut fds = Vec::default();
 
     while !data.is_empty() {
@@ -319,7 +380,8 @@ fn read_fds(mut data: &[u8]) -> std::io::Result<Vec<RawFd>> {
 
         let chunks = msg_data
             .array_chunks::<4>()
-            .map(|chunk| i32::from_ne_bytes(*chunk));
+            .copied()
+            .map(i32::from_ne_bytes);
         fds.extend(chunks);
     }
 
@@ -329,14 +391,13 @@ fn read_fds(mut data: &[u8]) -> std::io::Result<Vec<RawFd>> {
 fn read_cmsg(data: &[u8]) -> std::io::Result<(cmsghdr, &[u8])> {
     use std::io::ErrorKind::InvalidData;
 
-    const HEADER_LENGTH: usize = 16;
     static_assertions::assert_eq_size!(usize, libc::size_t);
     static_assertions::assert_eq_size!(i32, libc::c_int);
 
     let read_n = |range: Range<usize>| -> std::io::Result<&[u8]> {
         data.get(range).ok_or_else(|| InvalidData.into())
     };
-    if data.len() < HEADER_LENGTH {
+    if data.len() < CMSG_HEADER_LENGTH {
         return Err(InvalidData.into());
     }
     let header = cmsghdr {
@@ -344,10 +405,10 @@ fn read_cmsg(data: &[u8]) -> std::io::Result<(cmsghdr, &[u8])> {
         cmsg_level: i32::from_ne_bytes(read_n(8..12)?.try_into().unwrap()),
         cmsg_type: i32::from_ne_bytes(read_n(12..16)?.try_into().unwrap()),
     };
-    if header.cmsg_len < HEADER_LENGTH {
+    if header.cmsg_len < CMSG_HEADER_LENGTH {
         return Err(InvalidData.into());
     }
-    let msg = read_n(HEADER_LENGTH..header.cmsg_len)?;
+    let msg = read_n(CMSG_HEADER_LENGTH..header.cmsg_len)?;
 
     Ok((header, msg))
 }

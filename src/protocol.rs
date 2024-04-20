@@ -248,6 +248,20 @@ fn write_constants(f: &mut impl Write, interface: &Interface) -> std::io::Result
     writeln!(f, "    const INTERFACE_NAME: &'static str = \"{}\";", interface.name)?;
     writeln!(f, "    const INTERFACE_VERSION: u32 = {};", interface.version)?;
     writeln!(f, "  }}")?;
+
+    writeln!(
+        f,
+        "  impl crate::object::IdToObject for {} {{",
+        interface_name_to_id(&interface.name),
+    )?;
+    writeln!(
+        f,
+        "    type Object = crate::wayland_objects::{}::{};",
+        interface.name,
+        interface.name.to_upper_camel_case()
+    )?;
+    writeln!(f, "  }}")?;
+
     Ok(())
 }
 
@@ -319,8 +333,11 @@ pub fn gen() -> std::io::Result<()> {
     writeln!(f, "pub struct WaylandId(u32);")?;
     writeln!(f, "{}", derive_str)?;
     writeln!(f, "pub struct NewId(u32);")?;
+
+    let derive_str =
+        "#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From, derive_more::Into, derive_more::Deref)]";
     writeln!(f, "{}", derive_str)?;
-    writeln!(f, "pub struct Array;\n")?;
+    writeln!(f, "pub struct Array(pub Vec<u32>);\n")?;
 
     writeln!(f, "wayland_id! {{")?;
     for protocol in &protocols {

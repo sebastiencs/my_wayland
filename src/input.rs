@@ -137,20 +137,20 @@ pub struct Input {
     device: input::Device,
 }
 
+#[derive(derive_more::Deref, derive_more::From)]
+pub struct ForeignStr<'a>(&'a std::ffi::CStr);
+impl<'a> Drop for ForeignStr<'a> {
+    fn drop(&mut self) {
+        unsafe { libc::free(self.as_ptr() as *mut _) }
+    }
+}
+
 unsafe extern "C" fn log_handler(
     _libinput: *mut input::ffi::libinput,
     priority: input::ffi::libinput_log_priority,
     format: *const libc::c_char,
     args: std::ffi::VaList,
 ) {
-    #[derive(derive_more::Deref, derive_more::From)]
-    struct ForeignStr<'a>(&'a std::ffi::CStr);
-    impl<'a> Drop for ForeignStr<'a> {
-        fn drop(&mut self) {
-            unsafe { libc::free(self.as_ptr() as *mut _) }
-        }
-    }
-
     extern "C" {
         fn vasprintf(
             strp: *mut *mut libc::c_char,

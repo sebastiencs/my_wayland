@@ -1,14 +1,19 @@
+pub mod wl_buffer;
 pub mod wl_callback;
 pub mod wl_compositor;
 pub mod wl_display;
+pub mod wl_keyboard;
 pub mod wl_output;
 pub mod wl_registry;
 pub mod wl_seat;
 pub mod wl_shm;
+pub mod wl_shm_pool;
 pub mod wl_subcompositor;
+pub mod wl_surface;
 pub mod wp_cursor_shape_manager_v1;
 pub mod wp_presentation;
 pub mod xdg_activation_v1;
+pub mod xdg_surface;
 pub mod xdg_wm_base;
 pub mod zxdg_output_manager_v1;
 
@@ -24,19 +29,21 @@ macro_rules! fake_obj {
     )+)
 }
 
+pub use xdg_surface::xdg_toplevel;
+
 fake_obj! {
-    { wl_shm_pool, WlShmPool },
-    { wl_buffer, WlBuffer },
+    // { wl_shm_pool, WlShmPool },
+    // { wl_buffer, WlBuffer },
     { wl_data_offer, WlDataOffer },
     { wl_data_source, WlDataSource },
     { wl_data_device, WlDataDevice },
     { wl_data_device_manager, WlDataDeviceManager },
     { wl_shell, WlShell },
     { wl_shell_surface, WlShellSurface },
-    { wl_surface, WlSurface },
+    // { wl_surface, WlSurface },
     // { wl_seat, WlSeat },
     { wl_pointer, WlPointer },
-    { wl_keyboard, WlKeyboard },
+    // { wl_keyboard, WlKeyboard },
     { wl_touch, WlTouch },
     // { wl_output, WlOutput },
     { wl_region, WlRegion },
@@ -48,8 +55,8 @@ fake_obj! {
     { wp_viewport, WpViewport },
     // { xdg_wm_base, XdgWmBase },
     { xdg_positioner, XdgPositioner },
-    { xdg_surface, XdgSurface },
-    { xdg_toplevel, XdgToplevel },
+    // { xdg_surface, XdgSurface },
+    // { xdg_toplevel, XdgToplevel },
     { xdg_popup, XdgPopup },
     { wp_content_type_manager_v1, WpContentTypeManagerV1 },
     { wp_content_type_v1, WpContentTypeV1 },

@@ -20,6 +20,7 @@ use crate::{
     dmabuf::DmaBuf,
     drm::{DrmFd, Format, Modifier, FORMATS_MAP},
     gbm::GbmDevice,
+    wayland_objects::wl_shm_pool::SliceSharedMemory,
 };
 
 const EGL_PLATFORM_GBM_KHR: u32 = 0x31D7;
@@ -410,7 +411,7 @@ impl EglImage {
 
 #[derive(Debug)]
 pub struct GlTexture {
-    image: EglImage,
+    image: Option<EglImage>,
     texture: gl::Uint,
 }
 
@@ -435,7 +436,41 @@ impl GlTexture {
             gl::BindTexture(target, 0);
             texture
         };
-        Ok(GlTexture { image, texture })
+        Ok(GlTexture { image: Some(image), texture })
+    }
+
+    pub fn import_shm(
+        mem: SliceSharedMemory,
+        width: usize,
+        height: usize,
+        stride: usize,
+        format: &Format,
+    ) -> Result<GlTexture, ()> {
+        let target = gl::TEXTURE_2D as gl::Enum;
+        let texture = unsafe {
+            let mut texture = 0;
+            gl::GenTextures(1, &mut texture);
+            gl::BindTexture(target, texture);
+            gl::TexParameteri(target, gl::TEXTURE_WRAP_S as _, gl::CLAMP_TO_EDGE);
+            gl::TexParameteri(target, gl::TEXTURE_WRAP_T as _, gl::CLAMP_TO_EDGE);
+            let param = stride as u32 / format.bpp;
+            gl::PixelStorei(gl::UNPACK_ROW_LENGTH_EXT as _, param as i32);
+            gl::TexImage2D(
+                target,
+                0,
+                format.gl_format,
+                width as i32,
+                height as i32,
+                0,
+                format.gl_format as _,
+                format.gl_type as _,
+                mem.as_ptr() as _,
+            );
+            gl::PixelStorei(gl::UNPACK_ROW_LENGTH_EXT as _, 0);
+            gl::BindTexture(target, 0);
+            texture
+        };
+        Ok(Self { image: None, texture })
     }
 }
 

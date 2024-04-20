@@ -36,7 +36,7 @@ impl Global for ZxdgOutputManagerV1Global {
 
 #[derive(Debug)]
 pub struct ZxdgOutputManagerV1 {
-    pub id: ZxdgOutputManagerV1Id,
+    id: ZxdgOutputManagerV1Id,
 }
 
 impl ZxdgOutputManagerV1 {
@@ -58,6 +58,7 @@ impl Object for ZxdgOutputManagerV1 {
             GetXdgOutput { id, output } => todo!(),
         }
     }
+
     fn as_any(&mut self) -> &mut dyn std::any::Any {
         self
     }
