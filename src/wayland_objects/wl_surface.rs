@@ -62,18 +62,13 @@ impl Object for WlSurface {
             SetInputRegion { region } => todo!(),
             Commit => {
                 let xdg_surface_id = self.impl_id.unwrap();
-                client.with_object(xdg_surface_id, state, |xdg_surface, state, client| {
-                    xdg_surface.on_commit(client, state, dispatcher);
-                });
+                let mut xdg_surface = client.grab_object(xdg_surface_id, state);
+                xdg_surface.on_commit(client, state, dispatcher);
             }
             SetBufferTransform { transform } => todo!(),
             SetBufferScale { scale } => todo!(),
             DamageBuffer { x, y, width, height } => todo!(),
             Offset { x, y } => todo!(),
         }
-    }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 }

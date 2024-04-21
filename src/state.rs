@@ -3,11 +3,12 @@ use crate::{
     egl::EGL,
     globals::{Global, Globals},
     input::Input,
+    object::Object,
     protocol_generated::WaylandId,
     xkb::Xkb,
 };
 
-use {crate::object::Object, std::marker::PhantomData};
+use std::{any::Any, marker::PhantomData, ptr::NonNull};
 
 #[derive(Debug)]
 enum ValueOrEmpty<V> {
@@ -19,7 +20,24 @@ enum ValueOrEmpty<V> {
 pub struct IndexMap<K, V> {
     map: Vec<ValueOrEmpty<V>>,
     next_empty: Option<u32>,
-    _phantom: PhantomData<K>,
+    ngrabbed: usize,
+    /// `*mut ()` to make us !Sync and !Send
+    _phantom: PhantomData<(K, *mut ())>,
+}
+
+impl<K, V> Drop for IndexMap<K, V> {
+    fn drop(&mut self) {
+        if self.ngrabbed == 0 {
+            return;
+        }
+        // Abort when there are still grabbed items
+        // Or the grabbed items will have invalid pointer to our `IndexMap`
+        eprintln!("ABORT: Dropped `IndexMap` with remaining `Grab` alive");
+        eprintln!("ABORT: K={}", std::any::type_name::<K>());
+        eprintln!("ABORT: V={}", std::any::type_name::<V>());
+        // Abort because we cannot recover
+        std::process::abort();
+    }
 }
 
 impl<K, V> std::ops::Index<K> for IndexMap<K, V>
@@ -44,12 +62,90 @@ where
     }
 }
 
-#[derive(derive_more::Deref, derive_more::DerefMut)]
-pub struct Grab<K, V> {
+#[derive(Debug)]
+pub struct Grab<K, V>
+where
+    K: Into<usize> + Copy,
+{
     key: K,
-    #[deref]
-    #[deref_mut]
-    value: V,
+    // Store the value in an `Option` so we can `take` it during drop and
+    // in `GrabbedObject`
+    value: Option<V>,
+    /// Pointer to our `IndexMap`, to re-insert the value inside it.
+    /// We know that the pointer will always be valid because:
+    /// - `IndexMap::grab` is taking a `Box<Self>` as self, so `self` is a stable pointer:
+    ///   The `IndexMap` will not change memory location after creating a `Grab`.
+    /// - `IndexMap::drop` ensure that there is no remaining `Grab` alive
+    /// - `IndexMap` and `Grab` are !Synd and !Send
+    map: NonNull<IndexMap<K, V>>,
+}
+
+static_assertions::assert_not_impl_all!(IndexMap<usize, usize>: Send, Sync);
+static_assertions::assert_not_impl_all!(Grab<usize, usize>: Send, Sync);
+
+impl<K, V> std::ops::Deref for Grab<K, V>
+where
+    K: Into<usize> + Copy,
+{
+    type Target = V;
+
+    fn deref(&self) -> &Self::Target {
+        self.value.as_ref().unwrap()
+    }
+}
+
+impl<K, V> std::ops::DerefMut for Grab<K, V>
+where
+    K: Into<usize> + Copy,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.value.as_mut().unwrap()
+    }
+}
+
+impl<K, V> Drop for Grab<K, V>
+where
+    K: Into<usize> + Copy,
+{
+    fn drop(&mut self) {
+        let Self { key, value, map } = self;
+        let value = value.take().unwrap();
+
+        // Safety: See doc in `Grab`
+        let indexmap: &mut IndexMap<K, V> = unsafe { map.as_mut() };
+        indexmap.release(*key, value);
+    }
+}
+
+/// Small helper structure to downcast `dyn Object` into their concrete types
+pub struct GrabbedObject<O: Object> {
+    value: Option<Box<O>>,
+    grabbed: Grab<ObjectId, Box<dyn Object>>,
+    _phantom: PhantomData<O>,
+}
+impl<O: Object> Drop for GrabbedObject<O> {
+    fn drop(&mut self) {
+        self.grabbed.value = Some(self.value.take().unwrap());
+    }
+}
+impl<O: Object> GrabbedObject<O> {
+    pub fn new(mut grabbed: Grab<ObjectId, Box<dyn Object>>) -> Self {
+        let value: Box<dyn Object> = grabbed.value.take().unwrap();
+        let value: Box<dyn Any> = value.into_any();
+        let value: Box<O> = value.downcast().unwrap();
+        Self { value: Some(value), grabbed, _phantom: PhantomData }
+    }
+}
+impl<O: Object> std::ops::Deref for GrabbedObject<O> {
+    type Target = O;
+    fn deref(&self) -> &Self::Target {
+        self.value.as_ref().unwrap()
+    }
+}
+impl<O: Object> std::ops::DerefMut for GrabbedObject<O> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.value.as_mut().unwrap()
+    }
 }
 
 impl<K, V> std::fmt::Debug for IndexMap<K, V>
@@ -72,6 +168,7 @@ impl<K, V> Default for IndexMap<K, V> {
         Self {
             map: Vec::with_capacity(128),
             next_empty: None,
+            ngrabbed: 0,
             _phantom: Default::default(),
         }
     }
@@ -104,6 +201,21 @@ where
         K::from(empty_index as usize)
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (K, &V)> {
+        self.map.iter().enumerate().filter_map(|(index, v)| {
+            let key: K = index.into();
+            let ValueOrEmpty::Value(value) = v else {
+                return None;
+            };
+            Some((key, value))
+        })
+    }
+}
+
+impl<K, V> IndexMap<K, V>
+where
+    K: Into<usize> + Copy,
+{
     pub fn remove(&mut self, key: K) -> Option<V> {
         let index: usize = key.into();
         let entry = self.map.get_mut(index)?;
@@ -119,17 +231,8 @@ where
         Some(value)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (K, &V)> {
-        self.map.iter().enumerate().filter_map(|(index, v)| {
-            let key: K = index.into();
-            let ValueOrEmpty::Value(value) = v else {
-                return None;
-            };
-            Some((key, value))
-        })
-    }
-
-    pub fn grab<Key: Into<K>>(&mut self, key: Key) -> Grab<K, V> {
+    /// NOTE: Allow grabbing only on `Box<Self>`, so that self is a stable pointer
+    pub fn grab<Key: Into<K>>(self: &mut Box<Self>, key: Key) -> Grab<K, V> {
         let key: K = key.into();
         let index: usize = key.into();
         let entry = self.map.get_mut(index).unwrap();
@@ -138,13 +241,12 @@ where
             ValueOrEmpty::Value(value) => value,
             _ => panic!("invalid state"),
         };
+        self.ngrabbed = self.ngrabbed.checked_add(1).unwrap();
 
-        Grab { key, value }
+        Grab { key, value: Some(value), map: NonNull::from(&mut **self) }
     }
 
-    pub fn release(&mut self, grabbed: Grab<K, V>) {
-        let Grab { key, value } = grabbed;
-
+    fn release(&mut self, key: K, value: V) {
         let index: usize = key.into();
         let entry = self.map.get_mut(index).unwrap();
 
@@ -152,16 +254,16 @@ where
         let ValueOrEmpty::Grabbed = std::mem::replace(entry, value) else {
             panic!("invalid state");
         };
+
+        self.ngrabbed = self.ngrabbed.checked_sub(1).unwrap();
     }
 
-    pub fn with<F, R>(&mut self, key: K, fun: F) -> R
+    pub fn with<F, R>(self: &mut Box<Self>, key: K, fun: F) -> R
     where
         F: FnOnce(&mut Grab<K, V>) -> R,
     {
         let mut grabbed = self.grab(key);
-        let result = fun(&mut grabbed);
-        self.release(grabbed);
-        result
+        fun(&mut grabbed)
     }
 
     pub fn get(&self, key: K) -> &V
@@ -199,7 +301,7 @@ index_map_id!(InputId);
 index_map_id!(DrmId);
 
 pub struct State {
-    pub objects: IndexMap<ObjectId, Box<dyn Object>>,
+    pub objects: Box<IndexMap<ObjectId, Box<dyn Object>>>,
     pub inputs: IndexMap<InputId, Input>,
     pub drm: IndexMap<DrmId, Drm>,
     pub globals: Globals,
@@ -216,28 +318,24 @@ impl State {
     pub fn remove_object(&mut self, object_id: ObjectId) -> Box<dyn Object> {
         self.objects.remove(object_id).unwrap()
     }
-    pub fn with_object<O, F, R>(&mut self, object_id: ObjectId, fun: F) -> R
-    where
-        F: FnOnce(&mut O, &mut Self) -> R,
-        O: 'static,
-    {
-        let mut object = self.objects.grab(object_id);
-        let object_ref = object.as_any().downcast_mut::<O>().unwrap();
-        let result = fun(object_ref, self);
-        self.objects.release(object);
-        result
-    }
 
     pub fn insert_global(&mut self, global: Box<dyn Global>) {
         self.globals.insert(global);
     }
-    pub fn with_global<F, R>(&mut self, global_name: u32, fun: F) -> R
-    where
-        F: FnOnce(&mut Box<dyn Global>, &mut Self) -> R,
-    {
-        let mut global = self.globals.map.grab(global_name);
-        let result = fun(&mut *global, self);
-        self.globals.map.release(global);
-        result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[ignore]
+    #[test]
+    #[should_panic]
+    fn indexmap_dropped() {
+        let mut map = Box::new(IndexMap::<usize, usize>::default());
+        let key = map.insert(10);
+        let grabbed = map.grab(key);
+        std::mem::drop(map);
+        dbg!(key, grabbed);
     }
 }

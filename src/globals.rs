@@ -12,7 +12,7 @@ use crate::{
 };
 
 pub struct Globals {
-    pub map: IndexMap<GlobalName, Box<dyn Global>>,
+    pub map: Box<IndexMap<GlobalName, Box<dyn Global>>>,
     current_name: u32,
 }
 
@@ -39,7 +39,7 @@ pub trait Global {
 
 impl Globals {
     pub fn new() -> Self {
-        Self { map: IndexMap::default(), current_name: 1 }
+        Self { map: Box::default(), current_name: 1 }
     }
 
     pub fn initialize(&mut self) {

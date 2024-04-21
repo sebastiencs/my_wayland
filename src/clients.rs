@@ -19,7 +19,7 @@ use crate::{
     object::{IdToObject, Object, ParserError},
     protocol_generated::{wl_display, Array, Constants, WaylandId},
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
-    state::{ObjectId, State},
+    state::{Grab, GrabbedObject, ObjectId, State},
     udev::Udev,
     wayland_objects::wl_display::WlDisplay,
 };
@@ -200,24 +200,24 @@ impl Client {
         self.info = Some(ProcessInfo { command, cred })
     }
 
-    pub fn get_object<'a, O, K>(&self, id: K, state: &'a mut State) -> &'a mut O
-    where
-        K: Into<WaylandId>,
-        O: Object,
-    {
-        let id: WaylandId = id.into();
-        let obj_id = self.objects[&id];
-        state.objects[obj_id].as_any().downcast_mut().unwrap()
-    }
-
-    pub fn with_object<K, F, R>(&mut self, id: K, state: &mut State, fun: F) -> R
+    pub fn get_object<'a, K>(&self, id: K, state: &'a mut State) -> &'a mut K::Object
     where
         K: Into<WaylandId> + IdToObject,
-        F: FnOnce(&mut K::Object, &mut State, &mut Self) -> R,
     {
         let id: WaylandId = id.into();
         let obj_id = self.objects[&id];
-        state.with_object(obj_id, |object, state| fun(object, state, self))
+        state.objects[obj_id].as_any_mut().downcast_mut().unwrap()
+    }
+
+    pub fn grab_object<K>(&self, id: K, state: &mut State) -> GrabbedObject<K::Object>
+    where
+        K: Into<WaylandId> + IdToObject,
+        K::Object: Object,
+    {
+        let id: WaylandId = id.into();
+        let obj_id = self.objects[&id];
+        let grabbed = state.objects.grab(obj_id);
+        GrabbedObject::new(grabbed)
     }
 
     pub fn insert_object<'a, O: Object>(
@@ -228,7 +228,7 @@ impl Client {
         let (wayland_id, object_id) = state.insert_object(object);
         self.objects.insert(wayland_id, object_id);
         let object: &mut O = state.objects[object_id]
-            .as_any()
+            .as_any_mut()
             .downcast_mut::<O>()
             .unwrap();
         ((wayland_id, object_id), object)
@@ -286,7 +286,7 @@ impl Model for Client {
         action: ClientAction,
         dispatcher: &mut Dispatcher,
     ) -> Result<(), ()> {
-        use {crate::wayland_objects::wl_display::WlDisplay, ClientAction::*};
+        use ClientAction::*;
 
         let mut dispatcher = ClientDispatcher::make(self, dispatcher);
 
@@ -321,7 +321,6 @@ impl Model for Client {
                 obj.on(self, state, request, &mut dispatcher);
 
                 self.pending_fds = pending_fds;
-                state.objects.release(obj);
             }
             Close => {
                 log::info!("client_id={:?} closed", self.id);

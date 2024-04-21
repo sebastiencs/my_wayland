@@ -42,15 +42,11 @@ impl Object for WlRegistry {
     ) {
         match Self::parse(req).unwrap() {
             wl_registry::Request::Bind { name, id } => {
-                state.with_global(name, |global, state| {
-                    let (_, version) = global.interface();
-                    global.bind(client, state, id, version, dispatcher);
-                });
+                let mut global = state.globals.map.grab(name);
+
+                let (_, version) = global.interface();
+                global.bind(client, state, id, version, dispatcher);
             }
         }
-    }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 }

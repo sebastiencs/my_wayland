@@ -58,8 +58,4 @@ impl Object for ZxdgOutputManagerV1 {
             GetXdgOutput { id, output } => todo!(),
         }
     }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }

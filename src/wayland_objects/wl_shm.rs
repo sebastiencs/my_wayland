@@ -73,8 +73,4 @@ impl Object for WlShm {
             }
         }
     }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }

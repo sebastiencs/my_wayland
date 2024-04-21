@@ -6,7 +6,7 @@ use crate::{
     state::State,
 };
 
-pub trait Object: 'static {
+pub trait Object: AsAny + 'static {
     fn id(&self) -> WaylandId;
     fn on(
         &mut self,
@@ -15,7 +15,29 @@ pub trait Object: 'static {
         request: RawRequest,
         dispatcher: &mut ClientDispatcher,
     );
-    fn as_any(&mut self) -> &mut dyn Any;
+}
+
+/// Convert `dyn Object` into concrete types
+/// We need to implement those methods on concrete types, to get
+/// the vtable of the concrete type.
+///
+/// See https://stackoverflow.com/a/33687996
+pub trait AsAny: 'static {
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
+}
+
+impl<T: 'static> AsAny for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
 }
 
 pub trait Parser: Constants {
@@ -65,7 +87,7 @@ pub trait IdToObject {
 impl<A, B> IdToObject for (A, B)
 where
     A: IdToObject,
-    B: IdToObject
+    B: IdToObject,
 {
     type Object = (A::Object, B::Object);
 }

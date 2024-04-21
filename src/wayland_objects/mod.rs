@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 pub mod wl_buffer;
 pub mod wl_callback;
 pub mod wl_compositor;

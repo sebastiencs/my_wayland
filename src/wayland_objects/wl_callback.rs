@@ -27,8 +27,4 @@ impl Object for WlCallback {
     }
 
     fn on(&mut self, _: &mut Client, _: &mut State, _: RawRequest, _: &mut ClientDispatcher) {}
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }

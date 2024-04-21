@@ -65,7 +65,7 @@ impl Object for XdgWmBase {
             Destroy => todo!(),
             CreatePositioner { id } => todo!(),
             GetXdgSurface { id, surface } => {
-                let wl_surface: &mut WlSurface = client.get_object(surface, state);
+                let wl_surface = client.get_object(surface, state);
                 wl_surface.set_role(Role::XdgSurface).unwrap();
                 wl_surface.set_impl(id);
 
@@ -74,9 +74,5 @@ impl Object for XdgWmBase {
             }
             Pong { serial } => todo!(),
         }
-    }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 }

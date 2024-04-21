@@ -60,10 +60,6 @@ impl Object for WpPresentation {
             Feedback { surface, callback } => todo!(),
         }
     }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }
 
 impl WpPresentation {

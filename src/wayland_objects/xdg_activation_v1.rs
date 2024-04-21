@@ -57,8 +57,4 @@ impl Object for XdgActivationV1 {
             Activate { token, surface } => todo!(),
         }
     }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }

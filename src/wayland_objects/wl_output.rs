@@ -62,10 +62,6 @@ impl Object for WlOutput {
             Release => todo!(),
         }
     }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }
 
 impl WlOutput {

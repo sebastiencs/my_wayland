@@ -56,8 +56,4 @@ impl Object for WlSubcompositor {
             GetSubsurface { id, surface, parent } => todo!(),
         }
     }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }

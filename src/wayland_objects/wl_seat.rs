@@ -78,10 +78,6 @@ impl Object for WlSeat {
             Release => todo!(),
         }
     }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }
 
 impl WlSeat {

@@ -67,8 +67,4 @@ impl Object for WlBuffer {
             Destroy => todo!(),
         }
     }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }

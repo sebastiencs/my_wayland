@@ -45,9 +45,8 @@ impl XdgSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         let xdg_toplevel_id = self.impl_id.unwrap();
-        client.with_object(xdg_toplevel_id, state, |xdg_toplevel, state, client| {
-            xdg_toplevel.on_commit(client, state, dispatcher)
-        });
+        let mut xdg_toplevel = client.grab_object(xdg_toplevel_id, state);
+        xdg_toplevel.on_commit(client, state, dispatcher);
     }
 }
 
@@ -80,10 +79,6 @@ impl Object for XdgSurface {
             SetWindowGeometry { x, y, width, height } => todo!(),
             AckConfigure { serial } => todo!(),
         }
-    }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 }
 
@@ -149,10 +144,6 @@ pub mod xdg_toplevel {
                 UnsetFullscreen => todo!(),
                 SetMinimized => todo!(),
             }
-        }
-
-        fn as_any(&mut self) -> &mut dyn std::any::Any {
-            self
         }
     }
 }

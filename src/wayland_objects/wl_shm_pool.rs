@@ -52,10 +52,6 @@ impl Object for WlShmPool {
             Resize { size } => todo!(),
         }
     }
-
-    fn as_any(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }
 
 #[derive(Debug)]
