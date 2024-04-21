@@ -64,7 +64,7 @@ impl Object for WlSeat {
     ) {
         use wl_seat::Request::*;
 
-        match Self::parse(req).unwrap() {
+        match client.parse::<Self>(req).unwrap() {
             GetPointer { id } => todo!(),
             GetKeyboard { id } => {
                 let wl_keyboard = WlKeyboard::new(id);

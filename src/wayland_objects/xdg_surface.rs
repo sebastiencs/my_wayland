@@ -64,7 +64,7 @@ impl Object for XdgSurface {
     ) {
         use xdg_surface::Request::*;
 
-        match Self::parse(req).unwrap() {
+        match client.parse::<Self>(req).unwrap() {
             Destroy => todo!(),
             GetToplevel { id } => {
                 self.set_role(Role::Toplevel).unwrap();
@@ -123,10 +123,16 @@ pub mod xdg_toplevel {
             self.id.into()
         }
 
-        fn on(&mut self, _: &mut Client, _: &mut State, req: RawRequest, _: &mut ClientDispatcher) {
+        fn on(
+            &mut self,
+            client: &mut Client,
+            _: &mut State,
+            req: RawRequest,
+            _: &mut ClientDispatcher,
+        ) {
             use proto_xdg_toplevel::Request::*;
 
-            match Self::parse(req).unwrap() {
+            match client.parse::<Self>(req).unwrap() {
                 Destroy => todo!(),
                 SetParent { parent } => todo!(),
                 SetTitle { title } => {

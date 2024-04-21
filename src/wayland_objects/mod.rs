@@ -33,6 +33,8 @@ macro_rules! fake_obj {
 
 pub use xdg_surface::xdg_toplevel;
 
+/// Declaring objects, until we properly implement them
+/// So `protocol_generated.rs` doesn't contain non-declared types
 fake_obj! {
     // { wl_shm_pool, WlShmPool },
     // { wl_buffer, WlBuffer },

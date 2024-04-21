@@ -48,10 +48,16 @@ impl Object for WlSubcompositor {
         self.id.into()
     }
 
-    fn on(&mut self, _: &mut Client, _: &mut State, req: RawRequest, _: &mut ClientDispatcher) {
+    fn on(
+        &mut self,
+        client: &mut Client,
+        _: &mut State,
+        req: RawRequest,
+        _: &mut ClientDispatcher,
+    ) {
         use wl_subcompositor::Request::*;
 
-        match Self::parse(req).unwrap() {
+        match client.parse::<Self>(req).unwrap() {
             Destroy => todo!(),
             GetSubsurface { id, surface, parent } => todo!(),
         }

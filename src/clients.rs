@@ -1,11 +1,11 @@
 use std::{
-    array::IntoIter,
     collections::{BTreeMap, BTreeSet, VecDeque},
     os::{
         fd::{AsRawFd, RawFd},
         unix::net::UnixListener,
     },
     path::PathBuf,
+    rc::Rc,
 };
 
 use libc::getsockopt;
@@ -16,10 +16,10 @@ use crate::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted},
     },
-    object::{IdToObject, Object, ParserError},
+    object::{IdToObject, Object, Parser, ParserError},
     protocol_generated::{wl_display, Array, Constants, WaylandId},
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
-    state::{Grab, GrabbedObject, ObjectId, State},
+    state::{GrabbedObject, ObjectId, State},
     udev::Udev,
     wayland_objects::wl_display::WlDisplay,
 };
@@ -134,7 +134,7 @@ impl Model for Clients {
 
 #[derive(Debug)]
 struct ProcessInfo {
-    command: String,
+    command: Rc<str>,
     cred: libc::ucred,
 }
 
@@ -147,7 +147,7 @@ pub struct Client {
     /// So this `objects` is just used to lookup into `State::objects`, from the client `WaylandId`
     // TODO: Replace `BTreeMap` with a `IndexMap` here ?
     objects: BTreeMap<WaylandId, ObjectId>,
-    info: Option<ProcessInfo>,
+    info: Option<Rc<ProcessInfo>>,
     pending_fds: VecDeque<RawFd>,
 }
 
@@ -195,9 +195,9 @@ impl Client {
             }
         };
         let command = String::from_utf8_lossy(&comm);
-        let command = command.trim().to_string();
+        let command = Rc::from(command.trim());
 
-        self.info = Some(ProcessInfo { command, cred })
+        self.info = Some(Rc::new(ProcessInfo { command, cred }))
     }
 
     pub fn get_object<'a, K>(&self, id: K, state: &'a mut State) -> &'a mut K::Object
@@ -245,6 +245,57 @@ impl Client {
         state.remove_object(object_id);
         wl_display.send_event(wl_display::Event::DeleteId { id: id.into() }, dispatcher);
     }
+
+    fn log_request<R: Parser>(&self, object_id: u32, result: Result<&R::Request, &ParserError>)
+    where
+        R::Request: std::fmt::Debug,
+    {
+        let interface_name = R::INTERFACE_NAME;
+        let (proc, pid) = match self.info.as_ref() {
+            Some(info) => (&*info.command, info.cred.pid),
+            None => ("UNKNOWN", 0),
+        };
+        let id = self.id;
+        let s = format!("in {:?}-{}-{}", proc, pid, id.0);
+        match result {
+            Ok(req) => {
+                log::trace!(target: &s, "[{}] {}::{:?}", object_id, interface_name, req)
+            }
+            Err(err) => {
+                log::error!(target: &s, "[{}] {}: {:?}", object_id, interface_name, err)
+            }
+        }
+    }
+
+    fn log_event<E: EventWriter + Constants>(
+        writer: &E,
+        event: &E::Event,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        if log::Level::Trace > log::max_level() {
+            return;
+        }
+        let (proc, pid) = match dispatcher.command.as_ref() {
+            Some(info) => (&*info.command, info.cred.pid),
+            None => ("UNKNOWN", 0),
+        };
+        let id = dispatcher.client_id;
+        let s = format!("out {:?}-{}-{}", proc, pid, id.0);
+        log::trace!(target: &s, "[{}] {}::{:?}", u32::from(writer.object_id()), E::INTERFACE_NAME, event);
+    }
+
+    /// Helper that just log the request
+    pub fn parse<R: Parser>(&self, req: RawRequest) -> Result<R::Request, ParserError>
+    where
+        R::Request: std::fmt::Debug,
+    {
+        let object_id = req.object_id;
+        let result = R::parse_request(req);
+        if log::Level::Trace <= log::max_level() {
+            self.log_request::<R>(object_id, result.as_ref());
+        }
+        result
+    }
 }
 
 /// A specialized `Dispatcher`
@@ -256,11 +307,20 @@ pub struct ClientDispatcher<'a> {
     #[deref_mut]
     dispatcher: &'a mut Dispatcher,
     client_fd: RawFd,
+    client_id: ClientId,
+    command: Option<Rc<ProcessInfo>>,
 }
 
 impl<'a> ClientDispatcher<'a> {
     fn make(client: &Client, dispatcher: &'a mut Dispatcher) -> Self {
-        Self { dispatcher, client_fd: client.fd }
+        let command =
+            if log::Level::Trace <= log::max_level() { client.info.clone() } else { None };
+        Self {
+            dispatcher,
+            client_fd: client.fd,
+            client_id: client.id,
+            command,
+        }
     }
 
     pub fn send_event(&mut self, mut event: RawEvent) {
@@ -526,16 +586,13 @@ pub struct RawEvent {
     fds: Vec<RawFd>,
 }
 
-pub trait EventWriter: Constants {
+pub trait EventWriter: Constants + Sized {
     type Event: 'static + std::fmt::Debug;
     /// Helper method, for loggings
     fn object_id(&self) -> WaylandId;
     fn to_raw_event(&self, event: Self::Event) -> RawEvent;
     fn send_event(&self, event: Self::Event, dispatcher: &mut ClientDispatcher) {
-        log::trace!(target: "out", "[{}] {}::{:?}", u32::from(self.object_id()), Self::INTERFACE_NAME, event);
-        // let raw = self.to_raw_event(event);
-        // log::trace!(target: "out", "raw: {:?}", raw);
-        // dispatcher.send_event(raw);
+        Client::log_event::<Self>(self, &event, dispatcher);
         dispatcher.send_event(self.to_raw_event(event));
     }
 }

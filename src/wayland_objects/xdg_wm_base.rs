@@ -61,7 +61,7 @@ impl Object for XdgWmBase {
     ) {
         use xdg_wm_base::Request::*;
 
-        match Self::parse(req).unwrap() {
+        match client.parse::<Self>(req).unwrap() {
             Destroy => todo!(),
             CreatePositioner { id } => todo!(),
             GetXdgSurface { id, surface } => {

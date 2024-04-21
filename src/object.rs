@@ -42,34 +42,7 @@ impl<T: 'static> AsAny for T {
 
 pub trait Parser: Constants {
     type Request: 'static;
-    // const INTERFACE_NAME: &'static str;
 
-    /// Helper that just log the request
-    fn parse(req: RawRequest) -> Result<Self::Request, ParserError>
-    where
-        Self::Request: std::fmt::Debug,
-    {
-        let object_id = req.object_id;
-        Self::parse_request(req)
-            .inspect(|req| {
-                log::trace!(
-                    target: "in",
-                    "[{}] {}::{:?}",
-                    object_id,
-                    Self::INTERFACE_NAME,
-                    req
-                )
-            })
-            .inspect_err(|req| {
-                log::error!(
-                    target: "in",
-                    "[{}] {}: {:?}",
-                    object_id,
-                    Self::INTERFACE_NAME,
-                    req
-                )
-            })
-    }
     fn parse_request(req: RawRequest) -> Result<Self::Request, ParserError>;
 }
 

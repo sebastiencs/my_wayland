@@ -40,7 +40,7 @@ impl Object for WlRegistry {
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
     ) {
-        match Self::parse(req).unwrap() {
+        match client.parse::<Self>(req).unwrap() {
             wl_registry::Request::Bind { name, id } => {
                 let mut global = state.globals.map.grab(name);
 

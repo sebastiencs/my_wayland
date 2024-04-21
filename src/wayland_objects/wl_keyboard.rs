@@ -22,10 +22,16 @@ impl Object for WlKeyboard {
         self.id.into()
     }
 
-    fn on(&mut self, _: &mut Client, _: &mut State, req: RawRequest, _: &mut ClientDispatcher) {
+    fn on(
+        &mut self,
+        client: &mut Client,
+        _: &mut State,
+        req: RawRequest,
+        _: &mut ClientDispatcher,
+    ) {
         use wl_keyboard::Request::*;
 
-        match Self::parse(req).unwrap() {
+        match client.parse::<Self>(req).unwrap() {
             Release => todo!(),
         }
     }

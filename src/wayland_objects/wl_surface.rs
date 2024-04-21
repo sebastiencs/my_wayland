@@ -53,7 +53,7 @@ impl Object for WlSurface {
     ) {
         use wl_surface::Request::*;
 
-        match Self::parse(req).unwrap() {
+        match client.parse::<Self>(req).unwrap() {
             Destroy => todo!(),
             Attach { buffer, x, y } => todo!(),
             Damage { x, y, width, height } => todo!(),

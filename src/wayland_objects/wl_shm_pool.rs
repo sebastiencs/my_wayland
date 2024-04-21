@@ -40,7 +40,7 @@ impl Object for WlShmPool {
     ) {
         use wl_shm_pool::Request::*;
 
-        match Self::parse(req).unwrap() {
+        match client.parse::<Self>(req).unwrap() {
             CreateBuffer { id, offset, width, height, stride, format } => {
                 let format = *SHM_FORMATS.iter().find(|f| f.wayland_id == format).unwrap();
                 let wl_buffer =

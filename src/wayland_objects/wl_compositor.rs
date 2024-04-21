@@ -58,7 +58,7 @@ impl Object for WlCompositor {
     ) {
         use crate::protocol_generated::wl_compositor::Request::*;
 
-        match Self::parse(req).unwrap() {
+        match client.parse::<Self>(req).unwrap() {
             CreateSurface { id } => {
                 client.insert_object(state, WlSurface::new(id));
             }
