@@ -3,7 +3,7 @@ use std::{os::fd::RawFd, ptr::NonNull, rc::Rc};
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
     object::{Object, Parser},
-    protocol_generated::{wl_shm_pool, WaylandId, WlShmPoolId},
+    protocol_generated::{wl_shm, wl_shm_pool, WaylandId, WlShmPoolId},
     state::State,
     wayland_objects::{
         wl_buffer::{NewWlBufferParams, WlBuffer},
@@ -36,16 +36,28 @@ impl Object for WlShmPool {
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
-        _: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) {
         use wl_shm_pool::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
             CreateBuffer { id, offset, width, height, stride, format } => {
-                let format = *SHM_FORMATS.iter().find(|f| f.wayland_id == format).unwrap();
-                let wl_buffer =
-                    WlBuffer::new(NewWlBufferParams { id, offset, width, height, stride, format })
-                        .unwrap();
+                let Some(format) = SHM_FORMATS.iter().find(|f| f.wayland_id == format).copied()
+                else {
+                    client.send_error(wl_shm::Error::InvalidFormat, dispatcher);
+                    return; // TODO: Return an error
+                };
+                let mem = self.mem.clone();
+                let wl_buffer = WlBuffer::new(NewWlBufferParams {
+                    id,
+                    offset,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    mem,
+                })
+                .unwrap();
                 client.insert_object(state, wl_buffer);
             }
             Destroy => todo!(),

@@ -220,7 +220,7 @@ pub mod wl_display {
     ///
     /// These errors are global and can be emitted in response to any
     /// server request.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Server couldn't find object,
         InvalidObject = 0,
@@ -613,7 +613,7 @@ pub mod wl_shm {
     /// Wl_shm error values
     ///
     /// These errors can be emitted in response to wl_shm requests.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Buffer format is not known,
         InvalidFormat = 0,
@@ -636,7 +636,7 @@ pub mod wl_shm {
     ///
     /// For all wl_shm formats and unless specified in another protocol
     /// extension, pre-multiplied alpha is used for pixel values.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Format {
         /// 32-bit ARGB format, [31:0] A:R:G:B 8:8:8:8 little endian,
         Argb8888 = 0,
@@ -1155,7 +1155,7 @@ pub mod wl_data_offer {
             }
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Finish request was called untimely,
         InvalidFinish = 0,
@@ -1370,7 +1370,7 @@ pub mod wl_data_source {
             }
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Action mask contains invalid values,
         InvalidActionMask = 0,
@@ -1603,7 +1603,7 @@ pub mod wl_data_device {
             }
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Given wl_surface has another role,
         Role = 0,
@@ -1687,7 +1687,7 @@ pub mod wl_data_device_manager {
     /// Compositors may for example bind other modifiers (like Alt/Meta)
     /// or drags initiated with other buttons than BTN_LEFT to specific
     /// actions (e.g. "ask").
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum DndAction {
         /// No action,
         None = 0,
@@ -1747,7 +1747,7 @@ pub mod wl_shell {
             Ok(request)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Given wl_surface has another role,
         Role = 0,
@@ -2081,7 +2081,7 @@ pub mod wl_shell_surface {
     /// is being dragged in a resize operation. The server may
     /// use this information to adapt its behavior, e.g. choose
     /// an appropriate cursor image.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Resize {
         /// No edge,
         None = 0,
@@ -2106,7 +2106,7 @@ pub mod wl_shell_surface {
     ///
     /// These flags specify details of the expected behaviour
     /// of transient surfaces. Used in the set_transient request.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Transient {
         /// Do not set keyboard focus,
         Inactive = 1,
@@ -2116,7 +2116,7 @@ pub mod wl_shell_surface {
     /// Hints to indicate to the compositor how to deal with a conflict
     /// between the dimensions of the surface and the dimensions of the
     /// output. The compositor is free to ignore this parameter.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum FullscreenMethod {
         /// No preference, apply default policy,
         Default = 0,
@@ -2653,7 +2653,7 @@ pub mod wl_surface {
     /// Wl_surface error values
     ///
     /// These errors can be emitted in response to wl_surface requests.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Buffer scale value is invalid,
         InvalidScale = 0,
@@ -2828,7 +2828,7 @@ pub mod wl_seat {
     ///
     /// This is a bitmask of capabilities this seat has; if a member is
     /// set, then it is present on the seat.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Capability {
         /// The seat has pointer devices,
         Pointer = 1,
@@ -2840,7 +2840,7 @@ pub mod wl_seat {
     /// Wl_seat error values
     ///
     /// These errors can be emitted in response to wl_seat requests.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Get_pointer, get_keyboard or get_touch called on seat without the matching capability,
         MissingCapability = 0,
@@ -3319,7 +3319,7 @@ pub mod wl_pointer {
             }
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Given wl_surface has another role,
         Role = 0,
@@ -3328,7 +3328,7 @@ pub mod wl_pointer {
     ///
     /// Describes the physical state of a button that produced the button
     /// event.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum ButtonState {
         /// The button is not pressed,
         Released = 0,
@@ -3338,7 +3338,7 @@ pub mod wl_pointer {
     /// Axis types
     ///
     /// Describes the axis types of scroll events.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Axis {
         /// Vertical axis,
         VerticalScroll = 0,
@@ -3363,7 +3363,7 @@ pub mod wl_pointer {
     /// The "wheel tilt" axis source indicates that the actual device is a
     /// wheel but the scroll event is not caused by a rotation but a
     /// (usually sideways) tilt of the wheel.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum AxisSource {
         /// A physical wheel rotation,
         Wheel = 0,
@@ -3378,7 +3378,7 @@ pub mod wl_pointer {
     ///
     /// This specifies the direction of the physical motion that caused a
     /// wl_pointer.axis event, relative to the wl_pointer.axis direction.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum AxisRelativeDirection {
         /// Physical motion matches axis direction,
         Identical = 0,
@@ -3584,7 +3584,7 @@ pub mod wl_keyboard {
     ///
     /// This specifies the format of the keymap provided to the
     /// client with the wl_keyboard.keymap event.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum KeymapFormat {
         /// No keymap; client must understand how to interpret the raw keycode,
         NoKeymap = 0,
@@ -3594,7 +3594,7 @@ pub mod wl_keyboard {
     /// Physical key state
     ///
     /// Describes the physical state of a key that produced the key event.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum KeyState {
         /// Key is not pressed,
         Released = 0,
@@ -4107,7 +4107,7 @@ pub mod wl_output {
     ///
     /// This enumeration describes how the physical
     /// pixels on an output are laid out.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Subpixel {
         /// Unknown geometry,
         Unknown = 0,
@@ -4135,7 +4135,7 @@ pub mod wl_output {
     /// tell the compositor, so that for fullscreen surfaces, the
     /// compositor will still be able to scan out directly from client
     /// surfaces.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Transform {
         /// No transform,
         Normal = 0,
@@ -4158,7 +4158,7 @@ pub mod wl_output {
     ///
     /// These flags describe properties of an output mode.
     /// They are used in the flags bitfield of the mode event.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Mode {
         /// Indicates this is the current mode,
         Current = 1,
@@ -4320,7 +4320,7 @@ pub mod wl_subcompositor {
             Ok(request)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// The to-be sub-surface is invalid,
         BadSurface = 0,
@@ -4504,7 +4504,7 @@ pub mod wl_subsurface {
             Ok(request)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Wl_surface is not a sibling or the parent,
         BadSurface = 0,
@@ -4634,7 +4634,7 @@ pub mod wp_presentation {
     ///
     /// These fatal protocol errors may be emitted in response to
     /// illegal presentation requests.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Invalid value in tv_nsec,
         InvalidTimestamp = 0,
@@ -4791,7 +4791,7 @@ pub mod wp_presentation_feedback {
     /// the related content update was done. The intent is to help
     /// clients assess the reliability of the feedback and the visual
     /// quality with respect to possible tearing and timings.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Kind {
         /// Presentation was vsync'd
         ///
@@ -4877,7 +4877,7 @@ pub mod wp_viewporter {
             Ok(request)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// The surface already has a viewport object associated,
         ViewportExists = 0,
@@ -5018,7 +5018,7 @@ pub mod wp_viewport {
             Ok(request)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Negative or zero values in width or height,
         BadValue = 0,
@@ -5142,7 +5142,7 @@ pub mod xdg_wm_base {
             }
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Given wl_surface has another role,
         Role = 0,
@@ -5355,12 +5355,12 @@ pub mod xdg_positioner {
             Ok(request)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Invalid input provided,
         InvalidInput = 0,
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Anchor {
         None = 0,
         Top = 1,
@@ -5372,7 +5372,7 @@ pub mod xdg_positioner {
         TopRight = 7,
         BottomRight = 8,
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Gravity {
         None = 0,
         Top = 1,
@@ -5397,7 +5397,7 @@ pub mod xdg_positioner {
     ///
     /// The adjustments can be combined, according to a defined precedence: 1)
     /// Flip, 2) Slide, 3) Resize.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum ConstraintAdjustment {
         /// Don't move the child surface when constrained
         ///
@@ -5697,7 +5697,7 @@ pub mod xdg_surface {
             }
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Surface was not fully constructed,
         NotConstructed = 1,
@@ -6222,7 +6222,7 @@ pub mod xdg_toplevel {
             }
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Provided value is not a valid variant of the resize_edge enum,
         InvalidResizeEdge = 0,
@@ -6235,7 +6235,7 @@ pub mod xdg_toplevel {
     ///
     /// These values are used to indicate which edge of a surface
     /// is being dragged in a resize operation.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum ResizeEdge {
         None = 0,
         Top = 1,
@@ -6256,7 +6256,7 @@ pub mod xdg_toplevel {
     ///
     /// States set in this way are double-buffered. They will get applied on
     /// the next commit.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum State {
         /// The surface is maximized,
         /// The surface is maximized
@@ -6319,7 +6319,7 @@ pub mod xdg_toplevel {
         /// outputs are switched off due to screen locking.
         Suspended = 9,
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum WmCapabilities {
         /// Show_window_menu is available,
         WindowMenu = 1,
@@ -6549,7 +6549,7 @@ pub mod xdg_popup {
             }
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Tried to grab after being mapped,
         InvalidGrab = 0,
@@ -6601,7 +6601,7 @@ pub mod wp_content_type_manager_v1 {
             Ok(request)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Wl_surface already has a content type object,
         AlreadyConstructed = 0,
@@ -6664,7 +6664,7 @@ pub mod wp_content_type_v1 {
     /// Possible content types
     ///
     /// These values describe the available content types for a surface.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Type {
         /// No content type applies
         ///
@@ -7024,7 +7024,7 @@ pub mod wp_drm_lease_request_v1 {
             Ok(request)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Requested a connector from a different lease device,
         WrongDevice = 0,
@@ -7492,7 +7492,7 @@ pub mod ext_session_lock_v1 {
             }
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Attempted to destroy session lock while locked,
         InvalidDestroy = 0,
@@ -7626,7 +7626,7 @@ pub mod ext_session_lock_surface_v1 {
             }
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Surface committed before first ack_configure request,
         CommitBeforeFirstAck = 0,
@@ -7687,7 +7687,7 @@ pub mod wp_fractional_scale_manager_v1 {
             Ok(request)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// The surface already has a fractional_scale object associated,
         FractionalScaleExists = 0,
@@ -7882,7 +7882,7 @@ pub mod wp_tearing_control_manager_v1 {
             Ok(request)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// The surface already has a tearing object associated,
         TearingControlExists = 0,
@@ -7938,7 +7938,7 @@ pub mod wp_tearing_control_v1 {
     ///
     /// This enum provides information for if submitted frames from the client
     /// may be presented with tearing.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum PresentationHint {
         /// Tearing-free presentation
         ///
@@ -8136,7 +8136,7 @@ pub mod xdg_activation_token_v1 {
             }
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// The token has already been used previously,
         AlreadyUsed = 0,
@@ -8202,7 +8202,7 @@ pub mod xwayland_shell_v1 {
             Ok(request)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Given wl_surface has another role,
         Role = 0,
@@ -8279,7 +8279,7 @@ pub mod xwayland_surface_v1 {
             Ok(request)
         }
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Given wl_surface is already associated with an X11 window,
         AlreadyAssociated = 0,
@@ -8405,7 +8405,7 @@ pub mod wp_cursor_shape_device_v1 {
     ///
     /// The names are taken from the CSS W3C specification:
     /// https://w3c.github.io/csswg-drafts/css-ui/#cursor
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Shape {
         /// Default cursor,
         Default = 1,
@@ -8476,7 +8476,7 @@ pub mod wp_cursor_shape_device_v1 {
         /// Something can be zoomed out,
         ZoomOut = 34,
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// The specified shape value is invalid,
         InvalidShape = 1,
@@ -9114,7 +9114,7 @@ pub mod zwp_tablet_tool_v2 {
     ///
     /// The lens tool is a mouse-shaped tool with an attached lens to
     /// provide precision focus.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Type {
         /// Pen,
         Pen = 320,
@@ -9139,7 +9139,7 @@ pub mod zwp_tablet_tool_v2 {
     ///
     /// Any tool must provide x and y values, extra axes are
     /// device-specific.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Capability {
         /// Tilt axes,
         Tilt = 1,
@@ -9157,14 +9157,14 @@ pub mod zwp_tablet_tool_v2 {
     /// Physical button state
     ///
     /// Describes the physical state of a button that produced the button event.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum ButtonState {
         /// Button is not pressed,
         Released = 0,
         /// Button is pressed,
         Pressed = 1,
     }
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
         /// Given wl_surface has another role,
         Role = 0,
@@ -9464,7 +9464,7 @@ pub mod zwp_tablet_pad_ring_v2 {
     /// client how a ring event was physically generated; a client may
     /// adjust the user interface accordingly. For example, events
     /// from a "finger" source may trigger kinetic scrolling.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Source {
         /// Finger,
         Finger = 1,
@@ -9635,7 +9635,7 @@ pub mod zwp_tablet_pad_strip_v2 {
     /// client how a strip event was physically generated; a client may
     /// adjust the user interface accordingly. For example, events
     /// from a "finger" source may trigger kinetic scrolling.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Source {
         /// Finger,
         Finger = 1,
@@ -10071,7 +10071,7 @@ pub mod zwp_tablet_pad_v2 {
     ///
     /// Describes the physical state of a button that caused the button
     /// event.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum ButtonState {
         /// The button is not pressed,
         Released = 0,

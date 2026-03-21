@@ -8,7 +8,7 @@ use crate::{
     xkb::Xkb,
 };
 
-use std::{any::Any, marker::PhantomData, ptr::NonNull};
+use std::{any::Any, marker::PhantomData, ptr::NonNull, rc::Rc};
 
 #[derive(Debug)]
 enum ValueOrEmpty<V> {
@@ -20,22 +20,26 @@ enum ValueOrEmpty<V> {
 pub struct IndexMap<K, V> {
     map: Vec<ValueOrEmpty<V>>,
     next_empty: Option<u32>,
-    ngrabbed: usize,
-    /// `*mut ()` to make us !Sync and !Send
-    _phantom: PhantomData<(K, *mut ())>,
+    /// See `Grab` for why we use an indirection (`Rc`) here
+    /// The number of grab is the strong counter of that `Rc`
+    ngrabbed: Rc<()>,
+    /// `*mut _` to make us !Sync and !Send
+    _phantom: PhantomData<*mut K>,
 }
 
 impl<K, V> Drop for IndexMap<K, V> {
     fn drop(&mut self) {
-        if self.ngrabbed == 0 {
+        if Rc::strong_count(&self.ngrabbed) == 1 {
             return;
         }
         // Abort when there are still grabbed items
         // Or the grabbed items will have invalid pointer to our `IndexMap`
         eprintln!("ABORT: Dropped `IndexMap` with remaining `Grab` alive");
-        eprintln!("ABORT: K={}", std::any::type_name::<K>());
-        eprintln!("ABORT: V={}", std::any::type_name::<V>());
+        eprintln!("ABORT: {}", std::any::type_name::<Self>());
         // Abort because we cannot recover
+        // Do not unwind the stack in any way here (such as panics) because it would
+        // run the destructor of still-alive `Grab` (that contains pointer
+        // to now invalid/deallocated `IndexMap`)
         std::process::abort();
     }
 }
@@ -68,8 +72,8 @@ where
     K: Into<usize> + Copy,
 {
     key: K,
-    // Store the value in an `Option` so we can `take` it during drop and
-    // in `GrabbedObject`
+    /// Store the value in an `Option` so we can `take` it during drop and
+    /// in `GrabbedObject`
     value: Option<V>,
     /// Pointer to our `IndexMap`, to re-insert the value inside it.
     /// We know that the pointer will always be valid because:
@@ -78,6 +82,12 @@ where
     /// - `IndexMap::drop` ensure that there is no remaining `Grab` alive
     /// - `IndexMap` and `Grab` are !Synd and !Send
     map: NonNull<IndexMap<K, V>>,
+    /// We don't manipulate `self.map->ngrabbed` because the original `IndexMap` could have
+    /// been moved/replaced (such as with `std::mem::replace`).
+    /// In other words, `Self::map` points to a valid `IndexMap`, but it might be another
+    /// `IndexMap` than the one used to create us (`Grab`), and it's important we
+    /// decrement the original `IndexMap::ngrabbed` on `Self::drop`.
+    ngrabbed: Rc<()>,
 }
 
 static_assertions::assert_not_impl_all!(IndexMap<usize, usize>: Send, Sync);
@@ -108,12 +118,16 @@ where
     K: Into<usize> + Copy,
 {
     fn drop(&mut self) {
-        let Self { key, value, map } = self;
+        let Self { key, value, map, ngrabbed } = self;
+        assert!(Rc::strong_count(ngrabbed) > 1);
+
         let value = value.take().unwrap();
 
         // Safety: See doc in `Grab`
         let indexmap: &mut IndexMap<K, V> = unsafe { map.as_mut() };
         indexmap.release(*key, value);
+
+        // ngrabbed will be dropped and its counter decremented
     }
 }
 
@@ -168,7 +182,7 @@ impl<K, V> Default for IndexMap<K, V> {
         Self {
             map: Vec::with_capacity(128),
             next_empty: None,
-            ngrabbed: 0,
+            ngrabbed: Rc::default(),
             _phantom: Default::default(),
         }
     }
@@ -241,9 +255,13 @@ where
             ValueOrEmpty::Value(value) => value,
             _ => panic!("invalid state"),
         };
-        self.ngrabbed = self.ngrabbed.checked_add(1).unwrap();
 
-        Grab { key, value: Some(value), map: NonNull::from(&mut **self) }
+        Grab {
+            key,
+            value: Some(value),
+            map: NonNull::from(&mut **self),
+            ngrabbed: self.ngrabbed.clone(),
+        }
     }
 
     fn release(&mut self, key: K, value: V) {
@@ -254,8 +272,6 @@ where
         let ValueOrEmpty::Grabbed = std::mem::replace(entry, value) else {
             panic!("invalid state");
         };
-
-        self.ngrabbed = self.ngrabbed.checked_sub(1).unwrap();
     }
 
     pub fn with<F, R>(self: &mut Box<Self>, key: K, fun: F) -> R
@@ -293,6 +309,10 @@ where
             ValueOrEmpty::Empty { .. } => None,
             ValueOrEmpty::Grabbed => panic!("invalid state"),
         }
+    }
+
+    pub fn contains(&self, key: K) -> bool {
+        self.try_get(key).is_some()
     }
 }
 

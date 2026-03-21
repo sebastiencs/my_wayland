@@ -19,11 +19,22 @@ pub struct XdgSurface {
     wl_surface: WlSurfaceId,
     role: Role,
     impl_id: Option<XdgToplevelId>,
+    is_initialized: bool,
+    serial: u32,
+    acked_serial: Option<u32>,
 }
 
 impl XdgSurface {
     pub fn new(id: XdgSurfaceId, wl_surface: WlSurfaceId) -> Self {
-        Self { id, wl_surface, role: Role::None, impl_id: None }
+        Self {
+            id,
+            wl_surface,
+            role: Role::None,
+            impl_id: None,
+            is_initialized: false,
+            serial: 1,
+            acked_serial: None,
+        }
     }
 
     pub fn set_role(&mut self, new_role: Role) -> Result<(), xdg_wm_base::Error> {
@@ -38,15 +49,23 @@ impl XdgSurface {
         self.impl_id = Some(id);
     }
 
+    pub fn send_configure(&self, serial: u32, dispatcher: &mut ClientDispatcher) {
+        self.send_event(xdg_surface::Event::Configure { serial }, dispatcher);
+    }
+
     pub fn on_commit(
         &mut self,
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let xdg_toplevel_id = self.impl_id.unwrap();
-        let mut xdg_toplevel = client.grab_object(xdg_toplevel_id, state);
-        xdg_toplevel.on_commit(client, state, dispatcher);
+        if !self.is_initialized {
+            let xdg_toplevel_id = self.impl_id.unwrap();
+            let mut xdg_toplevel = client.grab_object(xdg_toplevel_id, state);
+            xdg_toplevel.on_first_commit(client, state, dispatcher);
+            self.send_configure(self.serial, dispatcher);
+            self.is_initialized = true;
+        }
     }
 }
 
@@ -77,13 +96,22 @@ impl Object for XdgSurface {
             }
             GetPopup { id, parent, positioner } => todo!(),
             SetWindowGeometry { x, y, width, height } => todo!(),
-            AckConfigure { serial } => todo!(),
+            AckConfigure { serial: acked } => {
+                if acked == self.serial {
+                    self.acked_serial = Some(acked);
+                }
+            }
         }
     }
 }
 
 pub mod xdg_toplevel {
-    use crate::protocol_generated::{xdg_toplevel as proto_xdg_toplevel, Array, XdgToplevelId};
+    use std::collections::BTreeSet;
+
+    use {
+        crate::protocol_generated::{xdg_toplevel as proto_xdg_toplevel, Array, XdgToplevelId},
+        proto_xdg_toplevel::State as SurfaceState,
+    };
 
     use super::*;
 
@@ -93,28 +121,40 @@ pub mod xdg_toplevel {
         xdg_surface_id: XdgSurfaceId,
 
         title: String,
+        states: BTreeSet<SurfaceState>,
     }
 
     impl XdgToplevel {
         pub fn new(id: XdgToplevelId, xdg_surface_id: XdgSurfaceId) -> Self {
-            Self { id, xdg_surface_id, title: String::new() }
+            let mut states = BTreeSet::default();
+            states.insert(SurfaceState::Fullscreen);
+            Self { id, xdg_surface_id, title: String::new(), states }
         }
 
         pub fn send_capabilities(&self, dispatcher: &mut ClientDispatcher) {
             use proto_xdg_toplevel::WmCapabilities;
+            let capapilities = [WmCapabilities::Fullscreen as u32, WmCapabilities::Maximize as u32];
             let capabilities = proto_xdg_toplevel::Event::WmCapabilities {
-                capabilities: Array(vec![WmCapabilities::Fullscreen as u32]),
+                capabilities: Array(capapilities.to_vec()),
             };
             self.send_event(capabilities, dispatcher);
         }
 
-        pub fn on_commit(
+        fn send_configure(&self, dispatcher: &mut ClientDispatcher) {
+            let states: Vec<_> = self.states.iter().cloned().map(|s| s as u32).collect();
+            self.send_event(
+                proto_xdg_toplevel::Event::Configure { width: 0, height: 0, states: Array(states) },
+                dispatcher,
+            );
+        }
+
+        pub fn on_first_commit(
             &mut self,
             client: &mut Client,
             state: &mut State,
             dispatcher: &mut ClientDispatcher,
         ) {
-            todo!()
+            self.send_configure(dispatcher);
         }
     }
 

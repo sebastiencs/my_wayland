@@ -234,6 +234,17 @@ impl Client {
         ((wayland_id, object_id), object)
     }
 
+    pub fn contains_object<K>(&self, id: K, state: &State) -> bool
+    where
+        K: Into<WaylandId> + IdToObject,
+    {
+        let id: WaylandId = id.into();
+        let Some(obj_id) = self.objects.get(&id).cloned() else {
+            return false;
+        };
+        state.objects.contains(obj_id)
+    }
+
     pub fn delete_id(
         &mut self,
         wl_display: &WlDisplay,
@@ -295,6 +306,11 @@ impl Client {
             self.log_request::<R>(object_id, result.as_ref());
         }
         result
+    }
+
+    pub fn send_error<E>(&self, error: E, _dispatcher: &mut ClientDispatcher) -> E {
+        // TODO
+        error
     }
 }
 
@@ -594,6 +610,9 @@ pub trait EventWriter: Constants + Sized {
     fn send_event(&self, event: Self::Event, dispatcher: &mut ClientDispatcher) {
         Client::log_event::<Self>(self, &event, dispatcher);
         dispatcher.send_event(self.to_raw_event(event));
+    }
+    fn send_error<E>(&self, _error: E, _dispatcher: &mut ClientDispatcher) {
+        // TODO
     }
 }
 

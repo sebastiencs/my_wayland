@@ -85,7 +85,7 @@ fn write_description(
 fn write_enums(f: &mut impl Write, enums: &[Enum]) -> std::io::Result<()> {
     for e in enums {
         write_description(f, "  /// ", e.description.as_ref())?;
-        writeln!(f, "  #[derive(Debug)]")?;
+        writeln!(f, "  #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]")?;
         writeln!(f, "  pub enum {} {{", e.name.to_upper_camel_case())?;
         for entry in &e.entries {
             if let Some(summary) = entry.summary.as_ref() {

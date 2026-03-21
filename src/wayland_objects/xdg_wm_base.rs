@@ -57,7 +57,7 @@ impl Object for XdgWmBase {
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
-        _: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) {
         use xdg_wm_base::Request::*;
 
@@ -66,7 +66,7 @@ impl Object for XdgWmBase {
             CreatePositioner { id } => todo!(),
             GetXdgSurface { id, surface } => {
                 let wl_surface = client.get_object(surface, state);
-                wl_surface.set_role(Role::XdgSurface).unwrap();
+                wl_surface.set_role(Role::XdgSurface, dispatcher).unwrap();
                 wl_surface.set_impl(id);
 
                 let xdg_surface = XdgSurface::new(id, surface);

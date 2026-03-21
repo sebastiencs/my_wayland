@@ -25,23 +25,18 @@ impl Global for WlCompositorGlobal {
         client: &mut Client,
         state: &mut State,
         id: NewId,
-        _version: u32,
+        version: u32,
         _dispatcher: &mut ClientDispatcher,
     ) {
         let id = WlCompositorId::from(id);
-        client.insert_object(state, WlCompositor { id });
+        client.insert_object(state, WlCompositor { id, version });
     }
 }
 
 #[derive(Debug)]
 pub struct WlCompositor {
     id: WlCompositorId,
-}
-
-impl WlCompositor {
-    pub fn new(id: WlCompositorId) -> Self {
-        Self { id }
-    }
+    version: u32,
 }
 
 impl Object for WlCompositor {
@@ -60,7 +55,7 @@ impl Object for WlCompositor {
 
         match client.parse::<Self>(req).unwrap() {
             CreateSurface { id } => {
-                client.insert_object(state, WlSurface::new(id));
+                client.insert_object(state, WlSurface::new(id, self.version));
             }
             CreateRegion { id } => todo!(),
         }

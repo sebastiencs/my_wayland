@@ -6,6 +6,8 @@ struct MyLogger {
 
 impl MyLogger {
     fn new() -> std::io::Result<Self> {
+        return Ok(Self { file: None });
+
         if crate::utils::is_x11() {
             return Ok(Self { file: None });
         }

@@ -22,3 +22,19 @@ pub fn strip_type_name(s: &str) -> &str {
     let index = s.rfind("::").map(|i| i + 2).unwrap_or(0);
     s.get(index..).unwrap()
 }
+
+pub trait MemHelper {
+    fn take(&mut self) -> Self
+    where
+        Self: Default,
+    {
+        std::mem::take(self)
+    }
+    fn replace(&mut self, value: Self) -> Self
+    where
+        Self: Sized,
+    {
+        std::mem::replace(self, value)
+    }
+}
+impl<T> MemHelper for T where T: Default {}

@@ -6,7 +6,10 @@ use crate::{
     state::State,
 };
 
-pub trait Object: AsAny + 'static {
+pub trait Object
+where
+    Self: AsAny + 'static,
+{
     fn id(&self) -> WaylandId;
     fn on(
         &mut self,
