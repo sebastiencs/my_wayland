@@ -823,10 +823,10 @@ fn get_in_formats(drm: &DrmFd, prop: u64) -> std::io::Result<Vec<InFormat>> {
     let to_u32 = |bytes: &[u8; 4]| u32::from_ne_bytes(*bytes);
     let to_u64 = |bytes: &[u8; 8]| u64::from_ne_bytes(*bytes);
 
-    let mut blob_iter = blob.array_chunks::<4>();
+    let mut blob_iter = blob.iter().copied().array_chunks::<4>();
     let mut read_u32 = || -> u32 {
-        let bytes = blob_iter.next().unwrap(); // We already checked length just above
-        to_u32(bytes)
+        let chunk = blob_iter.next().unwrap(); // We already checked length just above
+        to_u32(&chunk)
     };
 
     let header = drm_ffi::drm_format_modifier_blob {
@@ -850,12 +850,12 @@ fn get_in_formats(drm: &DrmFd, prop: u64) -> std::io::Result<Vec<InFormat>> {
     let formats = blob
         .get(formats_start..formats_end)
         .ok_or_else(|| std::io::Error::from(InvalidData))?;
-    let mut formats_iter = formats.array_chunks::<4>();
+    let mut formats_iter = formats.iter().copied().array_chunks::<4>();
     let mut read_u32 = || -> std::io::Result<u32> {
-        let bytes = formats_iter
+        let chunk = formats_iter
             .next()
             .ok_or_else(|| std::io::Error::from(InvalidData))?;
-        Ok(to_u32(bytes))
+        Ok(to_u32(&chunk))
     };
 
     let mut formats = (0..header.count_formats)
@@ -869,8 +869,11 @@ fn get_in_formats(drm: &DrmFd, prop: u64) -> std::io::Result<Vec<InFormat>> {
     let modifiers = blob
         .get(modifiers_start..modifiers_end)
         .ok_or_else(|| std::io::Error::from(InvalidData))?;
-    let mut modifiers_iter =
-        modifiers.array_chunks::<{ std::mem::size_of::<drm_ffi::drm_format_modifier>() }>();
+    const MODIFIER_BLOB_ENTRY: usize = std::mem::size_of::<drm_ffi::drm_format_modifier>();
+    let mut modifiers_iter = modifiers
+        .iter()
+        .copied()
+        .array_chunks::<MODIFIER_BLOB_ENTRY>();
     let mut read_modifier = || -> std::io::Result<drm_ffi::drm_format_modifier> {
         let bytes = modifiers_iter
             .next()

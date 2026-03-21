@@ -1,4 +1,4 @@
-#![feature(array_chunks, c_variadic, iter_array_chunks, non_null_convenience)]
+#![feature(c_variadic, iter_array_chunks)]
 #![allow(dead_code)]
 
 macro_rules! wayland_id {

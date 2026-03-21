@@ -658,17 +658,21 @@ impl RawEvent {
         self.push(len + 1); // +1 for terminating null byte
 
         let null_byte = std::iter::once(0);
-        let mut iter = s.as_bytes().iter().copied().chain(null_byte).array_chunks();
+        let mut iter = s
+            .as_bytes()
+            .iter()
+            .copied()
+            .chain(null_byte)
+            .array_chunks::<4>();
         for bytes in &mut iter {
             self.push(u32::from_ne_bytes(bytes));
         }
-        if let Some(remainder) = iter.into_remainder() {
-            let remainder = remainder.as_slice();
-            if !remainder.is_empty() {
-                let mut bytes = [0u8; 4];
-                bytes[..remainder.len()].copy_from_slice(remainder);
-                self.push(u32::from_ne_bytes(bytes));
-            }
+        let remainder = iter.into_remainder();
+        let remainder = remainder.as_slice();
+        if !remainder.is_empty() {
+            let mut bytes = [0u8; 4];
+            bytes[..remainder.len()].copy_from_slice(remainder);
+            self.push(u32::from_ne_bytes(bytes));
         }
     }
 
@@ -759,8 +763,9 @@ impl TryFrom<&[u8]> for RawRequest<'static> {
         }
 
         let args = value[8..]
-            .array_chunks::<4>()
+            .iter()
             .copied()
+            .array_chunks::<4>()
             .map(u32::from_ne_bytes)
             .collect();
 

@@ -379,8 +379,9 @@ fn read_fds(mut data: &[u8]) -> std::io::Result<Vec<RawFd>> {
         }
 
         let chunks = msg_data
-            .array_chunks::<4>()
+            .iter()
             .copied()
+            .array_chunks::<4>()
             .map(i32::from_ne_bytes);
         fds.extend(chunks);
     }
