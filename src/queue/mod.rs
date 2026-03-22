@@ -1,4 +1,6 @@
+#![allow(unused)]
 #[allow(clippy::module_inception)]
+
 mod queue;
 mod sync;
 

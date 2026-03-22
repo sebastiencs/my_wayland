@@ -1,6 +1,6 @@
 use std::{
     ffi::CStr,
-    os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     ptr::NonNull,
 };
 

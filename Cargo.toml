@@ -44,3 +44,6 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

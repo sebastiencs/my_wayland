@@ -5,6 +5,7 @@ struct MyLogger {
 }
 
 impl MyLogger {
+    #[allow(unused)]
     fn new() -> std::io::Result<Self> {
         return Ok(Self { file: None });
 

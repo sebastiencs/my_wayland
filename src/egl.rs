@@ -566,7 +566,7 @@ impl EglFrameBuffer {
         }
     }
 
-    pub fn clear_with(&self, r: f32, g: f32, b: f32, a: f32) {
+    pub fn clear_with(&self, _r: f32, _g: f32, _b: f32, _a: f32) {
         // let ops = self.take_render_ops();
         // self.render(ops, Some(&Color { r, g, b, a }));
     }
@@ -933,6 +933,7 @@ impl EglContext {
     }
 }
 
+#[allow(unused)]
 pub fn make_display(
     drm_fd: &DrmFd,
     egl: &EGL,

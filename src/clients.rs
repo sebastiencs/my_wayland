@@ -391,7 +391,7 @@ impl Model for Client {
                 dispatcher.start_model(client_reader_id, client_reader);
             }
             FdsReceived { fds } => {
-                self.pending_fds.extend(fds.into_iter());
+                self.pending_fds.extend(fds.iter());
             }
             MsgReceived { mut request } => {
                 // dbg!(&request, request.object_id());
