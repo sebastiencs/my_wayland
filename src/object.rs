@@ -20,6 +20,24 @@ where
     );
 }
 
+impl dyn Object {
+    pub fn downcast_ref<T: Object>(&self) -> Option<&T> {
+        self.as_any().downcast_ref::<T>()
+    }
+
+    pub fn downcast_mut<T: Object>(&mut self) -> Option<&mut T> {
+        self.as_any_mut().downcast_mut::<T>()
+    }
+
+    pub fn downcast<T: Object>(self: Box<Self>) -> Result<Box<T>, Box<Self>> {
+        if (&*self).as_any().is::<T>() {
+            Ok(self.into_any().downcast::<T>().ok().unwrap())
+        } else {
+            Err(self)
+        }
+    }
+}
+
 /// Convert `dyn Object` into concrete types
 /// We need to implement those methods on concrete types, to get
 /// the vtable of the concrete type.

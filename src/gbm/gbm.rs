@@ -100,28 +100,44 @@ impl GbmDevice {
         mut flags: UseFlags,
         mut modifiers: &[Modifier],
     ) -> BufferObject {
-        const LINEAR_MODIFIER: u64 = 0;
-
         let (width, height) = mode.size();
         let (width, height) = (width as u32, height as u32);
 
         let format = drm::buffer::DrmFourcc::Xrgb8888 as u32;
-        if modifiers == [Modifier::INVALID] {
-            modifiers = &[]
-        } else {
-            flags &= !UseFlags::LINEAR;
-        }
+        let use_plain_create = modifiers.is_empty()
+            || modifiers == [Modifier::INVALID]
+            || modifiers
+                .iter()
+                .all(|m| *m == Modifier::LINEAR || *m == Modifier::ZERO);
 
-        let bo = unsafe {
-            sys::gbm_bo_create_with_modifiers2(
-                self.gbm_device,
+        let bo = if use_plain_create {
+            log::debug!(
+                "Allocating GBM BO without modifiers: size={}x{} flags={:?}",
                 width,
                 height,
-                format,
-                utils::ptr_or_null(modifiers) as _,
-                modifiers.len() as _,
-                flags.bits(),
-            )
+                flags
+            );
+            unsafe { sys::gbm_bo_create(self.gbm_device, width, height, format, flags.bits()) }
+        } else {
+            flags &= !UseFlags::LINEAR;
+            log::debug!(
+                "Allocating GBM BO with modifiers: size={}x{} flags={:?} modifiers={:?}",
+                width,
+                height,
+                flags,
+                modifiers
+            );
+            unsafe {
+                sys::gbm_bo_create_with_modifiers2(
+                    self.gbm_device,
+                    width,
+                    height,
+                    format,
+                    utils::ptr_or_null(modifiers) as _,
+                    modifiers.len() as _,
+                    flags.bits(),
+                )
+            }
         };
         assert!(!bo.is_null());
 

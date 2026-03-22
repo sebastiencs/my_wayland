@@ -78,7 +78,13 @@ impl WlBuffer {
     }
 
     pub fn render_item(&self, x: i32, y: i32) -> Option<RenderItem> {
-        let texture = self.texture.as_ref()?;
+        let texture = match self.texture.as_ref() {
+            Some(texture) => texture,
+            None => {
+                log::warn!("WlBuffer::render_item missing texture for buffer={:?}", self.id);
+                return None;
+            }
+        };
         Some(RenderItem {
             texture: texture.texture_id(),
             x,

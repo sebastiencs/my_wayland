@@ -219,7 +219,7 @@ fn main() {
     let mut dispatcher = Dispatcher::default();
     dispatcher.dispatch(ClientsAction::Start);
 
-    let timer = make_timer(Duration::from_secs(2));
+    let timer = make_timer(Duration::from_secs(10));
 
     if !utils::is_x11() {
         fn on_timeout(_res: std::io::Result<PollCompleted>) -> AnyAction {

@@ -25,7 +25,6 @@ use crate::{
     egl::{EglContext, EglFrameBuffer, GlTexture, RenderItem, EGL},
     gbm::UseFlags,
     io_uring::ring::ReadWriteCompleted,
-    object::AsAny,
     runner::{AnyAction, Dispatcher, Model},
     state::{DrmId, State},
     wayland_objects::{wl_buffer::WlBuffer, wl_surface::WlSurface},
@@ -405,8 +404,20 @@ impl Drm {
         drm.set_client_capability(drm::ClientCapability::Atomic, true)
             .unwrap();
 
-        let driver = drm.get_driver().unwrap().into();
+        let driver: Driver = drm.get_driver().unwrap().into();
+        log::info!(
+            "Initializing DRM backend: devnode={:?} driver={} desc={}",
+            device.devnode(),
+            driver.name,
+            driver.desc
+        );
         let resources = Self::list_resources(&drm);
+        log::info!(
+            "Discovered DRM resources: connectors={} crtcs={} planes={}",
+            resources.connectors.len(),
+            resources.crtcs.len(),
+            resources.planes.len()
+        );
 
         let gbm = crate::gbm::GbmDevice::new(&drm).unwrap();
         let egl_context = EglContext::make(egl, gbm);
@@ -512,71 +523,94 @@ impl Drm {
 
         let in_use = Self::find_first_valid_connector(&connectors, &crtcs, &planes)
             .expect("Failed to find connector");
+        let mode = in_use.connector.preferred_mode.as_ref().unwrap();
+        let (hdisplay, vdisplay) = mode.size();
+        let (primary_plane, plane_modifiers) = in_use.primary_plane();
+        log::info!(
+            "Selected output: connector={} crtc={:?} plane={:?} mode={}x{} modifiers={:?}",
+            in_use.connector.interface_name,
+            in_use.crtc.handle,
+            primary_plane.handle,
+            hdisplay,
+            vdisplay,
+            plane_modifiers
+        );
 
         let mut changes = control::atomic::AtomicModeReq::new();
 
         let buffers: [_; 2] =
-            std::array::from_fn(|_| Self::make_render_buffer(drm, egl, &in_use, false).unwrap());
-
-        dbg!(&buffers);
-
-        let mode = in_use.connector.preferred_mode.as_ref().unwrap();
-        let (primary_plane, _) = in_use.primary_plane();
+            std::array::from_fn(|index| match Self::make_render_buffer(drm, egl, &in_use, false) {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    log::error!("Failed to create DRM render buffer #{index}: {:?}", error);
+                    panic!("Failed to create DRM render buffer #{index}: {:?}", error);
+                }
+            });
 
         changes.add_property(
-            dbg!(primary_plane.handle),
-            dbg!(primary_plane.fb_id),
+            primary_plane.handle,
+            primary_plane.fb_id,
             control::property::Value::Object(Some(buffers[0].drm_fb.id().into())),
         );
         changes.add_property(
-            dbg!(primary_plane.handle),
-            dbg!(primary_plane.crtc_id),
-            control::property::Value::CRTC(Some(dbg!(in_use.crtc.handle))),
+            primary_plane.handle,
+            primary_plane.crtc_id,
+            control::property::Value::CRTC(Some(in_use.crtc.handle)),
         );
         changes.add_property(
-            dbg!(primary_plane.handle),
-            dbg!(primary_plane.crtc.x.handle),
+            primary_plane.handle,
+            primary_plane.crtc.x.handle,
             control::property::Value::UnsignedRange(0),
         );
         changes.add_property(
-            dbg!(primary_plane.handle),
-            dbg!(primary_plane.crtc.y.handle),
+            primary_plane.handle,
+            primary_plane.crtc.y.handle,
             control::property::Value::UnsignedRange(0),
         );
-        let (hdisplay, vdisplay) = mode.size();
         changes.add_property(
-            dbg!(primary_plane.handle),
-            dbg!(primary_plane.crtc.width.handle),
+            primary_plane.handle,
+            primary_plane.crtc.width.handle,
             control::property::Value::UnsignedRange(hdisplay as _),
         );
         changes.add_property(
-            dbg!(primary_plane.handle),
-            dbg!(primary_plane.crtc.height.handle),
+            primary_plane.handle,
+            primary_plane.crtc.height.handle,
             control::property::Value::UnsignedRange(vdisplay as _),
         );
         changes.add_property(
-            dbg!(primary_plane.handle),
-            dbg!(primary_plane.src.x.handle),
+            primary_plane.handle,
+            primary_plane.src.x.handle,
             control::property::Value::UnsignedRange(0),
         );
         changes.add_property(
-            dbg!(primary_plane.handle),
-            dbg!(primary_plane.src.y.handle),
+            primary_plane.handle,
+            primary_plane.src.y.handle,
             control::property::Value::UnsignedRange(0),
         );
         changes.add_property(
-            dbg!(primary_plane.handle),
-            dbg!(primary_plane.src.width.handle),
+            primary_plane.handle,
+            primary_plane.src.width.handle,
             control::property::Value::UnsignedRange((hdisplay as u64) << 16),
         );
         changes.add_property(
-            dbg!(primary_plane.handle),
-            dbg!(primary_plane.src.height.handle),
+            primary_plane.handle,
+            primary_plane.src.height.handle,
             control::property::Value::UnsignedRange((vdisplay as u64) << 16),
         );
 
-        drm.atomic_commit(control::AtomicCommitFlags::ALLOW_MODESET, changes)
-            .expect("Failed to set mode");
+        if let Err(error) = drm.atomic_commit(control::AtomicCommitFlags::ALLOW_MODESET, changes) {
+            log::error!(
+                "Initial atomic modeset failed: connector={} crtc={:?} plane={:?} fb={:?} mode={}x{} error={:?}",
+                in_use.connector.interface_name,
+                in_use.crtc.handle,
+                primary_plane.handle,
+                buffers[0].drm_fb.id(),
+                hdisplay,
+                vdisplay,
+                error
+            );
+            panic!("Failed to set mode: {:?}", error);
+        }
 
         DrmOutput {
             in_use,
@@ -606,6 +640,14 @@ impl Drm {
             .copied()
             .collect();
         assert!(!modifiers.is_empty());
+        log::debug!(
+            "Creating render buffer: cursor={} mode={:?} plane_modifiers={:?} egl_write_modifiers={:?} chosen_modifiers={:?}",
+            is_cursor,
+            mode.name(),
+            plane_modifiers,
+            opengl_format.write_modifiers,
+            modifiers
+        );
 
         let mut flags = UseFlags::RENDERING | UseFlags::SCANOUT;
         if is_cursor {
@@ -613,7 +655,21 @@ impl Drm {
         }
 
         let bo = egl.gbm.create_bo(&mode, flags, &modifiers);
-        let drm_fb = Self::add_framebuffer(drm, bo.dmabuf()).unwrap();
+        let drm_fb = match Self::add_framebuffer(drm, bo.dmabuf()) {
+            Ok(framebuffer) => framebuffer,
+            Err(error) => {
+                log::error!(
+                    "Failed to create DRM framebuffer: size={}x{} format={} modifier={:?} flags={:?} error={:?}",
+                    bo.dmabuf().width,
+                    bo.dmabuf().height,
+                    bo.dmabuf().format.name,
+                    bo.dmabuf().modifier,
+                    flags,
+                    error
+                );
+                return Err(error);
+            }
+        };
         let image = egl.import_dmabuf(bo.dmabuf());
         let gl_framebuffer = egl.make_fb_from_image(&image, bo.dmabuf());
         gl_framebuffer.clear();
@@ -625,10 +681,18 @@ impl Drm {
     fn add_framebuffer(drm: &DrmFd, dmabuf: &DmaBuf) -> std::io::Result<DrmFrameBuffer> {
         let mut modifier = Modifier::ZERO;
         let mut flags = FbCmd2Flags::empty();
-        if dmabuf.modifier != Modifier::INVALID {
+        if dmabuf.modifier != Modifier::INVALID && dmabuf.modifier != Modifier::LINEAR {
             modifier = dmabuf.modifier;
             flags |= FbCmd2Flags::MODIFIERS;
         }
+        log::debug!(
+            "Adding framebuffer: size={}x{} format={} modifier={:?} addfb_flags={:?}",
+            dmabuf.width,
+            dmabuf.height,
+            dmabuf.format.name,
+            dmabuf.modifier,
+            flags
+        );
 
         const N: usize = 4;
         let (mut strides, mut offsets, mut handles, mut modifiers) =
@@ -658,8 +722,7 @@ impl Drm {
             &offsets,
             &modifiers,
             flags.bits(),
-        )
-        .unwrap();
+        )?;
 
         let handles = &handles[..dmabuf.planes.len()];
         close_gem_handles(drm, handles).unwrap();
@@ -1250,6 +1313,7 @@ pub enum DrmAction {
 
 pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
     let Some((drm_id, _)) = state.drm.iter().next() else {
+        log::warn!("schedule_active_output: no active DRM output");
         return;
     };
 
@@ -1294,7 +1358,8 @@ impl DrmModel {
     }
 
     fn schedule_frame(&mut self, state: &mut crate::state::State, dispatcher: &mut Dispatcher) {
-        if state.drm.get_mut(self.drm_id).output.request_frame() {
+        let scheduled = state.drm.get_mut(self.drm_id).output.request_frame();
+        if scheduled {
             dispatcher.dispatch_to(self.model_id(), DrmAction::RenderFrame);
         }
     }
@@ -1303,6 +1368,7 @@ impl DrmModel {
         let render_items = collect_render_items(state);
         let drm = state.drm.get_mut(self.drm_id);
         if !drm.output.begin_render() {
+            log::warn!("DrmModel::render_frame skipped: output not ready");
             return;
         }
 
@@ -1332,18 +1398,30 @@ impl DrmModel {
 fn collect_render_items(state: &crate::state::State) -> Vec<RenderItem> {
     let mut items = Vec::new();
 
-    for (_, object) in state.objects.iter() {
-        let Some(surface) = object.as_any().downcast_ref::<WlSurface>() else {
+    for (object_id, object) in state.objects.iter() {
+        let Some(surface) = object.downcast_ref::<WlSurface>() else {
             continue;
         };
         let Some(surface_state) = surface.render_state() else {
+            log::warn!(
+                "collect_render_items: surface has no render_state object_id={:?}",
+                object_id
+            );
             continue;
         };
-        let object = &state.objects[surface_state.buffer_object_id];
-        let Some(buffer) = object.as_any().downcast_ref::<WlBuffer>() else {
+        let Some(buffer) = state.objects[surface_state.buffer_object_id].downcast_ref::<WlBuffer>()
+        else {
+            log::warn!(
+                "collect_render_items: object {:?} is not a WlBuffer",
+                surface_state.buffer_object_id
+            );
             continue;
         };
         let Some(item) = buffer.render_item(surface_state.x, surface_state.y) else {
+            log::warn!(
+                "collect_render_items: no render item for buffer_object_id={:?}",
+                surface_state.buffer_object_id
+            );
             continue;
         };
         items.push(item);

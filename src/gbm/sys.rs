@@ -81,6 +81,13 @@ struct gbm_import_fd_modifier_data {
 #[link(name = "gbm")]
 extern "C" {
     pub fn gbm_create_device(fd: libc::c_int) -> *mut gbm_device;
+    pub fn gbm_bo_create(
+        dev: *mut gbm_device,
+        width: u32,
+        height: u32,
+        format: u32,
+        flags: u32,
+    ) -> *mut gbm_bo;
     pub fn gbm_bo_create_with_modifiers2(
         dev: *mut gbm_device,
         width: u32,

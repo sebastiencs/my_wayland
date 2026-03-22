@@ -441,6 +441,8 @@ impl GlTexture {
             gl::BindTexture(target, texture);
             gl::TexParameteri(target, gl::TEXTURE_WRAP_S as _, gl::CLAMP_TO_EDGE);
             gl::TexParameteri(target, gl::TEXTURE_WRAP_T as _, gl::CLAMP_TO_EDGE);
+            gl::TexParameteri(target, gl::TEXTURE_MIN_FILTER as _, gl::LINEAR as _);
+            gl::TexParameteri(target, gl::TEXTURE_MAG_FILTER as _, gl::LINEAR as _);
             gl::EGLImageTargetTexture2DOES(target, image.image.ptr);
             assert_eq!(gl::GetError(), gl::NO_ERROR as _);
             gl::BindTexture(target, 0);
@@ -463,6 +465,8 @@ impl GlTexture {
             gl::BindTexture(target, texture);
             gl::TexParameteri(target, gl::TEXTURE_WRAP_S as _, gl::CLAMP_TO_EDGE);
             gl::TexParameteri(target, gl::TEXTURE_WRAP_T as _, gl::CLAMP_TO_EDGE);
+            gl::TexParameteri(target, gl::TEXTURE_MIN_FILTER as _, gl::LINEAR as _);
+            gl::TexParameteri(target, gl::TEXTURE_MAG_FILTER as _, gl::LINEAR as _);
             let param = stride as u32 / format.bpp;
             gl::PixelStorei(gl::UNPACK_ROW_LENGTH_EXT as _, param as i32);
             gl::TexImage2D(
@@ -556,7 +560,7 @@ impl EglFrameBuffer {
             gl::BindFramebuffer(gl::FRAMEBUFFER as _, self.framebuffer_object);
             gl::Viewport(0, 0, self.width, self.height);
             // if let Some(c) = clear_color {
-            gl::ClearColor(0.1, 0.1, 0.1, 0.0);
+            gl::ClearColor(1.0, 0.0, 0.0, 1.0);
             gl::Clear(gl::COLOR_BUFFER_BIT as _);
             // }
             gl::BlendFunc(gl::ONE as _, gl::ONE_MINUS_SRC_ALPHA as _);

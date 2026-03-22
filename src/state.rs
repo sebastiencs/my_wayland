@@ -8,7 +8,7 @@ use crate::{
     xkb::Xkb,
 };
 
-use std::{any::Any, marker::PhantomData, ptr::NonNull, rc::Rc};
+use std::{marker::PhantomData, ptr::NonNull, rc::Rc};
 
 #[derive(Debug)]
 enum ValueOrEmpty<V> {
@@ -145,8 +145,7 @@ impl<O: Object> Drop for GrabbedObject<O> {
 impl<O: Object> GrabbedObject<O> {
     pub fn new(mut grabbed: Grab<ObjectId, Box<dyn Object>>) -> Self {
         let value: Box<dyn Object> = grabbed.value.take().unwrap();
-        let value: Box<dyn Any> = value.into_any();
-        let value: Box<O> = value.downcast().unwrap();
+        let value: Box<O> = value.downcast().ok().unwrap();
         Self { value: Some(value), grabbed, _phantom: PhantomData }
     }
 }
@@ -218,8 +217,10 @@ where
     pub fn iter(&self) -> impl Iterator<Item = (K, &V)> {
         self.map.iter().enumerate().filter_map(|(index, v)| {
             let key: K = index.into();
-            let ValueOrEmpty::Value(value) = v else {
-                return None;
+            let value = match v {
+                ValueOrEmpty::Value(value) => value,
+                ValueOrEmpty::Grabbed => panic!("iterating while grabbed"),
+                ValueOrEmpty::Empty { .. } => return None,
             };
             Some((key, value))
         })
@@ -230,6 +231,10 @@ impl<K, V> IndexMap<K, V>
 where
     K: Into<usize> + Copy,
 {
+    pub fn grabbed_count(&self) -> usize {
+        Rc::strong_count(&self.ngrabbed).saturating_sub(1)
+    }
+
     pub fn remove(&mut self, key: K) -> Option<V> {
         let index: usize = key.into();
         let entry = self.map.get_mut(index)?;

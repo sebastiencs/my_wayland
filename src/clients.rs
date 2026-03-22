@@ -203,10 +203,11 @@ impl Client {
     pub fn get_object<'a, K>(&self, id: K, state: &'a mut State) -> &'a mut K::Object
     where
         K: Into<WaylandId> + IdToObject,
+        K::Object: Object,
     {
         let id: WaylandId = id.into();
         let obj_id = self.objects[&id];
-        state.objects[obj_id].as_any_mut().downcast_mut().unwrap()
+        state.objects[obj_id].downcast_mut().unwrap()
     }
 
     pub fn grab_object<K>(&self, id: K, state: &mut State) -> GrabbedObject<K::Object>
@@ -235,10 +236,7 @@ impl Client {
     ) -> ((WaylandId, ObjectId), &'a mut O) {
         let (wayland_id, object_id) = state.insert_object(object);
         self.objects.insert(wayland_id, object_id);
-        let object: &mut O = state.objects[object_id]
-            .as_any_mut()
-            .downcast_mut::<O>()
-            .unwrap();
+        let object: &mut O = state.objects[object_id].downcast_mut::<O>().unwrap();
         ((wayland_id, object_id), object)
     }
 
