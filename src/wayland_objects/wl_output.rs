@@ -77,7 +77,7 @@ impl WlOutput {
 
     pub fn send_geometry(&self, state: &State, dispatcher: &mut ClientDispatcher) {
         let drm = self.get_drm(state);
-        let in_use = &drm.in_use;
+        let in_use = &drm.output.in_use;
 
         let geometry = wl_output::Event::Geometry {
             x: 0,
@@ -94,7 +94,7 @@ impl WlOutput {
 
     pub fn send_mode(&self, state: &State, dispatcher: &mut ClientDispatcher) {
         let drm = self.get_drm(state);
-        let in_use = &drm.in_use;
+        let in_use = &drm.output.in_use;
 
         let mode = in_use.connector.preferred_mode.as_ref().unwrap();
         let (width, height) = mode.size();
@@ -122,7 +122,7 @@ impl WlOutput {
 
     pub fn send_name(&self, state: &State, dispatcher: &mut ClientDispatcher) {
         let drm = self.get_drm(state);
-        let name = drm.in_use.connector.interface_name.clone();
+        let name = drm.output.in_use.connector.interface_name.clone();
         self.send_event(wl_output::Event::Name { name }, dispatcher);
     }
 

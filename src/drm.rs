@@ -106,9 +106,20 @@ pub struct Drm {
     device: udev::Device,
     resources: DrmResources,
     egl_context: EglContext,
+    pub output: DrmOutput,
+    driver: Driver,
+}
+
+#[derive(Debug)]
+pub struct DrmOutput {
     pub in_use: ConnectorInUse,
     buffers: [RenderBuffer; 2],
-    driver: Driver,
+    displayed_buffer_index: usize,
+    render_buffer_index: usize,
+    needs_frame: bool,
+    frame_scheduled: bool,
+    rendering_active: bool,
+    page_flip_pending: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -339,7 +350,7 @@ impl Drm {
 
         let gbm = crate::gbm::GbmDevice::new(&drm).unwrap();
         let egl_context = EglContext::make(egl, gbm);
-        let (in_use, buffers) = Self::init_drm(&drm, &egl_context, &resources);
+        let output = Self::init_drm(&drm, &egl_context, &resources);
 
         Self {
             fd: drm,
@@ -347,8 +358,7 @@ impl Drm {
             resources,
             egl_context,
             driver,
-            in_use,
-            buffers,
+            output,
         }
     }
 
@@ -416,7 +426,7 @@ impl Drm {
         drm: &DrmFd,
         egl: &EglContext,
         drm_resources: &DrmResources,
-    ) -> (ConnectorInUse, [RenderBuffer; 2]) {
+    ) -> DrmOutput {
         let DrmResources { planes, crtcs, connectors, .. } = drm_resources;
 
         let in_use = Self::find_first_valid_connector(&connectors, &crtcs, &planes)
@@ -487,7 +497,16 @@ impl Drm {
         drm.atomic_commit(control::AtomicCommitFlags::ALLOW_MODESET, changes)
             .expect("Failed to set mode");
 
-        (in_use, buffers)
+        DrmOutput {
+            in_use,
+            buffers,
+            displayed_buffer_index: 0,
+            render_buffer_index: 1,
+            needs_frame: false,
+            frame_scheduled: false,
+            rendering_active: false,
+            page_flip_pending: false,
+        }
     }
 
     fn make_render_buffer(
