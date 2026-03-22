@@ -43,6 +43,7 @@ loom = "0.5"
 panic = "abort"
 
 [profile.release]
+debug = true
 panic = "abort"
 
 [lints.rust]
