@@ -94,6 +94,10 @@ impl WlBuffer {
             height: self.height as i32,
         })
     }
+
+    pub fn dimensions(&self) -> (i32, i32) {
+        (self.width as i32, self.height as i32)
+    }
 }
 
 impl Object for WlBuffer {

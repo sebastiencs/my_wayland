@@ -55,7 +55,7 @@ impl Object for WlCompositor {
 
         match client.parse::<Self>(req).unwrap() {
             CreateSurface { id } => {
-                client.insert_object(state, WlSurface::new(id, self.version));
+                client.insert_object(state, WlSurface::new(id, client.client_id(), self.version));
             }
             CreateRegion { id } => todo!(),
         }

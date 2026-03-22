@@ -19,9 +19,10 @@ use crate::{
     object::{IdToObject, Object, Parser, ParserError},
     protocol_generated::{wl_display, Array, Constants, WaylandId},
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
+    seat::SeatClientEvent,
     state::{GrabbedObject, ObjectId, State},
     udev::Udev,
-    wayland_objects::wl_display::WlDisplay,
+    wayland_objects::{wl_display::WlDisplay, wl_keyboard::WlKeyboard, wl_pointer::WlPointer},
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
@@ -170,6 +171,7 @@ pub enum ClientAction {
     Start,
     MsgReceived { request: RawRequest<'static> },
     FdsReceived { fds: Box<[RawFd]> },
+    SeatEvent { event: SeatClientEvent },
     Close,
 }
 
@@ -313,6 +315,119 @@ impl Client {
         wl_display.send_event(wl_display::Event::DeleteId { id: id.into() }, dispatcher);
     }
 
+    fn handle_seat_event(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        event: SeatClientEvent,
+    ) {
+        match event {
+            SeatClientEvent::PointerEnter { serial, surface, x, y } => {
+                let pointers = state.seat.pointer_resources(self.id);
+                for pointer_id in pointers {
+                    if !self.contains_object(pointer_id, state) {
+                        continue;
+                    }
+                    let pointer: &mut WlPointer = self.get_object(pointer_id, state);
+                    pointer.send_enter(serial, surface, x, y, dispatcher);
+                }
+            }
+            SeatClientEvent::PointerLeave { serial, surface } => {
+                let pointers = state.seat.pointer_resources(self.id);
+                for pointer_id in pointers {
+                    if !self.contains_object(pointer_id, state) {
+                        continue;
+                    }
+                    let pointer: &mut WlPointer = self.get_object(pointer_id, state);
+                    pointer.send_leave(serial, surface, dispatcher);
+                }
+            }
+            SeatClientEvent::PointerMotion { time, x, y } => {
+                let pointers = state.seat.pointer_resources(self.id);
+                for pointer_id in pointers {
+                    if !self.contains_object(pointer_id, state) {
+                        continue;
+                    }
+                    let pointer: &mut WlPointer = self.get_object(pointer_id, state);
+                    pointer.send_motion(time, x, y, dispatcher);
+                }
+            }
+            SeatClientEvent::PointerButton { serial, time, button, state: button_state } => {
+                let pointers = state.seat.pointer_resources(self.id);
+                for pointer_id in pointers {
+                    if !self.contains_object(pointer_id, state) {
+                        continue;
+                    }
+                    let pointer: &mut WlPointer = self.get_object(pointer_id, state);
+                    pointer.send_button(serial, time, button, button_state, dispatcher);
+                }
+            }
+            SeatClientEvent::PointerFrame => {
+                let pointers = state.seat.pointer_resources(self.id);
+                for pointer_id in pointers {
+                    if !self.contains_object(pointer_id, state) {
+                        continue;
+                    }
+                    let pointer: &mut WlPointer = self.get_object(pointer_id, state);
+                    pointer.send_frame(dispatcher);
+                }
+            }
+            SeatClientEvent::KeyboardEnter { serial, surface } => {
+                let keyboards = state.seat.keyboard_resources(self.id);
+                for keyboard_id in keyboards {
+                    if !self.contains_object(keyboard_id, state) {
+                        continue;
+                    }
+                    let keyboard: &mut WlKeyboard = self.get_object(keyboard_id, state);
+                    keyboard.send_empty_enter(serial, surface, dispatcher);
+                }
+            }
+            SeatClientEvent::KeyboardLeave { serial, surface } => {
+                let keyboards = state.seat.keyboard_resources(self.id);
+                for keyboard_id in keyboards {
+                    if !self.contains_object(keyboard_id, state) {
+                        continue;
+                    }
+                    let keyboard: &mut WlKeyboard = self.get_object(keyboard_id, state);
+                    keyboard.send_leave(serial, surface, dispatcher);
+                }
+            }
+            SeatClientEvent::KeyboardKey { serial, time, key, state: key_state } => {
+                let keyboards = state.seat.keyboard_resources(self.id);
+                for keyboard_id in keyboards {
+                    if !self.contains_object(keyboard_id, state) {
+                        continue;
+                    }
+                    let keyboard: &mut WlKeyboard = self.get_object(keyboard_id, state);
+                    keyboard.send_key(serial, time, key, key_state, dispatcher);
+                }
+            }
+            SeatClientEvent::KeyboardModifiers {
+                serial,
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+            } => {
+                let keyboards = state.seat.keyboard_resources(self.id);
+                for keyboard_id in keyboards {
+                    if !self.contains_object(keyboard_id, state) {
+                        continue;
+                    }
+                    let keyboard: &mut WlKeyboard = self.get_object(keyboard_id, state);
+                    keyboard.send_modifiers(
+                        serial,
+                        mods_depressed,
+                        mods_latched,
+                        mods_locked,
+                        group,
+                        dispatcher,
+                    );
+                }
+            }
+        }
+    }
+
     fn log_request<R: Parser>(&self, object_id: u32, result: Result<&R::Request, &ParserError>)
     where
         R::Request: std::fmt::Debug,
@@ -454,6 +569,9 @@ impl Model for Client {
             FdsReceived { fds } => {
                 self.pending_fds.extend(fds.iter());
             }
+            SeatEvent { event } => {
+                self.handle_seat_event(state, &mut dispatcher, event);
+            }
             MsgReceived { mut request } => {
                 let Some(&obj_id) = self.objects.get(&request.object_id()) else {
                     log::warn!(
@@ -480,6 +598,7 @@ impl Model for Client {
             }
             Close => {
                 log::info!("client_id={:?} closed", self.id);
+                state.seat.remove_client(self.id);
                 let wayland_ids: Vec<WaylandId> = self.objects.keys().copied().collect();
                 for wid in wayland_ids {
                     if let Some(oid) = self.objects.remove(&wid) {

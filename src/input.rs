@@ -5,11 +5,18 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use input::AsRaw;
+use input::{
+    event::{
+        keyboard::{KeyState, KeyboardEvent, KeyboardEventTrait},
+        pointer::{ButtonState, PointerEvent, PointerEventTrait},
+    },
+    AsRaw,
+};
 
 use crate::{
     io_uring::{model::IoUringAction, ring::PollCompleted},
     runner::{Dispatcher, Model, Redispatcher},
+    seat,
     state::{InputId, State},
 };
 
@@ -113,7 +120,52 @@ impl Model for Libinput {
                 self.dispatch_poll_libinput(dispatcher);
             }
             Event => {
-                log::info!("LIBINPUT EVENT")
+                self.dispatch();
+                while let Some(event) = self.next_event() {
+                    match event {
+                        input::Event::Pointer(pointer) => match pointer {
+                            PointerEvent::Motion(motion) => seat::handle_pointer_motion(
+                                state,
+                                dispatcher,
+                                motion.dx(),
+                                motion.dy(),
+                                motion.time(),
+                            ),
+                            PointerEvent::Button(button) => {
+                                let button_state = match button.button_state() {
+                                    ButtonState::Pressed => 1,
+                                    ButtonState::Released => 0,
+                                };
+                                seat::handle_pointer_button(
+                                    state,
+                                    dispatcher,
+                                    button.button(),
+                                    button_state,
+                                    button.time(),
+                                );
+                            }
+                            _ => {}
+                        },
+                        input::Event::Keyboard(keyboard) => match keyboard {
+                            KeyboardEvent::Key(key) => {
+                                let key_state = match key.key_state() {
+                                    KeyState::Pressed => 1,
+                                    KeyState::Released => 0,
+                                };
+                                seat::handle_keyboard_key(
+                                    state,
+                                    dispatcher,
+                                    key.key(),
+                                    key_state,
+                                    key.time(),
+                                );
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                }
+                self.dispatch_poll_libinput(dispatcher);
             }
             OpenInput { devnode, fd, devnum } => {
                 self.insert_device_fd(fd, devnum);

@@ -2,9 +2,11 @@ use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     globals::Global,
     object::{Object, Parser},
-    protocol_generated::{wl_keyboard, wl_seat, Constants, NewId, WaylandId, WlSeatId},
+    protocol_generated::{
+        wl_keyboard, wl_seat, Constants, NewId, WaylandId, WlPointerId, WlSeatId,
+    },
     state::State,
-    wayland_objects::wl_keyboard::WlKeyboard,
+    wayland_objects::{wl_keyboard::WlKeyboard, wl_pointer::WlPointer},
 };
 
 #[derive(Debug)]
@@ -65,13 +67,19 @@ impl Object for WlSeat {
         use wl_seat::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
-            GetPointer { id } => todo!(),
+            GetPointer { id } => {
+                let id = WlPointerId::from(id);
+                let wl_pointer = WlPointer::new(id);
+                state.seat.register_pointer(client.client_id(), id);
+                client.insert_object(state, wl_pointer);
+            }
             GetKeyboard { id } => {
                 let wl_keyboard = WlKeyboard::new(id);
 
                 wl_keyboard.send_keymap(&state.xkb, dispatcher);
                 wl_keyboard.send_repeat_info(dispatcher);
 
+                state.seat.register_keyboard(client.client_id(), id);
                 client.insert_object(state, wl_keyboard);
             }
             GetTouch { id } => todo!(),

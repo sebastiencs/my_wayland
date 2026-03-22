@@ -114,6 +114,7 @@ mod protocol;
 mod protocol_generated;
 mod queue;
 pub mod runner;
+mod seat;
 mod state;
 mod udev;
 mod utils;
@@ -195,6 +196,7 @@ fn main() {
         drm: Default::default(),
         globals,
         egl,
+        seat: Default::default(),
         xkb,
     };
 

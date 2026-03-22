@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest},
     drm::schedule_active_output,
     object::{Object, Parser},
     protocol_generated::{
@@ -20,6 +20,7 @@ pub enum Role {
 #[derive(Debug)]
 pub struct WlSurface {
     id: WlSurfaceId,
+    client_id: ClientId,
     role: Role,
     impl_id: Option<XdgSurfaceId>,
     version: u32,
@@ -58,9 +59,10 @@ struct SurfaceChanges {
 }
 
 impl WlSurface {
-    pub fn new(id: WlSurfaceId, version: u32) -> Self {
+    pub fn new(id: WlSurfaceId, client_id: ClientId, version: u32) -> Self {
         Self {
             id,
+            client_id,
             role: Role::None,
             impl_id: None,
             version,
@@ -230,6 +232,14 @@ impl WlSurface {
             x: self.on_screen.x,
             y: self.on_screen.y,
         })
+    }
+
+    pub fn client_id(&self) -> ClientId {
+        self.client_id
+    }
+
+    pub fn surface_id(&self) -> WlSurfaceId {
+        self.id
     }
 }
 

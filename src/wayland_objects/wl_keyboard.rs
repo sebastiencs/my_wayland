@@ -1,8 +1,10 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     object::{Object, Parser},
-    protocol_generated::{wl_keyboard, WaylandId, WlKeyboardId},
+    protocol_generated::{wl_keyboard, Array, WaylandId, WlKeyboardId, WlSurfaceId},
+    seat::empty_keys,
     state::State,
+    wayland_objects::wl_display::WlDisplay,
     xkb::Xkb,
 };
 
@@ -25,14 +27,17 @@ impl Object for WlKeyboard {
     fn on(
         &mut self,
         client: &mut Client,
-        _: &mut State,
+        state: &mut State,
         req: RawRequest,
-        _: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) {
         use wl_keyboard::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
-            Release => todo!(),
+            Release => {
+                state.seat.unregister_keyboard(client.client_id(), self.id);
+                client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
+            }
         }
     }
 }
@@ -53,5 +58,60 @@ impl WlKeyboard {
 
     pub fn send_repeat_info(&self, dispatcher: &mut ClientDispatcher) {
         self.send_event(wl_keyboard::Event::RepeatInfo { rate: 25, delay: 250 }, dispatcher)
+    }
+
+    pub fn send_enter(
+        &self,
+        serial: u32,
+        surface: WlSurfaceId,
+        keys: Array,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.send_event(wl_keyboard::Event::Enter { serial, surface, keys }, dispatcher);
+    }
+
+    pub fn send_leave(&self, serial: u32, surface: WlSurfaceId, dispatcher: &mut ClientDispatcher) {
+        self.send_event(wl_keyboard::Event::Leave { serial, surface }, dispatcher);
+    }
+
+    pub fn send_key(
+        &self,
+        serial: u32,
+        time: u32,
+        key: u32,
+        state: u32,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.send_event(wl_keyboard::Event::Key { serial, time, key, state }, dispatcher);
+    }
+
+    pub fn send_modifiers(
+        &self,
+        serial: u32,
+        mods_depressed: u32,
+        mods_latched: u32,
+        mods_locked: u32,
+        group: u32,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.send_event(
+            wl_keyboard::Event::Modifiers {
+                serial,
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+            },
+            dispatcher,
+        );
+    }
+
+    pub fn send_empty_enter(
+        &self,
+        serial: u32,
+        surface: WlSurfaceId,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.send_enter(serial, surface, empty_keys(), dispatcher);
     }
 }

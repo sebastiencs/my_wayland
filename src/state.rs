@@ -5,6 +5,7 @@ use crate::{
     input::Input,
     object::Object,
     protocol_generated::WaylandId,
+    seat::SeatState,
     xkb::Xkb,
 };
 
@@ -354,6 +355,7 @@ pub struct State {
     pub drm: IndexMap<DrmId, Drm>,
     pub globals: Globals,
     pub egl: EGL,
+    pub seat: SeatState,
     pub xkb: Xkb,
 }
 

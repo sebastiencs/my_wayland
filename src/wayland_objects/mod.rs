@@ -6,6 +6,7 @@ pub mod wl_compositor;
 pub mod wl_display;
 pub mod wl_keyboard;
 pub mod wl_output;
+pub mod wl_pointer;
 pub mod wl_registry;
 pub mod wl_seat;
 pub mod wl_shm;
@@ -46,7 +47,6 @@ fake_obj! {
     { wl_shell_surface, WlShellSurface },
     // { wl_surface, WlSurface },
     // { wl_seat, WlSeat },
-    { wl_pointer, WlPointer },
     // { wl_keyboard, WlKeyboard },
     { wl_touch, WlTouch },
     // { wl_output, WlOutput },
