@@ -28,22 +28,25 @@ impl Global for XdgWmBaseGlobal {
         client: &mut Client,
         state: &mut State,
         id: NewId,
-        _version: u32,
+        version: u32,
         _dispatcher: &mut ClientDispatcher,
     ) {
         let id = XdgWmBaseId::from(id);
-        client.insert_object(state, XdgWmBase { id });
+        let version = version.min(XdgWmBase::INTERFACE_VERSION);
+        client.insert_object(state, XdgWmBase { id, version });
     }
 }
 
 #[derive(Debug)]
 pub struct XdgWmBase {
     id: XdgWmBaseId,
+    /// Client's negotiated `xdg_wm_base` version (caps which xdg_toplevel events we may send).
+    version: u32,
 }
 
 impl XdgWmBase {
     pub fn new(id: XdgWmBaseId) -> Self {
-        Self { id }
+        Self { id, version: XdgWmBase::INTERFACE_VERSION }
     }
 }
 
@@ -71,7 +74,7 @@ impl Object for XdgWmBase {
                 }
                 wl_surface.set_impl(id);
 
-                let xdg_surface = XdgSurface::new(id, surface);
+                let xdg_surface = XdgSurface::new(id, surface, self.version);
                 client.insert_object(state, xdg_surface);
             }
             Pong { serial } => todo!(),

@@ -17,6 +17,8 @@ pub enum Role {
 pub struct XdgSurface {
     id: XdgSurfaceId,
     wl_surface: WlSurfaceId,
+    /// Negotiated `xdg_wm_base` version for this shell (from the factory that created us).
+    wm_base_version: u32,
     role: Role,
     impl_id: Option<XdgToplevelId>,
     is_initialized: bool,
@@ -25,10 +27,11 @@ pub struct XdgSurface {
 }
 
 impl XdgSurface {
-    pub fn new(id: XdgSurfaceId, wl_surface: WlSurfaceId) -> Self {
+    pub fn new(id: XdgSurfaceId, wl_surface: WlSurfaceId, wm_base_version: u32) -> Self {
         Self {
             id,
             wl_surface,
+            wm_base_version,
             role: Role::None,
             impl_id: None,
             is_initialized: false,
@@ -112,7 +115,8 @@ impl Object for XdgSurface {
                 }
                 self.set_impl(id);
 
-                let xdg_toplevel = xdg_toplevel::XdgToplevel::new(id, self.id);
+                let xdg_toplevel =
+                    xdg_toplevel::XdgToplevel::new(id, self.id, self.wm_base_version);
                 xdg_toplevel.send_capabilities(dispatcher);
 
                 client.insert_object(state, xdg_toplevel);
@@ -142,6 +146,7 @@ pub mod xdg_toplevel {
     pub struct XdgToplevel {
         id: XdgToplevelId,
         xdg_surface_id: XdgSurfaceId,
+        wm_base_version: u32,
 
         title: String,
         app_id: String,
@@ -149,19 +154,25 @@ pub mod xdg_toplevel {
     }
 
     impl XdgToplevel {
-        pub fn new(id: XdgToplevelId, xdg_surface_id: XdgSurfaceId) -> Self {
+        pub fn new(id: XdgToplevelId, xdg_surface_id: XdgSurfaceId, wm_base_version: u32) -> Self {
             let mut states = BTreeSet::default();
             states.insert(SurfaceState::Fullscreen);
             Self {
                 id,
                 xdg_surface_id,
+                wm_base_version,
                 title: String::new(),
                 app_id: String::new(),
                 states,
             }
         }
 
+        /// `wm_capabilities` exists only since xdg_wm_base version 5; older clients (e.g. wev) must
+        /// not receive wire opcode 3 or libwayland aborts with a NULL listener.
         pub fn send_capabilities(&self, dispatcher: &mut ClientDispatcher) {
+            if self.wm_base_version < 5 {
+                return;
+            }
             use proto_xdg_toplevel::WmCapabilities;
             let capabilities_list =
                 [WmCapabilities::Fullscreen as u32, WmCapabilities::Maximize as u32];
