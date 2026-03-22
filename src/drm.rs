@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     num::NonZeroU32,
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
+    rc::Rc,
 };
 
 use {drm::control::FbCmd2Flags, khronos_types::gl};
@@ -70,7 +71,22 @@ pub const KNOWN_FORMATS: &[DrmFourcc] = &[DrmFourcc::Argb8888, DrmFourcc::Xrgb88
 
 #[derive(Debug)]
 struct DrmFrameBuffer {
-    fd: OwnedFd,
+    drm: DrmFd,
+    handle: control::framebuffer::Handle,
+}
+
+impl DrmFrameBuffer {
+    fn id(&self) -> control::framebuffer::Handle {
+        self.handle
+    }
+}
+
+impl Drop for DrmFrameBuffer {
+    fn drop(&mut self) {
+        if let Err(err) = self.drm.destroy_framebuffer(self.handle) {
+            log::error!("Could not destroy DRM framebuffer {:?}: {:?}", self.handle, err);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -95,9 +111,9 @@ pub struct Drm {
     driver: Driver,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DrmFd {
-    fd: OwnedFd,
+    fd: Rc<OwnedFd>,
 }
 
 impl AsFd for DrmFd {
@@ -136,7 +152,7 @@ impl DrmFd {
             OwnedFd::from_raw_fd(params.fd as i32)
         };
 
-        Ok(DrmFd { fd: lease })
+        Ok(DrmFd { fd: Rc::new(lease) })
     }
 }
 
@@ -314,7 +330,7 @@ pub struct InFormat {
 impl Drm {
     pub fn create_drm(fd: RawFd, device: udev::Device, egl: &EGL) -> Self {
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let drm = DrmFd { fd };
+        let drm = DrmFd { fd: Rc::new(fd) };
         drm.set_client_capability(drm::ClientCapability::Atomic, true)
             .unwrap();
 
@@ -419,9 +435,7 @@ impl Drm {
         changes.add_property(
             dbg!(primary_plane.handle),
             dbg!(primary_plane.fb_id),
-            control::property::Value::Object(NonZeroU32::new(
-                buffers[0].drm_fb.fd.as_raw_fd() as u32
-            )),
+            control::property::Value::Object(Some(buffers[0].drm_fb.id().into())),
         );
         changes.add_property(
             dbg!(primary_plane.handle),
@@ -501,11 +515,11 @@ impl Drm {
         let bo = egl.gbm.create_bo(&mode, flags, &modifiers);
         let drm_fb = Self::add_framebuffer(drm, bo.dmabuf()).unwrap();
         let image = egl.import_dmabuf(bo.dmabuf());
-        let fb = egl.make_fb_from_image(&image, bo.dmabuf());
-        fb.clear();
+        let gl_framebuffer = egl.make_fb_from_image(&image, bo.dmabuf());
+        gl_framebuffer.clear();
         let texture = image.into_texture().unwrap();
 
-        Ok(RenderBuffer { drm_fb, fb, texture })
+        Ok(RenderBuffer { drm_fb, gl_framebuffer, texture })
     }
 
     fn add_framebuffer(drm: &DrmFd, dmabuf: &DmaBuf) -> std::io::Result<DrmFrameBuffer> {
@@ -550,8 +564,10 @@ impl Drm {
         let handles = &handles[..dmabuf.planes.len()];
         close_gem_handles(drm, handles).unwrap();
 
-        let framebuffer =
-            DrmFrameBuffer { fd: unsafe { OwnedFd::from_raw_fd(framebuffer.fb_id as _) } };
+        let framebuffer = DrmFrameBuffer {
+            drm: drm.clone(),
+            handle: NonZeroU32::new(framebuffer.fb_id).unwrap().into(),
+        };
 
         Ok(framebuffer)
     }
@@ -927,7 +943,7 @@ fn close_gem_handles(fd: &DrmFd, handles: &[u32]) -> std::io::Result<()> {
 #[derive(Debug)]
 struct RenderBuffer {
     drm_fb: DrmFrameBuffer,
-    fb: EglFrameBuffer,
+    gl_framebuffer: EglFrameBuffer,
     texture: GlTexture,
 }
 
