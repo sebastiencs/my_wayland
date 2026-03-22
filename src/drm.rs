@@ -352,14 +352,7 @@ impl Drm {
         let egl_context = EglContext::make(egl, gbm);
         let output = Self::init_drm(&drm, &egl_context, &resources);
 
-        Self {
-            fd: drm,
-            device,
-            resources,
-            egl_context,
-            driver,
-            output,
-        }
+        Self { fd: drm, device, resources, egl_context, driver, output }
     }
 
     pub fn make_model(&self) -> DrmModel {
@@ -422,11 +415,7 @@ impl Drm {
         }
     }
 
-    fn init_drm(
-        drm: &DrmFd,
-        egl: &EglContext,
-        drm_resources: &DrmResources,
-    ) -> DrmOutput {
+    fn init_drm(drm: &DrmFd, egl: &EglContext, drm_resources: &DrmResources) -> DrmOutput {
         let DrmResources { planes, crtcs, connectors, .. } = drm_resources;
 
         let in_use = Self::find_first_valid_connector(&connectors, &crtcs, &planes)
@@ -966,14 +955,199 @@ struct RenderBuffer {
     texture: GlTexture,
 }
 
-/// Model to handle events
+/// Store and reassemble DRM event bytes from `read(2)` / io_uring reads.
+struct DrmBuffer {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+#[derive(Debug)]
+enum ParsedDrmEvent {
+    FlipComplete { len: usize, sequence: u32, tv_sec: u32, tv_usec: u32, crtc_id: u32 },
+    Ignored { len: usize },
+}
+
+impl ParsedDrmEvent {
+    fn len(&self) -> usize {
+        match self {
+            Self::FlipComplete { len, .. } | Self::Ignored { len } => *len,
+        }
+    }
+}
+
+impl DrmBuffer {
+    fn new() -> Self {
+        Self { data: vec![0; 4096], pos: 0 }
+    }
+
+    fn append(&mut self, buffer: &[u8]) {
+        let pos = self.pos;
+        let buffer_len = buffer.len();
+
+        if self.data.len() < pos + buffer_len {
+            self.data.resize(pos + buffer_len, 0);
+        }
+
+        self.data[pos..pos + buffer_len].copy_from_slice(buffer);
+        self.pos += buffer_len;
+    }
+
+    fn next_event(&self) -> Result<Option<ParsedDrmEvent>, ()> {
+        let header_len = std::mem::size_of::<drm_ffi::drm_event>();
+        let data = &self.data[..self.pos];
+        let header = match data.get(..header_len) {
+            Some(header) => header,
+            None => return Ok(None),
+        };
+
+        let header: drm_ffi::drm_event = unsafe { std::ptr::read_unaligned(header.as_ptr() as _) };
+        let len = header.length as usize;
+        if len < header_len {
+            return Err(());
+        }
+        if len > data.len() {
+            return Ok(None);
+        }
+
+        match header.type_ {
+            drm_ffi::DRM_EVENT_FLIP_COMPLETE => {
+                let event_len = std::mem::size_of::<drm_ffi::drm_event_vblank>();
+                if len < event_len {
+                    return Err(());
+                }
+                let bytes = &data[..event_len];
+                let event: drm_ffi::drm_event_vblank =
+                    unsafe { std::ptr::read_unaligned(bytes.as_ptr() as _) };
+                Ok(Some(ParsedDrmEvent::FlipComplete {
+                    len,
+                    sequence: event.sequence,
+                    tv_sec: event.tv_sec,
+                    tv_usec: event.tv_usec,
+                    crtc_id: event.crtc_id,
+                }))
+            }
+            _ => Ok(Some(ParsedDrmEvent::Ignored { len })),
+        }
+    }
+
+    fn consume_event(&mut self, len: usize) {
+        if self.pos == len {
+            self.pos = 0;
+        } else {
+            assert!(self.pos > len);
+            self.data.copy_within(len..self.pos, 0);
+            self.pos -= len;
+        }
+    }
+}
+
+/// Responsible for reading the DRM fd, parsing kernel events, and forwarding to [`DrmModel`].
+struct DrmReader {
+    fd: RawFd,
+    read_buffer: DrmBuffer,
+}
+
+#[derive(Debug)]
+enum DrmReaderAction {
+    Start,
+    ReadChunk { buffer: Box<[u8]> },
+    ReadError { error: std::io::Error },
+    Stop,
+}
+
+impl Model for DrmReader {
+    type Action = DrmReaderAction;
+    const START: Option<Self::Action> = Some(DrmReaderAction::Start);
+    const STOP: Option<Self::Action> = Some(DrmReaderAction::Stop);
+
+    fn process(
+        &mut self,
+        _state: &mut crate::state::State,
+        action: Self::Action,
+        dispatcher: &mut crate::runner::Dispatcher,
+    ) -> Result<(), ()> {
+        use DrmReaderAction::*;
+
+        match action {
+            Start => self.dispatch_read(dispatcher),
+            ReadChunk { buffer } => {
+                self.read_buffer.append(&buffer);
+                loop {
+                    let event = match self.read_buffer.next_event() {
+                        Ok(Some(event)) => event,
+                        Ok(None) => {
+                            self.dispatch_read(dispatcher);
+                            return Ok(());
+                        }
+                        Err(()) => {
+                            log::error!("Invalid DRM event stream");
+                            self.dispatch_read(dispatcher);
+                            return Ok(());
+                        }
+                    };
+
+                    let len = event.len();
+                    match event {
+                        ParsedDrmEvent::FlipComplete {
+                            sequence, tv_sec, tv_usec, crtc_id, ..
+                        } => dispatcher.dispatch(DrmAction::FlipComplete {
+                            sequence,
+                            tv_sec,
+                            tv_usec,
+                            crtc_id,
+                        }),
+                        ParsedDrmEvent::Ignored { .. } => {}
+                    }
+                    self.read_buffer.consume_event(len);
+                }
+            }
+            ReadError { error } => {
+                log::error!("Could not read DRM events: {:?}", error);
+                self.dispatch_read(dispatcher);
+            }
+            Stop => {
+                // TODO: teardown
+            }
+        };
+
+        Ok(())
+    }
+}
+
+impl DrmReader {
+    fn new(fd: RawFd) -> Self {
+        Self { fd, read_buffer: DrmBuffer::new() }
+    }
+
+    fn dispatch_read(&self, dispatcher: &mut Dispatcher) {
+        use crate::{io_uring::model::IoUringAction, runner::Redispatcher};
+
+        dispatcher.dispatch(IoUringAction::Read {
+            fd: self.fd,
+            offset: 0,
+            length: 4096,
+            dispatch_to: Redispatcher::new::<Self>(Self::on_read_event),
+        });
+    }
+
+    fn on_read_event(result: std::io::Result<ReadWriteCompleted>) -> AnyAction {
+        match result {
+            Ok(ReadWriteCompleted { fd: _, offset: _, buffer }) => {
+                AnyAction::from(DrmReaderAction::ReadChunk { buffer })
+            }
+            Err(error) => AnyAction::from(DrmReaderAction::ReadError { error }),
+        }
+    }
+}
+
+/// DRM compositor-side model: flip completion and scheduling (fed by [`DrmReader`], like [`crate::dbus::Dbus`]).
 pub struct DrmModel {
     fd: RawFd, // Do not close, it's owned by `Drm`
 }
 
 pub enum DrmAction {
     Start,
-    Event { event: drm_ffi::drm_event_vblank },
+    FlipComplete { sequence: u32, tv_sec: u32, tv_usec: u32, crtc_id: u32 },
     Stop,
 }
 
@@ -990,10 +1164,10 @@ impl Model for DrmModel {
     ) -> Result<(), ()> {
         match action {
             DrmAction::Start => {
-                self.dispatch_read(dispatcher);
+                dispatcher.start_model2(DrmReader::new(self.fd));
             }
-            DrmAction::Event { event } => {
-                self.handle_event(event);
+            DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id } => {
+                self.handle_flip_complete(sequence, tv_sec, tv_usec, crtc_id);
             }
             DrmAction::Stop => todo!(),
         };
@@ -1002,31 +1176,7 @@ impl Model for DrmModel {
 }
 
 impl DrmModel {
-    fn handle_event(&mut self, event: drm_ffi::drm_event_vblank) {
-        dbg!(event);
-        todo!()
-    }
-
-    fn dispatch_read(&self, dispatcher: &mut Dispatcher) {
-        use crate::{io_uring::model::IoUringAction, runner::Redispatcher};
-
-        dispatcher.dispatch(IoUringAction::Read {
-            fd: self.fd,
-            offset: 0,
-            length: std::mem::size_of::<drm_ffi::drm_event_vblank>(),
-            dispatch_to: Redispatcher::new::<Self>(Self::on_read_event),
-        });
-    }
-
-    fn on_read_event(result: std::io::Result<ReadWriteCompleted>) -> AnyAction {
-        let result = result.unwrap();
-        let event = result.read_as::<drm_ffi::drm_event_vblank>();
-
-        // TODO: Handle other events
-        let drm_ffi::drm_event { type_, length } = event.base;
-        assert_eq!(length as usize, result.buffer.len());
-        assert_eq!(type_, drm_ffi::DRM_EVENT_FLIP_COMPLETE);
-
-        AnyAction::from(DrmAction::Event { event })
+    fn handle_flip_complete(&mut self, sequence: u32, tv_sec: u32, tv_usec: u32, crtc_id: u32) {
+        dbg!(sequence, tv_sec, tv_usec, crtc_id);
     }
 }
