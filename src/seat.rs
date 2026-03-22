@@ -8,6 +8,7 @@ use crate::{
     runner::Dispatcher,
     state::{DrmId, IndexMap, ObjectId, State},
     wayland_objects::{wl_buffer::WlBuffer, wl_surface::WlSurface},
+    xkb::KeyboardModifiers,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,7 +31,7 @@ struct PointerFocus {
     rect: SurfaceRect,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum SeatClientEvent {
     PointerEnter {
         serial: u32,
@@ -57,6 +58,7 @@ pub enum SeatClientEvent {
     KeyboardEnter {
         serial: u32,
         surface: WlSurfaceId,
+        keys: Array,
     },
     KeyboardLeave {
         serial: u32,
@@ -268,6 +270,8 @@ pub fn handle_keyboard_key(
     key_state: u32,
     time: u32,
 ) {
+    let changed_modifiers = state.keyboard.update_key(key, key_state == 1);
+
     if state.seat.keyboard_focus.is_none() {
         set_keyboard_focus(state, dispatcher, state.seat.pointer_focus.map(|focus| focus.target));
     }
@@ -282,6 +286,10 @@ pub fn handle_keyboard_key(
         focus.client_id,
         SeatClientEvent::KeyboardKey { serial, time, key, state: key_state },
     );
+
+    if let Some(modifiers) = changed_modifiers {
+        dispatch_modifiers(dispatcher, focus.client_id, state.seat.next_serial(), modifiers);
+    }
 }
 
 fn set_keyboard_focus(
@@ -304,22 +312,13 @@ fn set_keyboard_focus(
     }
 
     if let Some(new_focus) = new_focus {
+        let keys = state.keyboard.pressed_keys();
         dispatch_client_event(
             dispatcher,
             new_focus.client_id,
-            SeatClientEvent::KeyboardEnter { serial, surface: new_focus.surface_id },
+            SeatClientEvent::KeyboardEnter { serial, surface: new_focus.surface_id, keys },
         );
-        dispatch_client_event(
-            dispatcher,
-            new_focus.client_id,
-            SeatClientEvent::KeyboardModifiers {
-                serial,
-                mods_depressed: 0,
-                mods_latched: 0,
-                mods_locked: 0,
-                group: 0,
-            },
-        );
+        dispatch_modifiers(dispatcher, new_focus.client_id, serial, state.keyboard.modifiers());
     }
 
     state.seat.keyboard_focus = new_focus;
@@ -392,4 +391,23 @@ where
 
 pub fn empty_keys() -> Array {
     Array(Vec::new())
+}
+
+fn dispatch_modifiers(
+    dispatcher: &mut Dispatcher,
+    client_id: ClientId,
+    serial: u32,
+    modifiers: KeyboardModifiers,
+) {
+    dispatch_client_event(
+        dispatcher,
+        client_id,
+        SeatClientEvent::KeyboardModifiers {
+            serial,
+            mods_depressed: modifiers.mods_depressed,
+            mods_latched: modifiers.mods_latched,
+            mods_locked: modifiers.mods_locked,
+            group: modifiers.group,
+        },
+    );
 }

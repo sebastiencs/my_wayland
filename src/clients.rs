@@ -372,14 +372,14 @@ impl Client {
                     pointer.send_frame(dispatcher);
                 }
             }
-            SeatClientEvent::KeyboardEnter { serial, surface } => {
+            SeatClientEvent::KeyboardEnter { serial, surface, keys } => {
                 let keyboards = state.seat.keyboard_resources(self.id);
                 for keyboard_id in keyboards {
                     if !self.contains_object(keyboard_id, state) {
                         continue;
                     }
                     let keyboard: &mut WlKeyboard = self.get_object(keyboard_id, state);
-                    keyboard.send_empty_enter(serial, surface, dispatcher);
+                    keyboard.send_enter(serial, surface, keys.clone(), dispatcher);
                 }
             }
             SeatClientEvent::KeyboardLeave { serial, surface } => {

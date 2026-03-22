@@ -186,6 +186,7 @@ fn main() {
     // log::info!("hello");
 
     let xkb = xkb::Xkb::new();
+    let keyboard = xkb.create_keyboard_state();
 
     let mut globals = Globals::new();
     globals.initialize();
@@ -197,6 +198,7 @@ fn main() {
         globals,
         egl,
         seat: Default::default(),
+        keyboard,
         xkb,
     };
 

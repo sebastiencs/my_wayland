@@ -6,7 +6,7 @@ use crate::{
     object::Object,
     protocol_generated::WaylandId,
     seat::SeatState,
-    xkb::Xkb,
+    xkb::{KeyboardState, Xkb},
 };
 
 use std::{marker::PhantomData, ptr::NonNull, rc::Rc};
@@ -356,6 +356,7 @@ pub struct State {
     pub globals: Globals,
     pub egl: EGL,
     pub seat: SeatState,
+    pub keyboard: KeyboardState,
     pub xkb: Xkb,
 }
 
