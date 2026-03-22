@@ -675,7 +675,7 @@ impl Drm {
         gl_framebuffer.clear();
         let texture = image.into_texture().unwrap();
 
-        Ok(RenderBuffer { drm_fb, gl_framebuffer, texture })
+        Ok(RenderBuffer { bo, drm_fb, gl_framebuffer, texture })
     }
 
     fn add_framebuffer(drm: &DrmFd, dmabuf: &DmaBuf) -> std::io::Result<DrmFrameBuffer> {
@@ -709,7 +709,7 @@ impl Drm {
             *stride = plane.stride;
             *offset = plane.offset;
             *modifiers = modifier.0;
-            *handle = prime_fd_to_gem_handle(drm, *plane.fd).unwrap();
+            *handle = prime_fd_to_gem_handle(drm, plane.fd.as_raw_fd()).unwrap();
         }
 
         let framebuffer = drm_ffi::mode::add_fb2(
@@ -1105,6 +1105,8 @@ fn close_gem_handles(fd: &DrmFd, handles: &[u32]) -> std::io::Result<()> {
 
 #[derive(Debug)]
 struct RenderBuffer {
+    /// Keeps the GBM BO (and dma-buf fds) alive while the DRM FB / EGL image / texture exist.
+    bo: crate::gbm::BufferObject,
     drm_fb: DrmFrameBuffer,
     gl_framebuffer: EglFrameBuffer,
     texture: GlTexture,
@@ -1260,7 +1262,7 @@ impl Model for DrmReader {
                 self.dispatch_read(dispatcher);
             }
             Stop => {
-                // TODO: teardown
+                log::debug!("DrmReader stopped for drm_id={:?}", self.drm_id);
             }
         };
 
@@ -1346,7 +1348,9 @@ impl Model for DrmModel {
             DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id } => {
                 self.handle_flip_complete(state, dispatcher, sequence, tv_sec, tv_usec, crtc_id);
             }
-            DrmAction::Stop => todo!(),
+            DrmAction::Stop => {
+                dispatcher.stop_model::<_, DrmReader>(self.model_id());
+            }
         };
         Ok(())
     }
@@ -1409,8 +1413,14 @@ fn collect_render_items(state: &crate::state::State) -> Vec<RenderItem> {
             );
             continue;
         };
-        let Some(buffer) = state.objects[surface_state.buffer_object_id].downcast_ref::<WlBuffer>()
-        else {
+        let Some(obj) = state.objects.try_get(surface_state.buffer_object_id) else {
+            log::warn!(
+                "collect_render_items: buffer object {:?} missing (destroyed?)",
+                surface_state.buffer_object_id
+            );
+            continue;
+        };
+        let Some(buffer) = obj.downcast_ref::<WlBuffer>() else {
             log::warn!(
                 "collect_render_items: object {:?} is not a WlBuffer",
                 surface_state.buffer_object_id
@@ -1428,4 +1438,23 @@ fn collect_render_items(state: &crate::state::State) -> Vec<RenderItem> {
     }
 
     items
+}
+
+#[cfg(test)]
+mod drm_event_tests {
+    use super::ParsedDrmEvent;
+
+    #[test]
+    fn parsed_drm_event_len() {
+        let e = ParsedDrmEvent::Ignored { len: 64 };
+        assert_eq!(e.len(), 64);
+        let f = ParsedDrmEvent::FlipComplete {
+            len: 32,
+            sequence: 0,
+            tv_sec: 0,
+            tv_usec: 0,
+            crtc_id: 0,
+        };
+        assert_eq!(f.len(), 32);
+    }
 }

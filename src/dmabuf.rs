@@ -1,7 +1,4 @@
-use std::{
-    os::fd::RawFd,
-    sync::{atomic::AtomicUsize, Arc},
-};
+use std::{os::fd::OwnedFd, sync::atomic::AtomicUsize};
 
 use crate::drm::{Format, Modifier};
 
@@ -16,11 +13,12 @@ impl DmaBufId {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct DmaBufPlane {
     pub offset: u32,
     pub stride: u32,
-    pub fd: Arc<RawFd>,
+    /// Owned `dma-buf` plane fd from GBM (closed on drop).
+    pub fd: OwnedFd,
 }
 
 #[derive(Debug)]

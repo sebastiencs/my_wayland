@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ffi::CStr,
+    os::fd::AsRawFd,
     ptr,
     time::Duration,
 };
@@ -41,6 +42,7 @@ fn load_methods() {
     for loader in [
         load_egl::CreatePlatformWindowSurfaceEXT as unsafe fn(_) -> Option<_>,
         load_egl::CreateImageKHR as _,
+        load_egl::DestroyImageKHR as _,
         load_egl::QueryDmaBufFormatsEXT as _,
         load_egl::QueryDmaBufModifiersEXT as _,
         load_gl::EGLImageTargetRenderbufferStorageOES as _,
@@ -112,7 +114,10 @@ impl EGL {
             egl::BAD_NATIVE_PIXMAP => egl::Error::BadNativePixmap,
             egl::BAD_NATIVE_WINDOW => egl::Error::BadNativeWindow,
             egl::CONTEXT_LOST => egl::Error::ContextLost,
-            code => todo!("code={:?}", code),
+            code => {
+                log::warn!("eglGetError: unknown code {code:#x}, treating as BAD_PARAMETER");
+                egl::Error::BadParameter
+            }
         };
         Err(e)
     }
@@ -391,6 +396,7 @@ pub struct OpenGlFormat {
 
 #[derive(Debug)]
 pub struct EglImage {
+    display: egl::EGLDisplay,
     image: ImageKHR,
     external_only: bool,
     destroyed: bool,
@@ -398,9 +404,14 @@ pub struct EglImage {
 
 impl Drop for EglImage {
     fn drop(&mut self) {
-        if !self.destroyed {
-            // panic!("destroy image here !")
+        if self.destroyed || self.image.ptr.is_null() {
+            return;
         }
+        unsafe {
+            let _ = egl::DestroyImageKHR(self.display, self.image.ptr);
+        }
+        self.image.ptr = std::ptr::null_mut();
+        self.destroyed = true;
     }
 }
 
@@ -414,6 +425,18 @@ impl EglImage {
 pub struct GlTexture {
     image: Option<EglImage>,
     texture: gl::Uint,
+}
+
+impl Drop for GlTexture {
+    fn drop(&mut self) {
+        if self.texture != 0 {
+            unsafe {
+                gl::DeleteTextures(1, &self.texture);
+            }
+            self.texture = 0;
+        }
+        self.image.take();
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -821,7 +844,7 @@ impl EglContext {
         attribs.extend([egl::LINUX_DRM_FOURCC_EXT, buf.format.drm as i32]);
         attribs.extend([egl::IMAGE_PRESERVED_KHR, egl::TRUE as i32]);
         for (key, plane) in PLANE_KEYS.iter().zip(buf.planes.iter()) {
-            attribs.extend([key.fd, *plane.fd]);
+            attribs.extend([key.fd, plane.fd.as_raw_fd() as egl::Int]);
             attribs.extend([key.pitch, plane.stride as i32]);
             attribs.extend([key.offset, plane.offset as i32]);
             if buf.modifier != Modifier::INVALID {
@@ -837,6 +860,7 @@ impl EglContext {
             .unwrap();
 
         EglImage {
+            display: self.display,
             image,
             external_only: egl_modifier.external_only,
             destroyed: false,

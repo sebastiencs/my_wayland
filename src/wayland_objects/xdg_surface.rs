@@ -37,8 +37,17 @@ impl XdgSurface {
         }
     }
 
-    pub fn set_role(&mut self, new_role: Role) -> Result<(), xdg_wm_base::Error> {
+    pub fn set_role(
+        &mut self,
+        new_role: Role,
+        dispatcher: &mut ClientDispatcher,
+    ) -> Result<(), xdg_wm_base::Error> {
         if self.role != Role::None && self.role != new_role {
+            self.send_error(
+                dispatcher,
+                xdg_wm_base::Error::Role as u32,
+                "invalid xdg_surface role",
+            );
             return Err(xdg_wm_base::Error::Role);
         }
         self.role = new_role;
@@ -60,7 +69,19 @@ impl XdgSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         if !self.is_initialized {
-            let xdg_toplevel_id = self.impl_id.unwrap();
+            let Some(xdg_toplevel_id) = self.impl_id else {
+                log::debug!(
+                    "xdg_surface {:?}: commit before role object; sending xdg_surface.not_constructed",
+                    self.id
+                );
+                client.protocol_violation_disconnect(
+                    dispatcher,
+                    self.id.into(),
+                    xdg_surface::Error::NotConstructed as u32,
+                    "xdg_surface committed before get_toplevel or get_popup",
+                );
+                return;
+            };
             let mut xdg_toplevel = client.grab_object(xdg_toplevel_id, state);
             xdg_toplevel.on_first_commit(client, state, dispatcher);
             self.send_configure(self.serial, dispatcher);
@@ -86,7 +107,9 @@ impl Object for XdgSurface {
         match client.parse::<Self>(req).unwrap() {
             Destroy => todo!(),
             GetToplevel { id } => {
-                self.set_role(Role::Toplevel).unwrap();
+                if self.set_role(Role::Toplevel, dispatcher).is_err() {
+                    return;
+                }
                 self.set_impl(id);
 
                 let xdg_toplevel = xdg_toplevel::XdgToplevel::new(id, self.id);
@@ -133,9 +156,10 @@ pub mod xdg_toplevel {
 
         pub fn send_capabilities(&self, dispatcher: &mut ClientDispatcher) {
             use proto_xdg_toplevel::WmCapabilities;
-            let capapilities = [WmCapabilities::Fullscreen as u32, WmCapabilities::Maximize as u32];
+            let capabilities_list =
+                [WmCapabilities::Fullscreen as u32, WmCapabilities::Maximize as u32];
             let capabilities = proto_xdg_toplevel::Event::WmCapabilities {
-                capabilities: Array(capapilities.to_vec()),
+                capabilities: Array(capabilities_list.to_vec()),
             };
             self.send_event(capabilities, dispatcher);
         }

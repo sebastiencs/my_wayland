@@ -44,11 +44,16 @@ impl Object for WlShmPool {
             CreateBuffer { id, offset, width, height, stride, format } => {
                 let Some(format) = SHM_FORMATS.iter().find(|f| f.wayland_id == format).copied()
                 else {
-                    client.send_error(wl_shm::Error::InvalidFormat, dispatcher);
-                    return; // TODO: Return an error
+                    client.send_protocol_error(
+                        dispatcher,
+                        self.id(),
+                        wl_shm::Error::InvalidFormat as u32,
+                        "invalid SHM buffer format",
+                    );
+                    return;
                 };
                 let mem = self.mem.clone();
-                let wl_buffer = WlBuffer::new(NewWlBufferParams {
+                let wl_buffer = match WlBuffer::new(NewWlBufferParams {
                     id,
                     offset,
                     width,
@@ -56,8 +61,18 @@ impl Object for WlShmPool {
                     stride,
                     format,
                     mem,
-                })
-                .unwrap();
+                }) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        client.send_protocol_error(
+                            dispatcher,
+                            self.id(),
+                            wl_shm::Error::InvalidStride as u32,
+                            "invalid SHM buffer parameters",
+                        );
+                        return;
+                    }
+                };
                 client.insert_object(state, wl_buffer);
             }
             Destroy => todo!(),

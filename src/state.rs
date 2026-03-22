@@ -269,6 +269,29 @@ where
         }
     }
 
+    /// Like [`Self::grab`], but returns [`None`] if the slot is empty, out of range, or already grabbed.
+    pub fn try_grab<Key: Into<K> + Copy>(self: &mut Box<Self>, key: Key) -> Option<Grab<K, V>>
+    where
+        K: Into<usize> + Copy + From<usize>,
+    {
+        let key: K = key.into();
+        let index: usize = key.into();
+        let entry = self.map.get_mut(index)?;
+        if !matches!(entry, ValueOrEmpty::Value(_)) {
+            return None;
+        }
+        let value = match std::mem::replace(entry, ValueOrEmpty::Grabbed) {
+            ValueOrEmpty::Value(value) => value,
+            _ => unreachable!(),
+        };
+        Some(Grab {
+            key,
+            value: Some(value),
+            map: NonNull::from(&mut **self),
+            ngrabbed: self.ngrabbed.clone(),
+        })
+    }
+
     fn release(&mut self, key: K, value: V) {
         let index: usize = key.into();
         let entry = self.map.get_mut(index).unwrap();
@@ -362,5 +385,22 @@ mod tests {
         let grabbed = map.grab(key);
         std::mem::drop(map);
         dbg!(key, grabbed);
+    }
+
+    #[test]
+    fn indexmap_try_grab_empty_slot() {
+        let mut map = Box::new(IndexMap::<ObjectId, u32>::default());
+        assert!(map.try_grab(ObjectId::from(0usize)).is_none());
+    }
+
+    #[test]
+    fn indexmap_try_grab_roundtrip() {
+        let mut map = Box::new(IndexMap::<ObjectId, u32>::default());
+        let k = map.insert(99);
+        {
+            let g = map.try_grab(k).unwrap();
+            assert_eq!(*g, 99);
+        }
+        assert_eq!(*map.get(k), 99);
     }
 }

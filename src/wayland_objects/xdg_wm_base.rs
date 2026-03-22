@@ -66,7 +66,9 @@ impl Object for XdgWmBase {
             CreatePositioner { id } => todo!(),
             GetXdgSurface { id, surface } => {
                 let wl_surface = client.get_object(surface, state);
-                wl_surface.set_role(Role::XdgSurface, dispatcher).unwrap();
+                if wl_surface.set_role(Role::XdgSurface, dispatcher).is_err() {
+                    return;
+                }
                 wl_surface.set_impl(id);
 
                 let xdg_surface = XdgSurface::new(id, surface);

@@ -1,3 +1,7 @@
+//! `wl_output` global: one instance per DRM device in this compositor, describing the
+//! currently selected connector (see [`crate::drm::DrmOutput::in_use`]). A full multi-output
+//! setup should register one global per logical connector.
+
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     drm::Drm,

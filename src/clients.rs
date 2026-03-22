@@ -36,6 +36,7 @@ pub struct Clients {
 #[derive(Debug)]
 pub enum ClientsAction {
     Start,
+    RearmAccept,
     NewClient { new_client: RawFd },
     LibinputEvent,
     UdevEvent,
@@ -44,11 +45,15 @@ pub enum ClientsAction {
 
 impl Clients {
     pub fn new() -> Box<Self> {
-        let filename = PathBuf::from("/var/run/user/1000/wayland-1");
+        let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+        let filename = PathBuf::from(runtime).join("my-wayland-0");
         if filename.exists() {
-            std::fs::remove_file(&filename).unwrap();
+            let _ = std::fs::remove_file(&filename);
         }
-        let fd = UnixListener::bind(filename).unwrap();
+        let fd = UnixListener::bind(&filename).unwrap_or_else(|e| {
+            panic!("bind Wayland socket {:?}: {}", filename, e);
+        });
+        log::info!("Listening on Wayland socket {:?}", filename);
         let current_id = 0;
         let set = BTreeSet::default();
 
@@ -62,8 +67,15 @@ impl Clients {
     }
 
     fn on_accept(result: std::io::Result<AcceptCompleted>) -> AnyAction {
-        let AcceptCompleted { fd: _, new_client } = result.unwrap();
-        AnyAction::from(ClientsAction::NewClient { new_client })
+        match result {
+            Ok(AcceptCompleted { fd: _, new_client }) => {
+                AnyAction::from(ClientsAction::NewClient { new_client })
+            }
+            Err(e) => {
+                log::error!("accept failed: {:?}", e);
+                AnyAction::from(ClientsAction::RearmAccept)
+            }
+        }
     }
 
     fn dispatch_accept(&self, dispatcher: &mut Dispatcher) {
@@ -90,6 +102,9 @@ impl Model for Clients {
                 self.dispatch_accept(dispatcher);
                 dispatcher.start::<Dbus>();
                 dispatcher.start::<Udev>();
+            }
+            RearmAccept => {
+                self.dispatch_accept(dispatcher);
             }
             NewClient { new_client } => {
                 self.dispatch_accept(dispatcher);
@@ -170,6 +185,33 @@ impl Client {
         }
     }
 
+    pub fn client_id(&self) -> ClientId {
+        self.id
+    }
+
+    /// Send `wl_display.error` for `object_id` with a protocol error `code`, then disconnect the client.
+    pub fn protocol_violation_disconnect(
+        &mut self,
+        dispatcher: &mut ClientDispatcher,
+        object_id: WaylandId,
+        code: u32,
+        message: impl AsRef<str>,
+    ) {
+        dispatcher.send_wl_display_error(object_id, code, message.as_ref());
+        dispatcher.disconnect_client(self.id);
+    }
+
+    /// Send `wl_display.error` without disconnecting (rare; prefer [`Self::protocol_violation_disconnect`]).
+    pub fn send_protocol_error(
+        &self,
+        dispatcher: &mut ClientDispatcher,
+        object_id: WaylandId,
+        code: u32,
+        message: impl AsRef<str>,
+    ) {
+        dispatcher.send_wl_display_error(object_id, code, message.as_ref());
+    }
+
     fn read_process_info(&mut self) {
         let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
         let mut len = std::mem::size_of::<libc::ucred>() as u32;
@@ -227,6 +269,14 @@ impl Client {
     {
         let id: WaylandId = id.into();
         self.objects[&id]
+    }
+
+    pub fn object_id_for_wayland(&self, id: WaylandId) -> Option<ObjectId> {
+        self.objects.get(&id).copied()
+    }
+
+    pub fn remove_wayland_object(&mut self, id: WaylandId) -> Option<ObjectId> {
+        self.objects.remove(&id)
     }
 
     pub fn insert_object<'a, O: Object>(
@@ -313,11 +363,6 @@ impl Client {
         }
         result
     }
-
-    pub fn send_error<E>(&self, error: E, _dispatcher: &mut ClientDispatcher) -> E {
-        // TODO
-        error
-    }
 }
 
 /// A specialized `Dispatcher`
@@ -343,6 +388,24 @@ impl<'a> ClientDispatcher<'a> {
             client_id: client.id,
             command,
         }
+    }
+
+    /// `wl_display` singleton id is always `1` in this compositor.
+    pub fn send_wl_display_error(
+        &mut self,
+        object_id: WaylandId,
+        code: u32,
+        message: impl AsRef<str>,
+    ) {
+        let mut raw = RawEvent::new(WaylandId::from(1u32), 0, 3);
+        raw.id(object_id);
+        raw.uint(code);
+        raw.string(message.as_ref().to_string());
+        self.send_event(raw);
+    }
+
+    pub fn disconnect_client(&mut self, client_id: ClientId) {
+        self.dispatch(ClientsAction::Close { id: client_id });
     }
 
     pub fn send_event(&mut self, mut event: RawEvent) {
@@ -392,20 +455,37 @@ impl Model for Client {
                 self.pending_fds.extend(fds.iter());
             }
             MsgReceived { mut request } => {
-                // dbg!(&request, request.object_id());
-                // dbg!(request.object_id());
-                let obj_id = self.objects.get(&request.object_id()).unwrap();
+                let Some(&obj_id) = self.objects.get(&request.object_id()) else {
+                    log::warn!(
+                        "unknown Wayland object id {:?} from client {:?}",
+                        request.object_id(),
+                        self.id
+                    );
+                    self.protocol_violation_disconnect(
+                        &mut dispatcher,
+                        request.object_id(),
+                        wl_display::Error::InvalidObject as u32,
+                        "invalid object id",
+                    );
+                    return Ok(());
+                };
 
                 let mut pending_fds = std::mem::take(&mut self.pending_fds);
                 request.fds = Some(&mut pending_fds);
 
-                let mut obj = state.objects.grab(*obj_id);
+                let mut obj = state.objects.grab(obj_id);
                 obj.on(self, state, request, &mut dispatcher);
 
                 self.pending_fds = pending_fds;
             }
             Close => {
                 log::info!("client_id={:?} closed", self.id);
+                let wayland_ids: Vec<WaylandId> = self.objects.keys().copied().collect();
+                for wid in wayland_ids {
+                    if let Some(oid) = self.objects.remove(&wid) {
+                        let _ = state.remove_object(oid);
+                    }
+                }
                 if let Some(id) = self.reader_id {
                     dispatcher.stop_model::<_, ClientReader>(id)
                 };
@@ -580,7 +660,14 @@ impl Model for ClientReader {
                     };
                     let request: RawRequest = match msg.try_into() {
                         Ok(request) => request,
-                        Err(_) => todo!(),
+                        Err(()) => {
+                            log::warn!(
+                                "malformed Wayland message from client {:?}, disconnecting",
+                                self.client_id
+                            );
+                            self.dispatch_close(dispatcher);
+                            return Ok(());
+                        }
                     };
                     dispatcher.dispatch_to(self.client_id, ClientAction::MsgReceived { request });
                     self.read_buffer.consume_msg();
@@ -617,8 +704,9 @@ pub trait EventWriter: Constants + Sized {
         Client::log_event::<Self>(self, &event, dispatcher);
         dispatcher.send_event(self.to_raw_event(event));
     }
-    fn send_error<E>(&self, _error: E, _dispatcher: &mut ClientDispatcher) {
-        // TODO
+    /// Send `wl_display.error` with this object's id as the source of the error.
+    fn send_error(&self, dispatcher: &mut ClientDispatcher, code: u32, message: impl AsRef<str>) {
+        dispatcher.send_wl_display_error(self.object_id(), code, message.as_ref());
     }
 }
 
@@ -654,8 +742,13 @@ impl RawEvent {
         self.push(id.into());
     }
 
-    pub fn new_id_with_interface<I>(&mut self, _id: I) -> Result<I, ParserError> {
-        todo!()
+    pub fn new_id_with_interface<I>(&mut self, id: I) -> Result<I, ParserError>
+    where
+        I: Into<WaylandId> + Copy,
+    {
+        let w: WaylandId = id.into();
+        self.id(w);
+        Ok(id)
     }
 
     pub fn string<S: AsRef<str>>(&mut self, s: S) {
@@ -682,8 +775,10 @@ impl RawEvent {
         }
     }
 
-    pub fn fixed(&mut self, _fixed: f32) {
-        todo!()
+    /// Wayland `fixed` is a signed 24.8 value in the wire format.
+    pub fn fixed(&mut self, fixed: f32) {
+        let v = (fixed * 256.0).round() as i32;
+        self.int(v);
     }
 
     pub fn array(&mut self, array: Array) {
@@ -831,15 +926,44 @@ impl Arguments {
         assert!(bytes.len() >= len);
         bytes.truncate(len - 1);
 
-        Ok(String::from_utf8(bytes).unwrap())
+        String::from_utf8(bytes).map_err(|_| ParserError::InvalidString)
     }
 
     pub fn fixed(&mut self) -> Result<f32, ParserError> {
-        todo!()
+        let v = self.int()?;
+        Ok(v as f32 / 256.0)
     }
 
     pub fn fd(&mut self) -> Result<RawFd, ParserError> {
         // Implemented by `RawRequest`
-        unimplemented!()
+        Err(ParserError::Malformed)
+    }
+}
+
+#[cfg(test)]
+mod clients_wire_tests {
+    use std::collections::VecDeque;
+
+    use super::{Arguments, ParserError, RawRequest};
+
+    #[test]
+    fn arguments_string_rejects_invalid_utf8() {
+        let mut args = VecDeque::new();
+        args.push_back(2);
+        args.push_back(u32::from_ne_bytes([0xFFu8, 0xFF, 0, 0]));
+        let mut a = Arguments { args };
+        assert_eq!(a.string(), Err(ParserError::InvalidString));
+    }
+
+    #[test]
+    fn arguments_fixed_roundtrip() {
+        let v = (1.5f32 * 256.0).round() as i32 as u32;
+        let mut a = Arguments { args: VecDeque::from([v]) };
+        assert!((a.fixed().unwrap() - 1.5f32).abs() < 0.002);
+    }
+
+    #[test]
+    fn raw_request_try_from_rejects_short_buffer() {
+        assert!(RawRequest::try_from([1u8, 0, 0, 0].as_slice()).is_err());
     }
 }

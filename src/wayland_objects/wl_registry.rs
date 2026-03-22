@@ -1,7 +1,7 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     object::{Object, Parser},
-    protocol_generated::{wl_registry, WaylandId, WlRegistryId},
+    protocol_generated::{wl_display, wl_registry, WaylandId, WlRegistryId},
     state::State,
 };
 
@@ -42,7 +42,15 @@ impl Object for WlRegistry {
     ) {
         match client.parse::<Self>(req).unwrap() {
             wl_registry::Request::Bind { name, id } => {
-                let mut global = state.globals.map.grab(name);
+                let Some(mut global) = state.globals.try_grab_global(name) else {
+                    client.protocol_violation_disconnect(
+                        dispatcher,
+                        self.id.into(),
+                        wl_display::Error::InvalidObject as u32,
+                        "invalid global name",
+                    );
+                    return;
+                };
 
                 let (_, version) = global.interface();
                 global.bind(client, state, id, version, dispatcher);

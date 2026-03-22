@@ -31,7 +31,10 @@ impl dyn Object {
 
     pub fn downcast<T: Object>(self: Box<Self>) -> Result<Box<T>, Box<Self>> {
         if (&*self).as_any().is::<T>() {
-            Ok(self.into_any().downcast::<T>().ok().unwrap())
+            Ok(self
+                .into_any()
+                .downcast::<T>()
+                .expect("downcast matches TypeId::is check"))
         } else {
             Err(self)
         }
@@ -67,11 +70,13 @@ pub trait Parser: Constants {
     fn parse_request(req: RawRequest) -> Result<Self::Request, ParserError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ParserError {
     Malformed,
     InvalidRequest,
     MissingFileDescriptor,
+    /// String argument was not valid UTF-8
+    InvalidString,
 }
 
 pub trait IdToObject {

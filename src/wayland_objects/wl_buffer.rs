@@ -9,7 +9,7 @@ use crate::{
     state::State,
 };
 
-use super::wl_shm_pool::SharedMemory;
+use super::{wl_shm_pool::SharedMemory, wl_surface::WlSurface};
 
 #[derive(Debug)]
 pub struct WlBuffer {
@@ -66,15 +66,16 @@ impl WlBuffer {
     }
 
     pub fn update_texture(&mut self) {
-        let texture = GlTexture::import_shm(
+        match GlTexture::import_shm(
             self.mem.clone().slice(),
             self.width,
             self.height,
             self.stride,
             self.format,
-        )
-        .unwrap();
-        self.texture = Some(texture);
+        ) {
+            Ok(texture) => self.texture = Some(texture),
+            Err(()) => log::warn!("WlBuffer::update_texture failed for buffer={:?}", self.id),
+        }
     }
 
     pub fn render_item(&self, x: i32, y: i32) -> Option<RenderItem> {
@@ -103,14 +104,37 @@ impl Object for WlBuffer {
     fn on(
         &mut self,
         client: &mut Client,
-        _: &mut State,
+        state: &mut State,
         req: RawRequest,
         _: &mut ClientDispatcher,
     ) {
         use wl_buffer::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
-            Destroy => todo!(),
+            Destroy => {
+                let wid = self.id.into();
+                let Some(object_id) = client.object_id_for_wayland(wid) else {
+                    return;
+                };
+                let buf_id = self.id;
+                let surface_oids: Vec<crate::state::ObjectId> = state
+                    .objects
+                    .iter()
+                    .filter_map(|(oid, obj)| {
+                        obj.downcast_ref::<WlSurface>()
+                            .filter(|s| s.references_wl_buffer(buf_id))
+                            .map(|_| oid)
+                    })
+                    .collect();
+                for oid in surface_oids {
+                    let mut g = state.objects.grab(oid);
+                    if let Some(s) = g.downcast_mut::<WlSurface>() {
+                        s.detach_wl_buffer(buf_id);
+                    }
+                }
+                client.remove_wayland_object(wid);
+                let _ = state.remove_object(object_id);
+            }
         }
     }
 }

@@ -1,7 +1,7 @@
 use crate::{
     clients::{Client, ClientDispatcher},
     protocol_generated::NewId,
-    state::{IndexMap, State},
+    state::{Grab, IndexMap, State},
     wayland_objects::{
         wl_compositor::WlCompositorGlobal, wl_seat::WlSeatGlobal, wl_shm::WlShmGlobal,
         wl_subcompositor::WlSubcompositorGlobal,
@@ -64,5 +64,11 @@ impl Globals {
 
     pub fn insert(&mut self, global: Box<dyn Global>) {
         self.map.insert(global);
+    }
+
+    /// Take a global out of the registry for binding. Fails if `name` is not a live global slot.
+    pub fn try_grab_global(&mut self, name: u32) -> Option<Grab<GlobalName, Box<dyn Global>>> {
+        let key = GlobalName::from(name as usize);
+        self.map.try_grab(key)
     }
 }

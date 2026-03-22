@@ -1,7 +1,4 @@
-use std::{
-    os::fd::{AsFd, AsRawFd, RawFd},
-    sync::Arc,
-};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 use crate::{
     dmabuf::{DmaBuf, DmaBufId, DmaBufPlane},
@@ -67,20 +64,18 @@ impl drm::control::Device for GbmDevice {}
 // };
 
 impl GbmDevice {
+    /// Create GBM on the same DRM master fd used for KMS (not a lease fd).
     pub fn new(drm: &DrmFd) -> Result<Self, GbmError> {
-        let drm = drm.try_create_lease()?;
         let gbm_device = unsafe { sys::gbm_create_device(drm.as_raw_fd()) };
         if gbm_device.is_null() {
             return Err(GbmError::FailedCreate);
         }
-        Ok(Self { drm, gbm_device })
+        Ok(Self { drm: drm.clone(), gbm_device })
     }
 
     pub fn create_surface(&self, mode: &drm::control::Mode) -> GbmSurface {
         let (width, height) = mode.size();
         let (width, height) = (width as u32, height as u32);
-
-        dbg!(width, height);
 
         let format = drm::buffer::DrmFourcc::Xrgb8888 as u32;
         let flags = UseFlags::SCANOUT.bits() | UseFlags::RENDERING.bits();
@@ -166,7 +161,8 @@ fn make_dmabuf(bo: *mut libc::c_void) -> DmaBuf {
                         let stride = sys::gbm_bo_get_stride_for_plane(bo, index);
                         let fd = sys::gbm_bo_get_fd_for_plane(bo, index);
                         assert!(fd >= 0);
-                        DmaBufPlane { offset, stride, fd: Arc::new(fd) }
+                        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+                        DmaBufPlane { offset, stride, fd }
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice()
@@ -209,9 +205,8 @@ impl BufferObject {
     }
 
     pub fn write(&self, buf: &[u8]) {
-        let res_write: i32 =
+        let _res_write: i32 =
             unsafe { sys::gbm_bo_write(self.bo, buf.as_ptr() as *mut _, buf.len()) };
-        dbg!(res_write);
     }
 
     pub fn dmabuf(&self) -> &DmaBuf {
@@ -241,6 +236,17 @@ impl drm::buffer::Buffer for BufferObject {
         let handle = handle as u32;
 
         unsafe { std::mem::transmute(handle) }
+    }
+}
+
+impl Drop for BufferObject {
+    fn drop(&mut self) {
+        if !self.bo.is_null() {
+            unsafe {
+                sys::gbm_bo_destroy(self.bo);
+            }
+            self.bo = std::ptr::null_mut();
+        }
     }
 }
 
