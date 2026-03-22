@@ -144,6 +144,7 @@ pub mod xdg_toplevel {
         xdg_surface_id: XdgSurfaceId,
 
         title: String,
+        app_id: String,
         states: BTreeSet<SurfaceState>,
     }
 
@@ -151,7 +152,13 @@ pub mod xdg_toplevel {
         pub fn new(id: XdgToplevelId, xdg_surface_id: XdgSurfaceId) -> Self {
             let mut states = BTreeSet::default();
             states.insert(SurfaceState::Fullscreen);
-            Self { id, xdg_surface_id, title: String::new(), states }
+            Self {
+                id,
+                xdg_surface_id,
+                title: String::new(),
+                app_id: String::new(),
+                states,
+            }
         }
 
         pub fn send_capabilities(&self, dispatcher: &mut ClientDispatcher) {
@@ -202,7 +209,9 @@ pub mod xdg_toplevel {
                 SetTitle { title } => {
                     self.title = title;
                 }
-                SetAppId { app_id } => todo!(),
+                SetAppId { app_id } => {
+                    self.app_id = app_id;
+                }
                 ShowWindowMenu { seat, serial, x, y } => todo!(),
                 Move { seat, serial } => todo!(),
                 Resize { seat, serial, edges } => todo!(),
