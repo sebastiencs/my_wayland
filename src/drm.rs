@@ -27,7 +27,7 @@ use crate::{
     io_uring::ring::ReadWriteCompleted,
     object::AsAny,
     runner::{AnyAction, Dispatcher, Model},
-    state::DrmId,
+    state::{DrmId, State},
     wayland_objects::{wl_buffer::WlBuffer, wl_surface::WlSurface},
 };
 
@@ -1246,6 +1246,15 @@ pub enum DrmAction {
     RenderFrame,
     FlipComplete { sequence: u32, tv_sec: u32, tv_usec: u32, crtc_id: u32 },
     Stop,
+}
+
+pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
+    let Some((drm_id, _)) = state.drm.iter().next() else {
+        return;
+    };
+
+    let model_id = usize::from(drm_id) as u64;
+    dispatcher.dispatch_to(model_id, DrmAction::ScheduleFrame);
 }
 
 impl Model for DrmModel {

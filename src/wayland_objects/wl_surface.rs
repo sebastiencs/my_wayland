@@ -1,5 +1,6 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    drm::schedule_active_output,
     object::{Object, Parser},
     protocol_generated::{xdg_wm_base, WaylandId, WlBufferId, WlSurfaceId, XdgSurfaceId},
     state::{ObjectId, State},
@@ -141,6 +142,9 @@ impl WlSurface {
         };
 
         let SurfaceChanges { is_new_buffer } = changes;
+        if is_new_buffer {
+            schedule_active_output(state, dispatcher);
+        }
     }
 
     pub fn render_state(&self) -> Option<SurfaceRenderState> {
