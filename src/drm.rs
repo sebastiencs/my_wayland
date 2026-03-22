@@ -26,6 +26,7 @@ use crate::{
     gbm::UseFlags,
     io_uring::ring::ReadWriteCompleted,
     runner::{AnyAction, Dispatcher, Model},
+    state::DrmId,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -120,6 +121,59 @@ pub struct DrmOutput {
     frame_scheduled: bool,
     rendering_active: bool,
     page_flip_pending: bool,
+}
+
+impl DrmOutput {
+    fn request_frame(&mut self) -> bool {
+        self.needs_frame = true;
+
+        if self.frame_scheduled || self.rendering_active || self.page_flip_pending {
+            return false;
+        }
+
+        self.frame_scheduled = true;
+        true
+    }
+
+    fn begin_render(&mut self) -> bool {
+        if !self.needs_frame || !self.frame_scheduled || self.rendering_active || self.page_flip_pending {
+            return false;
+        }
+
+        self.frame_scheduled = false;
+        self.rendering_active = true;
+        true
+    }
+
+    fn mark_render_failed(&mut self) {
+        self.rendering_active = false;
+    }
+
+    fn mark_frame_submitted(&mut self) {
+        self.rendering_active = false;
+        self.page_flip_pending = true;
+        self.needs_frame = false;
+    }
+
+    fn finish_page_flip(&mut self) -> bool {
+        if !self.page_flip_pending {
+            return false;
+        }
+
+        self.page_flip_pending = false;
+        std::mem::swap(&mut self.displayed_buffer_index, &mut self.render_buffer_index);
+
+        if self.needs_frame && !self.frame_scheduled {
+            self.frame_scheduled = true;
+            return true;
+        }
+
+        false
+    }
+
+    fn render_buffer(&self) -> &RenderBuffer {
+        &self.buffers[self.render_buffer_index]
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -355,8 +409,36 @@ impl Drm {
         Self { fd: drm, device, resources, egl_context, driver, output }
     }
 
-    pub fn make_model(&self) -> DrmModel {
-        DrmModel { fd: self.fd.as_raw_fd() }
+    pub fn make_model(&self, drm_id: DrmId) -> DrmModel {
+        DrmModel { drm_id }
+    }
+
+    fn submit_render_buffer(&mut self) -> std::io::Result<()> {
+        let (primary_plane, fb, crtc) = {
+            let output = &self.output;
+            let (primary_plane, _) = output.in_use.primary_plane();
+            let fb = output.render_buffer().drm_fb.id();
+            (primary_plane.clone(), fb, output.in_use.crtc.handle)
+        };
+
+        let mut changes = control::atomic::AtomicModeReq::new();
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.fb_id,
+            control::property::Value::Object(Some(fb.into())),
+        );
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.crtc_id,
+            control::property::Value::CRTC(Some(crtc)),
+        );
+
+        self.fd.atomic_commit(
+            control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
+            changes,
+        )?;
+        self.output.mark_frame_submitted();
+        Ok(())
     }
 
     fn list_resources(drm: &DrmFd) -> DrmResources {
@@ -1043,6 +1125,7 @@ impl DrmBuffer {
 
 /// Responsible for reading the DRM fd, parsing kernel events, and forwarding to [`DrmModel`].
 struct DrmReader {
+    drm_id: DrmId,
     fd: RawFd,
     read_buffer: DrmBuffer,
 }
@@ -1090,7 +1173,7 @@ impl Model for DrmReader {
                     match event {
                         ParsedDrmEvent::FlipComplete {
                             sequence, tv_sec, tv_usec, crtc_id, ..
-                        } => dispatcher.dispatch(DrmAction::FlipComplete {
+                        } => dispatcher.dispatch_to(self.model_id(), DrmAction::FlipComplete {
                             sequence,
                             tv_sec,
                             tv_usec,
@@ -1115,8 +1198,12 @@ impl Model for DrmReader {
 }
 
 impl DrmReader {
-    fn new(fd: RawFd) -> Self {
-        Self { fd, read_buffer: DrmBuffer::new() }
+    fn new(drm_id: DrmId, fd: RawFd) -> Self {
+        Self { drm_id, fd, read_buffer: DrmBuffer::new() }
+    }
+
+    fn model_id(&self) -> u64 {
+        usize::from(self.drm_id) as u64
     }
 
     fn dispatch_read(&self, dispatcher: &mut Dispatcher) {
@@ -1126,7 +1213,7 @@ impl DrmReader {
             fd: self.fd,
             offset: 0,
             length: 4096,
-            dispatch_to: Redispatcher::new::<Self>(Self::on_read_event),
+            dispatch_to: Redispatcher::id(self.model_id(), Self::on_read_event),
         });
     }
 
@@ -1142,11 +1229,13 @@ impl DrmReader {
 
 /// DRM compositor-side model: flip completion and scheduling (fed by [`DrmReader`], like [`crate::dbus::Dbus`]).
 pub struct DrmModel {
-    fd: RawFd, // Do not close, it's owned by `Drm`
+    drm_id: DrmId,
 }
 
 pub enum DrmAction {
     Start,
+    ScheduleFrame,
+    RenderFrame,
     FlipComplete { sequence: u32, tv_sec: u32, tv_usec: u32, crtc_id: u32 },
     Stop,
 }
@@ -1158,16 +1247,23 @@ impl Model for DrmModel {
 
     fn process(
         &mut self,
-        _state: &mut crate::state::State,
+        state: &mut crate::state::State,
         action: Self::Action,
         dispatcher: &mut crate::runner::Dispatcher,
     ) -> Result<(), ()> {
         match action {
             DrmAction::Start => {
-                dispatcher.start_model2(DrmReader::new(self.fd));
+                let fd = state.drm.get(self.drm_id).fd.as_raw_fd();
+                dispatcher.start_model(self.model_id(), DrmReader::new(self.drm_id, fd));
+            }
+            DrmAction::ScheduleFrame => {
+                self.schedule_frame(state, dispatcher);
+            }
+            DrmAction::RenderFrame => {
+                self.render_frame(state);
             }
             DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id } => {
-                self.handle_flip_complete(sequence, tv_sec, tv_usec, crtc_id);
+                self.handle_flip_complete(state, dispatcher, sequence, tv_sec, tv_usec, crtc_id);
             }
             DrmAction::Stop => todo!(),
         };
@@ -1176,7 +1272,40 @@ impl Model for DrmModel {
 }
 
 impl DrmModel {
-    fn handle_flip_complete(&mut self, sequence: u32, tv_sec: u32, tv_usec: u32, crtc_id: u32) {
-        dbg!(sequence, tv_sec, tv_usec, crtc_id);
+    fn model_id(&self) -> u64 {
+        usize::from(self.drm_id) as u64
+    }
+
+    fn schedule_frame(&mut self, state: &mut crate::state::State, dispatcher: &mut Dispatcher) {
+        if state.drm.get_mut(self.drm_id).output.request_frame() {
+            dispatcher.dispatch_to(self.model_id(), DrmAction::RenderFrame);
+        }
+    }
+
+    fn render_frame(&mut self, state: &mut crate::state::State) {
+        let drm = state.drm.get_mut(self.drm_id);
+        if !drm.output.begin_render() {
+            return;
+        }
+
+        if let Err(error) = drm.submit_render_buffer() {
+            drm.output.mark_render_failed();
+            log::error!("Could not submit DRM frame: {:?}", error);
+        }
+    }
+
+    fn handle_flip_complete(
+        &mut self,
+        state: &mut crate::state::State,
+        dispatcher: &mut Dispatcher,
+        _sequence: u32,
+        _tv_sec: u32,
+        _tv_usec: u32,
+        _crtc_id: u32,
+    ) {
+        let should_render = state.drm.get_mut(self.drm_id).output.finish_page_flip();
+        if should_render {
+            dispatcher.dispatch_to(self.model_id(), DrmAction::RenderFrame);
+        }
     }
 }

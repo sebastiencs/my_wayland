@@ -221,11 +221,9 @@ impl Udev {
         eprintln!("DRM TAKEN {:?}", device.devnode());
 
         let drm = Drm::create_drm(fd, device, &state.egl);
-
-        let drm_model = drm.make_model();
-        dispatcher.start_model2(drm_model);
-
         let drm_id = state.drm.insert(drm);
+        let drm_model = state.drm.get(drm_id).make_model(drm_id);
+        dispatcher.start_model(usize::from(drm_id) as u64, drm_model);
         state.insert_global(WlOutputGlobal::new(drm_id)); // TODO: Should we notify clients ?
     }
 }
