@@ -377,8 +377,12 @@ fn refresh_pointer_focus(
     send_motion: bool,
 ) {
     let old_focus = state.seat.pointer_focus;
-    let new_focus =
-        hit_test_surface(&state.objects, &state.drm, state.seat.pointer_pos.0, state.seat.pointer_pos.1);
+    let new_focus = hit_test_surface(
+        &state.objects,
+        &state.drm,
+        state.seat.pointer_pos.0,
+        state.seat.pointer_pos.1,
+    );
 
     if old_focus.map(|focus| focus.target) != new_focus.map(|focus| focus.target) {
         log::debug!(
@@ -399,7 +403,11 @@ fn refresh_pointer_focus(
                 old_focus.target.client_id,
                 SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface_id },
             );
-            dispatch_client_event(dispatcher, old_focus.target.client_id, SeatClientEvent::PointerFrame);
+            dispatch_client_event(
+                dispatcher,
+                old_focus.target.client_id,
+                SeatClientEvent::PointerFrame,
+            );
         }
 
         if let Some(new_focus) = new_focus {
@@ -421,7 +429,11 @@ fn refresh_pointer_focus(
                     SeatClientEvent::PointerMotion { time, x, y },
                 );
             }
-            dispatch_client_event(dispatcher, new_focus.target.client_id, SeatClientEvent::PointerFrame);
+            dispatch_client_event(
+                dispatcher,
+                new_focus.target.client_id,
+                SeatClientEvent::PointerFrame,
+            );
         }
 
         state.seat.pointer_focus = new_focus;
@@ -438,7 +450,11 @@ fn refresh_pointer_focus(
                 focus.target.client_id,
                 SeatClientEvent::PointerMotion { time, x, y },
             );
-            dispatch_client_event(dispatcher, focus.target.client_id, SeatClientEvent::PointerFrame);
+            dispatch_client_event(
+                dispatcher,
+                focus.target.client_id,
+                SeatClientEvent::PointerFrame,
+            );
         }
     }
 }

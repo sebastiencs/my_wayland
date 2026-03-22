@@ -3,8 +3,8 @@ use crate::{
     protocol_generated::NewId,
     state::{Grab, IndexMap, State},
     wayland_objects::{
-        wl_compositor::WlCompositorGlobal, wl_seat::WlSeatGlobal, wl_shm::WlShmGlobal,
-        wl_subcompositor::WlSubcompositorGlobal,
+        wl_compositor::WlCompositorGlobal, wl_data_device_manager::WlDataDeviceManagerGlobal,
+        wl_seat::WlSeatGlobal, wl_shm::WlShmGlobal, wl_subcompositor::WlSubcompositorGlobal,
         wp_cursor_shape_manager_v1::WpCursorShapeManagerV1Global,
         wp_presentation::WpPresentationGlobal, xdg_activation_v1::XdgActivationV1Global,
         xdg_wm_base::XdgWmBaseGlobal, zxdg_output_manager_v1::ZxdgOutputManagerV1Global,
@@ -45,6 +45,7 @@ impl Globals {
     pub fn initialize(&mut self) {
         for fun in [
             WlCompositorGlobal::new,
+            WlDataDeviceManagerGlobal::new,
             WlShmGlobal::new,
             WlSubcompositorGlobal::new,
             WlSeatGlobal::new, // TODO: `WlSeatGlobal` should be added dynamically

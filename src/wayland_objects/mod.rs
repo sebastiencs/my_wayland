@@ -3,6 +3,9 @@
 pub mod wl_buffer;
 pub mod wl_callback;
 pub mod wl_compositor;
+pub mod wl_data_device;
+pub mod wl_data_device_manager;
+pub mod wl_data_source;
 pub mod wl_display;
 pub mod wl_keyboard;
 pub mod wl_output;
@@ -40,9 +43,6 @@ fake_obj! {
     // { wl_shm_pool, WlShmPool },
     // { wl_buffer, WlBuffer },
     { wl_data_offer, WlDataOffer },
-    { wl_data_source, WlDataSource },
-    { wl_data_device, WlDataDevice },
-    { wl_data_device_manager, WlDataDeviceManager },
     { wl_shell, WlShell },
     { wl_shell_surface, WlShellSurface },
     // { wl_surface, WlSurface },
