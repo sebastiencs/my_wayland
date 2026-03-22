@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ffi::CStr,
+    ptr,
     time::Duration,
 };
 
@@ -415,6 +416,15 @@ pub struct GlTexture {
     texture: gl::Uint,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct RenderItem {
+    pub texture: gl::Uint,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 pub fn image_target(external_only: bool) -> gl::Enum {
     match external_only {
         true => gl::TEXTURE_EXTERNAL_OES as _,
@@ -471,6 +481,10 @@ impl GlTexture {
             texture
         };
         Ok(Self { image: None, texture })
+    }
+
+    pub fn texture_id(&self) -> gl::Uint {
+        self.texture
     }
 }
 
@@ -556,6 +570,121 @@ impl EglFrameBuffer {
         // let ops = self.take_render_ops();
         // self.render(ops, Some(&Color { r, g, b, a }));
     }
+
+    pub fn render(&self, items: &[RenderItem]) {
+        self.clear();
+
+        if items.is_empty() {
+            return;
+        }
+
+        let program = create_texture_program();
+        let position_name = b"a_position\0";
+        let texcoord_name = b"a_texcoord\0";
+        let sampler_name = b"u_texture\0";
+        let position_location =
+            unsafe { gl::GetAttribLocation(program, position_name.as_ptr().cast()) } as gl::Uint;
+        let texcoord_location =
+            unsafe { gl::GetAttribLocation(program, texcoord_name.as_ptr().cast()) } as gl::Uint;
+        let sampler_location =
+            unsafe { gl::GetUniformLocation(program, sampler_name.as_ptr().cast()) };
+
+        unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER as _, self.framebuffer_object);
+            gl::Viewport(0, 0, self.width, self.height);
+            gl::UseProgram(program);
+            gl::Enable(gl::BLEND as _);
+            gl::BlendFunc(gl::ONE as _, gl::ONE_MINUS_SRC_ALPHA as _);
+            gl::Uniform1i(sampler_location, 0);
+            gl::ActiveTexture(gl::TEXTURE0 as _);
+            gl::EnableVertexAttribArray(position_location);
+            gl::EnableVertexAttribArray(texcoord_location);
+        }
+
+        for item in items {
+            let left = (item.x as f32 / self.width as f32) * 2.0 - 1.0;
+            let right = ((item.x + item.width) as f32 / self.width as f32) * 2.0 - 1.0;
+            let top = 1.0 - (item.y as f32 / self.height as f32) * 2.0;
+            let bottom = 1.0 - ((item.y + item.height) as f32 / self.height as f32) * 2.0;
+            let vertices: [f32; 16] = [
+                left, top, 0.0, 0.0, right, top, 1.0, 0.0, left, bottom, 0.0, 1.0, right, bottom,
+                1.0, 1.0,
+            ];
+            let stride = (4 * std::mem::size_of::<f32>()) as i32;
+
+            unsafe {
+                gl::BindTexture(gl::TEXTURE_2D as _, item.texture);
+                gl::VertexAttribPointer(
+                    position_location,
+                    2,
+                    gl::FLOAT as _,
+                    0,
+                    stride,
+                    vertices.as_ptr().cast(),
+                );
+                gl::VertexAttribPointer(
+                    texcoord_location,
+                    2,
+                    gl::FLOAT as _,
+                    0,
+                    stride,
+                    vertices.as_ptr().add(2).cast(),
+                );
+                gl::DrawArrays(gl::TRIANGLE_STRIP as _, 0, 4);
+            }
+        }
+
+        unsafe {
+            gl::BindTexture(gl::TEXTURE_2D as _, 0);
+            gl::DisableVertexAttribArray(position_location);
+            gl::DisableVertexAttribArray(texcoord_location);
+            gl::UseProgram(0);
+            gl::DeleteProgram(program);
+            gl::Flush();
+        }
+    }
+}
+
+fn create_texture_program() -> gl::Uint {
+    let vertex_source = b"attribute vec2 a_position;\nattribute vec2 a_texcoord;\nvarying vec2 v_texcoord;\nvoid main() {\n    gl_Position = vec4(a_position, 0.0, 1.0);\n    v_texcoord = a_texcoord;\n}\n\0";
+    let fragment_source = b"precision mediump float;\nvarying vec2 v_texcoord;\nuniform sampler2D u_texture;\nvoid main() {\n    gl_FragColor = texture2D(u_texture, v_texcoord);\n}\n\0";
+    let vertex_shader = compile_shader(gl::VERTEX_SHADER as _, vertex_source);
+    let fragment_shader = compile_shader(gl::FRAGMENT_SHADER as _, fragment_source);
+    let program = unsafe { gl::CreateProgram() };
+
+    unsafe {
+        gl::AttachShader(program, vertex_shader);
+        gl::AttachShader(program, fragment_shader);
+        gl::LinkProgram(program);
+        gl::DeleteShader(vertex_shader);
+        gl::DeleteShader(fragment_shader);
+    }
+
+    let mut status = 0;
+    unsafe { gl::GetProgramiv(program, gl::LINK_STATUS as _, &mut status) };
+    if status == 0 {
+        panic!("Could not link texture program");
+    }
+
+    program
+}
+
+fn compile_shader(kind: gl::Enum, source: &[u8]) -> gl::Uint {
+    let shader = unsafe { gl::CreateShader(kind) };
+    let source_ptr = source.as_ptr().cast();
+
+    unsafe {
+        gl::ShaderSource(shader, 1, &source_ptr, ptr::null());
+        gl::CompileShader(shader);
+    }
+
+    let mut status = 0;
+    unsafe { gl::GetShaderiv(shader, gl::COMPILE_STATUS as _, &mut status) };
+    if status == 0 {
+        panic!("Could not compile shader");
+    }
+
+    shader
 }
 
 #[derive(Debug)]

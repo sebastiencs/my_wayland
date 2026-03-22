@@ -220,6 +220,14 @@ impl Client {
         GrabbedObject::new(grabbed)
     }
 
+    pub fn object_id<K>(&self, id: K) -> ObjectId
+    where
+        K: Into<WaylandId>,
+    {
+        let id: WaylandId = id.into();
+        self.objects[&id]
+    }
+
     pub fn insert_object<'a, O: Object>(
         &mut self,
         state: &'a mut State,

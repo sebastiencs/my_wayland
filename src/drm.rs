@@ -22,11 +22,13 @@ use {
 
 use crate::{
     dmabuf::DmaBuf,
-    egl::{EglContext, EglFrameBuffer, GlTexture, EGL},
+    egl::{EglContext, EglFrameBuffer, GlTexture, RenderItem, EGL},
     gbm::UseFlags,
     io_uring::ring::ReadWriteCompleted,
+    object::AsAny,
     runner::{AnyAction, Dispatcher, Model},
     state::DrmId,
+    wayland_objects::{wl_buffer::WlBuffer, wl_surface::WlSurface},
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -136,7 +138,11 @@ impl DrmOutput {
     }
 
     fn begin_render(&mut self) -> bool {
-        if !self.needs_frame || !self.frame_scheduled || self.rendering_active || self.page_flip_pending {
+        if !self.needs_frame
+            || !self.frame_scheduled
+            || self.rendering_active
+            || self.page_flip_pending
+        {
             return false;
         }
 
@@ -411,6 +417,10 @@ impl Drm {
 
     pub fn make_model(&self, drm_id: DrmId) -> DrmModel {
         DrmModel { drm_id }
+    }
+
+    fn render_output(&self, items: &[RenderItem]) {
+        self.output.render_buffer().gl_framebuffer.render(items);
     }
 
     fn submit_render_buffer(&mut self) -> std::io::Result<()> {
@@ -1173,12 +1183,10 @@ impl Model for DrmReader {
                     match event {
                         ParsedDrmEvent::FlipComplete {
                             sequence, tv_sec, tv_usec, crtc_id, ..
-                        } => dispatcher.dispatch_to(self.model_id(), DrmAction::FlipComplete {
-                            sequence,
-                            tv_sec,
-                            tv_usec,
-                            crtc_id,
-                        }),
+                        } => dispatcher.dispatch_to(
+                            self.model_id(),
+                            DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id },
+                        ),
                         ParsedDrmEvent::Ignored { .. } => {}
                     }
                     self.read_buffer.consume_event(len);
@@ -1283,11 +1291,13 @@ impl DrmModel {
     }
 
     fn render_frame(&mut self, state: &mut crate::state::State) {
+        let render_items = collect_render_items(state);
         let drm = state.drm.get_mut(self.drm_id);
         if !drm.output.begin_render() {
             return;
         }
 
+        drm.render_output(&render_items);
         if let Err(error) = drm.submit_render_buffer() {
             drm.output.mark_render_failed();
             log::error!("Could not submit DRM frame: {:?}", error);
@@ -1308,4 +1318,27 @@ impl DrmModel {
             dispatcher.dispatch_to(self.model_id(), DrmAction::RenderFrame);
         }
     }
+}
+
+fn collect_render_items(state: &crate::state::State) -> Vec<RenderItem> {
+    let mut items = Vec::new();
+
+    for (_, object) in state.objects.iter() {
+        let Some(surface) = object.as_any().downcast_ref::<WlSurface>() else {
+            continue;
+        };
+        let Some(surface_state) = surface.render_state() else {
+            continue;
+        };
+        let object = &state.objects[surface_state.buffer_object_id];
+        let Some(buffer) = object.as_any().downcast_ref::<WlBuffer>() else {
+            continue;
+        };
+        let Some(item) = buffer.render_item(surface_state.x, surface_state.y) else {
+            continue;
+        };
+        items.push(item);
+    }
+
+    items
 }

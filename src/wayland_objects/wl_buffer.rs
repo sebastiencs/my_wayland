@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     drm::Format,
-    egl::GlTexture,
+    egl::{GlTexture, RenderItem},
     object::{Object, Parser},
     protocol_generated::{wl_buffer, WaylandId, WlBufferId},
     state::State,
@@ -75,6 +75,17 @@ impl WlBuffer {
         )
         .unwrap();
         self.texture = Some(texture);
+    }
+
+    pub fn render_item(&self, x: i32, y: i32) -> Option<RenderItem> {
+        let texture = self.texture.as_ref()?;
+        Some(RenderItem {
+            texture: texture.texture_id(),
+            x,
+            y,
+            width: self.width as i32,
+            height: self.height as i32,
+        })
     }
 }
 

@@ -2,7 +2,7 @@ use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     object::{Object, Parser},
     protocol_generated::{xdg_wm_base, WaylandId, WlBufferId, WlSurfaceId, XdgSurfaceId},
-    state::State,
+    state::{ObjectId, State},
     utils::MemHelper,
     wayland_objects::xdg_surface::XdgSurface,
 };
@@ -36,8 +36,16 @@ struct Pending {
 #[derive(Debug, Default)]
 struct OnScreen {
     buffer: Option<WlBufferId>,
+    buffer_object_id: Option<ObjectId>,
     x: i32,
     y: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SurfaceRenderState {
+    pub buffer_object_id: ObjectId,
+    pub x: i32,
+    pub y: i32,
 }
 
 struct SurfaceChanges {
@@ -117,6 +125,7 @@ impl WlSurface {
 
         if let Some(buffer_id) = self.pending.buffer.take() {
             if let Some(buffer_id) = self.on_screen.buffer.take() {
+                self.on_screen.buffer_object_id = None;
                 let buffer = client.get_object(buffer_id, state);
                 buffer.send_release(dispatcher);
             }
@@ -128,9 +137,18 @@ impl WlSurface {
             buffer.update_texture();
 
             self.on_screen.buffer = Some(buffer_id);
+            self.on_screen.buffer_object_id = Some(client.object_id(buffer_id));
         };
 
         let SurfaceChanges { is_new_buffer } = changes;
+    }
+
+    pub fn render_state(&self) -> Option<SurfaceRenderState> {
+        Some(SurfaceRenderState {
+            buffer_object_id: self.on_screen.buffer_object_id?,
+            x: self.on_screen.x,
+            y: self.on_screen.y,
+        })
     }
 }
 
