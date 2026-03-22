@@ -170,68 +170,10 @@ pub fn handle_pointer_motion(
     time: u32,
 ) {
     let seat = &mut state.seat;
-    seat.pointer_pos.0 = (seat.pointer_pos.0 + dx).max(0.0);
-    seat.pointer_pos.1 = (seat.pointer_pos.1 + dy).max(0.0);
-
-    let old_focus = seat.pointer_focus;
-    let new_focus =
-        hit_test_surface(&state.objects, &state.drm, seat.pointer_pos.0, seat.pointer_pos.1);
-
-    if old_focus.map(|focus| focus.target) != new_focus.map(|focus| focus.target) {
-        let serial = state.seat.next_serial();
-
-        if let Some(old_focus) = old_focus {
-            dispatch_client_event(
-                dispatcher,
-                old_focus.target.client_id,
-                SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface_id },
-            );
-            dispatch_client_event(
-                dispatcher,
-                old_focus.target.client_id,
-                SeatClientEvent::PointerFrame,
-            );
-        }
-
-        if let Some(new_focus) = new_focus {
-            let (x, y) = local_coords(new_focus.rect, state.seat.pointer_pos);
-            dispatch_client_event(
-                dispatcher,
-                new_focus.target.client_id,
-                SeatClientEvent::PointerEnter {
-                    serial,
-                    surface: new_focus.target.surface_id,
-                    x,
-                    y,
-                },
-            );
-            dispatch_client_event(
-                dispatcher,
-                new_focus.target.client_id,
-                SeatClientEvent::PointerMotion { time, x, y },
-            );
-            dispatch_client_event(
-                dispatcher,
-                new_focus.target.client_id,
-                SeatClientEvent::PointerFrame,
-            );
-        }
-
-        state.seat.pointer_focus = new_focus;
-        return;
-    }
-
-    state.seat.pointer_focus = new_focus;
-
-    if let Some(focus) = new_focus {
-        let (x, y) = local_coords(focus.rect, state.seat.pointer_pos);
-        dispatch_client_event(
-            dispatcher,
-            focus.target.client_id,
-            SeatClientEvent::PointerMotion { time, x, y },
-        );
-        dispatch_client_event(dispatcher, focus.target.client_id, SeatClientEvent::PointerFrame);
-    }
+    seat.pointer_pos.0 += dx;
+    seat.pointer_pos.1 += dy;
+    clamp_pointer_to_outputs(state);
+    refresh_pointer_focus(state, dispatcher, time, true);
 }
 
 pub fn handle_pointer_button(
@@ -241,6 +183,7 @@ pub fn handle_pointer_button(
     button_state: u32,
     time: u32,
 ) {
+    refresh_pointer_focus(state, dispatcher, time, false);
     let pointer_focus = state.seat.pointer_focus;
     if button_state == 1 {
         set_keyboard_focus(state, dispatcher, pointer_focus.map(|focus| focus.target));
@@ -261,6 +204,18 @@ pub fn handle_pointer_button(
         pointer_focus.target.client_id,
         SeatClientEvent::PointerFrame,
     );
+}
+
+pub fn handle_pointer_motion_absolute(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    x: f64,
+    y: f64,
+    time: u32,
+) {
+    state.seat.pointer_pos = (x, y);
+    clamp_pointer_to_outputs(state);
+    refresh_pointer_focus(state, dispatcher, time, true);
 }
 
 pub fn handle_keyboard_key(
@@ -365,6 +320,89 @@ fn hit_test_surface(
     }
 
     hit
+}
+
+fn refresh_pointer_focus(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    time: u32,
+    send_motion: bool,
+) {
+    let old_focus = state.seat.pointer_focus;
+    let new_focus =
+        hit_test_surface(&state.objects, &state.drm, state.seat.pointer_pos.0, state.seat.pointer_pos.1);
+
+    if old_focus.map(|focus| focus.target) != new_focus.map(|focus| focus.target) {
+        let serial = state.seat.next_serial();
+
+        if let Some(old_focus) = old_focus {
+            dispatch_client_event(
+                dispatcher,
+                old_focus.target.client_id,
+                SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface_id },
+            );
+            dispatch_client_event(dispatcher, old_focus.target.client_id, SeatClientEvent::PointerFrame);
+        }
+
+        if let Some(new_focus) = new_focus {
+            let (x, y) = local_coords(new_focus.rect, state.seat.pointer_pos);
+            dispatch_client_event(
+                dispatcher,
+                new_focus.target.client_id,
+                SeatClientEvent::PointerEnter {
+                    serial,
+                    surface: new_focus.target.surface_id,
+                    x,
+                    y,
+                },
+            );
+            if send_motion {
+                dispatch_client_event(
+                    dispatcher,
+                    new_focus.target.client_id,
+                    SeatClientEvent::PointerMotion { time, x, y },
+                );
+            }
+            dispatch_client_event(dispatcher, new_focus.target.client_id, SeatClientEvent::PointerFrame);
+        }
+
+        state.seat.pointer_focus = new_focus;
+        return;
+    }
+
+    state.seat.pointer_focus = new_focus;
+
+    if send_motion {
+        if let Some(focus) = new_focus {
+            let (x, y) = local_coords(focus.rect, state.seat.pointer_pos);
+            dispatch_client_event(
+                dispatcher,
+                focus.target.client_id,
+                SeatClientEvent::PointerMotion { time, x, y },
+            );
+            dispatch_client_event(dispatcher, focus.target.client_id, SeatClientEvent::PointerFrame);
+        }
+    }
+}
+
+fn clamp_pointer_to_outputs(state: &mut State) {
+    let Some((width, height)) = output_size(state) else {
+        state.seat.pointer_pos.0 = state.seat.pointer_pos.0.max(0.0);
+        state.seat.pointer_pos.1 = state.seat.pointer_pos.1.max(0.0);
+        return;
+    };
+
+    let max_x = (width - 1.0).max(0.0);
+    let max_y = (height - 1.0).max(0.0);
+    state.seat.pointer_pos.0 = state.seat.pointer_pos.0.clamp(0.0, max_x);
+    state.seat.pointer_pos.1 = state.seat.pointer_pos.1.clamp(0.0, max_y);
+}
+
+fn output_size(state: &State) -> Option<(f64, f64)> {
+    let (_, drm) = state.drm.iter().next()?;
+    let mode = drm.output.in_use.connector.preferred_mode.as_ref()?;
+    let (width, height) = mode.size();
+    Some((width as f64, height as f64))
 }
 
 fn local_coords(rect: SurfaceRect, pointer_pos: (f64, f64)) -> (f32, f32) {

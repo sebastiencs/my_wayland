@@ -131,6 +131,18 @@ impl Model for Libinput {
                                 motion.dy(),
                                 motion.time(),
                             ),
+                            PointerEvent::MotionAbsolute(motion) => {
+                                let Some((width, height)) = current_output_size(state) else {
+                                    continue;
+                                };
+                                seat::handle_pointer_motion_absolute(
+                                    state,
+                                    dispatcher,
+                                    motion.absolute_x_transformed(width),
+                                    motion.absolute_y_transformed(height),
+                                    motion.time(),
+                                );
+                            }
                             PointerEvent::Button(button) => {
                                 let button_state = match button.button_state() {
                                     ButtonState::Pressed => 1,
@@ -187,6 +199,13 @@ impl Model for Libinput {
 
 pub struct Input {
     device: input::Device,
+}
+
+fn current_output_size(state: &State) -> Option<(u32, u32)> {
+    let (_, drm) = state.drm.iter().next()?;
+    let mode = drm.output.in_use.connector.preferred_mode.as_ref()?;
+    let (width, height) = mode.size();
+    Some((width as u32, height as u32))
 }
 
 #[derive(derive_more::Deref, derive_more::From)]
