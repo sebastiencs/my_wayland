@@ -124,22 +124,38 @@ impl Model for Libinput {
                 while let Some(event) = self.next_event() {
                     match event {
                         input::Event::Pointer(pointer) => match pointer {
-                            PointerEvent::Motion(motion) => seat::handle_pointer_motion(
-                                state,
-                                dispatcher,
-                                motion.dx(),
-                                motion.dy(),
-                                motion.time(),
-                            ),
+                            PointerEvent::Motion(motion) => {
+                                log::debug!(
+                                    "libinput pointer motion dx={} dy={} time={}",
+                                    motion.dx(),
+                                    motion.dy(),
+                                    motion.time()
+                                );
+                                seat::handle_pointer_motion(
+                                    state,
+                                    dispatcher,
+                                    motion.dx(),
+                                    motion.dy(),
+                                    motion.time(),
+                                )
+                            }
                             PointerEvent::MotionAbsolute(motion) => {
                                 let Some((width, height)) = current_output_size(state) else {
                                     continue;
                                 };
+                                let x = motion.absolute_x_transformed(width);
+                                let y = motion.absolute_y_transformed(height);
+                                log::debug!(
+                                    "libinput pointer motion absolute x={} y={} time={}",
+                                    x,
+                                    y,
+                                    motion.time()
+                                );
                                 seat::handle_pointer_motion_absolute(
                                     state,
                                     dispatcher,
-                                    motion.absolute_x_transformed(width),
-                                    motion.absolute_y_transformed(height),
+                                    x,
+                                    y,
                                     motion.time(),
                                 );
                             }
@@ -148,6 +164,12 @@ impl Model for Libinput {
                                     ButtonState::Pressed => 1,
                                     ButtonState::Released => 0,
                                 };
+                                log::debug!(
+                                    "libinput pointer button button={} state={} time={}",
+                                    button.button(),
+                                    button_state,
+                                    button.time()
+                                );
                                 seat::handle_pointer_button(
                                     state,
                                     dispatcher,
@@ -164,6 +186,12 @@ impl Model for Libinput {
                                     KeyState::Pressed => 1,
                                     KeyState::Released => 0,
                                 };
+                                log::debug!(
+                                    "libinput keyboard key key={} state={} time={}",
+                                    key.key(),
+                                    key_state,
+                                    key.time()
+                                );
                                 seat::handle_keyboard_key(
                                     state,
                                     dispatcher,

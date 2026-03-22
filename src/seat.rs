@@ -173,6 +173,12 @@ pub fn handle_pointer_motion(
     seat.pointer_pos.0 += dx;
     seat.pointer_pos.1 += dy;
     clamp_pointer_to_outputs(state);
+    log::debug!(
+        "seat pointer motion pos=({:.1}, {:.1}) time={}",
+        state.seat.pointer_pos.0,
+        state.seat.pointer_pos.1,
+        time
+    );
     refresh_pointer_focus(state, dispatcher, time, true);
 }
 
@@ -185,6 +191,13 @@ pub fn handle_pointer_button(
 ) {
     refresh_pointer_focus(state, dispatcher, time, false);
     let pointer_focus = state.seat.pointer_focus;
+    log::debug!(
+        "seat pointer button button={} state={} time={} focus={:?}",
+        button,
+        button_state,
+        time,
+        pointer_focus.map(|focus| focus.target)
+    );
     if button_state == 1 {
         set_keyboard_focus(state, dispatcher, pointer_focus.map(|focus| focus.target));
     }
@@ -215,6 +228,12 @@ pub fn handle_pointer_motion_absolute(
 ) {
     state.seat.pointer_pos = (x, y);
     clamp_pointer_to_outputs(state);
+    log::debug!(
+        "seat pointer motion absolute pos=({:.1}, {:.1}) time={}",
+        state.seat.pointer_pos.0,
+        state.seat.pointer_pos.1,
+        time
+    );
     refresh_pointer_focus(state, dispatcher, time, true);
 }
 
@@ -226,6 +245,13 @@ pub fn handle_keyboard_key(
     time: u32,
 ) {
     let changed_modifiers = state.keyboard.update_key(key, key_state == 1);
+    log::debug!(
+        "seat keyboard key key={} state={} time={} focus_before={:?}",
+        key,
+        key_state,
+        time,
+        state.seat.keyboard_focus
+    );
 
     if state.seat.keyboard_focus.is_none() {
         set_keyboard_focus(state, dispatcher, state.seat.pointer_focus.map(|focus| focus.target));
@@ -236,6 +262,13 @@ pub fn handle_keyboard_key(
     };
 
     let serial = state.seat.next_serial();
+    log::debug!(
+        "seat dispatch keyboard key client={:?} serial={} key={} state={}",
+        focus.client_id,
+        serial,
+        key,
+        key_state
+    );
     dispatch_client_event(
         dispatcher,
         focus.client_id,
@@ -243,6 +276,15 @@ pub fn handle_keyboard_key(
     );
 
     if let Some(modifiers) = changed_modifiers {
+        log::debug!(
+            "seat modifiers changed client={:?} serial={} depressed={} latched={} locked={} group={}",
+            focus.client_id,
+            state.seat.current_serial,
+            modifiers.mods_depressed,
+            modifiers.mods_latched,
+            modifiers.mods_locked,
+            modifiers.group
+        );
         dispatch_modifiers(dispatcher, focus.client_id, state.seat.next_serial(), modifiers);
     }
 }
@@ -255,6 +297,12 @@ fn set_keyboard_focus(
     if state.seat.keyboard_focus == new_focus {
         return;
     }
+
+    log::debug!(
+        "seat keyboard focus change old={:?} new={:?}",
+        state.seat.keyboard_focus,
+        new_focus
+    );
 
     let serial = state.seat.next_serial();
 
@@ -331,6 +379,16 @@ fn refresh_pointer_focus(
     let old_focus = state.seat.pointer_focus;
     let new_focus =
         hit_test_surface(&state.objects, &state.drm, state.seat.pointer_pos.0, state.seat.pointer_pos.1);
+
+    if old_focus.map(|focus| focus.target) != new_focus.map(|focus| focus.target) {
+        log::debug!(
+            "seat pointer focus change pos=({:.1}, {:.1}) old={:?} new={:?}",
+            state.seat.pointer_pos.0,
+            state.seat.pointer_pos.1,
+            old_focus.map(|focus| focus.target),
+            new_focus.map(|focus| focus.target)
+        );
+    }
 
     if old_focus.map(|focus| focus.target) != new_focus.map(|focus| focus.target) {
         let serial = state.seat.next_serial();
