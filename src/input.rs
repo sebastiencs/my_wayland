@@ -227,6 +227,9 @@ impl Model for Libinput {
 
                 let input_id = state.inputs.insert(Input { device });
                 self.inputs.insert(input_id);
+                // `LibinputAction::Start` is not dispatched from `main` yet, so arm polling once
+                // the first device is added; future events re-arm from the `Event` path.
+                self.dispatch_poll_libinput(dispatcher);
             }
         }
         Ok(())
