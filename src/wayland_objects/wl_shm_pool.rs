@@ -10,8 +10,8 @@ use crate::{
     protocol_generated::{wl_shm, wl_shm_pool, WaylandId, WlShmPoolId},
     state::State,
     wayland_objects::{
-        wl_display::WlDisplay,
         wl_buffer::{NewWlBufferParams, WlBuffer},
+        wl_display::WlDisplay,
         wl_shm::SHM_FORMATS,
     },
 };

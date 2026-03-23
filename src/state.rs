@@ -15,7 +15,11 @@ use std::{marker::PhantomData, ptr::NonNull, rc::Rc};
 enum ValueOrEmpty<V> {
     Value(V),
     Grabbed,
-    Empty { next_empty: Option<u32> },
+    /// `remove_or_defer` while grabbed: on [`Grab`] drop, drop value and free slot.
+    GrabbedToRemove,
+    Empty {
+        next_empty: Option<u32>,
+    },
 }
 
 pub struct IndexMap<K, V> {
@@ -221,7 +225,7 @@ where
             let value = match v {
                 ValueOrEmpty::Value(value) => value,
                 ValueOrEmpty::Grabbed => panic!("iterating while grabbed"),
-                ValueOrEmpty::Empty { .. } => return None,
+                ValueOrEmpty::Empty { .. } | ValueOrEmpty::GrabbedToRemove => return None,
             };
             Some((key, value))
         })
@@ -244,11 +248,37 @@ where
         let value = match std::mem::replace(entry, empty) {
             ValueOrEmpty::Value(value) => value,
             ValueOrEmpty::Empty { .. } => panic!("cannot remove twice"), // produce invalid state
-            ValueOrEmpty::Grabbed => panic!("invalid state"),
+            ValueOrEmpty::Grabbed | ValueOrEmpty::GrabbedToRemove => panic!("invalid state"),
         };
         self.next_empty = Some(index as u32);
 
         Some(value)
+    }
+
+    /// Remove immediately if `key` holds a value; if the slot is grabbed, mark for removal and
+    /// return `None` (value is dropped when the active `Grab` is released).
+    ///
+    /// Returns `None` if the slot is empty, out of range, or removal was deferred.
+    pub fn remove_or_defer(&mut self, key: K) -> Option<V> {
+        let index: usize = key.into();
+        let entry = self.map.get_mut(index)?;
+
+        match entry {
+            ValueOrEmpty::Empty { .. } => None,
+            ValueOrEmpty::Grabbed => {
+                *entry = ValueOrEmpty::GrabbedToRemove;
+                None
+            }
+            ValueOrEmpty::GrabbedToRemove => None,
+            ValueOrEmpty::Value(_) => {
+                let empty = ValueOrEmpty::Empty { next_empty: self.next_empty };
+                let ValueOrEmpty::Value(value) = std::mem::replace(entry, empty) else {
+                    unreachable!()
+                };
+                self.next_empty = Some(index as u32);
+                Some(value)
+            }
+        }
     }
 
     /// NOTE: Allow grabbing only on `Box<Self>`, so that self is a stable pointer
@@ -297,10 +327,17 @@ where
         let index: usize = key.into();
         let entry = self.map.get_mut(index).unwrap();
 
-        let value = ValueOrEmpty::Value(value);
-        let ValueOrEmpty::Grabbed = std::mem::replace(entry, value) else {
-            panic!("invalid state");
-        };
+        match entry {
+            ValueOrEmpty::Grabbed => {
+                *entry = ValueOrEmpty::Value(value);
+            }
+            ValueOrEmpty::GrabbedToRemove => {
+                drop(value);
+                *entry = ValueOrEmpty::Empty { next_empty: self.next_empty };
+                self.next_empty = Some(index as u32);
+            }
+            _ => panic!("invalid state in IndexMap::release"),
+        }
     }
 
     pub fn with<F, R>(self: &mut Box<Self>, key: K, fun: F) -> R
@@ -322,7 +359,7 @@ where
         let index: usize = key.into();
         match self.map.get(index)? {
             ValueOrEmpty::Value(value) => Some(value),
-            ValueOrEmpty::Empty { .. } => None,
+            ValueOrEmpty::Empty { .. } | ValueOrEmpty::GrabbedToRemove => None,
             ValueOrEmpty::Grabbed => panic!("invalid state"),
         }
     }
@@ -335,13 +372,18 @@ where
         let index: usize = key.into();
         match self.map.get_mut(index)? {
             ValueOrEmpty::Value(value) => Some(value),
-            ValueOrEmpty::Empty { .. } => None,
+            ValueOrEmpty::Empty { .. } | ValueOrEmpty::GrabbedToRemove => None,
             ValueOrEmpty::Grabbed => panic!("invalid state"),
         }
     }
 
     pub fn contains(&self, key: K) -> bool {
-        self.try_get(key).is_some()
+        let index: usize = key.into();
+        match self.map.get(index) {
+            Some(ValueOrEmpty::Value(_)) | Some(ValueOrEmpty::Grabbed) => true,
+            Some(ValueOrEmpty::Empty { .. }) | Some(ValueOrEmpty::GrabbedToRemove) => false,
+            None => false,
+        }
     }
 }
 
@@ -366,8 +408,10 @@ impl State {
         let object_id = self.objects.insert(Box::new(object));
         (wayland_id, object_id)
     }
-    pub fn remove_object(&mut self, object_id: ObjectId) -> Box<dyn Object> {
-        self.objects.remove(object_id).unwrap()
+    /// Removes the object now, or defers if the slot is currently grabbed.
+    /// Returns `None` if deferred or if the slot was already empty.
+    pub fn remove_object(&mut self, object_id: ObjectId) -> Option<Box<dyn Object>> {
+        self.objects.remove_or_defer(object_id)
     }
 
     pub fn insert_global(&mut self, global: Box<dyn Global>) {
@@ -405,5 +449,18 @@ mod tests {
             assert_eq!(*g, 99);
         }
         assert_eq!(*map.get(k), 99);
+    }
+
+    #[test]
+    fn indexmap_remove_or_defer_while_grabbed() {
+        let mut map = Box::new(IndexMap::<ObjectId, u32>::default());
+        let k = map.insert(42);
+        assert!(map.contains(k));
+        let g = map.grab(k);
+        assert!(map.contains(k));
+        assert!(map.remove_or_defer(k).is_none());
+        assert!(!map.contains(k));
+        drop(g);
+        assert!(!map.contains(k));
     }
 }
