@@ -20,10 +20,10 @@ use crate::{
     state::{InputId, State},
 };
 
-use {input::LibinputInterface, nix::unistd::close};
+use {input::LibinputInterface, nix::unistd::dup};
 
 struct Interface {
-    dev_to_fd: Arc<Mutex<BTreeMap<u64, RawFd>>>,
+    dev_to_fd: Arc<Mutex<BTreeMap<u64, OwnedFd>>>,
 }
 
 impl LibinputInterface for Interface {
@@ -33,18 +33,25 @@ impl LibinputInterface for Interface {
             log::error!("Failed to `stat(2)` {:?}", path);
             return Err(-1);
         };
-        // TODO: Handle errors
         let fd = {
             let dev_to_fd = self.dev_to_fd.lock().unwrap();
-            dev_to_fd.get(&stat.st_rdev).copied().unwrap()
+            let Some(fd) = dev_to_fd.get(&stat.st_rdev) else {
+                log::error!("No session fd cached for libinput device {:?}", path);
+                return Err(-1);
+            };
+            match dup(fd.as_raw_fd()) {
+                Ok(fd) => unsafe { OwnedFd::from_raw_fd(fd) },
+                Err(e) => {
+                    log::error!("Failed to dup libinput device fd for {:?}: {:?}", path, e);
+                    return Err(-1);
+                }
+            }
         };
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        Ok(fd)
     }
 
     fn close_restricted(&mut self, fd: OwnedFd) {
-        if let Err(e) = close(fd.as_raw_fd()) {
-            log::error!("Failed to close libinput fd: {:?}", e);
-        }
+        drop(fd);
     }
 }
 
@@ -52,7 +59,7 @@ pub struct Libinput {
     libinput: input::Libinput,
     /// We put that in an `Arc<Mutex<_>>` because not sure if libinput
     /// open the files in another thread or not
-    dev_to_fd: Arc<Mutex<BTreeMap<u64, RawFd>>>,
+    dev_to_fd: Arc<Mutex<BTreeMap<u64, OwnedFd>>>,
     inputs: BTreeSet<InputId>,
 }
 
@@ -84,6 +91,7 @@ impl Libinput {
 
     fn insert_device_fd(&mut self, fd: RawFd, devnum: u64) {
         let mut dev_to_fd = self.dev_to_fd.lock().unwrap();
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         dev_to_fd.insert(devnum, fd);
     }
 }
