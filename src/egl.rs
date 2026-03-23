@@ -781,7 +781,7 @@ impl EglContext {
                 .collect::<HashMap<_, _>>()
         };
 
-        dbg!(&extensions, &opengl_extensions);
+        // dbg!(&extensions, &opengl_extensions);
 
         Self {
             egl: egl.clone(),
