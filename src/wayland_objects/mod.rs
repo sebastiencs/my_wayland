@@ -53,6 +53,7 @@ fake_obj! {
     { wl_region, WlRegion },
     // { wl_subcompositor, WlSubcompositor },
     { wl_subsurface, WlSubsurface },
+    { wl_fixes, WlFixes },
     // { wp_presentation, WpPresentation },
     { wp_presentation_feedback, WpPresentationFeedback },
     { wp_viewporter, WpViewporter },

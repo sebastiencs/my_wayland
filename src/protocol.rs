@@ -204,8 +204,7 @@ fn write_parser(f: &mut impl Write, this_interface: &str, msgs: &[Message]) -> s
         if msg.args.is_empty() {
             writeln!(f, "        {} => {},", index, name)?;
         } else {
-            let untyped_new_ids =
-                msg.args.iter().filter(|a| is_untyped_new_id(a)).count();
+            let untyped_new_ids = msg.args.iter().filter(|a| is_untyped_new_id(a)).count();
             if untyped_new_ids > 1 {
                 panic!(
                     "protocol codegen: request `{}::{}` has multiple untyped new_id args; extend write_parser",

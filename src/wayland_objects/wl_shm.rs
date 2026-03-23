@@ -71,6 +71,7 @@ impl Object for WlShm {
                 let pool = WlShmPool::new(id, fd, size as usize);
                 client.insert_object(state, pool);
             }
+            Release => todo!(),
         }
     }
 }

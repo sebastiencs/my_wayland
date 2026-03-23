@@ -41,7 +41,7 @@ impl Object for WlRegistry {
         dispatcher: &mut ClientDispatcher,
     ) {
         match client.parse::<Self>(req).unwrap() {
-            wl_registry::Request::Bind { name, id } => {
+            wl_registry::Request::Bind { name, id, requested_version } => {
                 let Some(mut global) = state.globals.try_grab_global(name) else {
                     client.protocol_violation_disconnect(
                         dispatcher,
@@ -52,7 +52,8 @@ impl Object for WlRegistry {
                     return;
                 };
 
-                let (_, version) = global.interface();
+                let (_, max_version) = global.interface();
+                let version = requested_version.min(max_version);
                 global.bind(client, state, id, version, dispatcher);
             }
         }

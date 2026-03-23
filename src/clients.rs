@@ -1024,13 +1024,15 @@ impl Arguments {
         self.pop().map(Into::into)
     }
 
-    pub fn new_id_with_interface<I>(&mut self) -> Result<I, ParserError>
+    /// Parses Wayland `new_id` marshalling: interface name, client-requested version, object id.
+    pub fn new_id_with_interface<I>(&mut self) -> Result<(I, u32), ParserError>
     where
         I: From<u32>,
     {
         let _interface_name = self.string()?;
-        let _interface_version = self.uint()?;
-        self.id()
+        let requested_version = self.uint()?;
+        let id = self.id()?;
+        Ok((id, requested_version))
     }
 
     pub fn string(&mut self) -> Result<String, ParserError> {

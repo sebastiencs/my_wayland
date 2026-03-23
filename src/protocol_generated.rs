@@ -53,6 +53,7 @@ wayland_id! {
   WlRegionId,
   WlSubcompositorId,
   WlSubsurfaceId,
+  WlFixesId,
   WpPresentationId,
   WpPresentationFeedbackId,
   WpViewporterId,
@@ -128,7 +129,7 @@ pub mod wl_display {
         /// compositor after the callback is fired and as such the client must not
         /// attempt to use it after that point.
         ///
-        /// The callback_data passed in the callback is the event serial.
+        /// The callback_data passed in the callback is undefined and should be ignored.
         Sync {
             /// Callback object for the sync request,
             callback: WlCallbackId,
@@ -275,6 +276,8 @@ pub mod wl_registry {
             name: u32,
             /// Bounded object,
             id: NewId,
+            /// Client-requested interface version (from `new_id` marshalling),
+            requested_version: u32,
         },
     }
     impl Parser for crate::wayland_objects::wl_registry::WlRegistry {
@@ -282,7 +285,11 @@ pub mod wl_registry {
         fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
             use Request::*;
             let request = match req.request_id {
-                0 => Bind { name: req.uint()?, id: req.new_id_with_interface()? },
+                0 => {
+                    let name = req.uint()?;
+                    let (id, requested_version) = req.new_id_with_interface()?;
+                    Bind { name, id, requested_version }
+                }
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -451,7 +458,7 @@ pub mod wl_shm_pool {
     use super::*;
     impl Constants for crate::wayland_objects::wl_shm_pool::WlShmPool {
         const INTERFACE_NAME: &'static str = "wl_shm_pool";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 2;
     }
     impl crate::object::IdToObject for WlShmPoolId {
         type Object = crate::wayland_objects::wl_shm_pool::WlShmPool;
@@ -547,7 +554,7 @@ pub mod wl_shm {
     use super::*;
     impl Constants for crate::wayland_objects::wl_shm::WlShm {
         const INTERFACE_NAME: &'static str = "wl_shm";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 2;
     }
     impl crate::object::IdToObject for WlShmId {
         type Object = crate::wayland_objects::wl_shm::WlShm;
@@ -569,6 +576,13 @@ pub mod wl_shm {
             /// Pool size, in bytes,
             size: i32,
         },
+        /// Release the shm object
+        ///
+        /// Using this request a client can tell the server that it is not going to
+        /// use the shm object anymore.
+        ///
+        /// Objects created via this interface remain unaffected.
+        Release,
     }
     impl Parser for crate::wayland_objects::wl_shm::WlShm {
         type Request = Request;
@@ -576,6 +590,7 @@ pub mod wl_shm {
             use Request::*;
             let request = match req.request_id {
                 0 => CreatePool { id: req.id()?, fd: req.fd()?, size: req.int()? },
+                1 => Release,
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -842,6 +857,36 @@ pub mod wl_shm {
         Argb16161616 = 942953025,
         /// [63:0] A:B:G:R 16:16:16:16 little endian,
         Abgr16161616 = 942948929,
+        /// [7:0] C0:C1:C2:C3:C4:C5:C6:C7 1:1:1:1:1:1:1:1 eight pixels/byte,
+        C1 = 538980675,
+        /// [7:0] C0:C1:C2:C3 2:2:2:2 four pixels/byte,
+        C2 = 538980931,
+        /// [7:0] C0:C1 4:4 two pixels/byte,
+        C4 = 538981443,
+        /// [7:0] D0:D1:D2:D3:D4:D5:D6:D7 1:1:1:1:1:1:1:1 eight pixels/byte,
+        D1 = 538980676,
+        /// [7:0] D0:D1:D2:D3 2:2:2:2 four pixels/byte,
+        D2 = 538980932,
+        /// [7:0] D0:D1 4:4 two pixels/byte,
+        D4 = 538981444,
+        /// [7:0] D,
+        D8 = 538982468,
+        /// [7:0] R0:R1:R2:R3:R4:R5:R6:R7 1:1:1:1:1:1:1:1 eight pixels/byte,
+        R1 = 538980690,
+        /// [7:0] R0:R1:R2:R3 2:2:2:2 four pixels/byte,
+        R2 = 538980946,
+        /// [7:0] R0:R1 4:4 two pixels/byte,
+        R4 = 538981458,
+        /// [15:0] x:R 6:10 little endian,
+        R10 = 540029266,
+        /// [15:0] x:R 4:12 little endian,
+        R12 = 540160338,
+        /// [31:0] A:Cr:Cb:Y 8:8:8:8 little endian,
+        Avuy8888 = 1498764865,
+        /// [31:0] X:Cr:Cb:Y 8:8:8:8 little endian,
+        Xvuy8888 = 1498764888,
+        /// 2x2 subsampled Cr:Cb plane 10 bits per channel packed,
+        P030 = 808661072,
     }
 }
 
@@ -854,9 +899,11 @@ pub mod wl_shm {
 /// client provides and updates the contents is defined by the buffer factory
 /// interface.
 ///
-/// If the buffer uses a format that has an alpha channel, the alpha channel
-/// is assumed to be premultiplied in the color channels unless otherwise
-/// specified.
+/// Color channels are assumed to be electrical rather than optical (in other
+/// words, encoded with a transfer function) unless otherwise specified. If
+/// the buffer uses a format that has an alpha channel, the alpha channel is
+/// assumed to be premultiplied into the electrical color channel values
+/// (after transfer function encoding) unless otherwise specified.
 ///
 /// Note, because wl_buffer objects are created from multiple independent
 /// factory interfaces, the wl_buffer interface is frozen at version 1.
@@ -895,8 +942,10 @@ pub mod wl_buffer {
         /// Compositor releases buffer
         ///
         /// Sent when this wl_buffer is no longer used by the compositor.
-        /// The client is now free to reuse or destroy this buffer and its
-        /// backing storage.
+        ///
+        /// For more information on when release events may or may not be sent,
+        /// and what consequences it has, please see the description of
+        /// wl_surface.attach.
         ///
         /// If a client receives a release event before the frame callback
         /// requested in the same wl_surface.commit that attaches this
@@ -1416,7 +1465,7 @@ pub mod wl_data_device {
         /// The icon surface is an optional (can be NULL) surface that
         /// provides an icon to be moved around with the cursor.  Initially,
         /// the top-left corner of the icon surface is placed at the cursor
-        /// hotspot, but subsequent wl_surface.attach request can move the
+        /// hotspot, but subsequent wl_surface.offset requests can move the
         /// relative position. Attach requests must be confirmed with
         /// wl_surface.commit as usual. The icon surface is given the role of
         /// a drag-and-drop icon. If the icon surface already has another role,
@@ -1424,6 +1473,10 @@ pub mod wl_data_device {
         ///
         /// The input region is ignored for wl_surfaces with the role of a
         /// drag-and-drop icon.
+        ///
+        /// The given source may not be used in any further set_selection or
+        /// start_drag requests. Attempting to reuse a previously-used source
+        /// may send a used_source error.
         StartDrag {
             /// Data source for the eventual transfer,
             source: WlDataSourceId,
@@ -1440,6 +1493,10 @@ pub mod wl_data_device {
         /// to the data from the source on behalf of the client.
         ///
         /// To unset the selection, set the source to NULL.
+        ///
+        /// The given source may not be used in any further set_selection or
+        /// start_drag requests. Attempting to reuse a previously-used source
+        /// may send a used_source error.
         SetSelection {
             /// Data source for the selection,
             source: WlDataSourceId,
@@ -1607,6 +1664,8 @@ pub mod wl_data_device {
     pub enum Error {
         /// Given wl_surface has another role,
         Role = 0,
+        /// Source has already been used,
+        UsedSource = 1,
     }
 }
 
@@ -2235,7 +2294,8 @@ pub mod wl_surface {
         /// the delivery of wl_buffer.release events becomes undefined. A well
         /// behaved client should not rely on wl_buffer.release events in this
         /// case. Alternatively, a client could create multiple wl_buffer objects
-        /// from the same backing storage or use wp_linux_buffer_release.
+        /// from the same backing storage or use a protocol extension providing
+        /// per-commit release notifications.
         ///
         /// Destroying the wl_buffer after wl_buffer.release does not change
         /// the surface contents. Destroying the wl_buffer before wl_buffer.release
@@ -2247,6 +2307,13 @@ pub mod wl_surface {
         ///
         /// If wl_surface.attach is sent with a NULL wl_buffer, the
         /// following wl_surface.commit will remove the surface content.
+        ///
+        /// If a pending wl_buffer has been destroyed, the result is not specified.
+        /// Many compositors are known to remove the surface content on the following
+        /// wl_surface.commit, but this behaviour is not universal. Clients seeking to
+        /// maximise compatibility should not destroy pending buffers and should
+        /// ensure that they explicitly remove content from surfaces, even after
+        /// destroying buffers.
         Attach {
             /// Buffer of surface contents,
             buffer: WlBufferId,
@@ -2388,16 +2455,18 @@ pub mod wl_surface {
         ///
         /// Surface state (input, opaque, and damage regions, attached buffers,
         /// etc.) is double-buffered. Protocol requests modify the pending state,
-        /// as opposed to the current state in use by the compositor. A commit
-        /// request atomically applies all pending state, replacing the current
-        /// state. After commit, the new pending state is as documented for each
-        /// related request.
+        /// as opposed to the active state in use by the compositor.
         ///
-        /// On commit, a pending wl_buffer is applied first, and all other state
-        /// second. This means that all coordinates in double-buffered state are
-        /// relative to the new wl_buffer coming into use, except for
-        /// wl_surface.attach itself. If there is no pending wl_buffer, the
-        /// coordinates are relative to the current surface contents.
+        /// A commit request atomically creates a content update from the pending
+        /// state, even if the pending state has not been touched. The content
+        /// update is placed in a queue until it becomes active. After commit, the
+        /// new pending state is as documented for each related request.
+        ///
+        /// When the content update is applied, the wl_buffer is applied before all
+        /// other state. This means that all coordinates in double-buffered state
+        /// are relative to the newly attached wl_buffers, except for
+        /// wl_surface.attach itself. If there is no newly attached wl_buffer, the
+        /// coordinates are relative to the previous content update.
         ///
         /// All requests that need a commit to become effective are documented
         /// to affect double-buffered state.
@@ -2406,10 +2475,12 @@ pub mod wl_surface {
         Commit,
         /// Sets the buffer transformation
         ///
-        /// This request sets an optional transformation on how the compositor
-        /// interprets the contents of the buffer attached to the surface. The
-        /// accepted values for the transform parameter are the values for
-        /// wl_output.transform.
+        /// This request sets the transformation that the client has already applied
+        /// to the content of the buffer. The accepted values for the transform
+        /// parameter are the values for wl_output.transform.
+        ///
+        /// The compositor applies the inverse of this transformation whenever it
+        /// uses the buffer contents.
         ///
         /// Buffer transform is double-buffered state, see wl_surface.commit.
         ///
@@ -2462,10 +2533,10 @@ pub mod wl_surface {
         /// a buffer that is larger (by a factor of scale in each dimension)
         /// than the desired surface size.
         ///
-        /// If scale is not positive the invalid_scale protocol error is
+        /// If scale is not greater than 0 the invalid_scale protocol error is
         /// raised.
         SetBufferScale {
-            /// Positive scale for interpreting buffer contents,
+            /// Scale for interpreting buffer contents,
             scale: i32,
         },
         /// Mark part of the surface damaged using buffer coordinates
@@ -2519,6 +2590,9 @@ pub mod wl_surface {
         /// left corner, in surface-local coordinates. In other words, the
         /// x and y, combined with the new surface size define in which
         /// directions the surface's size changes.
+        ///
+        /// The exact semantics of wl_surface.offset are role-specific. Refer to
+        /// the documentation of specific roles for more information.
         ///
         /// Surface location offset is double-buffered state, see
         /// wl_surface.commit.
@@ -2597,10 +2671,15 @@ pub mod wl_surface {
         /// This event indicates the preferred buffer scale for this surface. It is
         /// sent whenever the compositor's preference changes.
         ///
+        /// Before receiving this event the preferred buffer scale for this surface
+        /// is 1.
+        ///
         /// It is intended that scaling aware clients use this event to scale their
         /// content and use wl_surface.set_buffer_scale to indicate the scale they
         /// have rendered with. This allows clients to supply a higher detail
         /// buffer.
+        ///
+        /// The compositor shall emit a scale value greater than 0.
         PreferredBufferScale {
             /// Preferred scaling factor,
             factor: i32,
@@ -2610,9 +2689,12 @@ pub mod wl_surface {
         /// This event indicates the preferred buffer transform for this surface.
         /// It is sent whenever the compositor's preference changes.
         ///
-        /// It is intended that transform aware clients use this event to apply the
-        /// transform to their content and use wl_surface.set_buffer_transform to
-        /// indicate the transform they have rendered with.
+        /// Before receiving this event the preferred buffer transform for this
+        /// surface is normal.
+        ///
+        /// Applying this transformation to the surface buffer contents and using
+        /// wl_surface.set_buffer_transform might allow the compositor to use the
+        /// surface buffer more efficiently.
         PreferredBufferTransform {
             /// Preferred transform,
             transform: u32,
@@ -2678,7 +2760,7 @@ pub mod wl_seat {
     use super::*;
     impl Constants for crate::wayland_objects::wl_seat::WlSeat {
         const INTERFACE_NAME: &'static str = "wl_seat";
-        const INTERFACE_VERSION: u32 = 9;
+        const INTERFACE_VERSION: u32 = 10;
     }
     impl crate::object::IdToObject for WlSeatId {
         type Object = crate::wayland_objects::wl_seat::WlSeat;
@@ -2751,9 +2833,10 @@ pub mod wl_seat {
     pub enum Event {
         /// Seat capabilities changed
         ///
-        /// This is emitted whenever a seat gains or loses the pointer,
-        /// keyboard or touch capabilities.  The argument is a capability
-        /// enum containing the complete set of capabilities this seat has.
+        /// This is sent on binding to the seat global or whenever a seat gains
+        /// or loses the pointer, keyboard or touch capabilities.
+        /// The argument is a capability enum containing the complete set of
+        /// capabilities this seat has.
         ///
         /// When the pointer capability is added, a client may create a
         /// wl_pointer object using the wl_seat.get_pointer request. This object
@@ -2791,9 +2874,9 @@ pub mod wl_seat {
         /// The same seat names are used for all clients. Thus, the name can be
         /// shared across processes to refer to a specific wl_seat global.
         ///
-        /// The name event is sent after binding to the seat global. This event is
-        /// only sent once per seat object, and the name does not change over the
-        /// lifetime of the wl_seat global.
+        /// The name event is sent after binding to the seat global, and should be sent
+        /// before announcing capabilities. This event only sent once per seat object,
+        /// and the name does not change over the lifetime of the wl_seat global.
         ///
         /// Compositors may re-use the same seat name if the wl_seat global is
         /// destroyed and re-created later.
@@ -2861,7 +2944,7 @@ pub mod wl_pointer {
     use super::*;
     impl Constants for crate::wayland_objects::wl_pointer::WlPointer {
         const INTERFACE_NAME: &'static str = "wl_pointer";
-        const INTERFACE_VERSION: u32 = 9;
+        const INTERFACE_VERSION: u32 = 10;
     }
     impl crate::object::IdToObject for WlPointerId {
         type Object = crate::wayland_objects::wl_pointer::WlPointer;
@@ -2887,9 +2970,9 @@ pub mod wl_pointer {
         /// where (x, y) are the coordinates of the pointer location, in
         /// surface-local coordinates.
         ///
-        /// On surface.attach requests to the pointer surface, hotspot_x
+        /// On wl_surface.offset requests to the pointer surface, hotspot_x
         /// and hotspot_y are decremented by the x and y parameters
-        /// passed to the request. Attach must be confirmed by
+        /// passed to the request. The offset must be applied by
         /// wl_surface.commit as usual.
         ///
         /// The hotspot can also be updated by passing the currently set
@@ -3391,11 +3474,21 @@ pub mod wl_pointer {
 ///
 /// The wl_keyboard interface represents one or more keyboards
 /// associated with a seat.
+///
+/// Each wl_keyboard has the following logical state:
+///
+/// - an active surface (possibly null),
+/// - the keys currently logically down,
+/// - the active modifiers,
+/// - the active group.
+///
+/// By default, the active surface is null, the keys currently logically down
+/// are empty, the active modifiers and the active group are 0.
 pub mod wl_keyboard {
     use super::*;
     impl Constants for crate::wayland_objects::wl_keyboard::WlKeyboard {
         const INTERFACE_NAME: &'static str = "wl_keyboard";
-        const INTERFACE_VERSION: u32 = 9;
+        const INTERFACE_VERSION: u32 = 10;
     }
     impl crate::object::IdToObject for WlKeyboardId {
         type Object = crate::wayland_objects::wl_keyboard::WlKeyboard;
@@ -3443,12 +3536,20 @@ pub mod wl_keyboard {
         ///
         /// The compositor must send the wl_keyboard.modifiers event after this
         /// event.
+        ///
+        /// In the wl_keyboard logical state, this event sets the active surface to
+        /// the surface argument and the keys currently logically down to the keys
+        /// in the keys argument. The compositor must not send this event if the
+        /// wl_keyboard already had an active surface immediately before this event.
+        ///
+        /// Clients should not use the list of pressed keys to emulate key-press
+        /// events. The order of keys in the list is unspecified.
         Enter {
             /// Serial number of the enter event,
             serial: u32,
             /// Surface gaining keyboard focus,
             surface: WlSurfaceId,
-            /// The currently pressed keys,
+            /// The keys currently logically down,
             keys: Array,
         },
         /// Leave event
@@ -3459,8 +3560,10 @@ pub mod wl_keyboard {
         /// The leave notification is sent before the enter notification
         /// for the new focus.
         ///
-        /// After this event client must assume that all keys, including modifiers,
-        /// are lifted and also it must stop key repeating if there's some going on.
+        /// In the wl_keyboard logical state, this event resets all values to their
+        /// defaults. The compositor must not send this event if the active surface
+        /// of the wl_keyboard was not equal to the surface argument immediately
+        /// before this event.
         Leave {
             /// Serial number of the leave event,
             serial: u32,
@@ -3478,6 +3581,20 @@ pub mod wl_keyboard {
         ///
         /// If this event produces a change in modifiers, then the resulting
         /// wl_keyboard.modifiers event must be sent after this event.
+        ///
+        /// In the wl_keyboard logical state, this event adds the key to the keys
+        /// currently logically down (if the state argument is pressed) or removes
+        /// the key from the keys currently logically down (if the state argument is
+        /// released). The compositor must not send this event if the wl_keyboard
+        /// did not have an active surface immediately before this event. The
+        /// compositor must not send this event if state is pressed (resp. released)
+        /// and the key was already logically down (resp. was not logically down)
+        /// immediately before this event.
+        ///
+        /// Since version 10, compositors may send key events with the "repeated"
+        /// key state when a wl_keyboard.repeat_info event with a rate argument of
+        /// 0 has been received. This allows the compositor to take over the
+        /// responsibility of key repetition.
         Key {
             /// Serial number of the key event,
             serial: u32,
@@ -3492,6 +3609,17 @@ pub mod wl_keyboard {
         ///
         /// Notifies clients that the modifier and/or group state has
         /// changed, and it should update its local state.
+        ///
+        /// The compositor may send this event without a surface of the client
+        /// having keyboard focus, for example to tie modifier information to
+        /// pointer focus instead. If a modifier event with pressed modifiers is sent
+        /// without a prior enter event, the client can assume the modifier state is
+        /// valid until it receives the next wl_keyboard.modifiers event. In order to
+        /// reset the modifier state again, the compositor can send a
+        /// wl_keyboard.modifiers event with no pressed modifiers.
+        ///
+        /// In the wl_keyboard logical state, this event updates the modifiers and
+        /// group.
         Modifiers {
             /// Serial number of the modifiers event,
             serial: u32,
@@ -3594,12 +3722,22 @@ pub mod wl_keyboard {
     /// Physical key state
     ///
     /// Describes the physical state of a key that produced the key event.
+    ///
+    /// Since version 10, the key can be in a "repeated" pseudo-state which
+    /// means the same as "pressed", but is used to signal repetition in the
+    /// key event.
+    ///
+    /// The key may only enter the repeated state after entering the pressed
+    /// state and before entering the released state. This event may be
+    /// generated multiple times while the key is down.
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum KeyState {
         /// Key is not pressed,
         Released = 0,
         /// Key is pressed,
         Pressed = 1,
+        /// Key was repeated,
+        Repeated = 2,
     }
 }
 
@@ -3617,7 +3755,7 @@ pub mod wl_touch {
     use super::*;
     impl Constants for crate::wayland_objects::wl_touch::WlTouch {
         const INTERFACE_NAME: &'static str = "wl_touch";
-        const INTERFACE_VERSION: u32 = 9;
+        const INTERFACE_VERSION: u32 = 10;
     }
     impl crate::object::IdToObject for WlTouchId {
         type Object = crate::wayland_objects::wl_touch::WlTouch;
@@ -3707,6 +3845,8 @@ pub mod wl_touch {
         /// currently active on this client's surface. The client is
         /// responsible for finalizing the touch points, future touch points on
         /// this surface may reuse the touch point ID.
+        ///
+        /// No frame event is required after the cancel event.
         Cancel,
         /// Update shape of touch point
         ///
@@ -3885,6 +4025,10 @@ pub mod wl_output {
         /// The geometry event will be followed by a done event (starting from
         /// version 2).
         ///
+        /// Clients should use wl_surface.preferred_buffer_transform instead of the
+        /// transform advertised by this event to find the preferred buffer
+        /// transform to use for a surface.
+        ///
         /// Note: wl_output only advertises partial information about the output
         /// position and identification. Some compositors, for instance those not
         /// implementing a desktop-style output layout or those exposing virtual
@@ -3906,7 +4050,7 @@ pub mod wl_output {
             make: String,
             /// Textual description of the model,
             model: String,
-            /// Transform that maps framebuffer to output,
+            /// Additional transformation applied to buffer contents during presentation,
             transform: i32,
         },
         /// Advertise available modes for the output
@@ -3967,8 +4111,9 @@ pub mod wl_output {
         /// This event contains scaling geometry information
         /// that is not in the geometry event. It may be sent after
         /// binding the output object or if the output scale changes
-        /// later. If it is not sent, the client should assume a
-        /// scale of 1.
+        /// later. The compositor will emit a non-zero, positive
+        /// value for scale. If it is not sent, the client should
+        /// assume a scale of 1.
         ///
         /// A scale larger than 1 means that the compositor will
         /// automatically scale surface buffers by this amount
@@ -3976,12 +4121,9 @@ pub mod wl_output {
         /// displays where applications rendering at the native
         /// resolution would be too small to be legible.
         ///
-        /// It is intended that scaling aware clients track the
-        /// current output of a surface, and if it is on a scaled
-        /// output it should use wl_surface.set_buffer_scale with
-        /// the scale of the output. That way the compositor can
-        /// avoid scaling the surface, and the client can supply
-        /// a higher detail image.
+        /// Clients should use wl_surface.preferred_buffer_scale
+        /// instead of this event to find the preferred buffer
+        /// scale to use for a surface.
         ///
         /// The scale event will be followed by a done event.
         Scale {
@@ -4122,11 +4264,10 @@ pub mod wl_output {
         /// Vertical BGR,
         VerticalBgr = 5,
     }
-    /// Transform from framebuffer to output
+    /// Transformation applied to buffer contents
     ///
-    /// This describes the transform that a compositor will apply to a
-    /// surface to compensate for the rotation or mirroring of an
-    /// output device.
+    /// This describes transformations that clients and compositors apply to
+    /// buffer contents.
     ///
     /// The flipped values correspond to an initial flip around a
     /// vertical axis followed by rotation.
@@ -4378,6 +4519,11 @@ pub mod wl_subcompositor {
 ///
 /// If the parent wl_surface object is destroyed, the sub-surface is
 /// unmapped.
+///
+/// A sub-surface never has the keyboard focus of any seat.
+///
+/// The wl_surface.offset request is ignored: clients must use set_position
+/// instead to move the sub-surface.
 pub mod wl_subsurface {
     use super::*;
     impl Constants for crate::wayland_objects::wl_subsurface::WlSubsurface {
@@ -4405,9 +4551,7 @@ pub mod wl_subsurface {
         /// surface area. Negative values are allowed.
         ///
         /// The scheduled coordinates will take effect whenever the state of the
-        /// parent surface is applied. When this happens depends on whether the
-        /// parent surface is in synchronized mode or not. See
-        /// wl_subsurface.set_sync and wl_subsurface.set_desync for details.
+        /// parent surface is applied.
         ///
         /// If more than one set_position request is invoked by the client before
         /// the commit of the parent surface, the position of a new request always
@@ -4431,9 +4575,7 @@ pub mod wl_subsurface {
         /// The z-order is double-buffered. Requests are handled in order and
         /// applied immediately to a pending state. The final pending state is
         /// copied to the active state the next time the state of the parent
-        /// surface is applied. When this happens depends on whether the parent
-        /// surface is in synchronized mode or not. See wl_subsurface.set_sync and
-        /// wl_subsurface.set_desync for details.
+        /// surface is applied.
         ///
         /// A new sub-surface is initially added as the top-most in the stack
         /// of its siblings and parent.
@@ -4511,6 +4653,55 @@ pub mod wl_subsurface {
     }
 }
 
+/// Wayland protocol fixes
+///
+/// This global fixes problems with other core-protocol interfaces that
+/// cannot be fixed in these interfaces themselves.
+pub mod wl_fixes {
+    use super::*;
+    impl Constants for crate::wayland_objects::wl_fixes::WlFixes {
+        const INTERFACE_NAME: &'static str = "wl_fixes";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WlFixesId {
+        type Object = crate::wayland_objects::wl_fixes::WlFixes;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroys this object
+        ///
+        ///
+        Destroy,
+        /// Destroy a wl_registry
+        ///
+        /// This request destroys a wl_registry object.
+        ///
+        /// The client should no longer use the wl_registry after making this
+        /// request.
+        ///
+        /// The compositor will emit a wl_display.delete_id event with the object ID
+        /// of the registry and will no longer emit any events on the registry. The
+        /// client should re-use the object ID once it receives the
+        /// wl_display.delete_id event.
+        DestroyRegistry {
+            /// The registry to destroy,
+            registry: WlRegistryId,
+        },
+    }
+    impl Parser for crate::wayland_objects::wl_fixes::WlFixes {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => DestroyRegistry { registry: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
 /// Timed presentation related wl_surface requests
 ///
 /// The main feature of this interface is accurate presentation
@@ -4534,7 +4725,7 @@ pub mod wp_presentation {
     use super::*;
     impl Constants for crate::wayland_objects::wp_presentation::WpPresentation {
         const INTERFACE_NAME: &'static str = "wp_presentation";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 2;
     }
     impl crate::object::IdToObject for WpPresentationId {
         type Object = crate::wayland_objects::wp_presentation::WpPresentation;
@@ -4660,7 +4851,7 @@ pub mod wp_presentation_feedback {
     use super::*;
     impl Constants for crate::wayland_objects::wp_presentation_feedback::WpPresentationFeedback {
         const INTERFACE_NAME: &'static str = "wp_presentation_feedback";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 2;
     }
     impl crate::object::IdToObject for WpPresentationFeedbackId {
         type Object = crate::wayland_objects::wp_presentation_feedback::WpPresentationFeedback;
@@ -4708,9 +4899,12 @@ pub mod wp_presentation_feedback {
         /// targeting the next few vblanks. If such prediction cannot
         /// usefully be done, the argument is zero.
         ///
-        /// If the output does not have a constant refresh rate, explicit
-        /// video mode switches excluded, then the refresh argument must
-        /// be zero.
+        /// For version 2 and later, if the output does not have a constant
+        /// refresh rate, explicit video mode switches excluded, then the
+        /// refresh argument must be either an appropriate rate picked by the
+        /// compositor (e.g. fastest rate), or 0 if no such rate exists.
+        /// For version 1, if the output does not have a constant refresh rate,
+        /// the refresh argument must be zero.
         ///
         /// The 64-bit value combined from seq_hi and seq_lo is the value
         /// of the output's vertical retrace counter when the content
@@ -4894,8 +5088,7 @@ pub mod wp_viewporter {
 /// src_y, src_width, src_height), and the destination size (dst_width,
 /// dst_height). The contents of the source rectangle are scaled to the
 /// destination size, and content outside the source rectangle is ignored.
-/// This state is double-buffered, and is applied on the next
-/// wl_surface.commit.
+/// This state is double-buffered, see wl_surface.commit.
 ///
 /// The two parts of crop and scale state are independent: the source
 /// rectangle, and the destination size. Initially both are unset, that
@@ -4968,8 +5161,7 @@ pub mod wp_viewport {
         /// or negative, or x or y are negative, raise the bad_value protocol
         /// error.
         ///
-        /// The crop and scale state is double-buffered state, and will be
-        /// applied on the next wl_surface.commit.
+        /// The crop and scale state is double-buffered, see wl_surface.commit.
         SetSource {
             /// Source rectangle x,
             x: f32,
@@ -4991,8 +5183,7 @@ pub mod wp_viewport {
         /// contains zero or negative values raises the bad_value protocol
         /// error.
         ///
-        /// The crop and scale state is double-buffered state, and will be
-        /// applied on the next wl_surface.commit.
+        /// The crop and scale state is double-buffered, see wl_surface.commit.
         SetDestination {
             /// Surface width,
             width: i32,
@@ -5042,7 +5233,7 @@ pub mod xdg_wm_base {
     use super::*;
     impl Constants for crate::wayland_objects::xdg_wm_base::XdgWmBase {
         const INTERFACE_NAME: &'static str = "xdg_wm_base";
-        const INTERFACE_VERSION: u32 = 6;
+        const INTERFACE_VERSION: u32 = 7;
     }
     impl crate::object::IdToObject for XdgWmBaseId {
         type Object = crate::wayland_objects::xdg_wm_base::XdgWmBase;
@@ -5186,7 +5377,7 @@ pub mod xdg_positioner {
     use super::*;
     impl Constants for crate::wayland_objects::xdg_positioner::XdgPositioner {
         const INTERFACE_NAME: &'static str = "xdg_positioner";
-        const INTERFACE_VERSION: u32 = 6;
+        const INTERFACE_VERSION: u32 = 7;
     }
     impl crate::object::IdToObject for XdgPositionerId {
         type Object = crate::wayland_objects::xdg_positioner::XdgPositioner;
@@ -5497,7 +5688,8 @@ pub mod xdg_positioner {
 /// manipulate a buffer prior to the first xdg_surface.configure call must
 /// also be treated as errors.
 ///
-/// After creating a role-specific object and setting it up, the client must
+/// After creating a role-specific object and setting it up (e.g. by sending
+/// the title, app ID, size constraints, parent, etc), the client must
 /// perform an initial commit without any buffer attached. The compositor
 /// will reply with initial wl_surface state such as
 /// wl_surface.preferred_buffer_scale followed by an xdg_surface.configure
@@ -5523,7 +5715,7 @@ pub mod xdg_surface {
     use super::*;
     impl Constants for crate::wayland_objects::xdg_surface::XdgSurface {
         const INTERFACE_NAME: &'static str = "xdg_surface";
-        const INTERFACE_VERSION: u32 = 6;
+        const INTERFACE_VERSION: u32 = 7;
     }
     impl crate::object::IdToObject for XdgSurfaceId {
         type Object = crate::wayland_objects::xdg_surface::XdgSurface;
@@ -5560,10 +5752,12 @@ pub mod xdg_surface {
         /// The window geometry of a surface is its "visible bounds" from the
         /// user's perspective. Client-side decorations often have invisible
         /// portions like drop-shadows which should be ignored for the
-        /// purposes of aligning, placing and constraining windows.
+        /// purposes of aligning, placing and constraining windows. Note that
+        /// in some situations, compositors may clip rendering to the window
+        /// geometry, so the client should avoid putting functional elements
+        /// outside of it.
         ///
-        /// The window geometry is double buffered, and will be applied at the
-        /// time wl_surface.commit of the corresponding wl_surface is called.
+        /// The window geometry is double-buffered state, see wl_surface.commit.
         ///
         /// When maintaining a position, the compositor should treat the (x, y)
         /// coordinate of the window geometry as the top left corner of the window.
@@ -5732,7 +5926,7 @@ pub mod xdg_surface {
 /// attributes (e.g. title, state, stacking, ...) are discarded for
 /// an xdg_toplevel surface when it is unmapped. The xdg_toplevel returns to
 /// the state it had right after xdg_surface.get_toplevel. The client
-/// can re-map the toplevel by perfoming a commit without any buffer
+/// can re-map the toplevel by performing a commit without any buffer
 /// attached, waiting for a configure event and handling it as usual (see
 /// xdg_surface description).
 ///
@@ -5741,7 +5935,7 @@ pub mod xdg_toplevel {
     use super::*;
     impl Constants for crate::wayland_objects::xdg_toplevel::XdgToplevel {
         const INTERFACE_NAME: &'static str = "xdg_toplevel";
-        const INTERFACE_VERSION: u32 = 6;
+        const INTERFACE_VERSION: u32 = 7;
     }
     impl crate::object::IdToObject for XdgToplevelId {
         type Object = crate::wayland_objects::xdg_toplevel::XdgToplevel;
@@ -5911,8 +6105,7 @@ pub mod xdg_toplevel {
         /// The width and height arguments are in window geometry coordinates.
         /// See xdg_surface.set_window_geometry.
         ///
-        /// Values set in this way are double-buffered. They will get applied
-        /// on the next commit.
+        /// Values set in this way are double-buffered, see wl_surface.commit.
         ///
         /// The compositor can use this information to allow or disallow
         /// different states like maximize or fullscreen and draw accurate
@@ -5948,8 +6141,7 @@ pub mod xdg_toplevel {
         /// The width and height arguments are in window geometry coordinates.
         /// See xdg_surface.set_window_geometry.
         ///
-        /// Values set in this way are double-buffered. They will get applied
-        /// on the next commit.
+        /// Values set in this way are double-buffered, see wl_surface.commit.
         ///
         /// The compositor can use this information to allow or disallow
         /// different states like maximize or fullscreen and draw accurate
@@ -6254,8 +6446,7 @@ pub mod xdg_toplevel {
     /// configure event to ensure that both the client and the compositor
     /// setting the state can be synchronized.
     ///
-    /// States set in this way are double-buffered. They will get applied on
-    /// the next commit.
+    /// States set in this way are double-buffered, see wl_surface.commit.
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum State {
         /// The surface is maximized,
@@ -6296,21 +6487,33 @@ pub mod xdg_toplevel {
         ///
         /// The window is currently in a tiled layout and the left edge is
         /// considered to be adjacent to another part of the tiling grid.
+        ///
+        /// The client should draw without shadow or other decoration outside of
+        /// the window geometry on the left edge.
         TiledLeft = 5,
         /// The surface’s right edge is tiled
         ///
         /// The window is currently in a tiled layout and the right edge is
         /// considered to be adjacent to another part of the tiling grid.
+        ///
+        /// The client should draw without shadow or other decoration outside of
+        /// the window geometry on the right edge.
         TiledRight = 6,
         /// The surface’s top edge is tiled
         ///
         /// The window is currently in a tiled layout and the top edge is
         /// considered to be adjacent to another part of the tiling grid.
+        ///
+        /// The client should draw without shadow or other decoration outside of
+        /// the window geometry on the top edge.
         TiledTop = 7,
         /// The surface’s bottom edge is tiled
         ///
         /// The window is currently in a tiled layout and the bottom edge is
         /// considered to be adjacent to another part of the tiling grid.
+        ///
+        /// The client should draw without shadow or other decoration outside of
+        /// the window geometry on the bottom edge.
         TiledBottom = 8,
         /// Surface repaint is suspended
         ///
@@ -6318,6 +6521,34 @@ pub mod xdg_toplevel {
         /// example because its content is occluded by another window, or its
         /// outputs are switched off due to screen locking.
         Suspended = 9,
+        /// The surface’s left edge is constrained
+        ///
+        /// The left edge of the window is currently constrained, meaning it
+        /// shouldn't attempt to resize from that edge. It can for example mean
+        /// it's tiled next to a monitor edge on the constrained side of the
+        /// window.
+        ConstrainedLeft = 10,
+        /// The surface’s right edge is constrained
+        ///
+        /// The right edge of the window is currently constrained, meaning it
+        /// shouldn't attempt to resize from that edge. It can for example mean
+        /// it's tiled next to a monitor edge on the constrained side of the
+        /// window.
+        ConstrainedRight = 11,
+        /// The surface’s top edge is constrained
+        ///
+        /// The top edge of the window is currently constrained, meaning it
+        /// shouldn't attempt to resize from that edge. It can for example mean
+        /// it's tiled next to a monitor edge on the constrained side of the
+        /// window.
+        ConstrainedTop = 12,
+        /// The surface’s bottom edge is constrained
+        ///
+        /// The bottom edge of the window is currently constrained, meaning it
+        /// shouldn't attempt to resize from that edge. It can for example mean
+        /// it's tiled next to a monitor edge on the constrained side of the
+        /// window.
+        ConstrainedBottom = 13,
     }
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum WmCapabilities {
@@ -6362,7 +6593,7 @@ pub mod xdg_popup {
     use super::*;
     impl Constants for crate::wayland_objects::xdg_popup::XdgPopup {
         const INTERFACE_NAME: &'static str = "xdg_popup";
-        const INTERFACE_VERSION: u32 = 6;
+        const INTERFACE_VERSION: u32 = 7;
     }
     impl crate::object::IdToObject for XdgPopupId {
         type Object = crate::wayland_objects::xdg_popup::XdgPopup;
@@ -6581,7 +6812,7 @@ pub mod wp_content_type_manager_v1 {
         /// Destroy the content type manager. This doesn't destroy objects created
         /// with the manager.
         Destroy,
-        /// Create a new toplevel decoration object
+        /// Create a new content type object
         ///
         /// Create a new content type object associated with the given surface.
         ///
@@ -6932,6 +7163,10 @@ pub mod wp_drm_lease_connector_v1 {
         /// encouraged to send this event when they lose access to connector, for
         /// example when the connector is hot-unplugged, when the connector gets
         /// leased to a client or when the compositor loses DRM master.
+        ///
+        /// If a client holds a lease for the connector, the status of the lease
+        /// remains the same. The client should destroy the object after receiving
+        /// this event.
         Withdrawn,
     }
     impl EventWriter for crate::wayland_objects::wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1 {
@@ -7005,7 +7240,7 @@ pub mod wp_drm_lease_request_v1 {
         ///
         /// Submits the lease request and creates a new wp_drm_lease_v1 object.
         /// After calling submit the compositor will immediately destroy this
-        /// object, issuing any more requests will cause a wl_diplay error.
+        /// object, issuing any more requests will cause a wl_display error.
         /// The compositor doesn't make any guarantees about the events of the
         /// lease object, clients cannot expect an immediate response.
         /// Not requesting any connectors before submitting the lease request
@@ -7061,6 +7296,10 @@ pub mod wp_drm_lease_v1 {
         /// The client should send this to indicate that it no longer wishes to use
         /// this lease. The compositor should use drmModeRevokeLease on the
         /// appropriate file descriptor, if necessary.
+        ///
+        /// Upon destruction, the compositor should advertise the connector for
+        /// leasing again by sending the connector event through the
+        /// wp_drm_lease_device_v1 interface.
         Destroy,
     }
     impl Parser for crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1 {
@@ -7101,7 +7340,9 @@ pub mod wp_drm_lease_v1 {
         /// no further events for this object after sending the finish event.
         /// Compositors should revoke the lease when any of the leased resources
         /// become unavailable, namely when a hot-unplug occurs or when the
-        /// compositor loses DRM master.
+        /// compositor loses DRM master. Compositors may advertise the connector
+        /// for leasing again, if the resource is available, by sending the
+        /// connector event through the wp_drm_lease_device_v1 interface.
         Finished,
     }
     impl EventWriter for crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1 {
@@ -7137,7 +7378,7 @@ pub mod ext_idle_notifier_v1 {
     use super::*;
     impl Constants for crate::wayland_objects::ext_idle_notifier_v1::ExtIdleNotifierV1 {
         const INTERFACE_NAME: &'static str = "ext_idle_notifier_v1";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 2;
     }
     impl crate::object::IdToObject for ExtIdleNotifierV1Id {
         type Object = crate::wayland_objects::ext_idle_notifier_v1::ExtIdleNotifierV1;
@@ -7165,6 +7406,24 @@ pub mod ext_idle_notifier_v1 {
             timeout: u32,
             seat: WlSeatId,
         },
+        /// Create a notification object
+        ///
+        /// Create a new idle notification object to track input from the
+        /// user, such as keyboard and mouse movement. Because this object is
+        /// meant to track user input alone, it ignores idle inhibitors.
+        ///
+        /// The notification object has a minimum timeout duration and is tied to a
+        /// seat. The client will be notified if the seat is inactive for at least
+        /// the provided timeout. See ext_idle_notification_v1 for more details.
+        ///
+        /// A zero timeout is valid and means the client wants to be notified as
+        /// soon as possible when the seat is inactive.
+        GetInputIdleNotification {
+            id: ExtIdleNotificationV1Id,
+            /// Minimum idle timeout in msec,
+            timeout: u32,
+            seat: WlSeatId,
+        },
     }
     impl Parser for crate::wayland_objects::ext_idle_notifier_v1::ExtIdleNotifierV1 {
         type Request = Request;
@@ -7173,6 +7432,11 @@ pub mod ext_idle_notifier_v1 {
             let request = match req.request_id {
                 0 => Destroy,
                 1 => GetIdleNotification { id: req.id()?, timeout: req.uint()?, seat: req.id()? },
+                2 => GetInputIdleNotification {
+                    id: req.id()?,
+                    timeout: req.uint()?,
+                    seat: req.id()?,
+                },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -7189,9 +7453,17 @@ pub mod ext_idle_notifier_v1 {
 /// becomes idle when no user activity has happened for at least the timeout
 /// duration, starting from the creation of the notification object. User
 /// activity may include input events or a presence sensor, but is
-/// compositor-specific. If an idle inhibitor is active (e.g. another client
-/// has created a zwp_idle_inhibitor_v1 on a visible surface), the compositor
-/// must not make the notification object idle.
+/// compositor-specific.
+///
+/// How this notification responds to idle inhibitors depends on how
+/// it was constructed. If constructed from the
+/// get_idle_notification request, then if an idle inhibitor is
+/// active (e.g. another client has created a zwp_idle_inhibitor_v1
+/// on a visible surface), the compositor must not make the
+/// notification object idle. However, if constructed from the
+/// get_input_idle_notification request, then idle inhibitors are
+/// ignored, and only input from the user, e.g. from a keyboard or
+/// mouse, counts as activity.
 ///
 /// When the notification object becomes idle, an idled event is sent. When
 /// user activity starts again, the notification object stops being idle,
@@ -7200,7 +7472,7 @@ pub mod ext_idle_notification_v1 {
     use super::*;
     impl Constants for crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1 {
         const INTERFACE_NAME: &'static str = "ext_idle_notification_v1";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 2;
     }
     impl crate::object::IdToObject for ExtIdleNotificationV1Id {
         type Object = crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1;
@@ -7790,6 +8062,13 @@ pub mod wp_single_pixel_buffer_manager_v1 {
         /// pre-multiplied alpha.
         ///
         /// The width and height of the buffer are 1.
+        ///
+        /// The r, g, b and a arguments valid range is from UINT32_MIN (0)
+        /// to UINT32_MAX (0xffffffff).
+        ///
+        /// These arguments should be interpreted as a percentage, i.e.
+        /// - UINT32_MIN = 0% of the given color component
+        /// - UINT32_MAX = 100% of the given color component
         CreateU32RgbaBuffer {
             id: WlBufferId,
             /// Value of the buffer's red channel,
@@ -7896,6 +8175,9 @@ pub mod wp_tearing_control_manager_v1 {
 /// presentation with tearing.
 /// The default presentation hint is vsync. See presentation_hint for more
 /// details.
+///
+/// If the associated wl_surface is destroyed, this object becomes inert and
+/// should be destroyed.
 pub mod wp_tearing_control_v1 {
     use super::*;
     impl Constants for crate::wayland_objects::wp_tearing_control_v1::WpTearingControlV1 {
@@ -7910,7 +8192,7 @@ pub mod wp_tearing_control_v1 {
         /// Set presentation hint
         ///
         /// Set the presentation hint for the associated wl_surface. This state is
-        /// double-buffered and is applied on the next wl_surface.commit.
+        /// double-buffered, see wl_surface.commit.
         ///
         /// The compositor is free to dynamically respect or ignore this hint based
         /// on various conditions like hardware capabilities, surface state and
@@ -8233,8 +8515,7 @@ pub mod xwayland_surface_v1 {
         /// Associates a Xwayland window to a wl_surface
         ///
         /// Associates an Xwayland window to a wl_surface.
-        /// The association state is double-buffered and will be applied at
-        /// the time wl_surface.commit of the corresponding wl_surface is called.
+        /// The association state is double-buffered, see wl_surface.commit.
         ///
         /// The `serial_lo` and `serial_hi` parameters specify a non-zero
         /// monotonic serial number which is entirely unique and provided by the
@@ -8302,7 +8583,7 @@ pub mod wp_cursor_shape_manager_v1 {
     use super::*;
     impl Constants for crate::wayland_objects::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1 {
         const INTERFACE_NAME: &'static str = "wp_cursor_shape_manager_v1";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 2;
     }
     impl crate::object::IdToObject for WpCursorShapeManagerV1Id {
         type Object = crate::wayland_objects::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
@@ -8316,10 +8597,16 @@ pub mod wp_cursor_shape_manager_v1 {
         /// Manage the cursor shape of a pointer device
         ///
         /// Obtain a wp_cursor_shape_device_v1 for a wl_pointer object.
+        ///
+        /// When the pointer capability is removed from the wl_seat, the
+        /// wp_cursor_shape_device_v1 object becomes inert.
         GetPointer { cursor_shape_device: WpCursorShapeDeviceV1Id, pointer: WlPointerId },
         /// Manage the cursor shape of a tablet tool device
         ///
         /// Obtain a wp_cursor_shape_device_v1 for a zwp_tablet_tool_v2 object.
+        ///
+        /// When the zwp_tablet_tool_v2 is removed, the wp_cursor_shape_device_v1
+        /// object becomes inert.
         GetTabletToolV2 {
             cursor_shape_device: WpCursorShapeDeviceV1Id,
             tablet_tool: ZwpTabletToolV2Id,
@@ -8342,13 +8629,12 @@ pub mod wp_cursor_shape_manager_v1 {
 
 /// Cursor shape for a device
 ///
-/// This interface advertises the list of supported cursor shapes for a
-/// device, and allows clients to set the cursor shape.
+/// This interface allows clients to set the cursor shape.
 pub mod wp_cursor_shape_device_v1 {
     use super::*;
     impl Constants for crate::wayland_objects::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1 {
         const INTERFACE_NAME: &'static str = "wp_cursor_shape_device_v1";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 2;
     }
     impl crate::object::IdToObject for WpCursorShapeDeviceV1Id {
         type Object = crate::wayland_objects::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1;
@@ -8405,6 +8691,14 @@ pub mod wp_cursor_shape_device_v1 {
     ///
     /// The names are taken from the CSS W3C specification:
     /// https://w3c.github.io/csswg-drafts/css-ui/#cursor
+    /// with a few additions.
+    ///
+    /// Note that there are some groups of cursor shapes that are related:
+    /// The first group is drag-and-drop cursors which are used to indicate
+    /// the selected action during dnd operations. The second group is resize
+    /// cursors which are used to indicate resizing and moving possibilities
+    /// on window borders. It is recommended that the shapes in these groups
+    /// should use visually compatible images and metaphors.
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Shape {
         /// Default cursor,
@@ -8475,6 +8769,10 @@ pub mod wp_cursor_shape_device_v1 {
         ZoomIn = 33,
         /// Something can be zoomed out,
         ZoomOut = 34,
+        /// Drag-and-drop: the user will select which action will be carried out (non-css value),
+        DndAsk = 35,
+        /// Resizing: something can be moved or resized in any direction (non-css value),
+        AllResize = 36,
     }
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
     pub enum Error {
@@ -9212,6 +9510,10 @@ pub mod zwp_tablet_v2 {
     pub enum Event {
         /// Tablet device name
         ///
+        /// A descriptive name for the tablet device.
+        ///
+        /// If the device has no descriptive name, this event is not sent.
+        ///
         /// This event is sent in the initial burst of events before the
         /// wp_tablet.done event.
         Name {
@@ -9219,6 +9521,11 @@ pub mod zwp_tablet_v2 {
             name: String,
         },
         /// Tablet device USB vendor/product id
+        ///
+        /// The USB vendor and product IDs for the tablet device.
+        ///
+        /// If the device has no USB vendor/product ID, this event is not sent.
+        /// This can happen for virtual devices or non-USB devices, for instance.
         ///
         /// This event is sent in the initial burst of events before the
         /// wp_tablet.done event.
