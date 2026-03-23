@@ -1,4 +1,8 @@
-use std::{os::fd::RawFd, ptr::NonNull, rc::Rc};
+use std::{
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    ptr::NonNull,
+    rc::Rc,
+};
 
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
@@ -6,6 +10,7 @@ use crate::{
     protocol_generated::{wl_shm, wl_shm_pool, WaylandId, WlShmPoolId},
     state::State,
     wayland_objects::{
+        wl_display::WlDisplay,
         wl_buffer::{NewWlBufferParams, WlBuffer},
         wl_shm::SHM_FORMATS,
     },
@@ -14,14 +19,15 @@ use crate::{
 #[derive(Debug)]
 pub struct WlShmPool {
     id: WlShmPoolId,
-    fd: RawFd,
+    fd: OwnedFd,
     size: usize,
     mem: Rc<SharedMemory>,
 }
 
 impl WlShmPool {
     pub fn new(id: WlShmPoolId, fd: RawFd, size: usize) -> Self {
-        let mem = SharedMemory::mmap(fd, size);
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mem = SharedMemory::mmap(fd.as_raw_fd(), size);
         Self { id, fd, size, mem }
     }
 }
@@ -75,7 +81,9 @@ impl Object for WlShmPool {
                 };
                 client.insert_object(state, wl_buffer);
             }
-            Destroy => todo!(),
+            Destroy => {
+                client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
+            }
             Resize { size } => todo!(),
         }
     }
