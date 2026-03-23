@@ -11,6 +11,16 @@ use crate::{
 
 use crate::protocol_generated::wl_display;
 
+static LOG_WL_SURFACE_DAMAGE_IGNORED: std::sync::Once = std::sync::Once::new();
+
+fn log_wl_surface_damage_ignored_once() {
+    LOG_WL_SURFACE_DAMAGE_IGNORED.call_once(|| {
+        log::warn!(
+            "wl_surface::damage and wl_surface::damage_buffer are ignored; repainting full buffers on commit until damage tracking is implemented"
+        );
+    });
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Role {
     None,
@@ -262,7 +272,9 @@ impl Object for WlSurface {
             Attach { buffer, x, y } => {
                 self.on_attach(client, state, buffer, x, y, dispatcher);
             }
-            Damage { x, y, width, height } => todo!(),
+            Damage { x: _, y: _, width: _, height: _ } => {
+                log_wl_surface_damage_ignored_once();
+            }
             Frame { callback } => {
                 client.insert_object(state, WlCallback::new(callback));
                 self.pending_frame_callbacks.push(callback);
@@ -274,7 +286,9 @@ impl Object for WlSurface {
             }
             SetBufferTransform { transform } => todo!(),
             SetBufferScale { scale } => todo!(),
-            DamageBuffer { x, y, width, height } => todo!(),
+            DamageBuffer { x: _, y: _, width: _, height: _ } => {
+                log_wl_surface_damage_ignored_once();
+            }
             Offset { x, y } => todo!(),
         }
     }
