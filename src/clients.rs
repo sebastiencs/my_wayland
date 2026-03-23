@@ -90,6 +90,8 @@ impl Clients {
 impl Model for Clients {
     type Action = ClientsAction;
 
+    const START: Option<Self::Action> = Some(ClientsAction::Start);
+
     fn process(
         &mut self,
         _state: &mut State,

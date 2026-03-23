@@ -221,7 +221,8 @@ fn main() {
     runner.add_model(clients);
 
     let mut dispatcher = Dispatcher::default();
-    dispatcher.dispatch(ClientsAction::Start);
+    dispatcher.start::<Clients>();
+    dispatcher.start::<input::Libinput>();
 
     let timer = make_timer(Duration::from_secs(10));
 
