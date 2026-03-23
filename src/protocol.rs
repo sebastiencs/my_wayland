@@ -1,3 +1,10 @@
+//! Protocol codegen for `src/protocol_generated.rs`.
+//!
+//! Run `cargo test regenerate_protocol_generated -- --ignored` to rewrite that file.
+//! **Note:** `/usr/share/wayland/wayland.xml` (and other XML paths in `gen()`) must match
+//! what this compositor implements; a newer core Wayland can add interfaces (e.g. `wl_fixes`)
+//! or requests and break the build until `wayland_objects` is updated.
+
 use std::{
     borrow::Cow,
     ffi::CString,
@@ -127,6 +134,10 @@ fn type_to_method_name(typ: protocol::Type, interface_name: Option<&String>) -> 
     }
 }
 
+fn is_untyped_new_id(arg: &protocol::Arg) -> bool {
+    arg.typ == protocol::Type::NewId && arg.interface.is_none()
+}
+
 fn write_event_writer(
     f: &mut impl Write,
     this_interface: &str,
@@ -193,12 +204,44 @@ fn write_parser(f: &mut impl Write, this_interface: &str, msgs: &[Message]) -> s
         if msg.args.is_empty() {
             writeln!(f, "        {} => {},", index, name)?;
         } else {
-            writeln!(f, "        {} => {} {{", index, name)?;
-            for arg in &msg.args {
-                let method = type_to_method_name(arg.typ, arg.interface.as_ref());
-                writeln!(f, "          {}: req.{}()?,", &arg.name, method)?;
+            let untyped_new_ids =
+                msg.args.iter().filter(|a| is_untyped_new_id(a)).count();
+            if untyped_new_ids > 1 {
+                panic!(
+                    "protocol codegen: request `{}::{}` has multiple untyped new_id args; extend write_parser",
+                    this_interface, msg.name
+                );
             }
-            writeln!(f, "        }},")?;
+            if untyped_new_ids == 1 {
+                writeln!(f, "        {} => {{", index)?;
+                for arg in &msg.args {
+                    if is_untyped_new_id(arg) {
+                        writeln!(
+                            f,
+                            "          let ({}, requested_version) = req.new_id_with_interface()?;",
+                            arg.name
+                        )?;
+                    } else {
+                        let method = type_to_method_name(arg.typ, arg.interface.as_ref());
+                        writeln!(f, "          let {} = req.{}()?;", &arg.name, method)?;
+                    }
+                }
+                let fields = msg
+                    .args
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .chain(std::iter::once("requested_version"))
+                    .join(", ");
+                writeln!(f, "          {} {{ {} }}", name, fields)?;
+                writeln!(f, "        }},")?;
+            } else {
+                writeln!(f, "        {} => {} {{", index, name)?;
+                for arg in &msg.args {
+                    let method = type_to_method_name(arg.typ, arg.interface.as_ref());
+                    writeln!(f, "          {}: req.{}()?,", &arg.name, method)?;
+                }
+                writeln!(f, "        }},")?;
+            }
         }
     }
 
@@ -230,6 +273,13 @@ fn write_message(f: &mut impl Write, name: &str, msgs: &[Message]) -> std::io::R
                 };
                 write_description(f, "      /// ", arg.description.as_ref())?;
                 writeln!(f, "      {}: {},", arg.name, type_to_name(arg))?;
+                if is_untyped_new_id(arg) {
+                    writeln!(
+                        f,
+                        "      /// Client-requested interface version (from `new_id` marshalling),"
+                    )?;
+                    writeln!(f, "      requested_version: u32,")?;
+                }
             }
             writeln!(f, "    }},")?;
         }
@@ -305,7 +355,9 @@ pub fn gen() -> std::io::Result<()> {
         // "/usr/share/wayland-protocols/unstable/xwayland-keyboard-grab/xwayland-keyboard-grab-unstable-v1.xml",
     ];
 
-    let file = File::create("/tmp/protocol_generated.rs")?;
+    let out_path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/protocol_generated.rs");
+    let file = File::create(&out_path)?;
     let mut file = BufWriter::with_capacity(32 * 1024 * 1024, file);
 
     // let mut file = temp_file();
@@ -355,7 +407,6 @@ pub fn gen() -> std::io::Result<()> {
 
     for protocol in &protocols {
         for interface in &protocol.interfaces {
-            dbg!(interface);
             let this_interface = &interface.name;
 
             write_description(f, "/// ", interface.description.as_ref())?;
@@ -386,4 +437,13 @@ pub fn gen() -> std::io::Result<()> {
     // println!("content=\n{}", content);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod protocol_gen_tests {
+    #[test]
+    #[ignore = "rewrites src/protocol_generated.rs; run: cargo test regenerate_protocol_generated -- --ignored"]
+    fn regenerate_protocol_generated() {
+        super::gen().unwrap();
+    }
 }
