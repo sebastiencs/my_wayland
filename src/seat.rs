@@ -350,6 +350,7 @@ fn hit_test_surface(
         };
 
         let (width, height) = buffer.dimensions();
+        // Hit-testing stays in compositor logical coordinates; the render path projects this space.
         let rect = SurfaceRect { x: surface_state.x, y: surface_state.y, width, height };
 
         let inside = x >= rect.x as f64

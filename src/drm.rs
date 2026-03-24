@@ -27,6 +27,7 @@ use crate::{
     io_uring::ring::ReadWriteCompleted,
     runner::{AnyAction, Dispatcher, Model},
     state::{DrmId, State},
+    transform::{self, OutputPresentationTransform},
     wayland_objects::{wl_buffer::WlBuffer, wl_surface::WlSurface},
 };
 
@@ -115,6 +116,7 @@ pub struct Drm {
 #[derive(Debug)]
 pub struct DrmOutput {
     pub in_use: ConnectorInUse,
+    presentation_transform: OutputPresentationTransform,
     buffers: [RenderBuffer; 2],
     displayed_buffer_index: usize,
     render_buffer_index: usize,
@@ -178,6 +180,15 @@ impl DrmOutput {
 
     fn render_buffer(&self) -> &RenderBuffer {
         &self.buffers[self.render_buffer_index]
+    }
+
+    fn render_projection(&self) -> transform::Mat3 {
+        let framebuffer = &self.render_buffer().gl_framebuffer;
+        transform::output_projection(
+            framebuffer.width as f32,
+            framebuffer.height as f32,
+            self.presentation_transform,
+        )
     }
 }
 
@@ -431,7 +442,8 @@ impl Drm {
     }
 
     fn render_output(&self, items: &[RenderItem]) {
-        self.output.render_buffer().gl_framebuffer.render(items);
+        let projection = self.output.render_projection();
+        self.output.render_buffer().gl_framebuffer.render(items, projection);
     }
 
     fn submit_render_buffer(&mut self) -> std::io::Result<()> {
@@ -614,6 +626,7 @@ impl Drm {
 
         DrmOutput {
             in_use,
+            presentation_transform: OutputPresentationTransform::FlipY,
             buffers,
             displayed_buffer_index: 0,
             render_buffer_index: 1,

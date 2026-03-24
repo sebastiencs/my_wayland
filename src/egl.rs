@@ -22,6 +22,7 @@ use crate::{
     dmabuf::DmaBuf,
     drm::{DrmFd, Format, Modifier, FORMATS_MAP},
     gbm::GbmDevice,
+    transform::Mat3,
     wayland_objects::wl_shm_pool::SliceSharedMemory,
 };
 
@@ -446,6 +447,8 @@ pub struct RenderItem {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    /// Future `wl_surface.set_buffer_transform` / scale support plugs in here.
+    pub tex_transform: Mat3,
 }
 
 pub fn image_target(external_only: bool) -> gl::Enum {
@@ -598,7 +601,7 @@ impl EglFrameBuffer {
         // self.render(ops, Some(&Color { r, g, b, a }));
     }
 
-    pub fn render(&self, items: &[RenderItem]) {
+    pub fn render(&self, items: &[RenderItem], projection: Mat3) {
         self.clear();
 
         if items.is_empty() {
@@ -609,12 +612,22 @@ impl EglFrameBuffer {
         let position_name = b"a_position\0";
         let texcoord_name = b"a_texcoord\0";
         let sampler_name = b"u_texture\0";
+        let transform_name = b"u_transform\0";
+        let tex_transform_name = b"u_tex_transform\0";
         let position_location =
             unsafe { gl::GetAttribLocation(program, position_name.as_ptr().cast()) } as gl::Uint;
         let texcoord_location =
             unsafe { gl::GetAttribLocation(program, texcoord_name.as_ptr().cast()) } as gl::Uint;
         let sampler_location =
             unsafe { gl::GetUniformLocation(program, sampler_name.as_ptr().cast()) };
+        let transform_location =
+            unsafe { gl::GetUniformLocation(program, transform_name.as_ptr().cast()) };
+        let tex_transform_location =
+            unsafe { gl::GetUniformLocation(program, tex_transform_name.as_ptr().cast()) };
+        let vertices: [f32; 16] = [
+            0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ];
+        let stride = (4 * std::mem::size_of::<f32>()) as i32;
 
         unsafe {
             gl::BindFramebuffer(gl::FRAMEBUFFER as _, self.framebuffer_object);
@@ -629,18 +642,20 @@ impl EglFrameBuffer {
         }
 
         for item in items {
-            let left = (item.x as f32 / self.width as f32) * 2.0 - 1.0;
-            let right = ((item.x + item.width) as f32 / self.width as f32) * 2.0 - 1.0;
-            let top = 1.0 - (item.y as f32 / self.height as f32) * 2.0;
-            let bottom = 1.0 - ((item.y + item.height) as f32 / self.height as f32) * 2.0;
-            let vertices: [f32; 16] = [
-                left, top, 0.0, 0.0, right, top, 1.0, 0.0, left, bottom, 0.0, 1.0, right, bottom,
-                1.0, 1.0,
-            ];
-            let stride = (4 * std::mem::size_of::<f32>()) as i32;
+            let transform = crate::transform::project_box(
+                item.x as f32,
+                item.y as f32,
+                item.width as f32,
+                item.height as f32,
+                projection,
+            )
+            .to_gl_array();
+            let tex_transform = item.tex_transform.to_gl_array();
 
             unsafe {
                 gl::BindTexture(gl::TEXTURE_2D as _, item.texture);
+                gl::UniformMatrix3fv(transform_location, 1, 0, transform.as_ptr());
+                gl::UniformMatrix3fv(tex_transform_location, 1, 0, tex_transform.as_ptr());
                 gl::VertexAttribPointer(
                     position_location,
                     2,
@@ -673,7 +688,7 @@ impl EglFrameBuffer {
 }
 
 fn create_texture_program() -> gl::Uint {
-    let vertex_source = b"attribute vec2 a_position;\nattribute vec2 a_texcoord;\nvarying vec2 v_texcoord;\nvoid main() {\n    gl_Position = vec4(a_position, 0.0, 1.0);\n    v_texcoord = a_texcoord;\n}\n\0";
+    let vertex_source = b"attribute vec2 a_position;\nattribute vec2 a_texcoord;\nuniform mat3 u_transform;\nuniform mat3 u_tex_transform;\nvarying vec2 v_texcoord;\nvoid main() {\n    vec3 position = u_transform * vec3(a_position, 1.0);\n    vec3 texcoord = u_tex_transform * vec3(a_texcoord, 1.0);\n    gl_Position = vec4(position.xy, 0.0, 1.0);\n    v_texcoord = texcoord.xy;\n}\n\0";
     let fragment_source = b"precision mediump float;\nvarying vec2 v_texcoord;\nuniform sampler2D u_texture;\nvoid main() {\n    gl_FragColor = texture2D(u_texture, v_texcoord);\n}\n\0";
     let vertex_shader = compile_shader(gl::VERTEX_SHADER as _, vertex_source);
     let fragment_shader = compile_shader(gl::FRAGMENT_SHADER as _, fragment_source);

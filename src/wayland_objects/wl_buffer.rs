@@ -7,6 +7,7 @@ use crate::{
     object::{Object, Parser},
     protocol_generated::{wl_buffer, WaylandId, WlBufferId},
     state::State,
+    transform::Mat3,
 };
 
 use super::{wl_shm_pool::SharedMemory, wl_surface::WlSurface};
@@ -92,6 +93,7 @@ impl WlBuffer {
             y,
             width: self.width as i32,
             height: self.height as i32,
+            tex_transform: Mat3::identity(),
         })
     }
 

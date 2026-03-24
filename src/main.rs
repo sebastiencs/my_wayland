@@ -116,6 +116,7 @@ mod queue;
 pub mod runner;
 mod seat;
 mod state;
+mod transform;
 mod udev;
 mod utils;
 mod wayland_objects;
