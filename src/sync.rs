@@ -14,7 +14,10 @@ use crate::{
     clients::{Client, ClientDispatcher, ClientId},
     drm::{schedule_active_output, DrmFd},
     egl::EglContext,
-    io_uring::{model::IoUringAction, ring::ReadWriteCompleted},
+    io_uring::{
+        model::IoUringAction,
+        ring::{ReadWriteCompleted, RingId},
+    },
     protocol_generated::WlBufferId,
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     state::{ObjectId, State},
@@ -101,12 +104,36 @@ impl AcquireSync {
     }
 
     pub fn is_ready_now(&self) -> bool {
-        match self.export_sync_file() {
-            Ok(fd) => poll_fd_ready(fd.as_fd(), 0),
-            Err(error) => {
-                log::warn!("explicit acquire readiness check failed: {:?}", error);
-                false
-            }
+        match self {
+            Self::None => true,
+            Self::SyncFile(fd) => poll_fd_ready(fd.as_fd(), 0),
+            Self::TimelinePoint { timeline, point } => match timeline.drm().syncobj_timeline_wait(
+                &[timeline.handle()],
+                &[*point],
+                0,
+                false,
+                false,
+                true,
+            ) {
+                Ok(_) => true,
+                Err(error) => {
+                    let raw = error.raw_os_error();
+                    #[cfg(target_os = "linux")]
+                    let is_timeout = raw == Some(libc::ETIME) || raw == Some(libc::ETIMEDOUT);
+                    #[cfg(not(target_os = "linux"))]
+                    let is_timeout = raw == Some(libc::ETIMEDOUT);
+
+                    if is_timeout {
+                        false
+                    } else {
+                        log::warn!(
+                            "explicit acquire readiness check failed for syncobj timeline: {:?}",
+                            error
+                        );
+                        false
+                    }
+                }
+            },
         }
     }
 
@@ -256,6 +283,7 @@ pub struct AcquireReadyWaiter {
     waiter_id: u64,
     surface_object_id: ObjectId,
     poll_fd: OwnedFd,
+    read_op_id: Option<RingId>,
 }
 
 #[derive(Debug)]
@@ -279,7 +307,10 @@ impl Model for AcquireReadyWaiter {
     ) -> Result<(), ()> {
         match action {
             AcquireReadyWaiterAction::Start => {
+                let read_op_id = RingId::fresh();
+                self.read_op_id = Some(read_op_id);
                 dispatcher.dispatch(IoUringAction::Read {
+                    id: Some(read_op_id),
                     fd: self.poll_fd.as_raw_fd(),
                     offset: 0,
                     length: std::mem::size_of::<u64>(),
@@ -287,6 +318,7 @@ impl Model for AcquireReadyWaiter {
                 });
             }
             AcquireReadyWaiterAction::Ready => {
+                self.read_op_id = None;
                 let became_active = {
                     let Some(mut obj) = state.objects.try_grab(self.surface_object_id) else {
                         dispatcher.stop_model::<_, Self>(self.waiter_id);
@@ -309,7 +341,11 @@ impl Model for AcquireReadyWaiter {
                 }
                 dispatcher.stop_model::<_, Self>(self.waiter_id);
             }
-            AcquireReadyWaiterAction::Stop => {}
+            AcquireReadyWaiterAction::Stop => {
+                if let Some(read_op_id) = self.read_op_id.take() {
+                    dispatcher.dispatch(IoUringAction::Cancel { target: read_op_id });
+                }
+            }
         }
 
         Ok(())
@@ -318,7 +354,7 @@ impl Model for AcquireReadyWaiter {
 
 impl AcquireReadyWaiter {
     pub fn new(waiter_id: u64, surface_object_id: ObjectId, poll_fd: OwnedFd) -> Self {
-        Self { waiter_id, surface_object_id, poll_fd }
+        Self { waiter_id, surface_object_id, poll_fd, read_op_id: None }
     }
 
     fn on_read_ready(result: io::Result<ReadWriteCompleted>) -> AnyAction {
