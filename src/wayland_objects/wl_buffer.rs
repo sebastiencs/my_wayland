@@ -134,6 +134,27 @@ impl WlBuffer {
         }
     }
 
+    pub fn format(&self) -> &'static Format {
+        match &self.backing {
+            BufferBacking::Shm { format, .. } => format,
+            BufferBacking::Dmabuf { dmabuf, .. } => dmabuf.format,
+        }
+    }
+
+    pub fn dmabuf(&self) -> Option<&DmaBuf> {
+        match &self.backing {
+            BufferBacking::Shm { .. } => None,
+            BufferBacking::Dmabuf { dmabuf, .. } => Some(dmabuf),
+        }
+    }
+
+    pub fn y_inverted(&self) -> bool {
+        match &self.backing {
+            BufferBacking::Shm { .. } => true,
+            BufferBacking::Dmabuf { y_inverted, .. } => *y_inverted,
+        }
+    }
+
     pub fn supports_explicit_sync(&self) -> bool {
         matches!(self.backing, BufferBacking::Dmabuf { .. })
     }
@@ -158,20 +179,20 @@ impl WlBuffer {
     ) -> Option<u32> {
         match &mut self.backing {
             BufferBacking::Shm { offset, width, height, format, stride, mem, texture } => {
-                if texture.is_none() {
-                    let bytes = stride.saturating_mul(*height);
-                    match GlTexture::import_shm(
-                        mem.clone().slice_at(*offset, bytes),
-                        *width,
-                        *height,
-                        *stride,
-                        format,
-                    ) {
-                        Ok(imported) => *texture = Some(imported),
-                        Err(()) => {
-                            log::warn!("failed to upload shm wl_buffer {:?}", self.id);
-                            return None;
-                        }
+                // wl_shm contents can change between commits while the wl_buffer object stays alive,
+                // so conservatively re-upload the texture every time we sample it.
+                let bytes = stride.saturating_mul(*height);
+                match GlTexture::import_shm(
+                    mem.clone().slice_at(*offset, bytes),
+                    *width,
+                    *height,
+                    *stride,
+                    format,
+                ) {
+                    Ok(imported) => *texture = Some(imported),
+                    Err(()) => {
+                        log::warn!("failed to upload shm wl_buffer {:?}", self.id);
+                        return None;
                     }
                 }
                 Some(texture.as_ref()?.texture_id())

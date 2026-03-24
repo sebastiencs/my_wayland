@@ -22,6 +22,7 @@ use crate::{
     dmabuf::DmaBuf,
     drm::{DrmFd, Format, Modifier, RenderSyncMode, FORMATS_MAP},
     gbm::GbmDevice,
+    region::{DamageRegion, RectI},
     transform::Mat3,
     wayland_objects::wl_shm_pool::SliceSharedMemory,
 };
@@ -540,7 +541,7 @@ impl Drop for GlTexture {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RenderItem {
     pub texture: gl::Uint,
     pub x: i32,
@@ -549,6 +550,7 @@ pub struct RenderItem {
     pub height: i32,
     /// Future `wl_surface.set_buffer_transform` / scale support plugs in here.
     pub tex_transform: Mat3,
+    pub damage: DamageRegion,
 }
 
 #[derive(Debug)]
@@ -702,21 +704,52 @@ impl Drop for EglFrameBuffer {
 
 impl EglFrameBuffer {
     pub fn clear(&self) {
-        // unsafe {
-        //     gl::ClearColor(0.0, 0.0, 0.0, 0.0);
-        //     gl::Clear(gl::COLOR_BUFFER_BIT as _);
-        // }
+        unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER as _, self.framebuffer_object);
+            gl::Viewport(0, 0, self.width, self.height);
+            gl::ClearColor(1.0, 0.0, 0.0, 1.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT as _);
+            gl::BlendFunc(gl::ONE as _, gl::ONE_MINUS_SRC_ALPHA as _);
+        }
+        unsafe {
+            gl::Flush();
+        }
+    }
+
+    fn output_bounds(&self) -> Option<RectI> {
+        RectI::new(0, 0, self.width, self.height)
+    }
+
+    fn clear_damage(&self, damage: &DamageRegion, preserve_contents: bool) {
+        let Some(output_bounds) = self.output_bounds() else {
+            return;
+        };
+        let mut clipped_damage = damage.clone();
+        clipped_damage.intersect_rect(output_bounds);
 
         unsafe {
             gl::BindFramebuffer(gl::FRAMEBUFFER as _, self.framebuffer_object);
             gl::Viewport(0, 0, self.width, self.height);
-            // if let Some(c) = clear_color {
             gl::ClearColor(1.0, 0.0, 0.0, 1.0);
-            gl::Clear(gl::COLOR_BUFFER_BIT as _);
-            // }
             gl::BlendFunc(gl::ONE as _, gl::ONE_MINUS_SRC_ALPHA as _);
         }
+
+        if !preserve_contents || clipped_damage.extents() == Some(output_bounds) {
+            unsafe {
+                gl::Disable(gl::SCISSOR_TEST as _);
+                gl::Clear(gl::COLOR_BUFFER_BIT as _);
+                gl::Flush();
+            }
+            return;
+        }
+
         unsafe {
+            gl::Enable(gl::SCISSOR_TEST as _);
+            for rect in clipped_damage.rects() {
+                gl::Scissor(rect.x, self.height - rect.y - rect.height, rect.width, rect.height);
+                gl::Clear(gl::COLOR_BUFFER_BIT as _);
+            }
+            gl::Disable(gl::SCISSOR_TEST as _);
             gl::Flush();
         }
     }
@@ -770,8 +803,10 @@ impl EglFrameBuffer {
         items: &[RenderItem],
         projection: Mat3,
         render_sync_mode: RenderSyncMode,
+        damage: &DamageRegion,
+        preserve_contents: bool,
     ) -> RenderCompletion {
-        self.clear();
+        self.clear_damage(damage, preserve_contents);
 
         if items.is_empty() {
             return self.finish_render(render_sync_mode);
@@ -796,6 +831,7 @@ impl EglFrameBuffer {
         let vertices: [f32; 16] =
             [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0];
         let stride = (4 * std::mem::size_of::<f32>()) as i32;
+        let output_bounds = self.output_bounds();
 
         unsafe {
             gl::BindFramebuffer(gl::FRAMEBUFFER as _, self.framebuffer_object);
@@ -810,6 +846,17 @@ impl EglFrameBuffer {
         }
 
         for item in items {
+            let Some(item_bounds) = RectI::new(item.x, item.y, item.width, item.height) else {
+                continue;
+            };
+            let mut clipped_damage = item.damage.clone();
+            if let Some(output_bounds) = output_bounds {
+                clipped_damage.intersect_rect(output_bounds);
+            }
+            clipped_damage.intersect_rect(item_bounds);
+            if clipped_damage.is_empty() {
+                continue;
+            }
             let transform = crate::transform::project_box(
                 item.x as f32,
                 item.y as f32,
@@ -840,7 +887,12 @@ impl EglFrameBuffer {
                     stride,
                     vertices.as_ptr().add(2).cast(),
                 );
-                gl::DrawArrays(gl::TRIANGLE_STRIP as _, 0, 4);
+                gl::Enable(gl::SCISSOR_TEST as _);
+                for rect in clipped_damage.rects() {
+                    gl::Scissor(rect.x, self.height - rect.y - rect.height, rect.width, rect.height);
+                    gl::DrawArrays(gl::TRIANGLE_STRIP as _, 0, 4);
+                }
+                gl::Disable(gl::SCISSOR_TEST as _);
             }
         }
 

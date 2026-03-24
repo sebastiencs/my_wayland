@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     num::NonZeroU32,
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
     rc::Rc,
@@ -25,6 +25,7 @@ use crate::{
     egl::{EglContext, EglFrameBuffer, GlTexture, RenderItem, EGL},
     gbm::UseFlags,
     io_uring::ring::{ReadWriteCompleted, RingId},
+    region::{DamageRegion, RectI},
     runner::{AnyAction, Dispatcher, Model},
     state::{DrmId, ObjectId, State},
     sync::{DeferredRelease, RetiredBufferCandidate},
@@ -34,6 +35,9 @@ use crate::{
         wl_surface::{StackEntry, WlSurface},
     },
 };
+
+use crate::clients::ClientId;
+use crate::protocol_generated::WlSurfaceId;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Format {
@@ -147,9 +151,78 @@ pub struct DrmOutput {
     rendering_active: bool,
     page_flip_pending: bool,
     in_flight_releases: Vec<DeferredRelease>,
+    present_count: u64,
+    damage_history: VecDeque<DamageRegion>,
+    last_scene: Vec<SceneItemState>,
+    force_full_redraw: bool,
+    rendered_buffer_present_id: [Option<u64>; 2],
+    in_flight_frame: Option<PendingFrame>,
+    displayed_external_fb: Option<DrmFrameBuffer>,
+    retiring_external_fb: Option<DrmFrameBuffer>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SurfaceKey {
+    client_id: ClientId,
+    surface_id: WlSurfaceId,
+}
+
+#[derive(Clone, Debug)]
+struct SceneItemState {
+    key: SurfaceKey,
+    buffer_object_id: ObjectId,
+    bounds: RectI,
+    tex_transform: transform::Mat3,
+}
+
+#[derive(Debug)]
+struct SceneItem {
+    state: SceneItemState,
+    texture: gl::Uint,
+    damage: DamageRegion,
+    opaque_region: DamageRegion,
+    opaque: bool,
+    sync: crate::sync::SurfaceSyncState,
+    direct_scanout: Option<DrmFrameBuffer>,
+}
+
+#[derive(Debug)]
+struct DirectScanoutCandidate {
+    bounds: RectI,
+    sync: crate::sync::SurfaceSyncState,
+    framebuffer: DrmFrameBuffer,
+}
+
+#[derive(Debug)]
+struct FramePlan {
+    items: Vec<SceneItem>,
+    scene: Vec<SceneItemState>,
+    damage: DamageRegion,
+    direct_scanout: Option<DirectScanoutCandidate>,
+    preserve_contents: bool,
+}
+
+#[derive(Debug)]
+enum PendingFrame {
+    Composited {
+        buffer_index: usize,
+        damage: DamageRegion,
+        scene: Vec<SceneItemState>,
+        damage_blob: Option<u64>,
+    },
+    DirectScanout {
+        scene: Vec<SceneItemState>,
+        framebuffer: DrmFrameBuffer,
+    },
 }
 
 impl DrmOutput {
+    fn output_bounds(&self) -> RectI {
+        let framebuffer = &self.render_buffer().gl_framebuffer;
+        RectI::new(0, 0, framebuffer.width, framebuffer.height)
+            .expect("framebuffer dimensions must be non-negative")
+    }
+
     fn request_frame(&mut self) -> bool {
         self.needs_frame = true;
 
@@ -177,28 +250,63 @@ impl DrmOutput {
 
     fn mark_render_failed(&mut self) {
         self.rendering_active = false;
+        self.force_full_redraw = true;
+        self.in_flight_frame = None;
     }
 
-    fn mark_frame_submitted(&mut self) {
+    fn mark_frame_idle(&mut self) {
         self.rendering_active = false;
-        self.page_flip_pending = true;
         self.needs_frame = false;
     }
 
-    fn finish_page_flip(&mut self) -> bool {
+    fn mark_frame_submitted(&mut self, frame: PendingFrame) {
+        self.rendering_active = false;
+        self.page_flip_pending = true;
+        self.needs_frame = false;
+        self.in_flight_frame = Some(frame);
+        self.retiring_external_fb = self.displayed_external_fb.take();
+    }
+
+    fn finish_page_flip(&mut self) -> (bool, Option<u64>) {
         if !self.page_flip_pending {
-            return false;
+            return (false, None);
         }
 
         self.page_flip_pending = false;
-        std::mem::swap(&mut self.displayed_buffer_index, &mut self.render_buffer_index);
+        self.present_count = self.present_count.saturating_add(1);
+        let mut damage_blob = None;
+
+        match self.in_flight_frame.take() {
+            Some(PendingFrame::Composited { buffer_index, damage, scene, damage_blob: blob }) => {
+                self.displayed_buffer_index = buffer_index;
+                self.render_buffer_index = if buffer_index == 0 { 1 } else { 0 };
+                self.rendered_buffer_present_id[buffer_index] = Some(self.present_count);
+                self.damage_history.push_front(damage);
+                while self.damage_history.len() > 4 {
+                    self.damage_history.pop_back();
+                }
+                self.last_scene = scene;
+                self.displayed_external_fb = None;
+                self.force_full_redraw = false;
+                damage_blob = blob;
+            }
+            Some(PendingFrame::DirectScanout { scene, framebuffer }) => {
+                self.force_full_redraw = true;
+                self.last_scene = scene;
+                self.displayed_external_fb = Some(framebuffer);
+                self.rendered_buffer_present_id = [None, None];
+                self.damage_history.clear();
+            }
+            None => {}
+        }
+        self.retiring_external_fb = None;
 
         if self.needs_frame && !self.frame_scheduled {
             self.frame_scheduled = true;
-            return true;
+            return (true, damage_blob);
         }
 
-        false
+        (false, damage_blob)
     }
 
     fn render_buffer(&self) -> &RenderBuffer {
@@ -212,6 +320,36 @@ impl DrmOutput {
             framebuffer.height as f32,
             self.presentation_transform,
         )
+    }
+
+    fn buffer_age(&self) -> Option<usize> {
+        let last_presented = self.rendered_buffer_present_id[self.render_buffer_index]?;
+        let age = self.present_count.checked_sub(last_presented)?.saturating_add(1);
+        usize::try_from(age).ok()
+    }
+
+    fn preserve_render_buffer_contents(&self) -> bool {
+        self.buffer_age().is_some() && !self.force_full_redraw
+    }
+
+    fn accumulate_damage_from_age(&self, base_damage: &DamageRegion) -> DamageRegion {
+        let mut damage = base_damage.clone();
+        let Some(age) = self.buffer_age() else {
+            damage.add_rect(self.output_bounds());
+            return damage;
+        };
+        if age == 0 || self.force_full_redraw {
+            damage.add_rect(self.output_bounds());
+            return damage;
+        }
+        if age.saturating_sub(1) > self.damage_history.len() {
+            damage.add_rect(self.output_bounds());
+            return damage;
+        }
+        for previous in self.damage_history.iter().take(age.saturating_sub(1)) {
+            damage.add_region(previous);
+        }
+        damage
     }
 }
 
@@ -323,6 +461,7 @@ pub struct Plane {
     pub fb_id: drm::control::property::Handle,
     pub crtc_id: drm::control::property::Handle,
     pub in_fence_fd: Option<control::property::Handle>,
+    pub fb_damage_clips: Option<control::property::Handle>,
     pub fb_handle: Option<control::framebuffer::Handle>,
 }
 
@@ -511,18 +650,27 @@ impl Drm {
             .collect()
     }
 
-    fn render_output(&self, items: &[RenderItem]) -> crate::egl::RenderCompletion {
+    fn render_output(
+        &self,
+        items: &[RenderItem],
+        damage: &DamageRegion,
+        preserve_contents: bool,
+    ) -> crate::egl::RenderCompletion {
         let projection = self.output.render_projection();
         self.output.render_buffer().gl_framebuffer.render(
             items,
             projection,
             self.output.render_sync_mode,
+            damage,
+            preserve_contents,
         )
     }
 
     fn submit_render_buffer(
         &mut self,
         render_completion: &crate::egl::RenderCompletion,
+        damage: &DamageRegion,
+        scene: Vec<SceneItemState>,
     ) -> std::io::Result<()> {
         let (primary_plane, fb, crtc) = {
             let output = &self.output;
@@ -542,26 +690,180 @@ impl Drm {
             primary_plane.crtc_id,
             control::property::Value::CRTC(Some(crtc)),
         );
-        if let Some(in_fence_fd) = render_completion.in_fence_fd.as_ref() {
-            if let Some(property) = primary_plane.in_fence_fd {
-                changes.add_property(
-                    primary_plane.handle,
-                    property,
-                    control::property::Value::SignedRange(in_fence_fd.as_raw_fd() as i64),
-                );
+        if let Some(property) = primary_plane.in_fence_fd {
+            let fence_fd = render_completion
+                .in_fence_fd
+                .as_ref()
+                .map(|fd| fd.as_raw_fd() as i64)
+                .unwrap_or(-1);
+            changes.add_property(
+                primary_plane.handle,
+                property,
+                control::property::Value::SignedRange(fence_fd),
+            );
+            if fence_fd >= 0 {
                 log::debug!(
                     "drm submit_render_buffer: attached explicit in-fence fd={} plane={:?}",
-                    in_fence_fd.as_raw_fd(),
+                    fence_fd,
                     primary_plane.handle
                 );
             }
+        }
+
+        let mut damage_blob = None;
+        if let Some(property) = primary_plane.fb_damage_clips {
+            let rects: Vec<drm_ffi::drm_mode_rect> = damage
+                .rects()
+                .iter()
+                .map(|rect| drm_ffi::drm_mode_rect {
+                    x1: rect.x,
+                    y1: rect.y,
+                    x2: rect.x2(),
+                    y2: rect.y2(),
+                })
+                .collect();
+            if rects.is_empty() {
+                changes.add_property(
+                    primary_plane.handle,
+                    property,
+                    control::property::Value::Blob(0),
+                );
+            } else if let Ok(blob) = self.fd.create_property_blob(&rects) {
+                changes.add_property(primary_plane.handle, property, blob);
+                damage_blob = blob.as_blob();
+            } else {
+                log::warn!(
+                    "drm submit_render_buffer: failed to create FB_DAMAGE_CLIPS blob, falling back to Blob(0)"
+                );
+                changes.add_property(
+                    primary_plane.handle,
+                    property,
+                    control::property::Value::Blob(0),
+                );
+            }
+        }
+
+        let commit_result = self.fd.atomic_commit(
+            control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
+            changes,
+        );
+        if commit_result.is_err() {
+            if let Some(blob) = damage_blob {
+                let _ = self.fd.destroy_property_blob(blob);
+            }
+        }
+        commit_result?;
+        self.output.mark_frame_submitted(PendingFrame::Composited {
+            buffer_index: self.output.render_buffer_index,
+            damage: damage.clone(),
+            scene,
+            damage_blob,
+        });
+        Ok(())
+    }
+
+    fn submit_direct_scanout(
+        &mut self,
+        candidate: DirectScanoutCandidate,
+        scene: Vec<SceneItemState>,
+    ) -> std::io::Result<()> {
+        let (primary_plane, crtc) = {
+            let output = &self.output;
+            let (primary_plane, _) = output.in_use.primary_plane();
+            (primary_plane.clone(), output.in_use.crtc.handle)
+        };
+
+        let mut changes = control::atomic::AtomicModeReq::new();
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.fb_id,
+            control::property::Value::Object(Some(candidate.framebuffer.id().into())),
+        );
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.crtc_id,
+            control::property::Value::CRTC(Some(crtc)),
+        );
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.crtc.x.handle,
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.crtc.y.handle,
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.crtc.width.handle,
+            control::property::Value::UnsignedRange(candidate.bounds.width as u64),
+        );
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.crtc.height.handle,
+            control::property::Value::UnsignedRange(candidate.bounds.height as u64),
+        );
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.src.x.handle,
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.src.y.handle,
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.src.width.handle,
+            control::property::Value::UnsignedRange((candidate.bounds.width as u64) << 16),
+        );
+        changes.add_property(
+            primary_plane.handle,
+            primary_plane.src.height.handle,
+            control::property::Value::UnsignedRange((candidate.bounds.height as u64) << 16),
+        );
+        if let Some(property) = primary_plane.fb_damage_clips {
+            changes.add_property(
+                primary_plane.handle,
+                property,
+                control::property::Value::Blob(0),
+            );
+        }
+        if let crate::sync::AcquireSync::SyncFile(sync_file) = &candidate.sync.acquire {
+            let Some(property) = primary_plane.in_fence_fd else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "scanout sync-file acquire requires IN_FENCE_FD support",
+                ));
+            };
+            changes.add_property(
+                primary_plane.handle,
+                property,
+                control::property::Value::SignedRange(sync_file.as_raw_fd() as i64),
+            );
+        } else if !candidate.sync.acquire.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "scanout currently only supports empty or sync-file acquire fences",
+            ));
+        } else if let Some(property) = primary_plane.in_fence_fd {
+            changes.add_property(
+                primary_plane.handle,
+                property,
+                control::property::Value::SignedRange(-1),
+            );
         }
 
         self.fd.atomic_commit(
             control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
             changes,
         )?;
-        self.output.mark_frame_submitted();
+        self.output.mark_frame_submitted(PendingFrame::DirectScanout {
+            scene,
+            framebuffer: candidate.framebuffer,
+        });
         Ok(())
     }
 
@@ -747,6 +1049,14 @@ impl Drm {
             rendering_active: false,
             page_flip_pending: false,
             in_flight_releases: Vec::new(),
+            present_count: 0,
+            damage_history: VecDeque::new(),
+            last_scene: Vec::new(),
+            force_full_redraw: true,
+            rendered_buffer_present_id: [None, None],
+            in_flight_frame: None,
+            displayed_external_fb: None,
+            retiring_external_fb: None,
         }
     }
 
@@ -1023,6 +1333,7 @@ impl Drm {
         let fb_id = get_handle("FB_ID");
         let crtc_id = get_handle("CRTC_ID");
         let in_fence_fd = props.get("IN_FENCE_FD").map(|(_, info)| info.handle());
+        let fb_damage_clips = props.get("FB_DAMAGE_CLIPS").map(|(_, info)| info.handle());
 
         let handle = plane;
         let plane = Plane {
@@ -1037,6 +1348,7 @@ impl Drm {
             fb_id,
             crtc_id,
             in_fence_fd,
+            fb_damage_clips,
         };
 
         (handle, plane)
@@ -1508,33 +1820,77 @@ impl DrmModel {
     }
 
     fn render_frame(&mut self, state: &mut crate::state::State, dispatcher: &mut Dispatcher) {
-        let (render_items, deferred_releases) = collect_render_items(state, self.drm_id);
-        let failed_releases = {
+        let ready = {
             let drm = state.drm.get_mut(self.drm_id);
-            if !drm.output.begin_render() {
+            drm.output.begin_render()
+        };
+        let failed_releases = {
+            if !ready {
                 log::warn!("DrmModel::render_frame skipped: output not ready");
                 return;
             }
+            let (scene_items, deferred_releases) = collect_render_items(state, self.drm_id);
+            let drm = state.drm.get_mut(self.drm_id);
 
             drm.output.in_flight_releases = deferred_releases;
-            let render_completion = drm.render_output(&render_items);
-            if let Err(error) = drm.submit_render_buffer(&render_completion) {
-                drm.output.mark_render_failed();
-                let failed_releases = std::mem::take(&mut drm.output.in_flight_releases);
-                if !render_completion.used_blocking_fallback {
-                    if let Some(in_fence_fd) = render_completion.in_fence_fd {
-                        if let Err(wait_error) = drm.egl_context.wait_on_native_fence(in_fence_fd) {
-                            log::warn!(
-                                "failed to wait on compositor render fence after submit failure: {:?}",
-                                wait_error
-                            );
+            let plan = build_frame_plan(&drm.output, scene_items);
+            let FramePlan {
+                items,
+                scene,
+                damage,
+                direct_scanout,
+                preserve_contents,
+            } = plan;
+
+            if let Some(candidate) = direct_scanout {
+                if let Err(error) = drm.submit_direct_scanout(candidate, scene.clone()) {
+                    log::debug!("direct scanout rejected, falling back to composition: {:?}", error);
+                } else {
+                    drm.output.force_full_redraw = true;
+                    return;
+                }
+            }
+
+            if damage.is_empty() {
+                drm.output.mark_frame_idle();
+                let releases = std::mem::take(&mut drm.output.in_flight_releases);
+                Some(releases)
+            } else {
+                let render_items: Vec<RenderItem> = items
+                    .iter()
+                    .map(|item| RenderItem {
+                        texture: item.texture,
+                        x: item.state.bounds.x,
+                        y: item.state.bounds.y,
+                        width: item.state.bounds.width,
+                        height: item.state.bounds.height,
+                        tex_transform: item.state.tex_transform,
+                        damage: item.damage.clone(),
+                    })
+                    .collect();
+                let render_completion =
+                    drm.render_output(&render_items, &damage, preserve_contents);
+                if let Err(error) =
+                    drm.submit_render_buffer(&render_completion, &damage, scene)
+                {
+                    drm.output.mark_render_failed();
+                    let failed_releases = std::mem::take(&mut drm.output.in_flight_releases);
+                    if !render_completion.used_blocking_fallback {
+                        if let Some(in_fence_fd) = render_completion.in_fence_fd {
+                            if let Err(wait_error) = drm.egl_context.wait_on_native_fence(in_fence_fd)
+                            {
+                                log::warn!(
+                                    "failed to wait on compositor render fence after submit failure: {:?}",
+                                    wait_error
+                                );
+                            }
                         }
                     }
+                    log::error!("Could not submit DRM frame: {:?}", error);
+                    Some(failed_releases)
+                } else {
+                    None
                 }
-                log::error!("Could not submit DRM frame: {:?}", error);
-                Some(failed_releases)
-            } else {
-                None
             }
         };
 
@@ -1554,15 +1910,19 @@ impl DrmModel {
         _tv_usec: u32,
         _crtc_id: u32,
     ) {
-        let (releases, should_render) = {
+        let (releases, should_render, damage_blob) = {
             let drm = state.drm.get_mut(self.drm_id);
             let releases = std::mem::take(&mut drm.output.in_flight_releases);
-            let should_render = drm.output.finish_page_flip();
-            (releases, should_render)
+            let (should_render, damage_blob) = drm.output.finish_page_flip();
+            (releases, should_render, damage_blob)
         };
 
         for release in releases {
             release.resolve(state, dispatcher);
+        }
+        if let Some(blob) = damage_blob {
+            let drm = state.drm.get(self.drm_id);
+            let _ = drm.fd.destroy_property_blob(blob);
         }
         if should_render {
             dispatcher.dispatch_to(self.model_id(), DrmAction::RenderFrame);
@@ -1584,7 +1944,7 @@ fn collect_surface_snapshots(
             return;
         };
         retired_candidates.extend(surface.take_retired_buffers());
-        let Some(surface_state) = surface.render_state_at(base_x, base_y) else {
+        let Some(surface_state) = surface.take_render_state_at(base_x, base_y) else {
             return;
         };
         (surface.current_stack().to_vec(), surface_state)
@@ -1616,10 +1976,79 @@ fn collect_surface_snapshots(
     }
 }
 
+fn scene_order(scene: &[SceneItemState]) -> Vec<SurfaceKey> {
+    scene.iter().map(|item| item.key).collect()
+}
+
+fn build_frame_plan(output: &DrmOutput, mut items: Vec<SceneItem>) -> FramePlan {
+    let output_bounds = output.output_bounds();
+    let mut base_damage = DamageRegion::new();
+    let scene = items.iter().map(|item| item.state.clone()).collect::<Vec<_>>();
+    let last_scene = &output.last_scene;
+    let order_changed = scene_order(last_scene) != scene_order(&scene);
+
+    if output.force_full_redraw || order_changed || scene.len() != last_scene.len() {
+        base_damage.add_rect(output_bounds);
+    } else {
+        for (current, previous) in items.iter().zip(last_scene.iter()) {
+            if current.state.key != previous.key {
+                base_damage.add_rect(output_bounds);
+                break;
+            }
+            if current.state.bounds != previous.bounds
+                || current.state.buffer_object_id != previous.buffer_object_id
+                || current.state.tex_transform != previous.tex_transform
+            {
+                base_damage.add_rect(previous.bounds);
+                base_damage.add_rect(current.state.bounds);
+            } else {
+                base_damage.add_region(&current.damage);
+            }
+        }
+    }
+
+    base_damage = output.accumulate_damage_from_age(&base_damage);
+    base_damage.intersect_rect(output_bounds);
+
+    let mut occluded = DamageRegion::new();
+    for item in items.iter_mut().rev() {
+        let mut visible_damage = base_damage.clone();
+        visible_damage.intersect_rect(item.state.bounds);
+        visible_damage.subtract_region(&occluded);
+        item.damage = visible_damage;
+        if item.opaque {
+            occluded.add_region(&item.opaque_region);
+        }
+    }
+
+    let direct_scanout = if items.len() == 1
+        && items[0].state.bounds == output_bounds
+        && output.page_flip_pending == false
+    {
+        let bounds = items[0].state.bounds;
+        let sync = items[0].sync.clone();
+        items[0].direct_scanout.take().map(|framebuffer| DirectScanoutCandidate {
+            bounds,
+            sync,
+            framebuffer,
+        })
+    } else {
+        None
+    };
+
+    FramePlan {
+        items,
+        scene,
+        damage: base_damage,
+        direct_scanout,
+        preserve_contents: output.preserve_render_buffer_contents() && !output.force_full_redraw,
+    }
+}
+
 fn collect_render_items(
     state: &mut crate::state::State,
     drm_id: DrmId,
-) -> (Vec<RenderItem>, Vec<DeferredRelease>) {
+) -> (Vec<SceneItem>, Vec<DeferredRelease>) {
     let mut items = Vec::new();
     let mut deferred_releases = Vec::new();
     let mut retired_candidates = Vec::new();
@@ -1652,23 +2081,41 @@ fn collect_render_items(
         deferred_releases.push(DeferredRelease::from_candidate(state, retired));
     }
 
-    let drm = state.drm.get(drm_id);
+    let (objects, drm_map) = (&mut state.objects, &state.drm);
+    let drm = drm_map.get(drm_id);
+    let output_bounds = drm.output.output_bounds();
+    let drm_fd = drm.fd();
 
     for surface_state in snapshots {
         let buffer_oid = surface_state.buffer_object_id;
-        if !state.objects.contains(buffer_oid) {
+        if !objects.contains(buffer_oid) {
             log::warn!("collect_render_items: buffer object {:?} missing (destroyed?)", buffer_oid);
             continue;
         }
-        let Some(_) = state.objects.try_get_ref_of::<WlBuffer>(buffer_oid) else {
+        let Some(_) = objects.try_get_ref_of::<WlBuffer>(buffer_oid) else {
             log::warn!("collect_render_items: object {:?} is not a WlBuffer", buffer_oid);
             continue;
         };
 
-        let mut obj = state.objects.grab(surface_state.buffer_object_id);
+        let mut obj = objects.grab(surface_state.buffer_object_id);
         let Some(buffer) = obj.downcast_mut::<WlBuffer>() else {
             continue;
         };
+        let Some(bounds) =
+            RectI::new(surface_state.x, surface_state.y, surface_state.width, surface_state.height)
+        else {
+            continue;
+        };
+        let mut damage = surface_state.damage.clone();
+        damage.intersect_rect(bounds);
+        damage.intersect_rect(output_bounds);
+        let mut opaque_region = if buffer.format().has_alpha {
+            surface_state.opaque_region.clone()
+        } else {
+            DamageRegion::from_rect(bounds)
+        };
+        opaque_region.intersect_rect(bounds);
+        opaque_region.intersect_rect(output_bounds);
         let Some(texture) = buffer.prepare_texture(&drm.egl_context, &surface_state.sync) else {
             log::warn!(
                 "collect_render_items: no prepared texture for buffer_object_id={:?}",
@@ -1685,13 +2132,53 @@ fn collect_render_items(
             surface_state.height,
             surface_state.tex_transform
         );
-        items.push(RenderItem {
+        let tex_transform = buffer.base_tex_transform().mul(surface_state.tex_transform);
+        let (buffer_width, buffer_height) = buffer.dimensions();
+        let scanout_sync_ok = matches!(
+            surface_state.sync.acquire,
+            crate::sync::AcquireSync::None | crate::sync::AcquireSync::SyncFile(_)
+        ) && (!matches!(
+            surface_state.sync.acquire,
+            crate::sync::AcquireSync::SyncFile(_)
+        ) || drm.output.in_use.primary_plane().0.in_fence_fd.is_some());
+        let direct_scanout = if buffer.dmabuf().is_some()
+            && !buffer.y_inverted()
+            && !buffer.format().has_alpha
+            && bounds == output_bounds
+            && buffer_width == bounds.width
+            && buffer_height == bounds.height
+            && tex_transform == transform::Mat3::identity()
+            && scanout_sync_ok
+        {
+            buffer.dmabuf().and_then(|dmabuf| {
+                let primary_plane = drm.output.in_use.primary_plane().0;
+                let plane_format = primary_plane.formats.get(&dmabuf.format.drm)?;
+                if !plane_format.modifiers.contains(&dmabuf.modifier)
+                    && !plane_format.modifiers.contains(&Modifier::INVALID)
+                {
+                    return None;
+                }
+                Drm::add_framebuffer(&drm_fd, dmabuf).ok()
+            })
+        } else {
+            None
+        };
+        items.push(SceneItem {
+            state: SceneItemState {
+                key: SurfaceKey {
+                    client_id: surface_state.surface_client_id,
+                    surface_id: surface_state.surface_id,
+                },
+                buffer_object_id: surface_state.buffer_object_id,
+                bounds,
+                tex_transform,
+            },
             texture,
-            x: surface_state.x,
-            y: surface_state.y,
-            width: surface_state.width,
-            height: surface_state.height,
-            tex_transform: buffer.base_tex_transform().mul(surface_state.tex_transform),
+            damage,
+            opaque_region: opaque_region.clone(),
+            opaque: !opaque_region.is_empty(),
+            sync: surface_state.sync,
+            direct_scanout,
         });
     }
 

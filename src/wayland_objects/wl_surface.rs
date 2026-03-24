@@ -6,7 +6,7 @@ use crate::{
         wl_surface, wp_linux_drm_syncobj_surface_v1, wp_viewport, xdg_wm_base, WaylandId,
         WlBufferId, WlCallbackId, WlRegionId, WlSubsurfaceId, WlSurfaceId, XdgSurfaceId,
     },
-    region::RegionValue,
+    region::{DamageRegion, RectI, RegionValue},
     state::{ObjectId, State},
     sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
     transform::{self, BufferTransform, SizeI, SurfaceViewport},
@@ -14,16 +14,6 @@ use crate::{
 };
 
 use {super::wl_buffer::WlBuffer, crate::protocol_generated::wl_display};
-
-static LOG_WL_SURFACE_DAMAGE_IGNORED: std::sync::Once = std::sync::Once::new();
-
-fn log_wl_surface_damage_ignored_once() {
-    LOG_WL_SURFACE_DAMAGE_IGNORED.call_once(|| {
-        log::warn!(
-            "wl_surface::damage and wl_surface::damage_buffer are ignored; repainting full buffers on commit until damage tracking is implemented"
-        );
-    });
-}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Role {
@@ -152,6 +142,7 @@ struct OnScreen {
     viewport: SurfaceViewport,
     logical_size: Option<SizeI>,
     sample_transform: transform::Mat3,
+    damage: DamageRegion,
     input_region: RegionValue,
     opaque_region: RegionValue,
 }
@@ -168,6 +159,7 @@ impl Default for OnScreen {
             viewport: SurfaceViewport::default(),
             logical_size: None,
             sample_transform: transform::Mat3::identity(),
+            damage: DamageRegion::new(),
             input_region: RegionValue::infinite(),
             opaque_region: RegionValue::empty(),
         }
@@ -176,12 +168,16 @@ impl Default for OnScreen {
 
 #[derive(Clone, Debug)]
 pub struct SurfaceRenderState {
+    pub surface_client_id: ClientId,
+    pub surface_id: WlSurfaceId,
     pub buffer_object_id: ObjectId,
     pub x: i32,
     pub y: i32,
     pub width: i32,
     pub height: i32,
     pub tex_transform: transform::Mat3,
+    pub damage: DamageRegion,
+    pub opaque_region: DamageRegion,
     pub sync: SurfaceSyncState,
 }
 
@@ -656,6 +652,7 @@ impl WlSurface {
             viewport: self.on_screen.viewport,
             logical_size: None,
             sample_transform: transform::Mat3::identity(),
+            damage: DamageRegion::new(),
             input_region: self.on_screen.input_region.clone(),
             opaque_region: self.on_screen.opaque_region.clone(),
         };
@@ -888,6 +885,61 @@ impl WlSurface {
         Some(DamageScaffold { surface_to_buffer, buffer_to_surface })
     }
 
+    fn full_damage_for_logical_size(logical_size: SizeI) -> DamageRegion {
+        let mut damage = DamageRegion::new();
+        if let Some(rect) = RectI::new(0, 0, logical_size.width, logical_size.height) {
+            damage.add_rect(rect);
+        }
+        damage
+    }
+
+    fn explicit_damage_region(
+        &self,
+        state: &State,
+        payload: &SurfaceCommitPayload,
+        logical_size: SizeI,
+        buffer_object_id: ObjectId,
+    ) -> DamageRegion {
+        let mut damage = DamageRegion::new();
+        for rect in &payload.damage_surface {
+            if let Some(rect) = RectI::new(rect.x, rect.y, rect.width, rect.height) {
+                damage.add_rect(rect);
+            }
+        }
+        if let Some(scaffold) =
+            self.pending_damage_scaffold(state, buffer_object_id, logical_size, payload)
+        {
+            for rect in scaffold.buffer_to_surface {
+                if let Some(rect) = RectI::from_f32_bounds(rect) {
+                    damage.add_rect(rect);
+                }
+            }
+        }
+        if let Some(bounds) = RectI::new(0, 0, logical_size.width, logical_size.height) {
+            damage.intersect_rect(bounds);
+        }
+        damage
+    }
+
+    fn committed_damage_region(
+        &self,
+        state: &State,
+        payload: &SurfaceCommitPayload,
+        buffer_changed: bool,
+        mapping_changed: bool,
+    ) -> DamageRegion {
+        let Some(buffer_object_id) = self.on_screen.buffer_object_id else {
+            return DamageRegion::new();
+        };
+        let Some(logical_size) = self.on_screen.logical_size else {
+            return DamageRegion::new();
+        };
+        if buffer_changed || mapping_changed {
+            return Self::full_damage_for_logical_size(logical_size);
+        }
+        self.explicit_damage_region(state, payload, logical_size, buffer_object_id)
+    }
+
     fn parent_behaves_synchronized(&self, state: &State) -> bool {
         let Some(parent_object_id) = self.parent_surface_object_id() else {
             return false;
@@ -970,6 +1022,7 @@ impl WlSurface {
     ) -> bool {
         let changes = self.get_changes_for_payload(payload);
         let mut commit_blocked = false;
+        let mut committed_damage = DamageRegion::new();
 
         match payload.buffer {
             None => {}
@@ -986,6 +1039,7 @@ impl WlSurface {
                     viewport: payload.viewport,
                     logical_size: None,
                     sample_transform: transform::Mat3::identity(),
+                    damage: DamageRegion::new(),
                     input_region: payload.input_region.clone(),
                     opaque_region: payload.opaque_region.clone(),
                 };
@@ -1062,6 +1116,13 @@ impl WlSurface {
         if !commit_blocked {
             self.on_screen.input_region = payload.input_region.clone();
             self.on_screen.opaque_region = payload.opaque_region.clone();
+            committed_damage = self.committed_damage_region(
+                state,
+                payload,
+                changes.buffer_changed,
+                changes.mapping_changed,
+            );
+            self.on_screen.damage.add_region(&committed_damage);
         }
 
         let SurfaceChanges { buffer_changed, mapping_changed } = changes;
@@ -1079,28 +1140,15 @@ impl WlSurface {
             );
         }
 
-        let damage_scaffold = self
-            .on_screen
-            .buffer_object_id
-            .zip(self.on_screen.logical_size)
-            .and_then(|(buffer_object_id, logical_size)| {
-                self.pending_damage_scaffold(state, buffer_object_id, logical_size, payload)
-            });
-        if let Some(damage) = damage_scaffold.as_ref() {
-            if !damage.surface_to_buffer.is_empty() || !damage.buffer_to_surface.is_empty() {
-                log::debug!(
-                    "wl_surface commit damage scaffold surface={:?} transform={:?} scale={} viewport={:?} surface_to_buffer={:?} buffer_to_surface={:?}",
-                    self.id,
-                    self.on_screen.buffer_transform,
-                    self.on_screen.buffer_scale,
-                    self.on_screen.viewport,
-                    damage.surface_to_buffer,
-                    damage.buffer_to_surface
-                );
-            }
+        if !committed_damage.is_empty() {
+            log::debug!(
+                "wl_surface commit damage applied surface={:?} local_damage={:?}",
+                self.id,
+                committed_damage.rects()
+            );
         }
 
-        buffer_changed || mapping_changed
+        buffer_changed || mapping_changed || !committed_damage.is_empty()
     }
 
     fn apply_cached_commit(
@@ -1354,15 +1402,28 @@ impl WlSurface {
 
     pub fn render_state_at(&self, base_x: i32, base_y: i32) -> Option<SurfaceRenderState> {
         let logical_size = self.on_screen.logical_size?;
+        let x = base_x + self.on_screen.x;
+        let y = base_y + self.on_screen.y;
+        let local_bounds = RectI::new(0, 0, logical_size.width, logical_size.height)?;
         Some(SurfaceRenderState {
+            surface_client_id: self.client_id,
+            surface_id: self.id,
             buffer_object_id: self.on_screen.buffer_object_id?,
-            x: base_x + self.on_screen.x,
-            y: base_y + self.on_screen.y,
+            x,
+            y,
             width: logical_size.width,
             height: logical_size.height,
             tex_transform: self.on_screen.sample_transform,
+            damage: self.on_screen.damage.translated(x, y),
+            opaque_region: self.on_screen.opaque_region.to_region_clipped(local_bounds).translated(x, y),
             sync: self.on_screen.sync.clone(),
         })
+    }
+
+    pub fn take_render_state_at(&mut self, base_x: i32, base_y: i32) -> Option<SurfaceRenderState> {
+        let state = self.render_state_at(base_x, base_y)?;
+        self.on_screen.damage.clear();
+        Some(state)
     }
 
     pub fn accepts_input_at(&self, x: f64, y: f64) -> bool {
@@ -1412,6 +1473,7 @@ impl WlSurface {
             viewport: SurfaceViewport::default(),
             logical_size: Some(SizeI { width, height }),
             sample_transform: transform::Mat3::identity(),
+            damage: Self::full_damage_for_logical_size(SizeI { width, height }),
             input_region: RegionValue::infinite(),
             opaque_region: RegionValue::empty(),
         };
@@ -1473,6 +1535,7 @@ impl WlSurface {
             viewport: next.viewport,
             logical_size: Some(SizeI { width: next.width, height: next.height }),
             sample_transform: next.tex_transform,
+            damage: Self::full_damage_for_logical_size(SizeI { width: next.width, height: next.height }),
             input_region: next.input_region,
             opaque_region: next.opaque_region,
         };
@@ -1488,6 +1551,7 @@ impl WlSurface {
         self.on_screen.sync = SurfaceSyncState::default();
         self.on_screen.logical_size = None;
         self.on_screen.sample_transform = transform::Mat3::identity();
+        self.on_screen.damage.clear();
     }
 
     fn cancel_blocked(
@@ -1644,7 +1708,6 @@ impl Object for WlSurface {
                 self.pending
                     .damage_surface
                     .push(DamageRect { x, y, width, height });
-                log_wl_surface_damage_ignored_once();
             }
             Frame { callback } => {
                 client.insert_object(state, WlCallback::new(callback));
@@ -1685,7 +1748,6 @@ impl Object for WlSurface {
                 self.pending
                     .damage_buffer
                     .push(DamageRect { x, y, width, height });
-                log_wl_surface_damage_ignored_once();
             }
             Offset { x, y } => {
                 if self.role != Role::Subsurface {
@@ -1705,7 +1767,7 @@ mod tests {
             egl::EGL,
             globals::Globals,
             protocol_generated::{WlSubsurfaceId, WlSurfaceId},
-            region::{RectI, RegionSpec, RegionValue},
+            region::{DamageRegion, RectI, RegionSpec, RegionValue},
             runner::Dispatcher,
             state::{ObjectId, State},
             sync::SurfaceSyncState,
@@ -1726,6 +1788,7 @@ mod tests {
             viewport: SurfaceViewport::default(),
             logical_size: Some(SizeI { width: 100, height: 80 }),
             sample_transform: transform::Mat3::identity(),
+            damage: DamageRegion::new(),
             input_region: RegionValue::infinite(),
             opaque_region: RegionValue::empty(),
         };
