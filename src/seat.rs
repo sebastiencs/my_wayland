@@ -7,7 +7,7 @@ use crate::{
     protocol_generated::{Array, WlKeyboardId, WlPointerId, WlSurfaceId},
     runner::Dispatcher,
     state::{DrmId, IndexMap, ObjectId, State},
-    wayland_objects::wl_surface::WlSurface,
+    wayland_objects::wl_surface::{StackEntry, WlSurface},
     xkb::KeyboardModifiers,
 };
 
@@ -327,37 +327,83 @@ fn set_keyboard_focus(
     state.seat.keyboard_focus = new_focus;
 }
 
-fn hit_test_surface(
+fn hit_test_subtree(
     objects: &IndexMap<ObjectId, Box<dyn Object>>,
+    surface_object_id: ObjectId,
+    base_x: i32,
+    base_y: i32,
+    x: f64,
+    y: f64,
+) -> Option<PointerFocus> {
+    let object = objects.try_get(surface_object_id)?;
+    let surface = object.downcast_ref::<WlSurface>()?;
+    let surface_state = surface.render_state_at(base_x, base_y)?;
+    let stack = surface.current_stack().to_vec();
+
+    for entry in stack.iter().rev() {
+        match *entry {
+            StackEntry::Parent => {
+                let rect = SurfaceRect {
+                    x: surface_state.x,
+                    y: surface_state.y,
+                    width: surface_state.width,
+                    height: surface_state.height,
+                };
+                if surface.accepts_input_at_with_origin(x, y, base_x, base_y) {
+                    return Some(PointerFocus {
+                        target: SurfaceFocus {
+                            client_id: surface.client_id(),
+                            surface_id: surface.surface_id(),
+                        },
+                        rect,
+                    });
+                }
+            }
+            StackEntry::Child(child_surface_object_id) => {
+                let Some(child_object) = objects.try_get(child_surface_object_id) else {
+                    continue;
+                };
+                let Some(child_surface) = child_object.downcast_ref::<WlSurface>() else {
+                    continue;
+                };
+                let (child_x, child_y) = child_surface.current_subsurface_position();
+                if let Some(hit) = hit_test_subtree(
+                    objects,
+                    child_surface_object_id,
+                    surface_state.x + child_x,
+                    surface_state.y + child_y,
+                    x,
+                    y,
+                ) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn hit_test_surface(
+    state: &State,
     _drm: &IndexMap<DrmId, Drm>,
     x: f64,
     y: f64,
 ) -> Option<PointerFocus> {
     let mut hit = None;
 
-    for (_, object) in objects.iter() {
+    for object_id in state.root_surface_ids() {
+        let Some(object) = state.objects.try_get(object_id) else {
+            continue;
+        };
         let Some(surface) = object.downcast_ref::<WlSurface>() else {
             continue;
         };
-        let Some(surface_state) = surface.render_state() else {
+        if !surface.is_root() {
             continue;
-        };
-        // Hit-testing stays in compositor logical coordinates; the render path projects this space.
-        let rect = SurfaceRect {
-            x: surface_state.x,
-            y: surface_state.y,
-            width: surface_state.width,
-            height: surface_state.height,
-        };
-
-        if surface.accepts_input_at(x, y) {
-            hit = Some(PointerFocus {
-                target: SurfaceFocus {
-                    client_id: surface.client_id(),
-                    surface_id: surface.surface_id(),
-                },
-                rect,
-            });
+        }
+        if let Some(root_hit) = hit_test_subtree(&state.objects, object_id, 0, 0, x, y) {
+            hit = Some(root_hit);
         }
     }
 
@@ -371,12 +417,8 @@ fn refresh_pointer_focus(
     send_motion: bool,
 ) {
     let old_focus = state.seat.pointer_focus;
-    let new_focus = hit_test_surface(
-        &state.objects,
-        &state.drm,
-        state.seat.pointer_pos.0,
-        state.seat.pointer_pos.1,
-    );
+    let new_focus =
+        hit_test_surface(state, &state.drm, state.seat.pointer_pos.0, state.seat.pointer_pos.1);
 
     if old_focus.map(|focus| focus.target) != new_focus.map(|focus| focus.target) {
         log::debug!(
@@ -516,4 +558,181 @@ fn dispatch_modifiers(
             group: modifiers.group,
         },
     );
+}
+
+#[cfg(test)]
+mod surface_tree_hit_test_tests {
+    use {
+        super::hit_test_surface,
+        crate::{
+            clients::ClientId,
+            egl::EGL,
+            globals::Globals,
+            protocol_generated::{WlSubsurfaceId, WlSurfaceId},
+            state::{ObjectId, State},
+            wayland_objects::wl_surface::WlSurface,
+            xkb::Xkb,
+        },
+    };
+
+    fn make_state() -> State {
+        let xkb = Xkb::new();
+        let keyboard = xkb.create_keyboard_state();
+        let mut globals = Globals::new();
+        globals.initialize();
+        State {
+            objects: Default::default(),
+            root_surfaces: Default::default(),
+            inputs: Default::default(),
+            drm: Default::default(),
+            globals,
+            egl: EGL::new(),
+            seat: Default::default(),
+            keyboard,
+            xkb,
+        }
+    }
+
+    fn insert_surface(state: &mut State, id: u32) -> ObjectId {
+        let object_id = state
+            .insert_object(WlSurface::new(WlSurfaceId::from(id), ClientId::from_raw(1), 6))
+            .1;
+        state.register_root_surface(object_id);
+        object_id
+    }
+
+    #[test]
+    fn hit_test_prefers_above_then_parent_then_below() {
+        let mut state = make_state();
+        let root = insert_surface(&mut state, 1);
+        let below = insert_surface(&mut state, 2);
+        let above = insert_surface(&mut state, 3);
+
+        {
+            let root_surface = state
+                .objects
+                .get_mut(root)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            root_surface.test_map(ObjectId::from(200usize), 0, 0, 20, 20);
+            root_surface.add_pending_child(below);
+            root_surface.add_pending_child(above);
+            assert!(root_surface.restack_child_relative(below, None, false));
+            assert!(root_surface.restack_child_relative(above, None, true));
+        }
+        {
+            let below_surface = state
+                .objects
+                .get_mut(below)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            below_surface.assign_subsurface(WlSubsurfaceId::from(31), root);
+            below_surface.set_subsurface_position(0, 0);
+            below_surface.test_map(ObjectId::from(201usize), 0, 0, 20, 20);
+        }
+        {
+            let above_surface = state
+                .objects
+                .get_mut(above)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            above_surface.assign_subsurface(WlSubsurfaceId::from(32), root);
+            above_surface.set_subsurface_position(0, 0);
+            above_surface.test_map(ObjectId::from(202usize), 0, 0, 20, 20);
+        }
+        {
+            let mut root_object = state.objects.grab(root);
+            let root_surface = root_object.downcast_mut::<WlSurface>().unwrap();
+            assert!(root_surface.apply_pending_tree_state(&mut state));
+        }
+
+        let hit = hit_test_surface(&state, &state.drm, 5.0, 5.0).unwrap();
+        assert_eq!(hit.target.surface_id, WlSurfaceId::from(3));
+    }
+
+    #[test]
+    fn hit_test_uses_nested_offsets_and_falls_back_when_child_rejects_input() {
+        let mut state = make_state();
+        let root = insert_surface(&mut state, 1);
+        let child = insert_surface(&mut state, 2);
+        let grandchild = insert_surface(&mut state, 3);
+
+        {
+            let root_surface = state
+                .objects
+                .get_mut(root)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            root_surface.test_map(ObjectId::from(210usize), 50, 60, 100, 100);
+            root_surface.add_pending_child(child);
+            assert!(root_surface.restack_child_relative(child, None, true));
+        }
+        {
+            let child_surface = state
+                .objects
+                .get_mut(child)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            child_surface.assign_subsurface(WlSubsurfaceId::from(41), root);
+            child_surface.set_subsurface_position(10, 10);
+            child_surface.test_map(ObjectId::from(211usize), 0, 0, 40, 40);
+            child_surface.add_pending_child(grandchild);
+        }
+        {
+            let grandchild_surface = state
+                .objects
+                .get_mut(grandchild)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            grandchild_surface.assign_subsurface(WlSubsurfaceId::from(42), child);
+            grandchild_surface.set_subsurface_position(5, 6);
+            grandchild_surface.test_map(ObjectId::from(212usize), 0, 0, 20, 20);
+            grandchild_surface.test_set_input_region(crate::region::RegionValue::empty());
+        }
+        {
+            let mut root_object = state.objects.grab(root);
+            let root_surface = root_object.downcast_mut::<WlSurface>().unwrap();
+            assert!(root_surface.apply_pending_tree_state(&mut state));
+        }
+        {
+            let mut child_object = state.objects.grab(child);
+            let child_surface = child_object.downcast_mut::<WlSurface>().unwrap();
+            assert!(child_surface.apply_pending_tree_state(&mut state));
+        }
+
+        let fallback_hit = hit_test_surface(&state, &state.drm, 66.0, 77.0).unwrap();
+        assert_eq!(fallback_hit.target.surface_id, WlSurfaceId::from(2));
+
+        let parent_hit = hit_test_surface(&state, &state.drm, 145.0, 145.0).unwrap();
+        assert_eq!(parent_hit.target.surface_id, WlSurfaceId::from(1));
+    }
+
+    #[test]
+    fn hit_test_uses_explicit_root_surface_order() {
+        let mut state = make_state();
+        let root_a = insert_surface(&mut state, 1);
+        let root_b = insert_surface(&mut state, 2);
+
+        {
+            let root_a_surface = state
+                .objects
+                .get_mut(root_a)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            root_a_surface.test_map(ObjectId::from(220usize), 0, 0, 20, 20);
+        }
+        {
+            let root_b_surface = state
+                .objects
+                .get_mut(root_b)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            root_b_surface.test_map(ObjectId::from(221usize), 0, 0, 20, 20);
+        }
+
+        state.register_root_surface(root_a);
+
+        let hit = hit_test_surface(&state, &state.drm, 5.0, 5.0).unwrap();
+        assert_eq!(hit.target.surface_id, WlSurfaceId::from(1));
+    }
 }

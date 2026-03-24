@@ -393,6 +393,7 @@ index_map_id!(DrmId);
 
 pub struct State {
     pub objects: Box<IndexMap<ObjectId, Box<dyn Object>>>,
+    pub root_surfaces: Vec<ObjectId>,
     pub inputs: IndexMap<InputId, Input>,
     pub drm: IndexMap<DrmId, Drm>,
     pub globals: Globals,
@@ -411,7 +412,26 @@ impl State {
     /// Removes the object now, or defers if the slot is currently grabbed.
     /// Returns `None` if deferred or if the slot was already empty.
     pub fn remove_object(&mut self, object_id: ObjectId) -> Option<Box<dyn Object>> {
+        self.unregister_root_surface(object_id);
         self.objects.remove_or_defer(object_id)
+    }
+
+    pub fn register_root_surface(&mut self, object_id: ObjectId) {
+        self.unregister_root_surface(object_id);
+        self.root_surfaces.push(object_id);
+    }
+
+    pub fn unregister_root_surface(&mut self, object_id: ObjectId) {
+        self.root_surfaces
+            .retain(|candidate| *candidate != object_id);
+    }
+
+    pub fn root_surface_ids(&self) -> Vec<ObjectId> {
+        self.root_surfaces
+            .iter()
+            .copied()
+            .filter(|object_id| self.objects.contains(*object_id))
+            .collect()
     }
 
     pub fn insert_global(&mut self, global: Box<dyn Global>) {

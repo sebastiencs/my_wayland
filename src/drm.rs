@@ -26,10 +26,13 @@ use crate::{
     gbm::UseFlags,
     io_uring::ring::{ReadWriteCompleted, RingId},
     runner::{AnyAction, Dispatcher, Model},
-    state::{DrmId, State},
-    sync::DeferredRelease,
+    state::{DrmId, ObjectId, State},
+    sync::{DeferredRelease, RetiredBufferCandidate},
     transform::{self, OutputPresentationTransform},
-    wayland_objects::{wl_buffer::WlBuffer, wl_surface::WlSurface},
+    wayland_objects::{
+        wl_buffer::WlBuffer,
+        wl_surface::{StackEntry, WlSurface},
+    },
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1567,6 +1570,52 @@ impl DrmModel {
     }
 }
 
+fn collect_surface_snapshots(
+    state: &mut crate::state::State,
+    surface_object_id: ObjectId,
+    base_x: i32,
+    base_y: i32,
+    retired_candidates: &mut Vec<RetiredBufferCandidate>,
+    snapshots: &mut Vec<crate::wayland_objects::wl_surface::SurfaceRenderState>,
+) {
+    let (stack, surface_state) = {
+        let mut obj = state.objects.grab(surface_object_id);
+        let Some(surface) = obj.downcast_mut::<WlSurface>() else {
+            return;
+        };
+        retired_candidates.extend(surface.take_retired_buffers());
+        let Some(surface_state) = surface.render_state_at(base_x, base_y) else {
+            return;
+        };
+        (surface.current_stack().to_vec(), surface_state)
+    };
+
+    for entry in &stack {
+        if let StackEntry::Child(child_surface_object_id) = *entry {
+            let child_base = {
+                let Some(child_object) = state.objects.try_get(child_surface_object_id) else {
+                    continue;
+                };
+                let Some(child_surface) = child_object.downcast_ref::<WlSurface>() else {
+                    continue;
+                };
+                let (x, y) = child_surface.current_subsurface_position();
+                (surface_state.x + x, surface_state.y + y)
+            };
+            collect_surface_snapshots(
+                state,
+                child_surface_object_id,
+                child_base.0,
+                child_base.1,
+                retired_candidates,
+                snapshots,
+            );
+        } else {
+            snapshots.push(surface_state.clone());
+        }
+    }
+}
+
 fn collect_render_items(
     state: &mut crate::state::State,
     drm_id: DrmId,
@@ -1574,23 +1623,30 @@ fn collect_render_items(
     let mut items = Vec::new();
     let mut deferred_releases = Vec::new();
     let mut retired_candidates = Vec::new();
-    let surface_oids: Vec<_> = state
-        .objects
-        .iter()
-        .filter_map(|(object_id, object)| object.downcast_ref::<WlSurface>().map(|_| object_id))
+    let root_surface_oids: Vec<_> = state
+        .root_surface_ids()
+        .into_iter()
+        .filter(|object_id| {
+            let Some(object) = state.objects.try_get(*object_id) else {
+                return false;
+            };
+            let Some(surface) = object.downcast_ref::<WlSurface>() else {
+                return false;
+            };
+            surface.is_root()
+        })
         .collect();
     let snapshots = {
         let mut snapshots = Vec::new();
-        for object_id in surface_oids {
-            let mut obj = state.objects.grab(object_id);
-            let Some(surface) = obj.downcast_mut::<WlSurface>() else {
-                continue;
-            };
-            retired_candidates.extend(surface.take_retired_buffers());
-            let Some(surface_state) = surface.render_state() else {
-                continue;
-            };
-            snapshots.push(surface_state);
+        for object_id in root_surface_oids {
+            collect_surface_snapshots(
+                state,
+                object_id,
+                0,
+                0,
+                &mut retired_candidates,
+                &mut snapshots,
+            );
         }
         snapshots
     };
@@ -1666,5 +1722,211 @@ mod drm_event_tests {
             crtc_id: 0,
         };
         assert_eq!(f.len(), 32);
+    }
+}
+
+#[cfg(test)]
+mod surface_tree_render_tests {
+    use {
+        super::collect_surface_snapshots,
+        crate::{
+            clients::ClientId,
+            egl::EGL,
+            globals::Globals,
+            protocol_generated::{WlSubsurfaceId, WlSurfaceId},
+            state::{ObjectId, State},
+            wayland_objects::wl_surface::WlSurface,
+            xkb::Xkb,
+        },
+    };
+
+    fn make_state() -> State {
+        let xkb = Xkb::new();
+        let keyboard = xkb.create_keyboard_state();
+        let mut globals = Globals::new();
+        globals.initialize();
+        State {
+            objects: Default::default(),
+            root_surfaces: Default::default(),
+            inputs: Default::default(),
+            drm: Default::default(),
+            globals,
+            egl: EGL::new(),
+            seat: Default::default(),
+            keyboard,
+            xkb,
+        }
+    }
+
+    fn insert_surface(state: &mut State, id: u32) -> ObjectId {
+        let object_id = state
+            .insert_object(WlSurface::new(WlSurfaceId::from(id), ClientId::from_raw(1), 6))
+            .1;
+        state.register_root_surface(object_id);
+        object_id
+    }
+
+    #[test]
+    fn collect_surface_snapshots_walks_below_self_above() {
+        let mut state = make_state();
+        let root = insert_surface(&mut state, 1);
+        let below = insert_surface(&mut state, 2);
+        let above = insert_surface(&mut state, 3);
+
+        {
+            let root_surface = state
+                .objects
+                .get_mut(root)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            root_surface.test_map(ObjectId::from(100usize), 10, 20, 50, 40);
+            root_surface.add_pending_child(below);
+            root_surface.add_pending_child(above);
+            assert!(root_surface.restack_child_relative(below, None, false));
+            assert!(root_surface.restack_child_relative(above, None, true));
+        }
+        {
+            let below_surface = state
+                .objects
+                .get_mut(below)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            below_surface.assign_subsurface(WlSubsurfaceId::from(11), root);
+            below_surface.set_subsurface_position(2, 3);
+            below_surface.test_map(ObjectId::from(101usize), 0, 0, 10, 10);
+        }
+        {
+            let above_surface = state
+                .objects
+                .get_mut(above)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            above_surface.assign_subsurface(WlSubsurfaceId::from(12), root);
+            above_surface.set_subsurface_position(7, 8);
+            above_surface.test_map(ObjectId::from(102usize), 0, 0, 10, 10);
+        }
+        {
+            let mut root_object = state.objects.grab(root);
+            let root_surface = root_object.downcast_mut::<WlSurface>().unwrap();
+            assert!(root_surface.apply_pending_tree_state(&mut state));
+        }
+
+        let mut retired = Vec::new();
+        let mut snapshots = Vec::new();
+        collect_surface_snapshots(&mut state, root, 0, 0, &mut retired, &mut snapshots);
+
+        let ids: Vec<_> = snapshots
+            .iter()
+            .map(|snapshot| snapshot.buffer_object_id)
+            .collect();
+        let positions: Vec<_> = snapshots
+            .iter()
+            .map(|snapshot| (snapshot.x, snapshot.y))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![ObjectId::from(101usize), ObjectId::from(100usize), ObjectId::from(102usize),]
+        );
+        assert_eq!(positions, vec![(12, 23), (10, 20), (17, 28)]);
+    }
+
+    #[test]
+    fn new_subsurface_defaults_below_parent() {
+        let mut state = make_state();
+        let root = insert_surface(&mut state, 1);
+        let child = insert_surface(&mut state, 2);
+
+        {
+            let root_surface = state
+                .objects
+                .get_mut(root)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            root_surface.test_map(ObjectId::from(120usize), 10, 20, 50, 40);
+            root_surface.add_pending_child(child);
+        }
+        {
+            let child_surface = state
+                .objects
+                .get_mut(child)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            child_surface.assign_subsurface(WlSubsurfaceId::from(31), root);
+            child_surface.set_subsurface_position(3, 4);
+            child_surface.test_map(ObjectId::from(121usize), 0, 0, 10, 10);
+        }
+        {
+            let mut root_object = state.objects.grab(root);
+            let root_surface = root_object.downcast_mut::<WlSurface>().unwrap();
+            assert!(root_surface.apply_pending_tree_state(&mut state));
+        }
+
+        let mut retired = Vec::new();
+        let mut snapshots = Vec::new();
+        collect_surface_snapshots(&mut state, root, 0, 0, &mut retired, &mut snapshots);
+        let ids: Vec<_> = snapshots
+            .iter()
+            .map(|snapshot| snapshot.buffer_object_id)
+            .collect();
+        assert_eq!(ids, vec![ObjectId::from(121usize), ObjectId::from(120usize)]);
+    }
+
+    #[test]
+    fn collect_surface_snapshots_accumulates_nested_subsurface_offsets() {
+        let mut state = make_state();
+        let root = insert_surface(&mut state, 1);
+        let child = insert_surface(&mut state, 2);
+        let grandchild = insert_surface(&mut state, 3);
+
+        {
+            let root_surface = state
+                .objects
+                .get_mut(root)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            root_surface.test_map(ObjectId::from(110usize), 100, 200, 40, 30);
+            root_surface.add_pending_child(child);
+        }
+        {
+            let child_surface = state
+                .objects
+                .get_mut(child)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            child_surface.assign_subsurface(WlSubsurfaceId::from(21), root);
+            child_surface.set_subsurface_position(5, 7);
+            child_surface.test_map(ObjectId::from(111usize), 1, 2, 20, 10);
+            child_surface.add_pending_child(grandchild);
+        }
+        {
+            let grandchild_surface = state
+                .objects
+                .get_mut(grandchild)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            grandchild_surface.assign_subsurface(WlSubsurfaceId::from(22), child);
+            grandchild_surface.set_subsurface_position(11, 13);
+            grandchild_surface.test_map(ObjectId::from(112usize), 3, 4, 8, 6);
+        }
+        {
+            let mut root_object = state.objects.grab(root);
+            let root_surface = root_object.downcast_mut::<WlSurface>().unwrap();
+            assert!(root_surface.apply_pending_tree_state(&mut state));
+        }
+        {
+            let mut child_object = state.objects.grab(child);
+            let child_surface = child_object.downcast_mut::<WlSurface>().unwrap();
+            assert!(child_surface.apply_pending_tree_state(&mut state));
+        }
+
+        let mut retired = Vec::new();
+        let mut snapshots = Vec::new();
+        collect_surface_snapshots(&mut state, root, 0, 0, &mut retired, &mut snapshots);
+
+        let positions: Vec<_> = snapshots
+            .iter()
+            .map(|snapshot| (snapshot.x, snapshot.y))
+            .collect();
+        assert_eq!(positions, vec![(120, 226), (106, 209), (100, 200)]);
     }
 }

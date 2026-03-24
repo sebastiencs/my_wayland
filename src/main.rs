@@ -197,6 +197,7 @@ fn main() {
 
     let state = State {
         objects: Default::default(),
+        root_surfaces: Default::default(),
         inputs: Default::default(),
         drm: Default::default(),
         globals,

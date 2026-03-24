@@ -16,6 +16,7 @@ pub mod wl_seat;
 pub mod wl_shm;
 pub mod wl_shm_pool;
 pub mod wl_subcompositor;
+pub mod wl_subsurface;
 pub mod wl_surface;
 pub mod wp_cursor_shape_manager_v1;
 pub mod wp_linux_drm_syncobj_manager_v1;
@@ -59,7 +60,6 @@ fake_obj! {
     { wl_touch, WlTouch },
     // { wl_output, WlOutput },
     // { wl_subcompositor, WlSubcompositor },
-    { wl_subsurface, WlSubsurface },
     { wl_fixes, WlFixes },
     // { wp_presentation, WpPresentation },
     { wp_presentation_feedback, WpPresentationFeedback },

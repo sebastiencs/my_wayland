@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
         unix::net::UnixListener,
     },
     path::PathBuf,
@@ -203,6 +203,12 @@ impl Client {
             pending_fds: VecDeque::new(),
             next_server_id: MIN_SERVER_ID,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_tests(client_id: ClientId) -> Self {
+        let fd = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+        Self::new(client_id, fd)
     }
 
     pub fn client_id(&self) -> ClientId {
@@ -605,6 +611,16 @@ impl<'a> ClientDispatcher<'a> {
             dispatch_to: Redispatcher::None,
         };
         self.dispatch(action);
+    }
+}
+
+#[cfg(test)]
+impl Client {
+    pub(crate) fn test_dispatcher<'a>(
+        &self,
+        dispatcher: &'a mut Dispatcher,
+    ) -> ClientDispatcher<'a> {
+        ClientDispatcher::make(self, dispatcher)
     }
 }
 
