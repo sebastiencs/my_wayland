@@ -48,6 +48,7 @@ macro_rules! index_map_id {
 }
 
 /// Cache any data
+#[allow(unused)]
 macro_rules! cache {
     ($F:ty, $compute:expr) => {{
         // Initializer is `const`.
@@ -93,7 +94,7 @@ use {
 use {globals::Globals, state::State};
 
 use crate::{
-    clients::{Clients, ClientsAction},
+    clients::Clients,
     io_uring::{model::IoUringState, ring::PollCompleted},
     runner::{AnyAction, Dispatcher, Redispatcher, Runner},
     udev::Udev,
@@ -241,7 +242,7 @@ fn main() {
 
         std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(500));
-            let output = std::process::Command::new("fish")
+            let _output = std::process::Command::new("fish")
                 .args(&[
                     "-c",
                     // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 vlc",

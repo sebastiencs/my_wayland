@@ -26,7 +26,10 @@ use crate::{
     },
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     state::State,
-    wayland_objects::wl_output::WlOutputGlobal,
+    wayland_objects::{
+        wl_output::WlOutputGlobal,
+        wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1Global,
+    },
 };
 
 #[derive(Debug)]
@@ -239,6 +242,13 @@ impl Udev {
         let drm_model = state.drm.get(drm_id).make_model(drm_id);
         dispatcher.start_model(usize::from(drm_id) as u64, drm_model);
         state.insert_global(WlOutputGlobal::new(drm_id)); // TODO: Should we notify clients ?
+        if state.drm.get(drm_id).supports_linux_drm_syncobj()
+            && !state
+                .globals
+                .contains_interface("wp_linux_drm_syncobj_manager_v1")
+        {
+            state.insert_global(WpLinuxDrmSyncobjManagerV1Global::new(drm_id));
+        }
     }
 }
 

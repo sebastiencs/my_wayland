@@ -105,15 +105,9 @@ impl WlSurface {
     pub fn set_syncobj_surface_object(
         &mut self,
         object: crate::protocol_generated::WpLinuxDrmSyncobjSurfaceV1Id,
-        dispatcher: &mut ClientDispatcher,
-    ) -> Result<(), wp_linux_drm_syncobj_surface_v1::Error> {
+    ) -> Result<(), ()> {
         if self.syncobj_surface_object.is_some() {
-            self.send_error(
-                dispatcher,
-                wp_linux_drm_syncobj_surface_v1::Error::NoSurface as u32,
-                "surface already has a syncobj surface object",
-            );
-            return Err(wp_linux_drm_syncobj_surface_v1::Error::NoSurface);
+            return Err(());
         }
         self.syncobj_surface_object = Some(object);
         Ok(())
@@ -130,6 +124,28 @@ impl WlSurface {
 
     pub fn pending_sync_mut(&mut self) -> &mut SurfaceSyncState {
         &mut self.pending.sync
+    }
+
+    pub fn has_syncobj_surface_object(&self) -> bool {
+        self.syncobj_surface_object.is_some()
+    }
+
+    fn send_syncobj_surface_error(
+        &self,
+        client: &Client,
+        dispatcher: &mut ClientDispatcher,
+        code: u32,
+        message: impl AsRef<str>,
+    ) {
+        let Some(syncobj_surface) = self.syncobj_surface_object else {
+            log::warn!(
+                "syncobj protocol error without syncobj surface object on wl_surface {:?}: {}",
+                self.id,
+                message.as_ref()
+            );
+            return;
+        };
+        client.send_protocol_error(dispatcher, syncobj_surface.into(), code, message);
     }
 
     pub fn set_role(
@@ -213,7 +229,7 @@ impl WlSurface {
             xdg_surface.on_commit(client, state, dispatcher);
         }
 
-        if !self.validate_pending_sync(state, dispatcher) {
+        if !self.validate_pending_sync(client, state, dispatcher) {
             self.pending.buffer = None;
             self.pending.sync = SurfaceSyncState::default();
             self.pending.offset = (0, 0);
@@ -248,16 +264,17 @@ impl WlSurface {
                 if should_block {
                     if let Err(error) = self.install_blocked_surface(
                         next.clone(),
+                        self.client_id,
                         client.object_id(self.id),
                         dispatcher,
                     ) {
                         log::warn!(
-                            "failed to install acquire waiter for surface {:?}: {:?}; activating immediately",
+                            "failed to install acquire waiter for surface {:?}: {:?}; keeping previous contents active",
                             self.id,
                             error
                         );
                         self.cancel_blocked(client, state, dispatcher);
-                        self.activate_blocked_state(next);
+                        return;
                     }
                 } else {
                     self.cancel_blocked(client, state, dispatcher);
@@ -276,6 +293,7 @@ impl WlSurface {
 
     fn validate_pending_sync(
         &mut self,
+        client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) -> bool {
@@ -287,7 +305,8 @@ impl WlSurface {
         let sync_present = !pending_sync.acquire.is_none() || !pending_sync.release.is_none();
         let Some(pending_buffer) = self.pending.buffer else {
             if sync_present {
-                self.send_error(
+                self.send_syncobj_surface_error(
+                    client,
                     dispatcher,
                     wp_linux_drm_syncobj_surface_v1::Error::NoBuffer as u32,
                     "explicit sync points require a pending non-null buffer",
@@ -299,7 +318,8 @@ impl WlSurface {
 
         let Some(buffer_object_id) = pending_buffer else {
             if sync_present {
-                self.send_error(
+                self.send_syncobj_surface_error(
+                    client,
                     dispatcher,
                     wp_linux_drm_syncobj_surface_v1::Error::NoBuffer as u32,
                     "explicit sync points require a pending non-null buffer",
@@ -310,23 +330,26 @@ impl WlSurface {
         };
 
         let Some(object) = state.objects.try_get(buffer_object_id) else {
-            self.send_error(
+            client.protocol_violation_disconnect(
                 dispatcher,
+                self.id.into(),
                 wl_display::Error::InvalidObject as u32,
                 "pending wl_buffer disappeared before commit",
             );
             return false;
         };
         let Some(buffer) = object.downcast_ref::<WlBuffer>() else {
-            self.send_error(
+            client.protocol_violation_disconnect(
                 dispatcher,
+                self.id.into(),
                 wl_display::Error::InvalidObject as u32,
                 "pending buffer object is not a wl_buffer",
             );
             return false;
         };
         if !buffer.supports_explicit_sync() {
-            self.send_error(
+            self.send_syncobj_surface_error(
+                client,
                 dispatcher,
                 wp_linux_drm_syncobj_surface_v1::Error::UnsupportedBuffer as u32,
                 "explicit sync currently only supports dma-buf wl_buffers",
@@ -334,7 +357,8 @@ impl WlSurface {
             return false;
         }
         if pending_sync.acquire.is_none() {
-            self.send_error(
+            self.send_syncobj_surface_error(
+                client,
                 dispatcher,
                 wp_linux_drm_syncobj_surface_v1::Error::NoAcquirePoint as u32,
                 "missing acquire point for explicit-sync surface commit",
@@ -342,7 +366,8 @@ impl WlSurface {
             return false;
         }
         if pending_sync.release.is_none() {
-            self.send_error(
+            self.send_syncobj_surface_error(
+                client,
                 dispatcher,
                 wp_linux_drm_syncobj_surface_v1::Error::NoReleasePoint as u32,
                 "missing release point for explicit-sync surface commit",
@@ -359,7 +384,8 @@ impl WlSurface {
             if acquire_timeline.handle() == release_timeline.handle()
                 && acquire_point >= release_point
             {
-                self.send_error(
+                self.send_syncobj_surface_error(
+                    client,
                     dispatcher,
                     wp_linux_drm_syncobj_surface_v1::Error::ConflictingPoints as u32,
                     "acquire timeline point must be strictly less than release point",
@@ -417,6 +443,7 @@ impl WlSurface {
     fn install_blocked_surface(
         &mut self,
         next: BlockedSurfaceState,
+        client_id: ClientId,
         surface_object_id: ObjectId,
         dispatcher: &mut ClientDispatcher,
     ) -> std::io::Result<()> {
@@ -433,8 +460,10 @@ impl WlSurface {
         }
         let waiter_id = sync::fresh_waiter_id();
         self.blocked_waiter_id = Some(waiter_id);
-        dispatcher
-            .start_model(waiter_id, AcquireReadyWaiter::new(waiter_id, surface_object_id, poll_fd));
+        dispatcher.start_model(
+            waiter_id,
+            AcquireReadyWaiter::new(waiter_id, client_id, surface_object_id, poll_fd),
+        );
         Ok(())
     }
 
@@ -479,6 +508,19 @@ impl WlSurface {
                 sync: blocked.sync,
             },
         );
+    }
+
+    pub fn cancel_blocked_if_waiter_matches(
+        &mut self,
+        waiter_id: u64,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        if self.blocked_waiter_id != Some(waiter_id) {
+            return;
+        }
+        self.cancel_blocked(client, state, dispatcher);
     }
 
     pub fn client_id(&self) -> ClientId {

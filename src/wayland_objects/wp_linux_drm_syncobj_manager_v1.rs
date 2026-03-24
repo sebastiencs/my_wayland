@@ -7,9 +7,10 @@ use crate::{
     globals::Global,
     object::{Object, Parser},
     protocol_generated::{
-        wp_linux_drm_syncobj_manager_v1, Constants, NewId, WaylandId, WpLinuxDrmSyncobjManagerV1Id,
+        wl_display, wp_linux_drm_syncobj_manager_v1, Constants, NewId, WaylandId,
+        WpLinuxDrmSyncobjManagerV1Id,
     },
-    state::State,
+    state::{DrmId, State},
     sync::SyncTimeline,
     wayland_objects::{
         wl_surface::WlSurface, wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
@@ -18,11 +19,13 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub struct WpLinuxDrmSyncobjManagerV1Global;
+pub struct WpLinuxDrmSyncobjManagerV1Global {
+    drm_id: DrmId,
+}
 
 impl WpLinuxDrmSyncobjManagerV1Global {
-    pub fn new() -> Box<dyn Global> {
-        Box::new(Self)
+    pub fn new(drm_id: DrmId) -> Box<dyn Global> {
+        Box::new(Self { drm_id })
     }
 }
 
@@ -40,7 +43,7 @@ impl Global for WpLinuxDrmSyncobjManagerV1Global {
         _dispatcher: &mut ClientDispatcher,
     ) {
         let id = WpLinuxDrmSyncobjManagerV1Id::from(id);
-        client.insert_object(state, WpLinuxDrmSyncobjManagerV1 { id });
+        client.insert_object(state, WpLinuxDrmSyncobjManagerV1 { id, import_drm_id: self.drm_id });
         log::debug!("advertised linux-drm-syncobj manager to client {:?}", client.client_id());
     }
 }
@@ -48,6 +51,7 @@ impl Global for WpLinuxDrmSyncobjManagerV1Global {
 #[derive(Debug)]
 pub struct WpLinuxDrmSyncobjManagerV1 {
     id: WpLinuxDrmSyncobjManagerV1Id,
+    import_drm_id: DrmId,
 }
 
 impl Object for WpLinuxDrmSyncobjManagerV1 {
@@ -70,36 +74,65 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
             GetSurface { id, surface } => {
-                if !client.contains_object(surface, state) {
-                    client.send_protocol_error(
+                let Some(surface_oid) = client.try_object_id(surface, state) else {
+                    client.protocol_violation_disconnect(
                         dispatcher,
-                        self.id.into(),
-                        wp_linux_drm_syncobj_manager_v1::Error::SurfaceExists as u32,
+                        surface.into(),
+                        wl_display::Error::InvalidObject as u32,
                         "invalid wl_surface for syncobj surface",
                     );
                     return;
+                };
+                {
+                    let Some(surface_ref) = state.objects.try_get(surface_oid) else {
+                        client.protocol_violation_disconnect(
+                            dispatcher,
+                            surface.into(),
+                            wl_display::Error::InvalidObject as u32,
+                            "invalid wl_surface for syncobj surface",
+                        );
+                        return;
+                    };
+                    if surface_ref.downcast_ref::<WlSurface>().is_none() {
+                        client.protocol_violation_disconnect(
+                            dispatcher,
+                            surface.into(),
+                            wl_display::Error::InvalidObject as u32,
+                            "syncobj surface target is not a wl_surface",
+                        );
+                        return;
+                    }
                 }
-                let surface_oid = client.object_id(surface);
                 {
                     let mut surface_obj = state.objects.grab(surface_oid);
                     let surface = surface_obj.downcast_mut::<WlSurface>().unwrap();
-                    if surface.set_syncobj_surface_object(id, dispatcher).is_err() {
+                    if surface.has_syncobj_surface_object() {
+                        client.send_protocol_error(
+                            dispatcher,
+                            self.id.into(),
+                            wp_linux_drm_syncobj_manager_v1::Error::SurfaceExists as u32,
+                            "surface already has a syncobj surface object",
+                        );
+                        return;
+                    }
+                    if surface.set_syncobj_surface_object(id).is_err() {
                         return;
                     }
                 }
                 client.insert_object(state, WpLinuxDrmSyncobjSurfaceV1::new(id, surface_oid));
             }
             ImportTimeline { id, fd } => {
-                let Some((_, drm)) = state.drm.iter().next() else {
+                let Some(drm) = state.drm.try_get(self.import_drm_id) else {
                     client.send_protocol_error(
                         dispatcher,
                         self.id.into(),
                         wp_linux_drm_syncobj_manager_v1::Error::InvalidTimeline as u32,
                         "cannot import syncobj timeline without an active DRM backend",
                     );
+                    unsafe { libc::close(fd) };
                     return;
                 };
-                if !drm.supports_syncobj_timeline() {
+                if !drm.supports_linux_drm_syncobj() {
                     client.send_protocol_error(
                         dispatcher,
                         self.id.into(),

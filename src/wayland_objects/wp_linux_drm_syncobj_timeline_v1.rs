@@ -26,14 +26,6 @@ impl WpLinuxDrmSyncobjTimelineV1 {
     }
 }
 
-impl Drop for WpLinuxDrmSyncobjTimelineV1 {
-    fn drop(&mut self) {
-        if let Err(error) = self.timeline.drm().destroy_syncobj(self.timeline.handle()) {
-            log::warn!("failed to destroy imported syncobj timeline {:?}: {:?}", self.id, error);
-        }
-    }
-}
-
 impl Object for WpLinuxDrmSyncobjTimelineV1 {
     fn id(&self) -> WaylandId {
         self.id.into()

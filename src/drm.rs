@@ -71,6 +71,21 @@ pub static FORMATS: &[Format] = &[*ARGB8888, *XRGB8888];
 pub static FORMATS_MAP: Lazy<HashMap<DrmFourcc, &'static Format>> =
     Lazy::new(|| FORMATS.iter().map(|format| (format.drm, format)).collect());
 
+fn probe_syncobj_eventfd_support(drm: &DrmFd) -> bool {
+    let Ok(handle) = drm.create_syncobj(false) else {
+        return false;
+    };
+    let raw = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if raw < 0 {
+        let _ = drm.destroy_syncobj(handle);
+        return false;
+    }
+    let eventfd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let result = drm.syncobj_eventfd(handle, 0, eventfd.as_fd(), false);
+    let _ = drm.destroy_syncobj(handle);
+    result.is_ok()
+}
+
 pub const KNOWN_FORMATS: &[DrmFourcc] = &[DrmFourcc::Argb8888, DrmFourcc::Xrgb8888];
 
 #[derive(Debug)]
@@ -113,6 +128,7 @@ pub struct Drm {
     pub output: DrmOutput,
     driver: Driver,
     supports_syncobj_timeline: bool,
+    supports_syncobj_eventfd: bool,
 }
 
 #[derive(Debug)]
@@ -453,6 +469,8 @@ impl Drm {
             .get_driver_capability(drm::DriverCapability::TimelineSyncObj)
             .unwrap_or(0)
             != 0;
+        let supports_syncobj_eventfd =
+            supports_syncobj_timeline && probe_syncobj_eventfd_support(&drm);
 
         Self {
             fd: drm,
@@ -462,6 +480,7 @@ impl Drm {
             driver,
             output,
             supports_syncobj_timeline,
+            supports_syncobj_eventfd,
         }
     }
 
@@ -475,6 +494,10 @@ impl Drm {
 
     pub fn supports_syncobj_timeline(&self) -> bool {
         self.supports_syncobj_timeline
+    }
+
+    pub fn supports_linux_drm_syncobj(&self) -> bool {
+        self.supports_syncobj_timeline && self.supports_syncobj_eventfd
     }
 
     pub fn supported_dmabuf_read_formats(&self) -> Vec<(&'static Format, BTreeSet<Modifier>)> {
@@ -496,7 +519,7 @@ impl Drm {
 
     fn submit_render_buffer(
         &mut self,
-        render_completion: crate::egl::RenderCompletion,
+        render_completion: &crate::egl::RenderCompletion,
     ) -> std::io::Result<()> {
         let (primary_plane, fb, crtc) = {
             let output = &self.output;
@@ -1456,7 +1479,7 @@ impl Model for DrmModel {
                 self.schedule_frame(state, dispatcher);
             }
             DrmAction::RenderFrame => {
-                self.render_frame(state);
+                self.render_frame(state, dispatcher);
             }
             DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id } => {
                 self.handle_flip_complete(state, dispatcher, sequence, tv_sec, tv_usec, crtc_id);
@@ -1481,20 +1504,41 @@ impl DrmModel {
         }
     }
 
-    fn render_frame(&mut self, state: &mut crate::state::State) {
+    fn render_frame(&mut self, state: &mut crate::state::State, dispatcher: &mut Dispatcher) {
         let (render_items, deferred_releases) = collect_render_items(state, self.drm_id);
-        let drm = state.drm.get_mut(self.drm_id);
-        if !drm.output.begin_render() {
-            log::warn!("DrmModel::render_frame skipped: output not ready");
-            return;
-        }
+        let failed_releases = {
+            let drm = state.drm.get_mut(self.drm_id);
+            if !drm.output.begin_render() {
+                log::warn!("DrmModel::render_frame skipped: output not ready");
+                return;
+            }
 
-        drm.output.in_flight_releases = deferred_releases;
-        let render_completion = drm.render_output(&render_items);
-        if let Err(error) = drm.submit_render_buffer(render_completion) {
-            drm.output.mark_render_failed();
-            drm.output.in_flight_releases.clear();
-            log::error!("Could not submit DRM frame: {:?}", error);
+            drm.output.in_flight_releases = deferred_releases;
+            let render_completion = drm.render_output(&render_items);
+            if let Err(error) = drm.submit_render_buffer(&render_completion) {
+                drm.output.mark_render_failed();
+                let failed_releases = std::mem::take(&mut drm.output.in_flight_releases);
+                if !render_completion.used_blocking_fallback {
+                    if let Some(in_fence_fd) = render_completion.in_fence_fd {
+                        if let Err(wait_error) = drm.egl_context.wait_on_native_fence(in_fence_fd) {
+                            log::warn!(
+                                "failed to wait on compositor render fence after submit failure: {:?}",
+                                wait_error
+                            );
+                        }
+                    }
+                }
+                log::error!("Could not submit DRM frame: {:?}", error);
+                Some(failed_releases)
+            } else {
+                None
+            }
+        };
+
+        if let Some(releases) = failed_releases {
+            for release in releases {
+                release.resolve(state, dispatcher);
+            }
         }
     }
 

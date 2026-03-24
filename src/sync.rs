@@ -24,23 +24,40 @@ use crate::{
     wayland_objects::{wl_buffer::WlBuffer, wl_surface::WlSurface},
 };
 
-#[derive(Debug, Clone)]
-pub struct SyncTimeline {
+#[derive(Debug)]
+struct SyncTimelineInner {
     drm: DrmFd,
     handle: syncobj::Handle,
 }
 
+impl Drop for SyncTimelineInner {
+    fn drop(&mut self) {
+        if let Err(error) = self.drm.destroy_syncobj(self.handle) {
+            log::warn!(
+                "failed to destroy imported syncobj timeline handle={:?}: {:?}",
+                self.handle,
+                error
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncTimeline {
+    inner: Rc<SyncTimelineInner>,
+}
+
 impl SyncTimeline {
     pub fn new(drm: DrmFd, handle: syncobj::Handle) -> Self {
-        Self { drm, handle }
+        Self { inner: Rc::new(SyncTimelineInner { drm, handle }) }
     }
 
     pub fn handle(&self) -> syncobj::Handle {
-        self.handle
+        self.inner.handle
     }
 
     pub fn drm(&self) -> &DrmFd {
-        &self.drm
+        &self.inner.drm
     }
 }
 
@@ -169,9 +186,14 @@ impl AcquireSync {
 
         if let Err(error) = egl.wait_on_native_fence(sync_file) {
             log::warn!(
-                "renderer explicit acquire wait failed, falling back to CPU poll: {:?}",
+                "renderer explicit acquire wait failed, falling back to CPU wait: {:?}",
                 error
             );
+            if let Ok(Some(sync_file)) = self.prepare_wait_fd() {
+                if let Err(wait_error) = wait_sync_file_cpu(sync_file.as_fd()) {
+                    log::warn!("renderer explicit acquire CPU wait also failed: {:?}", wait_error);
+                }
+            }
         }
     }
 
@@ -270,6 +292,25 @@ fn poll_fd_ready(fd: std::os::fd::BorrowedFd<'_>, timeout_ms: i32) -> bool {
     ready > 0 && (pfd.revents & libc::POLLIN) != 0
 }
 
+// Last-resort correctness fallback for sync_file acquires when the renderer
+// cannot import/wait on the native fence through EGL.
+fn wait_sync_file_cpu(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
+    loop {
+        let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let ready = unsafe { libc::poll(&mut pfd, 1, -1) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if (pfd.revents & libc::POLLIN) != 0 {
+            return Ok(());
+        }
+    }
+}
+
 fn next_waiter_id() -> u64 {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
@@ -281,6 +322,7 @@ pub fn fresh_waiter_id() -> u64 {
 
 pub struct AcquireReadyWaiter {
     waiter_id: u64,
+    client_id: ClientId,
     surface_object_id: ObjectId,
     poll_fd: OwnedFd,
     read_op_id: Option<RingId>,
@@ -290,6 +332,7 @@ pub struct AcquireReadyWaiter {
 pub enum AcquireReadyWaiterAction {
     Start,
     Ready,
+    Failed,
     Stop,
 }
 
@@ -341,6 +384,17 @@ impl Model for AcquireReadyWaiter {
                 }
                 dispatcher.stop_model::<_, Self>(self.waiter_id);
             }
+            AcquireReadyWaiterAction::Failed => {
+                self.read_op_id = None;
+                dispatcher.dispatch_to(
+                    self.client_id,
+                    crate::clients::ClientAction::CancelBlockedSurface {
+                        surface_object_id: self.surface_object_id,
+                        waiter_id: self.waiter_id,
+                    },
+                );
+                dispatcher.stop_model::<_, Self>(self.waiter_id);
+            }
             AcquireReadyWaiterAction::Stop => {
                 if let Some(read_op_id) = self.read_op_id.take() {
                     dispatcher.dispatch(IoUringAction::Cancel { target: read_op_id });
@@ -353,8 +407,19 @@ impl Model for AcquireReadyWaiter {
 }
 
 impl AcquireReadyWaiter {
-    pub fn new(waiter_id: u64, surface_object_id: ObjectId, poll_fd: OwnedFd) -> Self {
-        Self { waiter_id, surface_object_id, poll_fd, read_op_id: None }
+    pub fn new(
+        waiter_id: u64,
+        client_id: ClientId,
+        surface_object_id: ObjectId,
+        poll_fd: OwnedFd,
+    ) -> Self {
+        Self {
+            waiter_id,
+            client_id,
+            surface_object_id,
+            poll_fd,
+            read_op_id: None,
+        }
     }
 
     fn on_read_ready(result: io::Result<ReadWriteCompleted>) -> AnyAction {
@@ -362,7 +427,7 @@ impl AcquireReadyWaiter {
             Ok(_) => AnyAction::from(AcquireReadyWaiterAction::Ready),
             Err(error) => {
                 log::warn!("surface acquire waiter poll failed: {:?}", error);
-                AnyAction::from(AcquireReadyWaiterAction::Stop)
+                AnyAction::from(AcquireReadyWaiterAction::Failed)
             }
         }
     }

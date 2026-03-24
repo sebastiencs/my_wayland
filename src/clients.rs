@@ -22,7 +22,10 @@ use crate::{
     seat::SeatClientEvent,
     state::{GrabbedObject, ObjectId, State},
     udev::Udev,
-    wayland_objects::{wl_display::WlDisplay, wl_keyboard::WlKeyboard, wl_pointer::WlPointer},
+    wayland_objects::{
+        wl_display::WlDisplay, wl_keyboard::WlKeyboard, wl_pointer::WlPointer,
+        wl_surface::WlSurface,
+    },
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
@@ -178,6 +181,7 @@ pub enum ClientAction {
     FdsReceived { fds: Box<[RawFd]> },
     SeatEvent { event: SeatClientEvent },
     ReleaseBuffer { buffer_id: crate::protocol_generated::WlBufferId },
+    CancelBlockedSurface { surface_object_id: ObjectId, waiter_id: u64 },
     Close,
 }
 
@@ -259,6 +263,40 @@ impl Client {
         let id: WaylandId = id.into();
         let obj_id = self.objects[&id];
         state.objects[obj_id].downcast_mut().unwrap()
+    }
+
+    /// Resolve a client-visible Wayland id to our internal `ObjectId` if the id
+    /// is still live in both the per-client object map and `State::objects`.
+    ///
+    /// This is useful for request validation paths where we must distinguish
+    /// "the client sent an unknown/deleted object id" from "the id exists but is
+    /// the wrong interface", without panicking on a typed downcast.
+    pub fn try_object_id<K>(&self, id: K, state: &State) -> Option<ObjectId>
+    where
+        K: Into<WaylandId>,
+    {
+        let id: WaylandId = id.into();
+        let object_id = self.objects.get(&id).copied()?;
+        state.objects.contains(object_id).then_some(object_id)
+    }
+
+    /// Return whether a client-visible Wayland id currently refers to a live
+    /// object of the expected interface type `K::Object`.
+    ///
+    /// This is intentionally stricter than `contains_object()`: it checks both
+    /// liveness and the concrete object type, which lets protocol handlers reject
+    /// malformed ids with a protocol error instead of panicking in `get_object()`.
+    pub fn object_is<K>(&self, id: K, state: &State) -> bool
+    where
+        K: Into<WaylandId> + IdToObject,
+        K::Object: Object,
+    {
+        let Some(object_id) = self.try_object_id(id, state) else {
+            return false;
+        };
+        state.objects[object_id]
+            .downcast_ref::<K::Object>()
+            .is_some()
     }
 
     pub fn grab_object<K>(&self, id: K, state: &mut State) -> GrabbedObject<K::Object>
@@ -606,6 +644,15 @@ impl Model for Client {
                     let buffer = self.get_object(buffer_id, state);
                     buffer.send_release(&mut dispatcher);
                 }
+            }
+            CancelBlockedSurface { surface_object_id, waiter_id } => {
+                let Some(mut surface_obj) = state.objects.try_grab(surface_object_id) else {
+                    return Ok(());
+                };
+                let Some(surface) = surface_obj.downcast_mut::<WlSurface>() else {
+                    return Ok(());
+                };
+                surface.cancel_blocked_if_waiter_matches(waiter_id, self, state, &mut dispatcher);
             }
             MsgReceived { mut request } => {
                 let Some(&obj_id) = self.objects.get(&request.object_id()) else {

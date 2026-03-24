@@ -63,7 +63,7 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
             SetAcquirePoint { timeline, point_hi, point_lo } => {
-                if !client.contains_object(timeline, state) {
+                if !client.object_is(timeline, state) {
                     client.send_protocol_error(
                         dispatcher,
                         self.id.into(),
@@ -72,13 +72,13 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
                     );
                     return;
                 }
-                let timeline = client.get_object(timeline, state);
+                let timeline: &mut WpLinuxDrmSyncobjTimelineV1 = client.get_object(timeline, state);
                 let point = ((point_hi as u64) << 32) | point_lo as u64;
                 surface.pending_sync_mut().acquire =
                     AcquireSync::TimelinePoint { timeline: timeline.timeline().clone(), point };
             }
             SetReleasePoint { timeline, point_hi, point_lo } => {
-                if !client.contains_object(timeline, state) {
+                if !client.object_is(timeline, state) {
                     client.send_protocol_error(
                         dispatcher,
                         self.id.into(),

@@ -6,7 +6,6 @@ use crate::{
         wl_compositor::WlCompositorGlobal, wl_data_device_manager::WlDataDeviceManagerGlobal,
         wl_seat::WlSeatGlobal, wl_shm::WlShmGlobal, wl_subcompositor::WlSubcompositorGlobal,
         wp_cursor_shape_manager_v1::WpCursorShapeManagerV1Global,
-        wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1Global,
         wp_presentation::WpPresentationGlobal, xdg_activation_v1::XdgActivationV1Global,
         xdg_wm_base::XdgWmBaseGlobal, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1Global,
         zxdg_output_manager_v1::ZxdgOutputManagerV1Global,
@@ -53,7 +52,6 @@ impl Globals {
             WlSeatGlobal::new, // TODO: `WlSeatGlobal` should be added dynamically
             WpPresentationGlobal::new,
             ZwpLinuxDmabufV1Global::new,
-            WpLinuxDrmSyncobjManagerV1Global::new,
             WpCursorShapeManagerV1Global::new,
             XdgActivationV1Global::new,
             XdgWmBaseGlobal::new,
@@ -69,6 +67,12 @@ impl Globals {
 
     pub fn insert(&mut self, global: Box<dyn Global>) {
         self.map.insert(global);
+    }
+
+    pub fn contains_interface(&self, interface: &str) -> bool {
+        self.map
+            .iter()
+            .any(|(_, global)| global.interface().0 == interface)
     }
 
     /// Take a global out of the registry for binding. Fails if `name` is not a live global slot.
