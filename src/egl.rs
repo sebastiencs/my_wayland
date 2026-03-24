@@ -889,7 +889,12 @@ impl EglFrameBuffer {
                 );
                 gl::Enable(gl::SCISSOR_TEST as _);
                 for rect in clipped_damage.rects() {
-                    gl::Scissor(rect.x, self.height - rect.y - rect.height, rect.width, rect.height);
+                    gl::Scissor(
+                        rect.x,
+                        self.height - rect.y - rect.height,
+                        rect.width,
+                        rect.height,
+                    );
                     gl::DrawArrays(gl::TRIANGLE_STRIP as _, 0, 4);
                 }
                 gl::Disable(gl::SCISSOR_TEST as _);

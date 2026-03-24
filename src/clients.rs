@@ -17,7 +17,7 @@ use crate::{
         ring::{AcceptCompleted, RecvmsgCompleted, RingId},
     },
     object::{IdToObject, Object, Parser, ParserError},
-    protocol_generated::{wl_display, Array, Constants, WaylandId},
+    protocol_generated::{wl_display, Array, Constants, WaylandId, WlSurfaceId},
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     seat::SeatClientEvent,
     state::{GrabbedObject, ObjectId, State},
@@ -188,6 +188,7 @@ pub enum ClientAction {
     FdsReceived { fds: Box<[RawFd]> },
     SeatEvent { event: SeatClientEvent },
     ReleaseBuffer { buffer_id: crate::protocol_generated::WlBufferId },
+    CompleteSurfaceFrameCallbacks { surface_ids: Vec<WlSurfaceId> },
     CancelBlockedSurface { surface_object_id: ObjectId, waiter_id: u64 },
     Close,
 }
@@ -507,6 +508,39 @@ impl Client {
         }
     }
 
+    fn complete_surface_frame_callbacks(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        surface_ids: Vec<WlSurfaceId>,
+    ) {
+        let display = WlDisplay::default();
+        for surface_id in surface_ids {
+            let Some(object_id) = self.object_id_for_wayland(surface_id.into()) else {
+                continue;
+            };
+            let callbacks = {
+                let Some(mut surface_obj) = state.objects.try_grab(object_id) else {
+                    continue;
+                };
+                let Some(surface) = surface_obj.downcast_mut::<WlSurface>() else {
+                    continue;
+                };
+                surface.take_frame_callbacks()
+            };
+            for callback_id in callbacks {
+                if !self.contains_object(callback_id, state) {
+                    continue;
+                }
+                {
+                    let callback = self.grab_object(callback_id, state);
+                    callback.done(dispatcher);
+                }
+                self.delete_id(&display, state, dispatcher, callback_id.into());
+            }
+        }
+    }
+
     fn log_request<R: Parser>(&self, object_id: u32, result: Result<&R::Request, &ParserError>)
     where
         R::Request: std::fmt::Debug,
@@ -667,6 +701,9 @@ impl Model for Client {
                     let buffer = self.get_object(buffer_id, state);
                     buffer.send_release(&mut dispatcher);
                 }
+            }
+            CompleteSurfaceFrameCallbacks { surface_ids } => {
+                self.complete_surface_frame_callbacks(state, &mut dispatcher, surface_ids);
             }
             CancelBlockedSurface { surface_object_id, waiter_id } => {
                 let Some(mut surface_obj) = state.objects.try_grab(surface_object_id) else {

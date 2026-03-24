@@ -143,6 +143,7 @@ struct OnScreen {
     logical_size: Option<SizeI>,
     sample_transform: transform::Mat3,
     damage: DamageRegion,
+    frame_callbacks: Vec<WlCallbackId>,
     input_region: RegionValue,
     opaque_region: RegionValue,
 }
@@ -160,6 +161,7 @@ impl Default for OnScreen {
             logical_size: None,
             sample_transform: transform::Mat3::identity(),
             damage: DamageRegion::new(),
+            frame_callbacks: Vec::new(),
             input_region: RegionValue::infinite(),
             opaque_region: RegionValue::empty(),
         }
@@ -190,6 +192,7 @@ struct BlockedSurfaceState {
     height: i32,
     tex_transform: transform::Mat3,
     sync: SurfaceSyncState,
+    frame_callbacks: Vec<WlCallbackId>,
     buffer_transform: BufferTransform,
     buffer_scale: i32,
     viewport: SurfaceViewport,
@@ -653,6 +656,7 @@ impl WlSurface {
             logical_size: None,
             sample_transform: transform::Mat3::identity(),
             damage: DamageRegion::new(),
+            frame_callbacks: std::mem::take(&mut self.on_screen.frame_callbacks),
             input_region: self.on_screen.input_region.clone(),
             opaque_region: self.on_screen.opaque_region.clone(),
         };
@@ -826,6 +830,7 @@ impl WlSurface {
             height: logical_size.height,
             tex_transform,
             sync: payload.sync.clone(),
+            frame_callbacks: Vec::new(),
             buffer_transform: payload.buffer_transform,
             buffer_scale: payload.buffer_scale,
             viewport: payload.viewport,
@@ -1040,6 +1045,7 @@ impl WlSurface {
                     logical_size: None,
                     sample_transform: transform::Mat3::identity(),
                     damage: DamageRegion::new(),
+                    frame_callbacks: std::mem::take(&mut self.on_screen.frame_callbacks),
                     input_region: payload.input_region.clone(),
                     opaque_region: payload.opaque_region.clone(),
                 };
@@ -1161,14 +1167,15 @@ impl WlSurface {
         let Some(cached_commit) = self.cached_commit.take() else {
             return false;
         };
-        self.apply_surface_update(
+        let (changed, needs_frame) = self.apply_surface_update(
             client,
             state,
             dispatcher,
             cached_commit.payload,
             cached_commit.frame_callbacks,
             surface_behaves_synchronized,
-        )
+        );
+        changed || needs_frame
     }
 
     fn release_synchronized_children(
@@ -1221,7 +1228,7 @@ impl WlSurface {
         payload: SurfaceCommitPayload,
         frame_callbacks: Vec<WlCallbackId>,
         surface_behaves_synchronized: bool,
-    ) -> bool {
+    ) -> (bool, bool) {
         let mut changed = self.apply_surface_payload(client, state, dispatcher, &payload);
         changed |= self.apply_pending_tree_state(state);
         changed |= self.release_synchronized_children(
@@ -1230,8 +1237,9 @@ impl WlSurface {
             dispatcher,
             surface_behaves_synchronized,
         );
-        self.flush_frame_callbacks_list(frame_callbacks, client, state, dispatcher);
-        changed
+        let (immediate_callbacks, needs_frame) = self.route_frame_callbacks(frame_callbacks);
+        self.flush_frame_callbacks_list(immediate_callbacks, client, state, dispatcher);
+        (changed, needs_frame)
     }
 
     fn on_commit(
@@ -1264,7 +1272,7 @@ impl WlSurface {
         }
 
         let has_cached_commit = self.cached_commit.is_some();
-        let payload = if has_cached_commit {
+        let (changed, needs_frame) = if has_cached_commit {
             self.cache_commit_payload(payload, frame_callbacks);
             let cached_commit = self.cached_commit.take().unwrap();
             self.apply_surface_update(
@@ -1279,7 +1287,7 @@ impl WlSurface {
             self.apply_surface_update(client, state, dispatcher, payload, frame_callbacks, false)
         };
 
-        if payload {
+        if changed || needs_frame {
             schedule_active_output(state, dispatcher);
         }
     }
@@ -1396,8 +1404,27 @@ impl WlSurface {
         self.flush_frame_callbacks_list(callbacks, client, state, dispatcher);
     }
 
+    fn route_frame_callbacks(&mut self, callbacks: Vec<WlCallbackId>) -> (Vec<WlCallbackId>, bool) {
+        if callbacks.is_empty() {
+            return (Vec::new(), false);
+        }
+        if let Some(blocked) = self.blocked.as_mut() {
+            blocked.frame_callbacks.extend(callbacks);
+            return (Vec::new(), false);
+        }
+        if self.on_screen.logical_size.is_some() {
+            self.on_screen.frame_callbacks.extend(callbacks);
+            return (Vec::new(), true);
+        }
+        (callbacks, false)
+    }
+
     pub fn render_state(&self) -> Option<SurfaceRenderState> {
         self.render_state_at(0, 0)
+    }
+
+    pub fn take_frame_callbacks(&mut self) -> Vec<WlCallbackId> {
+        std::mem::take(&mut self.on_screen.frame_callbacks)
     }
 
     pub fn render_state_at(&self, base_x: i32, base_y: i32) -> Option<SurfaceRenderState> {
@@ -1415,7 +1442,11 @@ impl WlSurface {
             height: logical_size.height,
             tex_transform: self.on_screen.sample_transform,
             damage: self.on_screen.damage.translated(x, y),
-            opaque_region: self.on_screen.opaque_region.to_region_clipped(local_bounds).translated(x, y),
+            opaque_region: self
+                .on_screen
+                .opaque_region
+                .to_region_clipped(local_bounds)
+                .translated(x, y),
             sync: self.on_screen.sync.clone(),
         })
     }
@@ -1474,6 +1505,7 @@ impl WlSurface {
             logical_size: Some(SizeI { width, height }),
             sample_transform: transform::Mat3::identity(),
             damage: Self::full_damage_for_logical_size(SizeI { width, height }),
+            frame_callbacks: Vec::new(),
             input_region: RegionValue::infinite(),
             opaque_region: RegionValue::empty(),
         };
@@ -1524,6 +1556,8 @@ impl WlSurface {
     }
 
     fn activate_blocked_state(&mut self, next: BlockedSurfaceState) {
+        let mut frame_callbacks = std::mem::take(&mut self.on_screen.frame_callbacks);
+        frame_callbacks.extend(next.frame_callbacks.iter().copied());
         self.retire_current();
         self.on_screen = OnScreen {
             buffer_object_id: Some(next.buffer_object_id),
@@ -1535,7 +1569,11 @@ impl WlSurface {
             viewport: next.viewport,
             logical_size: Some(SizeI { width: next.width, height: next.height }),
             sample_transform: next.tex_transform,
-            damage: Self::full_damage_for_logical_size(SizeI { width: next.width, height: next.height }),
+            damage: Self::full_damage_for_logical_size(SizeI {
+                width: next.width,
+                height: next.height,
+            }),
+            frame_callbacks,
             input_region: next.input_region,
             opaque_region: next.opaque_region,
         };
@@ -1789,6 +1827,7 @@ mod tests {
             logical_size: Some(SizeI { width: 100, height: 80 }),
             sample_transform: transform::Mat3::identity(),
             damage: DamageRegion::new(),
+            frame_callbacks: Vec::new(),
             input_region: RegionValue::infinite(),
             opaque_region: RegionValue::empty(),
         };

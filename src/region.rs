@@ -199,7 +199,10 @@ impl DamageRegion {
     }
 
     pub fn intersects_rect(&self, rect: RectI) -> bool {
-        self.rects.iter().copied().any(|candidate| candidate.intersects(rect))
+        self.rects
+            .iter()
+            .copied()
+            .any(|candidate| candidate.intersects(rect))
     }
 
     pub fn translate(&mut self, dx: i32, dy: i32) {
@@ -212,6 +215,22 @@ impl DamageRegion {
         let mut region = self.clone();
         region.translate(dx, dy);
         region
+    }
+
+    pub fn expand(&mut self, margin: i32) {
+        if margin <= 0 || self.rects.is_empty() {
+            return;
+        }
+        let rects = std::mem::take(&mut self.rects);
+        for rect in rects {
+            let x1 = rect.x.saturating_sub(margin);
+            let y1 = rect.y.saturating_sub(margin);
+            let x2 = rect.x2().saturating_add(margin);
+            let y2 = rect.y2().saturating_add(margin);
+            if let Some(expanded) = RectI::from_extents(x1, y1, x2, y2) {
+                self.add_rect(expanded);
+            }
+        }
     }
 }
 
@@ -402,8 +421,10 @@ impl Default for RegionValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{DamageRegion, RectI, RegionSpec, RegionValue};
-    use crate::transform::RectF;
+    use {
+        super::{DamageRegion, RectI, RegionSpec, RegionValue},
+        crate::transform::RectF,
+    };
 
     #[test]
     fn region_contains_replays_add_then_subtract_order() {
@@ -445,7 +466,14 @@ mod tests {
         region.add_rect(RectI::new(5, 0, 10, 10).unwrap());
 
         assert_eq!(region.extents(), RectI::from_extents(0, 0, 15, 10));
-        assert_eq!(region.rects().iter().map(|rect| rect.width * rect.height).sum::<i32>(), 150);
+        assert_eq!(
+            region
+                .rects()
+                .iter()
+                .map(|rect| rect.width * rect.height)
+                .sum::<i32>(),
+            150
+        );
     }
 
     #[test]
@@ -466,11 +494,15 @@ mod tests {
 
         assert_eq!(
             region.rects(),
-            &[
-                RectI::new(5, 5, 5, 5).unwrap(),
-                RectI::new(20, 20, 5, 5).unwrap()
-            ]
+            &[RectI::new(5, 5, 5, 5).unwrap(), RectI::new(20, 20, 5, 5).unwrap()]
         );
+    }
+
+    #[test]
+    fn damage_region_expand_grows_each_edge() {
+        let mut region = DamageRegion::from_rect(RectI::new(5, 6, 7, 8).unwrap());
+        region.expand(1);
+        assert_eq!(region.extents(), RectI::new(4, 5, 9, 10));
     }
 
     #[test]
@@ -478,7 +510,8 @@ mod tests {
         let mut spec = RegionSpec::default();
         spec.add_rect(RectI::new(0, 0, 10, 10).unwrap());
         spec.subtract_rect(RectI::new(2, 2, 4, 4).unwrap());
-        let region = RegionValue::from_spec(spec).to_region_clipped(RectI::new(0, 0, 20, 20).unwrap());
+        let region =
+            RegionValue::from_spec(spec).to_region_clipped(RectI::new(0, 0, 20, 20).unwrap());
 
         assert!(region.intersects_rect(RectI::new(0, 0, 1, 1).unwrap()));
         assert!(!region.intersects_rect(RectI::new(3, 3, 1, 1).unwrap()));
@@ -486,7 +519,8 @@ mod tests {
 
     #[test]
     fn rect_from_f32_bounds_rounds_outward() {
-        let rect = RectI::from_f32_bounds(RectF { x: 1.25, y: 2.75, width: 3.1, height: 4.2 }).unwrap();
+        let rect =
+            RectI::from_f32_bounds(RectF { x: 1.25, y: 2.75, width: 3.1, height: 4.2 }).unwrap();
         assert_eq!(rect, RectI::new(1, 2, 4, 5).unwrap());
     }
 }
