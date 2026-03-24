@@ -7,7 +7,7 @@ use crate::{
     object::{Object, Parser},
     protocol_generated::{wl_buffer, WaylandId, WlBufferId},
     state::State,
-    transform::Mat3,
+    transform,
 };
 
 use super::{wl_shm_pool::SharedMemory, wl_surface::WlSurface};
@@ -93,7 +93,9 @@ impl WlBuffer {
             y,
             width: self.width as i32,
             height: self.height as i32,
-            tex_transform: Mat3::identity(),
+            // SHM uploads are memory-backed top-left buffers; sample them through an
+            // explicit texture transform instead of relying on implicit output flips.
+            tex_transform: transform::normalized_texcoord_flip_y(),
         })
     }
 

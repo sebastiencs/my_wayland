@@ -88,9 +88,15 @@ pub fn project_box(x: f32, y: f32, width: f32, height: f32, projection: Mat3) ->
     projection.mul(box_transform(x, y, width, height))
 }
 
+pub fn normalized_texcoord_flip_y() -> Mat3 {
+    Mat3::translation(0.0, 1.0).mul(Mat3::scale(1.0, -1.0))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{OutputPresentationTransform, output_projection, project_box};
+    use super::{
+        OutputPresentationTransform, normalized_texcoord_flip_y, output_projection, project_box,
+    };
 
     #[test]
     fn normal_projection_maps_top_left_box_to_clip_top_left() {
@@ -108,5 +114,13 @@ mod tests {
 
         assert_eq!(transform.transform_point(0.0, 0.0), (-1.0, -1.0));
         assert_eq!(transform.transform_point(1.0, 1.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn normalized_texcoord_flip_y_maps_top_left_to_gl_upper_row() {
+        let transform = normalized_texcoord_flip_y();
+
+        assert_eq!(transform.transform_point(0.0, 0.0), (0.0, 1.0));
+        assert_eq!(transform.transform_point(1.0, 1.0), (1.0, 0.0));
     }
 }
