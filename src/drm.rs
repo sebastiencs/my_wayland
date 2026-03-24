@@ -693,6 +693,7 @@ impl Drm {
             self.output.render_sync_mode,
             damage,
             preserve_contents,
+            self.output.presentation_transform,
         )
     }
 

@@ -23,7 +23,7 @@ use crate::{
     drm::{DrmFd, Format, Modifier, RenderSyncMode, FORMATS_MAP},
     gbm::GbmDevice,
     region::{DamageRegion, RectI},
-    transform::Mat3,
+    transform::{Mat3, OutputPresentationTransform},
     wayland_objects::wl_shm_pool::SliceSharedMemory,
 };
 
@@ -704,6 +704,13 @@ impl Drop for EglFrameBuffer {
 }
 
 impl EglFrameBuffer {
+    fn scissor_y(&self, rect: RectI, output_transform: OutputPresentationTransform) -> i32 {
+        match output_transform {
+            OutputPresentationTransform::Normal => self.height - rect.y - rect.height,
+            OutputPresentationTransform::FlipY => rect.y,
+        }
+    }
+
     pub fn clear(&self) {
         unsafe {
             gl::BindFramebuffer(gl::FRAMEBUFFER as _, self.framebuffer_object);
@@ -721,7 +728,12 @@ impl EglFrameBuffer {
         RectI::new(0, 0, self.width, self.height)
     }
 
-    fn clear_damage(&self, damage: &DamageRegion, preserve_contents: bool) {
+    fn clear_damage(
+        &self,
+        damage: &DamageRegion,
+        preserve_contents: bool,
+        output_transform: OutputPresentationTransform,
+    ) {
         let Some(output_bounds) = self.output_bounds() else {
             return;
         };
@@ -747,7 +759,12 @@ impl EglFrameBuffer {
         unsafe {
             gl::Enable(gl::SCISSOR_TEST as _);
             for rect in clipped_damage.rects() {
-                gl::Scissor(rect.x, self.height - rect.y - rect.height, rect.width, rect.height);
+                gl::Scissor(
+                    rect.x,
+                    self.scissor_y(*rect, output_transform),
+                    rect.width,
+                    rect.height,
+                );
                 gl::Clear(gl::COLOR_BUFFER_BIT as _);
             }
             gl::Disable(gl::SCISSOR_TEST as _);
@@ -806,8 +823,9 @@ impl EglFrameBuffer {
         render_sync_mode: RenderSyncMode,
         damage: &DamageRegion,
         preserve_contents: bool,
+        output_transform: OutputPresentationTransform,
     ) -> RenderCompletion {
-        self.clear_damage(damage, preserve_contents);
+        self.clear_damage(damage, preserve_contents, output_transform);
 
         if items.is_empty() {
             return self.finish_render(render_sync_mode);
@@ -896,7 +914,7 @@ impl EglFrameBuffer {
                 for rect in clipped_damage.rects() {
                     gl::Scissor(
                         rect.x,
-                        self.height - rect.y - rect.height,
+                        self.scissor_y(*rect, output_transform),
                         rect.width,
                         rect.height,
                     );
