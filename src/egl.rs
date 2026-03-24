@@ -682,7 +682,10 @@ impl EglFrameBuffer {
             gl::DisableVertexAttribArray(texcoord_location);
             gl::UseProgram(0);
             gl::DeleteProgram(program);
-            gl::Flush();
+            // Diagnostic sync point: force rendering completion before the DRM page-flip.
+            // If this removes the random torn strip, we have confirmed a missing
+            // GPU-to-scanout synchronization issue and can replace this with fences.
+            gl::Finish();
         }
     }
 }
