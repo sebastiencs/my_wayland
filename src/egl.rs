@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ffi::CStr,
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     ptr,
     time::Duration,
 };
@@ -19,6 +19,7 @@ use {
 use drm::control::Device;
 
 use crate::{
+    drm::RenderSyncMode,
     dmabuf::DmaBuf,
     drm::{DrmFd, Format, Modifier, FORMATS_MAP},
     gbm::GbmDevice,
@@ -27,6 +28,20 @@ use crate::{
 };
 
 const EGL_PLATFORM_GBM_KHR: u32 = 0x31D7;
+const EGL_SYNC_NATIVE_FENCE_ANDROID: egl::Enum = 0x3144;
+const EGL_SYNC_NATIVE_FENCE_FD_ANDROID: egl::Int = 0x3145;
+const EGL_NO_NATIVE_FENCE_FD_ANDROID: egl::Int = -1;
+
+#[derive(Clone, Copy, Debug)]
+struct EglSyncKhr(*mut std::ffi::c_void);
+
+impl EglSyncKhr {
+    const NO_SYNC: Self = Self(std::ptr::null_mut());
+
+    fn is_null(self) -> bool {
+        self.0.is_null()
+    }
+}
 
 fn load_methods() {
     use khronos_types::{egl::load as load_egl, gl::load as load_gl};
@@ -347,6 +362,70 @@ impl EGL {
 
         Ok((modifiers, external_only))
     }
+
+    fn create_sync_khr(
+        &self,
+        display: egl::Display,
+        type_: egl::Enum,
+        attrib_list: &[egl::Int],
+    ) -> Result<EglSyncKhr, egl::Error> {
+        type CreateSyncKhr = unsafe extern "system" fn(
+            egl::Display,
+            egl::Enum,
+            *const egl::Int,
+        ) -> *mut std::ffi::c_void;
+
+        Self::assert_ends_with_none(attrib_list);
+        let proc = unsafe { egl::GetProcAddress(c"eglCreateSyncKHR".as_ptr()) };
+        if proc.is_null() {
+            return Err(egl::Error::BadDisplay);
+        }
+        let create_sync: CreateSyncKhr = unsafe { std::mem::transmute(proc) };
+        let sync = unsafe { create_sync(display, type_, attrib_list.as_ptr()) };
+        let sync = EglSyncKhr(sync);
+        if sync.is_null() {
+            return Err(Self::last_error().unwrap_err());
+        }
+        Ok(sync)
+    }
+
+    fn destroy_sync_khr(&self, display: egl::Display, sync: EglSyncKhr) -> Result<(), egl::Error> {
+        type DestroySyncKhr =
+            unsafe extern "system" fn(egl::Display, *mut std::ffi::c_void) -> egl::Boolean;
+
+        if sync.is_null() {
+            return Ok(());
+        }
+
+        let proc = unsafe { egl::GetProcAddress(c"eglDestroySyncKHR".as_ptr()) };
+        if proc.is_null() {
+            return Err(egl::Error::BadDisplay);
+        }
+        let destroy_sync: DestroySyncKhr = unsafe { std::mem::transmute(proc) };
+        let result = unsafe { destroy_sync(display, sync.0) };
+        Self::ok_on(result, egl::TRUE as _)?;
+        Ok(())
+    }
+
+    fn dup_native_fence_fd_android(
+        &self,
+        display: egl::Display,
+        sync: EglSyncKhr,
+    ) -> Result<OwnedFd, egl::Error> {
+        type DupNativeFenceFdAndroid =
+            unsafe extern "system" fn(egl::Display, *mut std::ffi::c_void) -> egl::Int;
+
+        let proc = unsafe { egl::GetProcAddress(c"eglDupNativeFenceFDANDROID".as_ptr()) };
+        if proc.is_null() {
+            return Err(egl::Error::BadDisplay);
+        }
+        let dup_native_fence: DupNativeFenceFdAndroid = unsafe { std::mem::transmute(proc) };
+        let fd = unsafe { dup_native_fence(display, sync.0) };
+        if fd == EGL_NO_NATIVE_FENCE_FD_ANDROID {
+            return Err(Self::last_error().unwrap_err());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
 }
 
 pub fn init() -> EGL {
@@ -451,6 +530,22 @@ pub struct RenderItem {
     pub tex_transform: Mat3,
 }
 
+#[derive(Debug)]
+pub struct RenderCompletion {
+    pub in_fence_fd: Option<OwnedFd>,
+    pub used_blocking_fallback: bool,
+}
+
+impl RenderCompletion {
+    fn explicit(in_fence_fd: OwnedFd) -> Self {
+        Self { in_fence_fd: Some(in_fence_fd), used_blocking_fallback: false }
+    }
+
+    fn blocking_fallback() -> Self {
+        Self { in_fence_fd: None, used_blocking_fallback: true }
+    }
+}
+
 pub fn image_target(external_only: bool) -> gl::Enum {
     match external_only {
         true => gl::TEXTURE_EXTERNAL_OES as _,
@@ -520,6 +615,8 @@ impl GlTexture {
 
 #[derive(Debug)]
 pub struct EglRenderBuffer {
+    egl: EGL,
+    display: egl::EGLDisplay,
     width: i32,
     height: i32,
     format: &'static Format,
@@ -551,6 +648,8 @@ impl EglRenderBuffer {
         }
 
         EglFrameBuffer {
+            egl: self.egl.clone(),
+            display: self.display,
             width: self.width,
             height: self.height,
             render_buffer: self,
@@ -561,6 +660,8 @@ impl EglRenderBuffer {
 
 #[derive(Debug)]
 pub struct EglFrameBuffer {
+    egl: EGL,
+    display: egl::EGLDisplay,
     pub width: i32,
     pub height: i32,
     render_buffer: EglRenderBuffer,
@@ -601,11 +702,57 @@ impl EglFrameBuffer {
         // self.render(ops, Some(&Color { r, g, b, a }));
     }
 
-    pub fn render(&self, items: &[RenderItem], projection: Mat3) {
+    fn finish_render(&self, render_sync_mode: RenderSyncMode) -> RenderCompletion {
+        match render_sync_mode {
+            RenderSyncMode::ExplicitInFence => match self.export_native_render_fence() {
+                Ok(in_fence_fd) => {
+                    log::debug!(
+                        "egl finish_render: exported explicit render fence fd={}",
+                        in_fence_fd.as_raw_fd()
+                    );
+                    RenderCompletion::explicit(in_fence_fd)
+                }
+                Err(error) => {
+                    log::warn!(
+                        "egl finish_render: explicit fence export failed, falling back to glFinish: {:?}",
+                        error
+                    );
+                    unsafe { gl::Finish() };
+                    RenderCompletion::blocking_fallback()
+                }
+            },
+            RenderSyncMode::BlockingFinishFallback => {
+                unsafe { gl::Finish() };
+                RenderCompletion::blocking_fallback()
+            }
+        }
+    }
+
+    fn export_native_render_fence(&self) -> Result<OwnedFd, egl::Error> {
+        let sync = self.egl.create_sync_khr(
+            self.display,
+            EGL_SYNC_NATIVE_FENCE_ANDROID,
+            &[egl::NONE],
+        )?;
+        unsafe { gl::Flush() };
+        let fence_fd = self.egl.dup_native_fence_fd_android(self.display, sync);
+        let destroy_result = self.egl.destroy_sync_khr(self.display, sync);
+        if let Err(error) = destroy_result {
+            log::warn!("egl destroy_sync_khr failed after fence export: {:?}", error);
+        }
+        fence_fd
+    }
+
+    pub fn render(
+        &self,
+        items: &[RenderItem],
+        projection: Mat3,
+        render_sync_mode: RenderSyncMode,
+    ) -> RenderCompletion {
         self.clear();
 
         if items.is_empty() {
-            return;
+            return self.finish_render(render_sync_mode);
         }
 
         let program = create_texture_program();
@@ -682,11 +829,9 @@ impl EglFrameBuffer {
             gl::DisableVertexAttribArray(texcoord_location);
             gl::UseProgram(0);
             gl::DeleteProgram(program);
-            // Diagnostic sync point: force rendering completion before the DRM page-flip.
-            // If this removes the random torn strip, we have confirmed a missing
-            // GPU-to-scanout synchronization issue and can replace this with fences.
-            gl::Finish();
         }
+
+        self.finish_render(render_sync_mode)
     }
 }
 
@@ -799,7 +944,12 @@ impl EglContext {
                 .collect::<HashMap<_, _>>()
         };
 
-        // dbg!(&extensions, &opengl_extensions);
+        let supports_native_render_fence = extensions.contains("EGL_KHR_fence_sync")
+            && extensions.contains("EGL_ANDROID_native_fence_sync");
+        log::info!(
+            "EGL native render fence support: {}",
+            supports_native_render_fence
+        );
 
         Self {
             egl: egl.clone(),
@@ -907,6 +1057,8 @@ impl EglContext {
         }
 
         EglRenderBuffer {
+            egl: self.egl.clone(),
+            display: self.display,
             width: dmabuf.width,
             height: dmabuf.height,
             format: dmabuf.format,
@@ -976,6 +1128,11 @@ impl EglContext {
             let drm = DrmFourcc::try_from(attr as u32).unwrap();
             drm == drm::buffer::DrmFourcc::Xrgb8888
         })
+    }
+
+    pub fn supports_native_render_fence(&self) -> bool {
+        self.extensions.contains("EGL_KHR_fence_sync")
+            && self.extensions.contains("EGL_ANDROID_native_fence_sync")
     }
 }
 

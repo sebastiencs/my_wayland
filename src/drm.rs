@@ -117,6 +117,7 @@ pub struct Drm {
 pub struct DrmOutput {
     pub in_use: ConnectorInUse,
     presentation_transform: OutputPresentationTransform,
+    render_sync_mode: RenderSyncMode,
     buffers: [RenderBuffer; 2],
     displayed_buffer_index: usize,
     render_buffer_index: usize,
@@ -299,6 +300,7 @@ pub struct Plane {
     pub crtc_handle: Option<control::crtc::Handle>,
     pub fb_id: drm::control::property::Handle,
     pub crtc_id: drm::control::property::Handle,
+    pub in_fence_fd: Option<control::property::Handle>,
     pub fb_handle: Option<control::framebuffer::Handle>,
 }
 
@@ -309,6 +311,16 @@ impl Plane {
         let handle: control::property::Handle = handle.into();
         Some(handle)
     }
+
+    fn supports_explicit_sync(&self) -> bool {
+        self.in_fence_fd.is_some()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenderSyncMode {
+    ExplicitInFence,
+    BlockingFinishFallback,
 }
 
 #[derive(Clone, Debug)]
@@ -441,12 +453,18 @@ impl Drm {
         DrmModel { drm_id }
     }
 
-    fn render_output(&self, items: &[RenderItem]) {
+    fn render_output(&self, items: &[RenderItem]) -> crate::egl::RenderCompletion {
         let projection = self.output.render_projection();
-        self.output.render_buffer().gl_framebuffer.render(items, projection);
+        self.output
+            .render_buffer()
+            .gl_framebuffer
+            .render(items, projection, self.output.render_sync_mode)
     }
 
-    fn submit_render_buffer(&mut self) -> std::io::Result<()> {
+    fn submit_render_buffer(
+        &mut self,
+        render_completion: crate::egl::RenderCompletion,
+    ) -> std::io::Result<()> {
         let (primary_plane, fb, crtc) = {
             let output = &self.output;
             let (primary_plane, _) = output.in_use.primary_plane();
@@ -465,6 +483,20 @@ impl Drm {
             primary_plane.crtc_id,
             control::property::Value::CRTC(Some(crtc)),
         );
+        if let Some(in_fence_fd) = render_completion.in_fence_fd.as_ref() {
+            if let Some(property) = primary_plane.in_fence_fd {
+                changes.add_property(
+                    primary_plane.handle,
+                    property,
+                    control::property::Value::SignedRange(in_fence_fd.as_raw_fd() as i64),
+                );
+                log::debug!(
+                    "drm submit_render_buffer: attached explicit in-fence fd={} plane={:?}",
+                    in_fence_fd.as_raw_fd(),
+                    primary_plane.handle
+                );
+            }
+        }
 
         self.fd.atomic_commit(
             control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
@@ -538,6 +570,26 @@ impl Drm {
         let mode = in_use.connector.preferred_mode.as_ref().unwrap();
         let (hdisplay, vdisplay) = mode.size();
         let (primary_plane, plane_modifiers) = in_use.primary_plane();
+        let render_sync_mode = if egl.supports_native_render_fence()
+            && primary_plane.supports_explicit_sync()
+        {
+            log::info!(
+                "Using explicit compositor sync: connector={} plane={:?} in_fence_fd={:?}",
+                in_use.connector.interface_name,
+                primary_plane.handle,
+                primary_plane.in_fence_fd
+            );
+            RenderSyncMode::ExplicitInFence
+        } else {
+            log::warn!(
+                "Falling back to blocking GL sync: connector={} plane={:?} egl_native_fence={} plane_in_fence_fd={}",
+                in_use.connector.interface_name,
+                primary_plane.handle,
+                egl.supports_native_render_fence(),
+                primary_plane.supports_explicit_sync()
+            );
+            RenderSyncMode::BlockingFinishFallback
+        };
         log::info!(
             "Selected output: connector={} crtc={:?} plane={:?} mode={}x{} modifiers={:?}",
             in_use.connector.interface_name,
@@ -627,6 +679,7 @@ impl Drm {
         DrmOutput {
             in_use,
             presentation_transform: OutputPresentationTransform::FlipY,
+            render_sync_mode,
             buffers,
             displayed_buffer_index: 0,
             render_buffer_index: 1,
@@ -909,6 +962,7 @@ impl Drm {
         let possible_crtcs = info.possible_crtcs().0;
         let fb_id = get_handle("FB_ID");
         let crtc_id = get_handle("CRTC_ID");
+        let in_fence_fd = props.get("IN_FENCE_FD").map(|(_, info)| info.handle());
 
         let handle = plane;
         let plane = Plane {
@@ -922,6 +976,7 @@ impl Drm {
             fb_handle: info.framebuffer(),
             fb_id,
             crtc_id,
+            in_fence_fd,
         };
 
         (handle, plane)
@@ -1389,8 +1444,8 @@ impl DrmModel {
             return;
         }
 
-        drm.render_output(&render_items);
-        if let Err(error) = drm.submit_render_buffer() {
+        let render_completion = drm.render_output(&render_items);
+        if let Err(error) = drm.submit_render_buffer(render_completion) {
             drm.output.mark_render_failed();
             log::error!("Could not submit DRM frame: {:?}", error);
         }
