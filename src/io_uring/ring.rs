@@ -23,9 +23,10 @@ use super::{
     types::{
         io_uring_files_update, io_uring_params, io_uring_probe, CompletionQueueEntry, EnterFlags,
         FeaturesFlags, IoUringFd, SubmissionQueueEntry, IORING_OFF_CQ_RING, IORING_OFF_SQES,
-        IORING_OFF_SQ_RING, IORING_OP_ACCEPT, IORING_OP_NOP, IORING_OP_POLL_ADD, IORING_OP_READ,
-        IORING_OP_SENDMSG, IORING_OP_WRITE, IORING_POLL_ADD_MULTI, IORING_REGISTER_FILES,
-        IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_PROBE, IORING_UNREGISTER_FILES,
+        IORING_OFF_SQ_RING, IORING_OP_ACCEPT, IORING_OP_ASYNC_CANCEL, IORING_OP_NOP,
+        IORING_OP_POLL_ADD, IORING_OP_READ, IORING_OP_SENDMSG, IORING_OP_WRITE,
+        IORING_POLL_ADD_MULTI, IORING_REGISTER_FILES, IORING_REGISTER_FILES_UPDATE,
+        IORING_REGISTER_PROBE, IORING_UNREGISTER_FILES,
     },
 };
 
@@ -39,6 +40,11 @@ fn display_io_uring_features(features: u32) {
 pub struct RingId(pub u32);
 
 impl RingId {
+    pub fn fresh() -> Self {
+        static NEXT_RING_ID: AtomicU32 = AtomicU32::new(1);
+        Self(NEXT_RING_ID.fetch_add(1, Relaxed))
+    }
+
     pub fn to_user_data(self) -> u64 {
         self.0 as u64
     }
@@ -174,6 +180,10 @@ pub(super) enum Operation {
         fd: RawFd,
         dispatch_to: Redispatcher<std::io::Result<PollCompleted>>,
     },
+    Cancel {
+        id: RingId,
+        target: RingId,
+    },
 
     // fd: RawFd,
     // data: Box<[u8]>,
@@ -254,6 +264,11 @@ impl Debug for Operation {
                 .field("fd", fd)
                 .field("dispatch_to", dispatch_to)
                 .finish(),
+            Self::Cancel { id, target } => f
+                .debug_struct("Cancel")
+                .field("id", id)
+                .field("target", target)
+                .finish(),
             Self::NoOp => write!(f, "NoOp"),
         }
     }
@@ -268,6 +283,7 @@ impl Operation {
             Operation::Sendmsg { id, .. } => Some(*id),
             Operation::Accept { id, .. } => Some(*id),
             Operation::Poll { id, .. } => Some(*id),
+            Operation::Cancel { id, .. } => Some(*id),
         }
     }
 }
@@ -375,6 +391,12 @@ impl SubmissionQueueEntry {
                 self.fd = *fd;
                 self.flags = libc::POLLIN as u32;
                 self.len = IORING_POLL_ADD_MULTI;
+                self.user_data = id.to_user_data();
+            }
+            Operation::Cancel { id, target } => {
+                self.opcode = IORING_OP_ASYNC_CANCEL;
+                self.fd = -1;
+                self.addr_splice_off_in = target.to_user_data();
                 self.user_data = id.to_user_data();
             }
         }

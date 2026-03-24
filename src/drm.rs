@@ -1385,6 +1385,7 @@ impl DrmReader {
         use crate::{io_uring::model::IoUringAction, runner::Redispatcher};
 
         dispatcher.dispatch(IoUringAction::Read {
+            id: None,
             fd: self.fd,
             offset: 0,
             length: 4096,

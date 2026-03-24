@@ -250,7 +250,8 @@ impl Runner {
         assert_ne!(action.id, ActionId::of::<AnyAction>());
 
         let Some(AnyModel { model, vtable }) = self.models.get_mut(action.action_id()) else {
-            panic!("action not found1 {}", action.type_name);
+            log::warn!("dropping action for removed model {}", action.type_name);
+            return;
         };
         (vtable.try_process)(model, &mut self.state, action, dispatcher).unwrap();
         self.post_process(dispatcher);

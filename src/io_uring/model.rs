@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io::ErrorKind::UnexpectedEof,
     ops::Range,
     os::fd::RawFd,
@@ -25,10 +25,14 @@ pub enum IoUringAction {
     Completion,
     WaitForCompletion,
     Read {
+        id: Option<RingId>,
         fd: RawFd,
         offset: usize,
         length: usize,
         dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
+    },
+    Cancel {
+        target: RingId,
     },
     Write {
         fd: RawFd,
@@ -61,13 +65,15 @@ impl std::fmt::Debug for IoUringAction {
         match self {
             Self::Completion => write!(f, "Completion"),
             Self::WaitForCompletion => write!(f, "WaitForCompletion"),
-            Self::Read { fd, offset, length, dispatch_to } => f
+            Self::Read { id, fd, offset, length, dispatch_to } => f
                 .debug_struct("Read")
+                .field("id", id)
                 .field("fd", fd)
                 .field("offset", offset)
                 .field("length", length)
                 .field("dispatch_to", dispatch_to)
                 .finish(),
+            Self::Cancel { target } => f.debug_struct("Cancel").field("target", target).finish(),
             Self::Write { fd, offset, buffer, dispatch_to } => f
                 .debug_struct("Write")
                 .field("fd", fd)
@@ -106,10 +112,10 @@ pub struct IoUringState {
     need_submit: bool,
     /// Pushed to the sq
     pending: BTreeMap<RingId, Operation>,
+    ignored_completions: BTreeSet<RingId>,
     completed: VecDeque<Completed>,
     /// Operations that needs to be pushed to the sqe
     to_push: VecDeque<Operation>,
-    current_ring_id: u32,
 }
 
 impl Default for IoUringState {
@@ -118,8 +124,8 @@ impl Default for IoUringState {
             ring: IoUring::new(256).unwrap(),
             need_submit: false,
             pending: BTreeMap::default(),
+            ignored_completions: BTreeSet::default(),
             completed: VecDeque::with_capacity(128),
-            current_ring_id: 0,
             to_push: VecDeque::with_capacity(32),
         }
     }
@@ -151,8 +157,8 @@ impl Model for IoUringState {
                     dispatcher.dispatch(IoUringAction::Completion);
                 }
             }
-            IoUringAction::Read { fd, offset, length, dispatch_to } => {
-                let id = self.next_id();
+            IoUringAction::Read { id, fd, offset, length, dispatch_to } => {
+                let id = id.unwrap_or_else(RingId::fresh);
                 let buffer = Self::make_buffer(length);
                 let kind = ReadOrWrite::Read;
                 let nbytes_processed = 0;
@@ -167,6 +173,11 @@ impl Model for IoUringState {
                     nbytes_processed,
                     neof,
                 });
+            }
+            IoUringAction::Cancel { target } => {
+                self.ignored_completions.insert(target);
+                let id = self.next_id();
+                self.push_op(Operation::Cancel { id, target });
             }
             IoUringAction::Write { fd, offset, buffer, dispatch_to } => {
                 let id = self.next_id();
@@ -243,9 +254,7 @@ impl IoUringState {
     }
 
     fn next_id(&mut self) -> RingId {
-        let current = self.current_ring_id;
-        self.current_ring_id = self.current_ring_id.wrapping_add(1);
-        RingId(current)
+        RingId::fresh()
     }
 
     fn push_op(&mut self, op: Operation) {
@@ -267,16 +276,36 @@ impl IoUringState {
 
     fn process_completed(&mut self, completed: Completed, dispatcher: &mut Dispatcher) {
         let Completed { user_data: _, id, result } = completed;
+        let op = self.pending.remove(&id).unwrap();
+
+        if self.ignored_completions.remove(&id) {
+            return;
+        }
 
         if result < 0 {
+            if let Operation::Cancel { target, .. } = op {
+                if !self.pending.contains_key(&target) {
+                    self.ignored_completions.remove(&target);
+                }
+                if result != -libc::ENOENT {
+                    error!(
+                        "io_uring async cancel failed target={:?} error_code={:?}",
+                        target, result
+                    );
+                }
+                return;
+            }
             error!("io_uring Operation failed error_code={:?}", result);
-            // return Some((user_data, Err(std::io::ErrorKind::Other.into())));
             panic!()
         }
-        let op = self.pending.remove(&id).unwrap();
         // log::trace!("result={} completed={:?}", result, op);
         match op {
             Operation::NoOp => {}
+            Operation::Cancel { target, .. } => {
+                if !self.pending.contains_key(&target) {
+                    self.ignored_completions.remove(&target);
+                }
+            }
             Operation::Poll { id, fd, dispatch_to: to } => {
                 let dispatch_to = to.clone();
                 self.pending
@@ -299,7 +328,7 @@ impl IoUringState {
                 dispatcher.redispatch_to(to, Ok(AcceptCompleted { new_client, fd }));
             }
             Operation::ReadWrite {
-                id: _,
+                id,
                 buffer,
                 fd,
                 mut nbytes_processed,
@@ -321,7 +350,6 @@ impl IoUringState {
                     dispatcher.redispatch_to(to, Err(UnexpectedEof.into()));
                     return;
                 }
-                let id = self.next_id();
                 self.push_op(Operation::ReadWrite {
                     id,
                     fd,
