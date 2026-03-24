@@ -3,11 +3,12 @@ use crate::{
     drm::schedule_active_output,
     object::{Object, Parser},
     protocol_generated::{
-        wl_surface, wp_linux_drm_syncobj_surface_v1, xdg_wm_base, WaylandId, WlBufferId,
-        WlCallbackId, WlSurfaceId, XdgSurfaceId,
+        wl_surface, wp_linux_drm_syncobj_surface_v1, wp_viewport, xdg_wm_base, WaylandId,
+        WlBufferId, WlCallbackId, WlSurfaceId, XdgSurfaceId,
     },
     state::{ObjectId, State},
     sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
+    transform::{self, BufferTransform, SizeI, SurfaceViewport},
     wayland_objects::{wl_callback::WlCallback, xdg_surface::XdgSurface},
 };
 
@@ -43,25 +44,67 @@ pub struct WlSurface {
     blocked: Option<BlockedSurfaceState>,
     blocked_waiter_id: Option<u64>,
     syncobj_surface_object: Option<crate::protocol_generated::WpLinuxDrmSyncobjSurfaceV1Id>,
+    viewport_object: Option<crate::protocol_generated::WpViewportId>,
     retired_buffers: Vec<RetiredBufferCandidate>,
     /// `wl_surface.frame` callbacks to complete on the next `commit`.
     pending_frame_callbacks: Vec<WlCallbackId>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Pending {
     /// `None` = no attach this commit; `Some(None)` = detach; `Some(Some(id))` = attach.
     buffer: Option<Option<ObjectId>>,
     offset: (i32, i32),
     sync: SurfaceSyncState,
+    buffer_transform: BufferTransform,
+    buffer_scale: i32,
+    viewport: SurfaceViewport,
+    damage_surface: Vec<DamageRect>,
+    damage_buffer: Vec<DamageRect>,
 }
 
-#[derive(Clone, Debug, Default)]
+impl Default for Pending {
+    fn default() -> Self {
+        Self {
+            buffer: None,
+            offset: (0, 0),
+            sync: SurfaceSyncState::default(),
+            buffer_transform: BufferTransform::Normal,
+            buffer_scale: 1,
+            viewport: SurfaceViewport::default(),
+            damage_surface: Vec::new(),
+            damage_buffer: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct OnScreen {
     buffer_object_id: Option<ObjectId>,
     x: i32,
     y: i32,
     sync: SurfaceSyncState,
+    buffer_transform: BufferTransform,
+    buffer_scale: i32,
+    viewport: SurfaceViewport,
+    logical_size: Option<SizeI>,
+    sample_transform: transform::Mat3,
+}
+
+impl Default for OnScreen {
+    fn default() -> Self {
+        Self {
+            buffer_object_id: None,
+            x: 0,
+            y: 0,
+            sync: SurfaceSyncState::default(),
+            buffer_transform: BufferTransform::Normal,
+            buffer_scale: 1,
+            viewport: SurfaceViewport::default(),
+            logical_size: None,
+            sample_transform: transform::Mat3::identity(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +112,9 @@ pub struct SurfaceRenderState {
     pub buffer_object_id: ObjectId,
     pub x: i32,
     pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub tex_transform: transform::Mat3,
     pub sync: SurfaceSyncState,
 }
 
@@ -77,11 +123,32 @@ struct BlockedSurfaceState {
     buffer_object_id: ObjectId,
     x: i32,
     y: i32,
+    width: i32,
+    height: i32,
+    tex_transform: transform::Mat3,
     sync: SurfaceSyncState,
+    buffer_transform: BufferTransform,
+    buffer_scale: i32,
+    viewport: SurfaceViewport,
 }
 
 struct SurfaceChanges {
     buffer_changed: bool,
+    mapping_changed: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DamageRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Debug)]
+struct DamageScaffold {
+    surface_to_buffer: Vec<transform::RectF>,
+    buffer_to_surface: Vec<transform::RectF>,
 }
 
 impl WlSurface {
@@ -97,6 +164,7 @@ impl WlSurface {
             blocked: None,
             blocked_waiter_id: None,
             syncobj_surface_object: None,
+            viewport_object: None,
             retired_buffers: Vec::new(),
             pending_frame_callbacks: Vec::new(),
         }
@@ -122,8 +190,48 @@ impl WlSurface {
         }
     }
 
+    pub fn set_viewport_object(
+        &mut self,
+        object: crate::protocol_generated::WpViewportId,
+    ) -> Result<(), ()> {
+        if self.viewport_object.is_some() {
+            return Err(());
+        }
+        self.viewport_object = Some(object);
+        Ok(())
+    }
+
+    pub fn clear_viewport_object(&mut self, object: crate::protocol_generated::WpViewportId) {
+        if self.viewport_object == Some(object) {
+            self.viewport_object = None;
+            self.pending.viewport = SurfaceViewport::default();
+        }
+    }
+
+    fn send_viewport_error(
+        &self,
+        client: &Client,
+        dispatcher: &mut ClientDispatcher,
+        code: u32,
+        message: impl AsRef<str>,
+    ) {
+        let Some(viewport) = self.viewport_object else {
+            log::warn!(
+                "viewport protocol error without viewport object on wl_surface {:?}: {}",
+                self.id,
+                message.as_ref()
+            );
+            return;
+        };
+        client.send_protocol_error(dispatcher, viewport.into(), code, message);
+    }
+
     pub fn pending_sync_mut(&mut self) -> &mut SurfaceSyncState {
         &mut self.pending.sync
+    }
+
+    pub fn pending_viewport_mut(&mut self) -> &mut SurfaceViewport {
+        &mut self.pending.viewport
     }
 
     pub fn has_syncobj_surface_object(&self) -> bool {
@@ -213,7 +321,161 @@ impl WlSurface {
     }
 
     fn get_changes(&self) -> SurfaceChanges {
-        SurfaceChanges { buffer_changed: self.pending.buffer.is_some() }
+        SurfaceChanges {
+            buffer_changed: self.pending.buffer.is_some(),
+            mapping_changed: self.pending.buffer_transform != self.on_screen.buffer_transform
+                || self.pending.buffer_scale != self.on_screen.buffer_scale
+                || self.pending.viewport != self.on_screen.viewport,
+        }
+    }
+
+    fn validate_pending_mapping(
+        &self,
+        client: &Client,
+        state: &State,
+        dispatcher: &mut ClientDispatcher,
+    ) -> bool {
+        let Some(buffer_object_id) = self.pending.buffer.flatten().or(self.on_screen.buffer_object_id) else {
+            return true;
+        };
+        let Some(object) = state.objects.try_get(buffer_object_id) else {
+            return true;
+        };
+        let Some(buffer) = object.downcast_ref::<WlBuffer>() else {
+            return true;
+        };
+
+        let buffer_size = buffer.dimensions();
+        let buffer_size = SizeI { width: buffer_size.0, height: buffer_size.1 };
+        let base = transform::pre_viewport_logical_size(
+            buffer_size,
+            self.pending.buffer_transform,
+            self.pending.buffer_scale,
+        );
+        if let Some(src) = self.pending.viewport.src {
+            if src.width <= 0.0 || src.height <= 0.0 || src.x < 0.0 || src.y < 0.0 {
+                self.send_viewport_error(
+                    client,
+                    dispatcher,
+                    wp_viewport::Error::BadValue as u32,
+                    "viewport source must have positive size and non-negative origin",
+                );
+                return false;
+            }
+            if self.pending.viewport.dst.is_none()
+                && (src.width.fract() != 0.0 || src.height.fract() != 0.0)
+            {
+                self.send_viewport_error(
+                    client,
+                    dispatcher,
+                    wp_viewport::Error::BadSize as u32,
+                    "viewport source must have integer size when destination is unset",
+                );
+                return false;
+            }
+            let content = transform::RectF { x: 0.0, y: 0.0, width: base.width, height: base.height };
+            if !transform::rect_contains(content, src) {
+                self.send_viewport_error(
+                    client,
+                    dispatcher,
+                    wp_viewport::Error::OutOfBuffer as u32,
+                    "viewport source rectangle extends outside the transformed/scaled buffer",
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    fn mapped_state_for_buffer(
+        &self,
+        state: &State,
+        buffer_object_id: ObjectId,
+        x: i32,
+        y: i32,
+        sync: SurfaceSyncState,
+    ) -> Option<BlockedSurfaceState> {
+        let object = state.objects.try_get(buffer_object_id)?;
+        let buffer = object.downcast_ref::<WlBuffer>()?;
+        let buffer_size = buffer.dimensions();
+        let buffer_size = SizeI { width: buffer_size.0, height: buffer_size.1 };
+        let logical_size = transform::derive_logical_size(
+            buffer_size,
+            self.pending.buffer_transform,
+            self.pending.buffer_scale,
+            self.pending.viewport,
+        );
+        let tex_transform = transform::surface_sample_transform(
+            buffer_size,
+            self.pending.buffer_transform,
+            self.pending.buffer_scale,
+            self.pending.viewport,
+        );
+        Some(BlockedSurfaceState {
+            buffer_object_id,
+            x,
+            y,
+            width: logical_size.width,
+            height: logical_size.height,
+            tex_transform,
+            sync,
+            buffer_transform: self.pending.buffer_transform,
+            buffer_scale: self.pending.buffer_scale,
+            viewport: self.pending.viewport,
+        })
+    }
+
+    fn pending_damage_scaffold(
+        &self,
+        state: &State,
+        buffer_object_id: ObjectId,
+        logical_size: SizeI,
+    ) -> Option<DamageScaffold> {
+        let object = state.objects.try_get(buffer_object_id)?;
+        let buffer = object.downcast_ref::<WlBuffer>()?;
+        let raw_size = buffer.dimensions();
+        let raw_size = SizeI { width: raw_size.0, height: raw_size.1 };
+        let surface_to_buffer = self
+            .pending
+            .damage_surface
+            .iter()
+            .map(|rect| {
+                transform::surface_rect_to_buffer_rect(
+                    transform::RectF {
+                        x: rect.x as f32,
+                        y: rect.y as f32,
+                        width: rect.width as f32,
+                        height: rect.height as f32,
+                    },
+                    logical_size,
+                    raw_size,
+                    self.pending.buffer_transform,
+                    self.pending.buffer_scale,
+                    self.pending.viewport,
+                )
+            })
+            .collect();
+        let buffer_to_surface = self
+            .pending
+            .damage_buffer
+            .iter()
+            .filter_map(|rect| {
+                transform::buffer_rect_to_surface_rect(
+                    transform::RectF {
+                        x: rect.x as f32,
+                        y: rect.y as f32,
+                        width: rect.width as f32,
+                        height: rect.height as f32,
+                    },
+                    logical_size,
+                    raw_size,
+                    self.pending.buffer_transform,
+                    self.pending.buffer_scale,
+                    self.pending.viewport,
+                )
+            })
+            .collect();
+        Some(DamageScaffold { surface_to_buffer, buffer_to_surface })
     }
 
     fn on_commit(
@@ -229,10 +491,20 @@ impl WlSurface {
             xdg_surface.on_commit(client, state, dispatcher);
         }
 
+        if !self.validate_pending_mapping(client, state, dispatcher) {
+            self.pending.buffer = None;
+            self.pending.offset = (0, 0);
+            self.pending.damage_surface.clear();
+            self.pending.damage_buffer.clear();
+            return;
+        }
+
         if !self.validate_pending_sync(client, state, dispatcher) {
             self.pending.buffer = None;
             self.pending.sync = SurfaceSyncState::default();
             self.pending.offset = (0, 0);
+            self.pending.damage_surface.clear();
+            self.pending.damage_buffer.clear();
             return;
         }
 
@@ -247,16 +519,25 @@ impl WlSurface {
                     x: self.on_screen.x,
                     y: self.on_screen.y,
                     sync: SurfaceSyncState::default(),
+                    buffer_transform: self.pending.buffer_transform,
+                    buffer_scale: self.pending.buffer_scale,
+                    viewport: self.pending.viewport,
+                    logical_size: None,
+                    sample_transform: transform::Mat3::identity(),
                 };
             }
             Some(Some(buffer_object_id)) => {
                 let (x, y) = self.pending.offset;
                 self.pending.offset = (0, 0);
-                let next = BlockedSurfaceState {
+                let Some(next) = self.mapped_state_for_buffer(
+                    state,
                     buffer_object_id,
-                    x: self.on_screen.x + x,
-                    y: self.on_screen.y + y,
-                    sync: pending_sync,
+                    self.on_screen.x + x,
+                    self.on_screen.y + y,
+                    pending_sync,
+                ) else {
+                    log::warn!("failed to derive mapped state for buffer {:?}", buffer_object_id);
+                    return;
                 };
 
                 let should_block =
@@ -283,10 +564,67 @@ impl WlSurface {
             }
         }
 
+        if !changes.buffer_changed && changes.mapping_changed && self.on_screen.buffer_object_id.is_some()
+        {
+            let Some(next) = self.mapped_state_for_buffer(
+                state,
+                self.on_screen.buffer_object_id.unwrap(),
+                self.on_screen.x,
+                self.on_screen.y,
+                self.on_screen.sync.clone(),
+            ) else {
+                log::warn!("failed to recompute mapped state for current surface {:?}", self.id);
+                return;
+            };
+            self.on_screen.buffer_transform = next.buffer_transform;
+            self.on_screen.buffer_scale = next.buffer_scale;
+            self.on_screen.viewport = next.viewport;
+            self.on_screen.logical_size = Some(SizeI { width: next.width, height: next.height });
+            self.on_screen.sample_transform = next.tex_transform;
+        }
+
+        let SurfaceChanges { buffer_changed, mapping_changed } = changes;
+        if buffer_changed || mapping_changed {
+            log::debug!(
+                "wl_surface commit applied surface={:?} buffer={:?} logical_size={:?} pos=({}, {}) transform={:?} scale={} viewport={:?}",
+                self.id,
+                self.on_screen.buffer_object_id,
+                self.on_screen.logical_size,
+                self.on_screen.x,
+                self.on_screen.y,
+                self.on_screen.buffer_transform,
+                self.on_screen.buffer_scale,
+                self.on_screen.viewport
+            );
+        }
+
+        let damage_scaffold = self
+            .on_screen
+            .buffer_object_id
+            .zip(self.on_screen.logical_size)
+            .and_then(|(buffer_object_id, logical_size)| {
+                self.pending_damage_scaffold(state, buffer_object_id, logical_size)
+            });
+        if let Some(damage) = damage_scaffold.as_ref() {
+            if !damage.surface_to_buffer.is_empty() || !damage.buffer_to_surface.is_empty() {
+                log::debug!(
+                    "wl_surface commit damage scaffold surface={:?} transform={:?} scale={} viewport={:?} surface_to_buffer={:?} buffer_to_surface={:?}",
+                    self.id,
+                    self.on_screen.buffer_transform,
+                    self.on_screen.buffer_scale,
+                    self.on_screen.viewport,
+                    damage.surface_to_buffer,
+                    damage.buffer_to_surface
+                );
+            }
+        }
+
+        self.pending.damage_surface.clear();
+        self.pending.damage_buffer.clear();
+
         self.flush_frame_callbacks(client, state, dispatcher);
 
-        let SurfaceChanges { buffer_changed } = changes;
-        if buffer_changed {
+        if buffer_changed || mapping_changed {
             schedule_active_output(state, dispatcher);
         }
     }
@@ -416,12 +754,20 @@ impl WlSurface {
     }
 
     pub fn render_state(&self) -> Option<SurfaceRenderState> {
+        let logical_size = self.on_screen.logical_size?;
         Some(SurfaceRenderState {
             buffer_object_id: self.on_screen.buffer_object_id?,
             x: self.on_screen.x,
             y: self.on_screen.y,
+            width: logical_size.width,
+            height: logical_size.height,
+            tex_transform: self.on_screen.sample_transform,
             sync: self.on_screen.sync.clone(),
         })
+    }
+
+    pub fn logical_size(&self) -> Option<SizeI> {
+        self.on_screen.logical_size
     }
 
     pub fn take_retired_buffers(&mut self) -> Vec<RetiredBufferCandidate> {
@@ -474,6 +820,11 @@ impl WlSurface {
             x: next.x,
             y: next.y,
             sync: next.sync,
+            buffer_transform: next.buffer_transform,
+            buffer_scale: next.buffer_scale,
+            viewport: next.viewport,
+            logical_size: Some(SizeI { width: next.width, height: next.height }),
+            sample_transform: next.tex_transform,
         };
     }
 
@@ -485,6 +836,8 @@ impl WlSurface {
             });
         }
         self.on_screen.sync = SurfaceSyncState::default();
+        self.on_screen.logical_size = None;
+        self.on_screen.sample_transform = transform::Mat3::identity();
     }
 
     fn cancel_blocked(
@@ -551,7 +904,8 @@ impl Object for WlSurface {
             Attach { buffer, x, y } => {
                 self.on_attach(client, state, buffer, x, y, dispatcher);
             }
-            Damage { x: _, y: _, width: _, height: _ } => {
+            Damage { x, y, width, height } => {
+                self.pending.damage_surface.push(DamageRect { x, y, width, height });
                 log_wl_surface_damage_ignored_once();
             }
             Frame { callback } => {
@@ -563,9 +917,30 @@ impl Object for WlSurface {
             Commit => {
                 self.on_commit(client, state, dispatcher);
             }
-            SetBufferTransform { transform } => todo!(),
-            SetBufferScale { scale } => todo!(),
-            DamageBuffer { x: _, y: _, width: _, height: _ } => {
+            SetBufferTransform { transform } => {
+                let Some(transform) = BufferTransform::from_wayland(transform) else {
+                    self.send_error(
+                        dispatcher,
+                        wl_surface::Error::InvalidTransform as u32,
+                        "invalid wl_surface buffer transform",
+                    );
+                    return;
+                };
+                self.pending.buffer_transform = transform;
+            }
+            SetBufferScale { scale } => {
+                if scale < 1 {
+                    self.send_error(
+                        dispatcher,
+                        wl_surface::Error::InvalidScale as u32,
+                        "wl_surface buffer scale must be at least 1",
+                    );
+                    return;
+                }
+                self.pending.buffer_scale = scale;
+            }
+            DamageBuffer { x, y, width, height } => {
+                self.pending.damage_buffer.push(DamageRect { x, y, width, height });
                 log_wl_surface_damage_ignored_once();
             }
             Offset { x, y } => todo!(),

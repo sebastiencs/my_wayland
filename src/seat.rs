@@ -7,7 +7,7 @@ use crate::{
     protocol_generated::{Array, WlKeyboardId, WlPointerId, WlSurfaceId},
     runner::Dispatcher,
     state::{DrmId, IndexMap, ObjectId, State},
-    wayland_objects::{wl_buffer::WlBuffer, wl_surface::WlSurface},
+    wayland_objects::wl_surface::WlSurface,
     xkb::KeyboardModifiers,
 };
 
@@ -342,16 +342,13 @@ fn hit_test_surface(
         let Some(surface_state) = surface.render_state() else {
             continue;
         };
-        let Some(buffer_object) = objects.try_get(surface_state.buffer_object_id) else {
-            continue;
-        };
-        let Some(buffer) = buffer_object.downcast_ref::<WlBuffer>() else {
-            continue;
-        };
-
-        let (width, height) = buffer.dimensions();
         // Hit-testing stays in compositor logical coordinates; the render path projects this space.
-        let rect = SurfaceRect { x: surface_state.x, y: surface_state.y, width, height };
+        let rect = SurfaceRect {
+            x: surface_state.x,
+            y: surface_state.y,
+            width: surface_state.width,
+            height: surface_state.height,
+        };
 
         let inside = x >= rect.x as f64
             && y >= rect.y as f64

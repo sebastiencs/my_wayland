@@ -4,7 +4,7 @@ use crate::{
     clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest},
     dmabuf::DmaBuf,
     drm::Format,
-    egl::{EglContext, GlTexture, RenderItem},
+    egl::{EglContext, GlTexture},
     object::{Object, Parser},
     protocol_generated::{wl_buffer, WaylandId, WlBufferId},
     state::State,
@@ -138,14 +138,25 @@ impl WlBuffer {
         matches!(self.backing, BufferBacking::Dmabuf { .. })
     }
 
-    pub fn prepare_render(
+    pub fn base_tex_transform(&self) -> transform::Mat3 {
+        match &self.backing {
+            BufferBacking::Shm { .. } => transform::normalized_texcoord_flip_y(),
+            BufferBacking::Dmabuf { y_inverted, .. } => {
+                if *y_inverted {
+                    transform::normalized_texcoord_flip_y()
+                } else {
+                    transform::Mat3::identity()
+                }
+            }
+        }
+    }
+
+    pub fn prepare_texture(
         &mut self,
-        x: i32,
-        y: i32,
         egl: &EglContext,
         sync: &crate::sync::SurfaceSyncState,
-    ) -> Option<RenderItem> {
-        let tex_transform = match &mut self.backing {
+    ) -> Option<u32> {
+        match &mut self.backing {
             BufferBacking::Shm { offset, width, height, format, stride, mem, texture } => {
                 if texture.is_none() {
                     let bytes = stride.saturating_mul(*height);
@@ -163,7 +174,7 @@ impl WlBuffer {
                         }
                     }
                 }
-                transform::normalized_texcoord_flip_y()
+                Some(texture.as_ref()?.texture_id())
             }
             BufferBacking::Dmabuf { dmabuf, y_inverted, texture } => {
                 if !sync.acquire.is_none() {
@@ -183,31 +194,10 @@ impl WlBuffer {
                         }
                     }
                 }
-                if *y_inverted {
-                    transform::normalized_texcoord_flip_y()
-                } else {
-                    transform::Mat3::identity()
-                }
+                let _ = y_inverted;
+                Some(texture.as_ref()?.texture_id())
             }
-        };
-
-        let (width, height) = self.dimensions();
-        let texture = match &self.backing {
-            BufferBacking::Shm { texture: Some(texture), .. }
-            | BufferBacking::Dmabuf { texture: Some(texture), .. } => texture,
-            _ => {
-                log::warn!("wl_buffer {:?} missing texture after prepare_render", self.id);
-                return None;
-            }
-        };
-        Some(RenderItem {
-            texture: texture.texture_id(),
-            x,
-            y,
-            width,
-            height,
-            tex_transform,
-        })
+        }
     }
 }
 

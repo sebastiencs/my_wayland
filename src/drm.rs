@@ -1621,19 +1621,30 @@ fn collect_render_items(
         let Some(buffer) = obj.downcast_mut::<WlBuffer>() else {
             continue;
         };
-        let Some(item) = buffer.prepare_render(
-            surface_state.x,
-            surface_state.y,
-            &drm.egl_context,
-            &surface_state.sync,
-        ) else {
+        let Some(texture) = buffer.prepare_texture(&drm.egl_context, &surface_state.sync) else {
             log::warn!(
-                "collect_render_items: no render item for buffer_object_id={:?}",
+                "collect_render_items: no prepared texture for buffer_object_id={:?}",
                 surface_state.buffer_object_id
             );
             continue;
         };
-        items.push(item);
+        log::debug!(
+            "collect_render_items sample_view buffer_object_id={:?} pos=({}, {}) size={}x{} tex_transform={:?}",
+            surface_state.buffer_object_id,
+            surface_state.x,
+            surface_state.y,
+            surface_state.width,
+            surface_state.height,
+            surface_state.tex_transform
+        );
+        items.push(RenderItem {
+            texture,
+            x: surface_state.x,
+            y: surface_state.y,
+            width: surface_state.width,
+            height: surface_state.height,
+            tex_transform: buffer.base_tex_transform().mul(surface_state.tex_transform),
+        });
     }
 
     (items, deferred_releases)
