@@ -34,6 +34,7 @@ use crate::{
         wl_buffer::WlBuffer,
         wl_surface::{StackEntry, WlSurface},
     },
+    ENABLE_DAMAGE,
 };
 
 use crate::{
@@ -338,11 +339,15 @@ impl DrmOutput {
     }
 
     fn preserve_render_buffer_contents(&self) -> bool {
-        self.buffer_age().is_some() && !self.force_full_redraw
+        ENABLE_DAMAGE && self.buffer_age().is_some() && !self.force_full_redraw
     }
 
     fn accumulate_damage_from_age(&self, base_damage: &DamageRegion) -> DamageRegion {
         let mut damage = base_damage.clone();
+        if !ENABLE_DAMAGE {
+            damage.add_rect(self.output_bounds());
+            return damage;
+        }
         let Some(age) = self.buffer_age() else {
             damage.add_rect(self.output_bounds());
             return damage;
@@ -719,7 +724,8 @@ impl Drm {
                 y2: rect.y2(),
             })
             .collect();
-        let want_damage_clips = self.output.allow_fb_damage_clips
+        let want_damage_clips = ENABLE_DAMAGE
+            && self.output.allow_fb_damage_clips
             && primary_plane.fb_damage_clips.is_some()
             && !rects.is_empty();
         let want_in_fence = self.output.allow_in_fence_fd
@@ -2098,7 +2104,7 @@ fn build_frame_plan(output: &DrmOutput, mut items: Vec<SceneItem>) -> FramePlan 
     let last_scene = &output.last_scene;
     let order_changed = scene_order(last_scene) != scene_order(&scene);
 
-    if output.force_full_redraw || order_changed || scene.len() != last_scene.len() {
+    if !ENABLE_DAMAGE || output.force_full_redraw || order_changed || scene.len() != last_scene.len() {
         base_damage.add_rect(output_bounds);
     } else {
         for (current, previous) in items.iter().zip(last_scene.iter()) {
@@ -2164,7 +2170,9 @@ fn build_frame_plan(output: &DrmOutput, mut items: Vec<SceneItem>) -> FramePlan 
         scene,
         damage: base_damage,
         direct_scanout,
-        preserve_contents: output.preserve_render_buffer_contents() && !output.force_full_redraw,
+        preserve_contents: ENABLE_DAMAGE
+            && output.preserve_render_buffer_contents()
+            && !output.force_full_redraw,
     }
 }
 

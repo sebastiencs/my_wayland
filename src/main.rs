@@ -125,6 +125,11 @@ mod utils;
 mod wayland_objects;
 mod xkb;
 
+/// Master switch for incremental damage (surface commits, output damage, partial GL redraw,
+/// `FB_DAMAGE_CLIPS`, buffer age, occlusion, etc.). When `false`, code paths should fall back
+/// to full-frame invalidation and full redraws. Compile-time only; change and rebuild to toggle.
+pub const ENABLE_DAMAGE: bool = true;
+
 fn make_timer(duration: Duration) -> TimerFd {
     let timer = timerfd::TimerFd::new(
         timerfd::ClockId::CLOCK_MONOTONIC,

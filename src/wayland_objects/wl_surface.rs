@@ -11,6 +11,7 @@ use crate::{
     sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
     transform::{self, BufferTransform, SizeI, SurfaceViewport},
     wayland_objects::{wl_callback::WlCallback, wl_region::WlRegion, xdg_surface::XdgSurface},
+    ENABLE_DAMAGE,
 };
 
 use {super::wl_buffer::WlBuffer, crate::protocol_generated::wl_display};
@@ -939,6 +940,16 @@ impl WlSurface {
         let Some(logical_size) = self.on_screen.logical_size else {
             return DamageRegion::new();
         };
+        if !ENABLE_DAMAGE {
+            if buffer_changed
+                || mapping_changed
+                || !payload.damage_surface.is_empty()
+                || !payload.damage_buffer.is_empty()
+            {
+                return Self::full_damage_for_logical_size(logical_size);
+            }
+            return DamageRegion::new();
+        }
         if buffer_changed || mapping_changed {
             return Self::full_damage_for_logical_size(logical_size);
         }
