@@ -34,24 +34,14 @@ impl Mat3 {
 
     pub fn transform_point(self, x: f32, y: f32) -> (f32, f32) {
         let rows = self.rows;
-        (
-            rows[0][0] * x + rows[0][1] * y + rows[0][2],
-            rows[1][0] * x + rows[1][1] * y + rows[1][2],
-        )
+        (rows[0][0] * x + rows[0][1] * y + rows[0][2], rows[1][0] * x + rows[1][1] * y + rows[1][2])
     }
 
     pub fn to_gl_array(self) -> [f32; 9] {
         let rows = self.rows;
         [
-            rows[0][0],
-            rows[1][0],
-            rows[2][0],
-            rows[0][1],
-            rows[1][1],
-            rows[2][1],
-            rows[0][2],
-            rows[1][2],
-            rows[2][2],
+            rows[0][0], rows[1][0], rows[2][0], rows[0][1], rows[1][1], rows[2][1], rows[0][2],
+            rows[1][2], rows[2][2],
         ]
     }
 }
@@ -62,11 +52,7 @@ pub enum OutputPresentationTransform {
     FlipY,
 }
 
-pub fn output_projection(
-    width: f32,
-    height: f32,
-    transform: OutputPresentationTransform,
-) -> Mat3 {
+pub fn output_projection(width: f32, height: f32, transform: OutputPresentationTransform) -> Mat3 {
     assert!(width > 0.0, "output projection width must be positive");
     assert!(height > 0.0, "output projection height must be positive");
 
@@ -95,13 +81,18 @@ pub fn normalized_texcoord_flip_y() -> Mat3 {
 #[cfg(test)]
 mod tests {
     use super::{
-        OutputPresentationTransform, normalized_texcoord_flip_y, output_projection, project_box,
+        normalized_texcoord_flip_y, output_projection, project_box, OutputPresentationTransform,
     };
 
     #[test]
     fn normal_projection_maps_top_left_box_to_clip_top_left() {
-        let transform =
-            project_box(0.0, 0.0, 100.0, 50.0, output_projection(200.0, 100.0, OutputPresentationTransform::Normal));
+        let transform = project_box(
+            0.0,
+            0.0,
+            100.0,
+            50.0,
+            output_projection(200.0, 100.0, OutputPresentationTransform::Normal),
+        );
 
         assert_eq!(transform.transform_point(0.0, 0.0), (-1.0, 1.0));
         assert_eq!(transform.transform_point(1.0, 1.0), (0.0, 0.0));
@@ -109,8 +100,13 @@ mod tests {
 
     #[test]
     fn flipped_projection_compensates_for_y_inverted_targets() {
-        let transform =
-            project_box(0.0, 0.0, 100.0, 50.0, output_projection(200.0, 100.0, OutputPresentationTransform::FlipY));
+        let transform = project_box(
+            0.0,
+            0.0,
+            100.0,
+            50.0,
+            output_projection(200.0, 100.0, OutputPresentationTransform::FlipY),
+        );
 
         assert_eq!(transform.transform_point(0.0, 0.0), (-1.0, -1.0));
         assert_eq!(transform.transform_point(1.0, 1.0), (0.0, 0.0));

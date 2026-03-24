@@ -455,10 +455,11 @@ impl Drm {
 
     fn render_output(&self, items: &[RenderItem]) -> crate::egl::RenderCompletion {
         let projection = self.output.render_projection();
-        self.output
-            .render_buffer()
-            .gl_framebuffer
-            .render(items, projection, self.output.render_sync_mode)
+        self.output.render_buffer().gl_framebuffer.render(
+            items,
+            projection,
+            self.output.render_sync_mode,
+        )
     }
 
     fn submit_render_buffer(

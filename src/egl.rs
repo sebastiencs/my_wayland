@@ -19,9 +19,8 @@ use {
 use drm::control::Device;
 
 use crate::{
-    drm::RenderSyncMode,
     dmabuf::DmaBuf,
-    drm::{DrmFd, Format, Modifier, FORMATS_MAP},
+    drm::{DrmFd, Format, Modifier, RenderSyncMode, FORMATS_MAP},
     gbm::GbmDevice,
     transform::Mat3,
     wayland_objects::wl_shm_pool::SliceSharedMemory,
@@ -538,7 +537,10 @@ pub struct RenderCompletion {
 
 impl RenderCompletion {
     fn explicit(in_fence_fd: OwnedFd) -> Self {
-        Self { in_fence_fd: Some(in_fence_fd), used_blocking_fallback: false }
+        Self {
+            in_fence_fd: Some(in_fence_fd),
+            used_blocking_fallback: false,
+        }
     }
 
     fn blocking_fallback() -> Self {
@@ -729,11 +731,9 @@ impl EglFrameBuffer {
     }
 
     fn export_native_render_fence(&self) -> Result<OwnedFd, egl::Error> {
-        let sync = self.egl.create_sync_khr(
-            self.display,
-            EGL_SYNC_NATIVE_FENCE_ANDROID,
-            &[egl::NONE],
-        )?;
+        let sync =
+            self.egl
+                .create_sync_khr(self.display, EGL_SYNC_NATIVE_FENCE_ANDROID, &[egl::NONE])?;
         unsafe { gl::Flush() };
         let fence_fd = self.egl.dup_native_fence_fd_android(self.display, sync);
         let destroy_result = self.egl.destroy_sync_khr(self.display, sync);
@@ -771,9 +771,8 @@ impl EglFrameBuffer {
             unsafe { gl::GetUniformLocation(program, transform_name.as_ptr().cast()) };
         let tex_transform_location =
             unsafe { gl::GetUniformLocation(program, tex_transform_name.as_ptr().cast()) };
-        let vertices: [f32; 16] = [
-            0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-        ];
+        let vertices: [f32; 16] =
+            [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0];
         let stride = (4 * std::mem::size_of::<f32>()) as i32;
 
         unsafe {
@@ -946,10 +945,7 @@ impl EglContext {
 
         let supports_native_render_fence = extensions.contains("EGL_KHR_fence_sync")
             && extensions.contains("EGL_ANDROID_native_fence_sync");
-        log::info!(
-            "EGL native render fence support: {}",
-            supports_native_render_fence
-        );
+        log::info!("EGL native render fence support: {}", supports_native_render_fence);
 
         Self {
             egl: egl.clone(),
