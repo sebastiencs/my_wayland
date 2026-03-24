@@ -31,7 +31,20 @@ pub enum IoUringAction {
         length: usize,
         dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
     },
+    Recvmsg {
+        id: Option<RingId>,
+        fd: RawFd,
+        dispatch_to: Redispatcher<std::io::Result<RecvmsgCompleted>>,
+    },
     Cancel {
+        target: RingId,
+    },
+    Poll {
+        id: Option<RingId>,
+        fd: RawFd,
+        dispatch_to: Redispatcher<std::io::Result<PollCompleted>>,
+    },
+    PollRemove {
         target: RingId,
     },
     Write {
@@ -39,10 +52,6 @@ pub enum IoUringAction {
         offset: usize,
         buffer: Box<[u8]>,
         dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
-    },
-    Recvmsg {
-        fd: RawFd,
-        dispatch_to: Redispatcher<std::io::Result<RecvmsgCompleted>>,
     },
     Sendmsg {
         fd: RawFd,
@@ -53,10 +62,6 @@ pub enum IoUringAction {
     Accept {
         fd: RawFd,
         dispatch_to: Redispatcher<std::io::Result<AcceptCompleted>>,
-    },
-    Poll {
-        fd: RawFd,
-        dispatch_to: Redispatcher<std::io::Result<PollCompleted>>,
     },
 }
 
@@ -73,17 +78,28 @@ impl std::fmt::Debug for IoUringAction {
                 .field("length", length)
                 .field("dispatch_to", dispatch_to)
                 .finish(),
+            Self::Recvmsg { id, fd, dispatch_to } => f
+                .debug_struct("Recvmsg")
+                .field("id", id)
+                .field("fd", fd)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
             Self::Cancel { target } => f.debug_struct("Cancel").field("target", target).finish(),
+            Self::Poll { id, fd, dispatch_to } => f
+                .debug_struct("Poll")
+                .field("id", id)
+                .field("fd", fd)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
+            Self::PollRemove { target } => f
+                .debug_struct("PollRemove")
+                .field("target", target)
+                .finish(),
             Self::Write { fd, offset, buffer, dispatch_to } => f
                 .debug_struct("Write")
                 .field("fd", fd)
                 .field("offset", offset)
                 .field("buffer_len", &buffer.len())
-                .field("dispatch_to", dispatch_to)
-                .finish(),
-            Self::Recvmsg { fd, dispatch_to } => f
-                .debug_struct("Recvmsg")
-                .field("fd", fd)
                 .field("dispatch_to", dispatch_to)
                 .finish(),
             Self::Sendmsg { fd, dispatch_to, buffer, fds } => f
@@ -95,11 +111,6 @@ impl std::fmt::Debug for IoUringAction {
                 .finish(),
             Self::Accept { fd, dispatch_to } => f
                 .debug_struct("Accept")
-                .field("fd", fd)
-                .field("dispatch_to", dispatch_to)
-                .finish(),
-            Self::Poll { fd, dispatch_to } => f
-                .debug_struct("Poll")
                 .field("fd", fd)
                 .field("dispatch_to", dispatch_to)
                 .finish(),
@@ -195,8 +206,8 @@ impl Model for IoUringState {
                     neof,
                 });
             }
-            IoUringAction::Recvmsg { fd, dispatch_to } => {
-                let id = self.next_id();
+            IoUringAction::Recvmsg { id, fd, dispatch_to } => {
+                let id = id.unwrap_or_else(RingId::fresh);
                 let buffer_read = vec![0; 32 * 1024];
                 let buffer_aux = vec![0; 32 * 1024];
                 let mut data = Box::new(RecvmsgData {
@@ -238,9 +249,14 @@ impl Model for IoUringState {
                 let id = self.next_id();
                 self.push_op(Operation::Accept { id, fd, dispatch_to });
             }
-            IoUringAction::Poll { fd, dispatch_to } => {
-                let id = self.next_id();
+            IoUringAction::Poll { id, fd, dispatch_to } => {
+                let id = id.unwrap_or_else(RingId::fresh);
                 self.push_op(Operation::Poll { id, fd, dispatch_to });
+            }
+            IoUringAction::PollRemove { target } => {
+                self.ignored_completions.insert(target);
+                let id = self.next_id();
+                self.push_op(Operation::PollRemove { id, target });
             }
         }
 
@@ -283,17 +299,32 @@ impl IoUringState {
         }
 
         if result < 0 {
-            if let Operation::Cancel { target, .. } = op {
-                if !self.pending.contains_key(&target) {
-                    self.ignored_completions.remove(&target);
+            match op {
+                Operation::Cancel { target, .. } => {
+                    if !self.pending.contains_key(&target) {
+                        self.ignored_completions.remove(&target);
+                    }
+                    if result != -libc::ENOENT {
+                        error!(
+                            "io_uring async cancel failed target={:?} error_code={:?}",
+                            target, result
+                        );
+                    }
+                    return;
                 }
-                if result != -libc::ENOENT {
-                    error!(
-                        "io_uring async cancel failed target={:?} error_code={:?}",
-                        target, result
-                    );
+                Operation::PollRemove { target, .. } => {
+                    if !self.pending.contains_key(&target) {
+                        self.ignored_completions.remove(&target);
+                    }
+                    if result != -libc::ENOENT {
+                        error!(
+                            "io_uring poll remove failed target={:?} error_code={:?}",
+                            target, result
+                        );
+                    }
+                    return;
                 }
-                return;
+                _ => {}
             }
             error!("io_uring Operation failed error_code={:?}", result);
             panic!()
@@ -302,6 +333,11 @@ impl IoUringState {
         match op {
             Operation::NoOp => {}
             Operation::Cancel { target, .. } => {
+                if !self.pending.contains_key(&target) {
+                    self.ignored_completions.remove(&target);
+                }
+            }
+            Operation::PollRemove { target, .. } => {
                 if !self.pending.contains_key(&target) {
                     self.ignored_completions.remove(&target);
                 }

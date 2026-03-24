@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     os::{
-        fd::{AsRawFd, RawFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::net::UnixListener,
     },
     path::PathBuf,
@@ -14,7 +14,7 @@ use crate::{
     dbus::Dbus,
     io_uring::{
         model::IoUringAction,
-        ring::{AcceptCompleted, RecvmsgCompleted},
+        ring::{AcceptCompleted, RecvmsgCompleted, RingId},
     },
     object::{IdToObject, Object, Parser, ParserError},
     protocol_generated::{wl_display, Array, Constants, WaylandId},
@@ -160,7 +160,7 @@ const MIN_SERVER_ID: u32 = 0xff00_0000;
 
 pub struct Client {
     id: ClientId,
-    fd: RawFd,
+    fd: OwnedFd,
     reader_id: Option<ClientReaderId>,
     /// the key `WaylandId` is the id we share with the client
     /// the value `ObjectId` is an index in our `State::objects`
@@ -185,7 +185,7 @@ impl Client {
     fn new(client_id: ClientId, fd: RawFd) -> Self {
         Self {
             id: client_id,
-            fd,
+            fd: unsafe { OwnedFd::from_raw_fd(fd) },
             reader_id: None,
             objects: BTreeMap::default(),
             info: None,
@@ -226,7 +226,7 @@ impl Client {
         let mut len = std::mem::size_of::<libc::ucred>() as u32;
         let result = unsafe {
             getsockopt(
-                self.fd,
+                self.fd.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_PEERCRED,
                 &mut cred as *mut _ as *mut _,
@@ -527,7 +527,7 @@ impl<'a> ClientDispatcher<'a> {
             if log::Level::Trace <= log::max_level() { client.info.clone() } else { None };
         Self {
             dispatcher,
-            client_fd: client.fd,
+            client_fd: client.fd.as_raw_fd(),
             client_id: client.id,
             command,
         }
@@ -590,7 +590,8 @@ impl Model for Client {
                 let display: WlDisplay = WlDisplay::default();
                 self.insert_object(state, display);
 
-                let (client_reader_id, client_reader) = ClientReader::new(self.fd, self.id);
+                let (client_reader_id, client_reader) =
+                    ClientReader::new(self.fd.as_raw_fd(), self.id);
                 self.reader_id = Some(client_reader_id);
                 dispatcher.start_model(client_reader_id, client_reader);
             }
@@ -716,6 +717,7 @@ struct ClientReader {
     client_id: ClientId,
     read_buffer: Buffer,
     neof: usize,
+    recvmsg_op_id: Option<RingId>,
 }
 
 enum ClientReaderAction {
@@ -730,7 +732,7 @@ impl ClientReader {
         let id = ClientReader::next_id();
         let read_buffer = Buffer::new();
         let neof = 0;
-        let this = Self { fd, id, client_id, read_buffer, neof };
+        let this = Self { fd, id, client_id, read_buffer, neof, recvmsg_op_id: None };
         (id, this)
     }
 
@@ -756,8 +758,11 @@ impl ClientReader {
         false
     }
 
-    fn dispatch_recvmsg(&self, dispatcher: &mut Dispatcher) {
+    fn dispatch_recvmsg(&mut self, dispatcher: &mut Dispatcher) {
+        let recvmsg_op_id = RingId::fresh();
+        self.recvmsg_op_id = Some(recvmsg_op_id);
         dispatcher.dispatch(IoUringAction::Recvmsg {
+            id: Some(recvmsg_op_id),
             fd: self.fd,
             dispatch_to: Redispatcher::id(self.id, Self::on_recvmsg),
         });
@@ -795,6 +800,7 @@ impl Model for ClientReader {
                 self.dispatch_recvmsg(dispatcher);
             }
             ReadMsg { buffer, fds } => {
+                self.recvmsg_op_id = None;
                 if self.is_eof(&buffer) {
                     self.dispatch_close(dispatcher);
                     return Ok(());
@@ -827,12 +833,15 @@ impl Model for ClientReader {
                 }
             }
             ErrorOnSocket { error } => {
+                self.recvmsg_op_id = None;
                 log::error!("An error occured on the socket of {:?}: {:?}", self.client_id, error);
                 // Dispatch an action stop our Model
                 self.dispatch_close(dispatcher);
             }
             Stop => {
-                // TODO: Close file descriptor
+                if let Some(recvmsg_op_id) = self.recvmsg_op_id.take() {
+                    dispatcher.dispatch(IoUringAction::Cancel { target: recvmsg_op_id });
+                }
             }
         };
 

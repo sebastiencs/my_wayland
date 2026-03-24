@@ -11,8 +11,11 @@ use std::{
 use dbus_message_parser::encode::EncodeError;
 
 use crate::{
-    io_uring::{model::IoUringAction, ring::RecvmsgCompleted},
-    runner::{Dispatcher, Model, Redispatcher},
+    io_uring::{
+        model::IoUringAction,
+        ring::{RecvmsgCompleted, RingId},
+    },
+    runner::{AnyAction, Dispatcher, Model, Redispatcher},
     state::State,
     udev::UdevAction,
 };
@@ -420,7 +423,7 @@ impl Model for Dbus {
         match action {
             Start => {
                 let fd = self.socket.as_raw_fd();
-                dispatcher.start_model2(DbusReader::new(fd));
+                dispatcher.start_model(DBUS_READER_ID, DbusReader::new(fd));
             }
             TakeDevice { devnum } => {
                 let serial = self.take_device(devnum, dispatcher);
@@ -442,7 +445,10 @@ struct DbusReader {
     read_buffer: DbusBuffer,
     fds: Vec<RawFd>,
     neof: usize,
+    recvmsg_op_id: Option<RingId>,
 }
+
+const DBUS_READER_ID: u64 = 0;
 
 #[derive(Debug)]
 enum DbusReaderAction {
@@ -467,6 +473,7 @@ impl Model for DbusReader {
         match action {
             Start => self.dispatch_read(dispatcher),
             ReadMsg { buffer, fds } => {
+                self.recvmsg_op_id = None;
                 if self.is_eof(&buffer) {
                     return self.dispatch_close(dispatcher);
                 }
@@ -493,7 +500,9 @@ impl Model for DbusReader {
                 }
             }
             Stop => {
-                // TODO: Close fd
+                if let Some(recvmsg_op_id) = self.recvmsg_op_id.take() {
+                    dispatcher.dispatch(IoUringAction::Cancel { target: recvmsg_op_id });
+                }
             }
         };
 
@@ -569,7 +578,7 @@ impl DbusReader {
         let read_buffer = DbusBuffer::new();
         let neof = 0;
         let fds = Vec::with_capacity(16);
-        Self { fd, read_buffer, neof, fds }
+        Self { fd, read_buffer, neof, fds, recvmsg_op_id: None }
     }
 
     fn is_eof(&mut self, buffer: &[u8]) -> bool {
@@ -587,14 +596,30 @@ impl DbusReader {
         false
     }
 
-    fn dispatch_read(&self, dispatcher: &mut Dispatcher) {
+    fn dispatch_read(&mut self, dispatcher: &mut Dispatcher) {
+        let recvmsg_op_id = RingId::fresh();
+        self.recvmsg_op_id = Some(recvmsg_op_id);
         dispatcher.dispatch(IoUringAction::Recvmsg {
+            id: Some(recvmsg_op_id),
             fd: self.fd,
-            dispatch_to: Redispatcher::into::<DbusReaderAction>(),
+            dispatch_to: Redispatcher::id(DBUS_READER_ID, Self::on_recvmsg),
         });
     }
 
-    fn dispatch_close(&self, _dispatcher: &mut Dispatcher) -> Result<(), ()> {
-        todo!()
+    fn dispatch_close(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+        dispatcher.stop_model::<_, DbusReader>(DBUS_READER_ID);
+        Ok(())
+    }
+
+    fn on_recvmsg(result: std::io::Result<RecvmsgCompleted>) -> AnyAction {
+        match result {
+            Ok(RecvmsgCompleted { fd: _, buffer, fds }) => {
+                AnyAction::from(DbusReaderAction::ReadMsg { buffer, fds })
+            }
+            Err(error) => {
+                log::warn!("dbus reader recvmsg failed: {:?}", error);
+                AnyAction::from(DbusReaderAction::Stop)
+            }
+        }
     }
 }

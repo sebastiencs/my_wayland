@@ -14,7 +14,10 @@ use input::{
 };
 
 use crate::{
-    io_uring::{model::IoUringAction, ring::PollCompleted},
+    io_uring::{
+        model::IoUringAction,
+        ring::{PollCompleted, RingId},
+    },
     runner::{Dispatcher, Model, Redispatcher},
     seat,
     state::{InputId, State},
@@ -61,6 +64,7 @@ pub struct Libinput {
     /// open the files in another thread or not
     dev_to_fd: Arc<Mutex<BTreeMap<u64, OwnedFd>>>,
     inputs: BTreeSet<InputId>,
+    poll_op_id: Option<RingId>,
 }
 
 impl Libinput {
@@ -71,7 +75,7 @@ impl Libinput {
         set_logger(&libinput);
         let inputs = Default::default();
 
-        Box::new(Self { libinput, dev_to_fd, inputs })
+        Box::new(Self { libinput, dev_to_fd, inputs, poll_op_id: None })
     }
 
     pub fn dispatch(&mut self) {
@@ -82,8 +86,11 @@ impl Libinput {
         self.libinput.next()
     }
 
-    fn dispatch_poll_libinput(&self, dispatcher: &mut Dispatcher) {
+    fn dispatch_poll_libinput(&mut self, dispatcher: &mut Dispatcher) {
+        let poll_op_id = RingId::fresh();
+        self.poll_op_id = Some(poll_op_id);
         dispatcher.dispatch(IoUringAction::Poll {
+            id: Some(poll_op_id),
             fd: self.libinput.as_raw_fd(),
             dispatch_to: Redispatcher::into::<LibinputAction>(),
         });
@@ -101,6 +108,7 @@ pub enum LibinputAction {
     Start,
     Event,
     OpenInput { devnode: String, fd: RawFd, devnum: u64 },
+    Stop,
 }
 
 impl From<std::io::Result<PollCompleted>> for LibinputAction {
@@ -114,6 +122,7 @@ impl Model for Libinput {
     type Action = LibinputAction;
 
     const START: Option<Self::Action> = Some(Self::Action::Start);
+    const STOP: Option<Self::Action> = Some(Self::Action::Stop);
 
     fn process(
         &mut self,
@@ -226,6 +235,11 @@ impl Model for Libinput {
 
                 let input_id = state.inputs.insert(Input { device });
                 self.inputs.insert(input_id);
+            }
+            Stop => {
+                if let Some(poll_op_id) = self.poll_op_id.take() {
+                    dispatcher.dispatch(IoUringAction::PollRemove { target: poll_op_id });
+                }
             }
         }
         Ok(())

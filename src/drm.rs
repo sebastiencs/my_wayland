@@ -24,7 +24,7 @@ use crate::{
     dmabuf::DmaBuf,
     egl::{EglContext, EglFrameBuffer, GlTexture, RenderItem, EGL},
     gbm::UseFlags,
-    io_uring::ring::ReadWriteCompleted,
+    io_uring::ring::{ReadWriteCompleted, RingId},
     runner::{AnyAction, Dispatcher, Model},
     state::{DrmId, State},
     sync::DeferredRelease,
@@ -1305,6 +1305,7 @@ struct DrmReader {
     drm_id: DrmId,
     fd: RawFd,
     read_buffer: DrmBuffer,
+    read_op_id: Option<RingId>,
 }
 
 #[derive(Debug)]
@@ -1331,6 +1332,7 @@ impl Model for DrmReader {
         match action {
             Start => self.dispatch_read(dispatcher),
             ReadChunk { buffer } => {
+                self.read_op_id = None;
                 self.read_buffer.append(&buffer);
                 loop {
                     let event = match self.read_buffer.next_event() {
@@ -1360,10 +1362,16 @@ impl Model for DrmReader {
                 }
             }
             ReadError { error } => {
+                self.read_op_id = None;
                 log::error!("Could not read DRM events: {:?}", error);
                 self.dispatch_read(dispatcher);
             }
             Stop => {
+                if let Some(read_op_id) = self.read_op_id.take() {
+                    dispatcher.dispatch(crate::io_uring::model::IoUringAction::Cancel {
+                        target: read_op_id,
+                    });
+                }
                 log::debug!("DrmReader stopped for drm_id={:?}", self.drm_id);
             }
         };
@@ -1374,18 +1382,20 @@ impl Model for DrmReader {
 
 impl DrmReader {
     fn new(drm_id: DrmId, fd: RawFd) -> Self {
-        Self { drm_id, fd, read_buffer: DrmBuffer::new() }
+        Self { drm_id, fd, read_buffer: DrmBuffer::new(), read_op_id: None }
     }
 
     fn model_id(&self) -> u64 {
         usize::from(self.drm_id) as u64
     }
 
-    fn dispatch_read(&self, dispatcher: &mut Dispatcher) {
+    fn dispatch_read(&mut self, dispatcher: &mut Dispatcher) {
         use crate::{io_uring::model::IoUringAction, runner::Redispatcher};
 
+        let read_op_id = RingId::fresh();
+        self.read_op_id = Some(read_op_id);
         dispatcher.dispatch(IoUringAction::Read {
-            id: None,
+            id: Some(read_op_id),
             fd: self.fd,
             offset: 0,
             length: 4096,

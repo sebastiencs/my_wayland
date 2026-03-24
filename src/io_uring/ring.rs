@@ -24,9 +24,9 @@ use super::{
         io_uring_files_update, io_uring_params, io_uring_probe, CompletionQueueEntry, EnterFlags,
         FeaturesFlags, IoUringFd, SubmissionQueueEntry, IORING_OFF_CQ_RING, IORING_OFF_SQES,
         IORING_OFF_SQ_RING, IORING_OP_ACCEPT, IORING_OP_ASYNC_CANCEL, IORING_OP_NOP,
-        IORING_OP_POLL_ADD, IORING_OP_READ, IORING_OP_SENDMSG, IORING_OP_WRITE,
-        IORING_POLL_ADD_MULTI, IORING_REGISTER_FILES, IORING_REGISTER_FILES_UPDATE,
-        IORING_REGISTER_PROBE, IORING_UNREGISTER_FILES,
+        IORING_OP_POLL_ADD, IORING_OP_POLL_REMOVE, IORING_OP_READ, IORING_OP_SENDMSG,
+        IORING_OP_WRITE, IORING_POLL_ADD_MULTI, IORING_REGISTER_FILES,
+        IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_PROBE, IORING_UNREGISTER_FILES,
     },
 };
 
@@ -184,6 +184,10 @@ pub(super) enum Operation {
         id: RingId,
         target: RingId,
     },
+    PollRemove {
+        id: RingId,
+        target: RingId,
+    },
 
     // fd: RawFd,
     // data: Box<[u8]>,
@@ -269,6 +273,11 @@ impl Debug for Operation {
                 .field("id", id)
                 .field("target", target)
                 .finish(),
+            Self::PollRemove { id, target } => f
+                .debug_struct("PollRemove")
+                .field("id", id)
+                .field("target", target)
+                .finish(),
             Self::NoOp => write!(f, "NoOp"),
         }
     }
@@ -284,6 +293,7 @@ impl Operation {
             Operation::Accept { id, .. } => Some(*id),
             Operation::Poll { id, .. } => Some(*id),
             Operation::Cancel { id, .. } => Some(*id),
+            Operation::PollRemove { id, .. } => Some(*id),
         }
     }
 }
@@ -395,6 +405,12 @@ impl SubmissionQueueEntry {
             }
             Operation::Cancel { id, target } => {
                 self.opcode = IORING_OP_ASYNC_CANCEL;
+                self.fd = -1;
+                self.addr_splice_off_in = target.to_user_data();
+                self.user_data = id.to_user_data();
+            }
+            Operation::PollRemove { id, target } => {
+                self.opcode = IORING_OP_POLL_REMOVE;
                 self.fd = -1;
                 self.addr_splice_off_in = target.to_user_data();
                 self.user_data = id.to_user_data();

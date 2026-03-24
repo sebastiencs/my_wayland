@@ -20,7 +20,10 @@ use crate::{
     dbus::DbusAction,
     drm::Drm,
     input::LibinputAction,
-    io_uring::{model::IoUringAction, ring::PollCompleted},
+    io_uring::{
+        model::IoUringAction,
+        ring::{PollCompleted, RingId},
+    },
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     state::State,
     wayland_objects::wl_output::WlOutputGlobal,
@@ -51,17 +54,20 @@ enum PendingControl {
 pub struct Udev {
     udev_monitor: udev::MonitorSocket,
     pending: BTreeMap<libc::dev_t, PendingControl>,
+    poll_op_id: Option<RingId>,
 }
 
 pub enum UdevAction {
     Start,
     Event,
     DeviceTaken { fd: RawFd, inactive: bool, devnum: libc::dev_t },
+    Stop,
 }
 
 impl Model for Udev {
     type Action = UdevAction;
     const START: Option<Self::Action> = Some(Self::Action::Start);
+    const STOP: Option<Self::Action> = Some(Self::Action::Stop);
 
     fn process(
         &mut self,
@@ -95,6 +101,11 @@ impl Model for Udev {
                 // };
                 // log::warn!("DEVICE TAKEN devum={:?} fd={:?} inactive={:?} {:?}", devnum, fd, inactive, path_node);
             }
+            UdevAction::Stop => {
+                if let Some(poll_op_id) = self.poll_op_id.take() {
+                    dispatcher.dispatch(IoUringAction::PollRemove { target: poll_op_id });
+                }
+            }
         }
         Ok(())
     }
@@ -108,7 +119,7 @@ impl Udev {
             .listen()?;
         let pending = BTreeMap::default();
 
-        Ok(Box::new(Udev { udev_monitor, pending }))
+        Ok(Box::new(Udev { udev_monitor, pending, poll_op_id: None }))
     }
 
     fn on_udev_event(result: std::io::Result<PollCompleted>) -> AnyAction {
@@ -116,8 +127,11 @@ impl Udev {
         AnyAction::from(UdevAction::Event)
     }
 
-    fn dispatch_poll(&self, dispatcher: &mut Dispatcher) {
+    fn dispatch_poll(&mut self, dispatcher: &mut Dispatcher) {
+        let poll_op_id = RingId::fresh();
+        self.poll_op_id = Some(poll_op_id);
         dispatcher.dispatch(IoUringAction::Poll {
+            id: Some(poll_op_id),
             fd: self.udev_monitor.as_raw_fd(),
             dispatch_to: Redispatcher::new::<Self>(Self::on_udev_event),
         });
