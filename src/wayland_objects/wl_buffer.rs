@@ -1,38 +1,61 @@
 use std::rc::Rc;
 
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest},
+    dmabuf::DmaBuf,
     drm::Format,
-    egl::{GlTexture, RenderItem},
+    egl::{EglContext, GlTexture, RenderItem},
     object::{Object, Parser},
     protocol_generated::{wl_buffer, WaylandId, WlBufferId},
     state::State,
+    sync::PlainRelease,
     transform,
 };
 
-use super::{wl_shm_pool::SharedMemory, wl_surface::WlSurface};
+use super::wl_shm_pool::SharedMemory;
+
+#[derive(Debug)]
+enum BufferBacking {
+    Shm {
+        offset: usize,
+        width: usize,
+        height: usize,
+        stride: usize,
+        format: &'static Format,
+        mem: Rc<SharedMemory>,
+        texture: Option<GlTexture>,
+    },
+    Dmabuf {
+        dmabuf: DmaBuf,
+        y_inverted: bool,
+        texture: Option<GlTexture>,
+    },
+}
 
 #[derive(Debug)]
 pub struct WlBuffer {
     id: WlBufferId,
-    offset: usize,
-    width: usize,
-    height: usize,
-    stride: usize,
-    format: &'static Format,
-
-    mem: Rc<SharedMemory>,
-    texture: Option<GlTexture>,
+    owner_client_id: ClientId,
+    destroyed: bool,
+    backing: BufferBacking,
 }
 
 pub struct NewWlBufferParams {
     pub id: WlBufferId,
+    pub owner_client_id: ClientId,
     pub offset: i32,
     pub width: i32,
     pub height: i32,
     pub stride: i32,
     pub format: &'static Format,
     pub mem: Rc<SharedMemory>,
+}
+
+pub struct NewDmabufWlBufferParams {
+    pub id: WlBufferId,
+    pub owner_client_id: ClientId,
+    pub dmabuf: DmaBuf,
+    pub y_inverted: bool,
 }
 
 #[derive(Debug)]
@@ -42,23 +65,46 @@ pub enum WlBufferError {
 
 impl WlBuffer {
     pub fn new(params: NewWlBufferParams) -> Result<Self, WlBufferError> {
-        let NewWlBufferParams { id, offset, width, height, stride, format, mem } = params;
+        let NewWlBufferParams {
+            id,
+            owner_client_id,
+            offset,
+            width,
+            height,
+            stride,
+            format,
+            mem,
+        } = params;
 
         Ok(Self {
             id,
-            offset: offset
-                .try_into()
-                .map_err(|_| WlBufferError::InvalidParams)?,
-            width: width.try_into().map_err(|_| WlBufferError::InvalidParams)?,
-            height: height
-                .try_into()
-                .map_err(|_| WlBufferError::InvalidParams)?,
-            stride: stride
-                .try_into()
-                .map_err(|_| WlBufferError::InvalidParams)?,
-            format,
-            texture: None,
-            mem,
+            owner_client_id,
+            destroyed: false,
+            backing: BufferBacking::Shm {
+                offset: offset
+                    .try_into()
+                    .map_err(|_| WlBufferError::InvalidParams)?,
+                width: width.try_into().map_err(|_| WlBufferError::InvalidParams)?,
+                height: height
+                    .try_into()
+                    .map_err(|_| WlBufferError::InvalidParams)?,
+                stride: stride
+                    .try_into()
+                    .map_err(|_| WlBufferError::InvalidParams)?,
+                format,
+                mem,
+                texture: None,
+            },
+        })
+    }
+
+    pub fn new_dmabuf(params: NewDmabufWlBufferParams) -> Result<Self, WlBufferError> {
+        let NewDmabufWlBufferParams { id, owner_client_id, dmabuf, y_inverted } = params;
+        Ok(Self {
+            id,
+            owner_client_id,
+            destroyed: false,
+            backing: BufferBacking::Dmabuf { dmabuf, y_inverted, texture: None },
         })
     }
 
@@ -66,24 +112,91 @@ impl WlBuffer {
         self.send_event(wl_buffer::Event::Release, dispatcher);
     }
 
-    pub fn update_texture(&mut self) {
-        match GlTexture::import_shm(
-            self.mem.clone().slice(),
-            self.width,
-            self.height,
-            self.stride,
-            self.format,
-        ) {
-            Ok(texture) => self.texture = Some(texture),
-            Err(()) => log::warn!("WlBuffer::update_texture failed for buffer={:?}", self.id),
+    pub fn plain_release_target(&self) -> Option<PlainRelease> {
+        if self.destroyed {
+            return None;
+        }
+        Some(PlainRelease { client_id: self.owner_client_id, buffer_id: self.id })
+    }
+
+    pub fn mark_destroyed(&mut self) {
+        self.destroyed = true;
+    }
+
+    pub fn is_destroyed(&self) -> bool {
+        self.destroyed
+    }
+
+    pub fn dimensions(&self) -> (i32, i32) {
+        match &self.backing {
+            BufferBacking::Shm { width, height, .. } => (*width as i32, *height as i32),
+            BufferBacking::Dmabuf { dmabuf, .. } => (dmabuf.width, dmabuf.height),
         }
     }
 
-    pub fn render_item(&self, x: i32, y: i32) -> Option<RenderItem> {
-        let texture = match self.texture.as_ref() {
-            Some(texture) => texture,
-            None => {
-                log::warn!("WlBuffer::render_item missing texture for buffer={:?}", self.id);
+    pub fn supports_explicit_sync(&self) -> bool {
+        matches!(self.backing, BufferBacking::Dmabuf { .. })
+    }
+
+    pub fn prepare_render(
+        &mut self,
+        x: i32,
+        y: i32,
+        egl: &EglContext,
+        sync: &crate::sync::SurfaceSyncState,
+    ) -> Option<RenderItem> {
+        let tex_transform = match &mut self.backing {
+            BufferBacking::Shm { offset, width, height, format, stride, mem, texture } => {
+                if texture.is_none() {
+                    let bytes = stride.saturating_mul(*height);
+                    match GlTexture::import_shm(
+                        mem.clone().slice_at(*offset, bytes),
+                        *width,
+                        *height,
+                        *stride,
+                        format,
+                    ) {
+                        Ok(imported) => *texture = Some(imported),
+                        Err(()) => {
+                            log::warn!("failed to upload shm wl_buffer {:?}", self.id);
+                            return None;
+                        }
+                    }
+                }
+                transform::normalized_texcoord_flip_y()
+            }
+            BufferBacking::Dmabuf { dmabuf, y_inverted, texture } => {
+                if !sync.acquire.is_none() {
+                    log::debug!(
+                        "applying explicit acquire wait before sampling dma-buf wl_buffer={:?}",
+                        self.id
+                    );
+                    sync.acquire.wait_for_renderer(egl);
+                }
+                if texture.is_none() {
+                    let image = egl.import_dmabuf(dmabuf);
+                    match image.into_texture() {
+                        Ok(imported) => *texture = Some(imported),
+                        Err(()) => {
+                            log::warn!("failed to import dma-buf wl_buffer {:?}", self.id);
+                            return None;
+                        }
+                    }
+                }
+                if *y_inverted {
+                    transform::normalized_texcoord_flip_y()
+                } else {
+                    transform::Mat3::identity()
+                }
+            }
+        };
+
+        let (width, height) = self.dimensions();
+        let texture = match &self.backing {
+            BufferBacking::Shm { texture: Some(texture), .. }
+            | BufferBacking::Dmabuf { texture: Some(texture), .. } => texture,
+            _ => {
+                log::warn!("wl_buffer {:?} missing texture after prepare_render", self.id);
                 return None;
             }
         };
@@ -91,16 +204,10 @@ impl WlBuffer {
             texture: texture.texture_id(),
             x,
             y,
-            width: self.width as i32,
-            height: self.height as i32,
-            // SHM uploads are memory-backed top-left buffers; sample them through an
-            // explicit texture transform instead of relying on implicit output flips.
-            tex_transform: transform::normalized_texcoord_flip_y(),
+            width,
+            height,
+            tex_transform,
         })
-    }
-
-    pub fn dimensions(&self) -> (i32, i32) {
-        (self.width as i32, self.height as i32)
     }
 }
 
@@ -112,7 +219,7 @@ impl Object for WlBuffer {
     fn on(
         &mut self,
         client: &mut Client,
-        state: &mut State,
+        _state: &mut State,
         req: RawRequest,
         _: &mut ClientDispatcher,
     ) {
@@ -120,28 +227,8 @@ impl Object for WlBuffer {
 
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
-                let wid = self.id.into();
-                let Some(object_id) = client.object_id_for_wayland(wid) else {
-                    return;
-                };
-                let buf_id = self.id;
-                let surface_oids: Vec<crate::state::ObjectId> = state
-                    .objects
-                    .iter()
-                    .filter_map(|(oid, obj)| {
-                        obj.downcast_ref::<WlSurface>()
-                            .filter(|s| s.references_wl_buffer(buf_id))
-                            .map(|_| oid)
-                    })
-                    .collect();
-                for oid in surface_oids {
-                    let mut g = state.objects.grab(oid);
-                    if let Some(s) = g.downcast_mut::<WlSurface>() {
-                        s.detach_wl_buffer(buf_id);
-                    }
-                }
-                client.remove_wayland_object(wid);
-                let _ = state.remove_object(object_id);
+                self.destroyed = true;
+                client.remove_wayland_object(self.id.into());
             }
         }
     }

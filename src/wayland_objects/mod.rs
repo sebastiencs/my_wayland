@@ -17,10 +17,15 @@ pub mod wl_shm_pool;
 pub mod wl_subcompositor;
 pub mod wl_surface;
 pub mod wp_cursor_shape_manager_v1;
+pub mod wp_linux_drm_syncobj_manager_v1;
+pub mod wp_linux_drm_syncobj_surface_v1;
+pub mod wp_linux_drm_syncobj_timeline_v1;
 pub mod wp_presentation;
 pub mod xdg_activation_v1;
 pub mod xdg_surface;
 pub mod xdg_wm_base;
+pub mod zwp_linux_buffer_params_v1;
+pub mod zwp_linux_dmabuf_v1;
 pub mod zxdg_output_manager_v1;
 
 macro_rules! fake_obj {
@@ -85,13 +90,8 @@ fake_obj! {
     { xwayland_surface_v1, XwaylandSurfaceV1 },
     { zxdg_output_v1, ZxdgOutputV1 },
     { wp_cursor_shape_device_v1, WpCursorShapeDeviceV1 },
-    { wp_linux_drm_syncobj_manager_v1, WpLinuxDrmSyncobjManagerV1 },
-    { wp_linux_drm_syncobj_surface_v1, WpLinuxDrmSyncobjSurfaceV1 },
-    { wp_linux_drm_syncobj_timeline_v1, WpLinuxDrmSyncobjTimelineV1 },
-    { zwp_linux_buffer_params_v1, ZwpLinuxBufferParamsV1 },
     { zwp_linux_buffer_release_v1, ZwpLinuxBufferReleaseV1 },
     { zwp_linux_dmabuf_feedback_v1, ZwpLinuxDmabufFeedbackV1 },
-    { zwp_linux_dmabuf_v1, ZwpLinuxDmabufV1 },
     { zwp_linux_explicit_synchronization_v1, ZwpLinuxExplicitSynchronizationV1 },
     { zwp_linux_surface_synchronization_v1, ZwpLinuxSurfaceSynchronizationV1 },
     { zwp_tablet_manager_v2, ZwpTabletManagerV2 },

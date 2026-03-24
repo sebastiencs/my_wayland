@@ -3,13 +3,15 @@ use crate::{
     drm::schedule_active_output,
     object::{Object, Parser},
     protocol_generated::{
-        wl_surface, xdg_wm_base, WaylandId, WlBufferId, WlCallbackId, WlSurfaceId, XdgSurfaceId,
+        wl_surface, wp_linux_drm_syncobj_surface_v1, xdg_wm_base, WaylandId, WlBufferId,
+        WlCallbackId, WlSurfaceId, XdgSurfaceId,
     },
     state::{ObjectId, State},
+    sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
     wayland_objects::{wl_callback::WlCallback, xdg_surface::XdgSurface},
 };
 
-use crate::protocol_generated::wl_display;
+use {super::wl_buffer::WlBuffer, crate::protocol_generated::wl_display};
 
 static LOG_WL_SURFACE_DAMAGE_IGNORED: std::sync::Once = std::sync::Once::new();
 
@@ -38,6 +40,10 @@ pub struct WlSurface {
     pending: Pending,
     /// front buffer
     on_screen: OnScreen,
+    blocked: Option<BlockedSurfaceState>,
+    blocked_waiter_id: Option<u64>,
+    syncobj_surface_object: Option<crate::protocol_generated::WpLinuxDrmSyncobjSurfaceV1Id>,
+    retired_buffers: Vec<RetiredBufferCandidate>,
     /// `wl_surface.frame` callbacks to complete on the next `commit`.
     pending_frame_callbacks: Vec<WlCallbackId>,
 }
@@ -45,23 +51,33 @@ pub struct WlSurface {
 #[derive(Debug, Default)]
 struct Pending {
     /// `None` = no attach this commit; `Some(None)` = detach; `Some(Some(id))` = attach.
-    buffer: Option<Option<WlBufferId>>,
+    buffer: Option<Option<ObjectId>>,
     offset: (i32, i32),
+    sync: SurfaceSyncState,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct OnScreen {
-    buffer: Option<WlBufferId>,
     buffer_object_id: Option<ObjectId>,
     x: i32,
     y: i32,
+    sync: SurfaceSyncState,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct SurfaceRenderState {
     pub buffer_object_id: ObjectId,
     pub x: i32,
     pub y: i32,
+    pub sync: SurfaceSyncState,
+}
+
+#[derive(Clone, Debug)]
+struct BlockedSurfaceState {
+    buffer_object_id: ObjectId,
+    x: i32,
+    y: i32,
+    sync: SurfaceSyncState,
 }
 
 struct SurfaceChanges {
@@ -78,27 +94,42 @@ impl WlSurface {
             version,
             pending: Pending::default(),
             on_screen: OnScreen::default(),
+            blocked: None,
+            blocked_waiter_id: None,
+            syncobj_surface_object: None,
+            retired_buffers: Vec::new(),
             pending_frame_callbacks: Vec::new(),
         }
     }
 
-    /// Whether this surface references `buffer` in pending or current state.
-    pub fn references_wl_buffer(&self, buffer: WlBufferId) -> bool {
-        self.on_screen.buffer == Some(buffer)
-            || matches!(self.pending.buffer, Some(Some(b)) if b == buffer)
+    pub fn set_syncobj_surface_object(
+        &mut self,
+        object: crate::protocol_generated::WpLinuxDrmSyncobjSurfaceV1Id,
+        dispatcher: &mut ClientDispatcher,
+    ) -> Result<(), wp_linux_drm_syncobj_surface_v1::Error> {
+        if self.syncobj_surface_object.is_some() {
+            self.send_error(
+                dispatcher,
+                wp_linux_drm_syncobj_surface_v1::Error::NoSurface as u32,
+                "surface already has a syncobj surface object",
+            );
+            return Err(wp_linux_drm_syncobj_surface_v1::Error::NoSurface);
+        }
+        self.syncobj_surface_object = Some(object);
+        Ok(())
     }
 
-    /// Clear references to a destroyed `wl_buffer`.
-    pub fn detach_wl_buffer(&mut self, buffer: WlBufferId) {
-        if self.on_screen.buffer == Some(buffer) {
-            self.on_screen.buffer = None;
-            self.on_screen.buffer_object_id = None;
+    pub fn clear_syncobj_surface_object(
+        &mut self,
+        object: crate::protocol_generated::WpLinuxDrmSyncobjSurfaceV1Id,
+    ) {
+        if self.syncobj_surface_object == Some(object) {
+            self.syncobj_surface_object = None;
         }
-        if let Some(Some(b)) = self.pending.buffer {
-            if b == buffer {
-                self.pending.buffer = Some(None);
-            }
-        }
+    }
+
+    pub fn pending_sync_mut(&mut self) -> &mut SurfaceSyncState {
+        &mut self.pending.sync
     }
 
     pub fn set_role(
@@ -160,7 +191,7 @@ impl WlSurface {
             return Ok(());
         }
 
-        self.pending.buffer = Some(Some(buffer_id));
+        self.pending.buffer = Some(Some(client.object_id(buffer_id)));
 
         Ok(())
     }
@@ -182,31 +213,56 @@ impl WlSurface {
             xdg_surface.on_commit(client, state, dispatcher);
         }
 
+        if !self.validate_pending_sync(state, dispatcher) {
+            self.pending.buffer = None;
+            self.pending.sync = SurfaceSyncState::default();
+            self.pending.offset = (0, 0);
+            return;
+        }
+
+        let pending_sync = std::mem::take(&mut self.pending.sync);
         match self.pending.buffer.take() {
             None => {}
             Some(None) => {
-                if let Some(buffer_id) = self.on_screen.buffer.take() {
-                    self.on_screen.buffer_object_id = None;
-                    let buffer = client.get_object(buffer_id, state);
-                    buffer.send_release(dispatcher);
-                }
+                self.cancel_blocked(client, state, dispatcher);
+                self.retire_current();
+                self.on_screen = OnScreen {
+                    buffer_object_id: None,
+                    x: self.on_screen.x,
+                    y: self.on_screen.y,
+                    sync: SurfaceSyncState::default(),
+                };
             }
-            Some(Some(buffer_id)) => {
-                if let Some(old_id) = self.on_screen.buffer.take() {
-                    self.on_screen.buffer_object_id = None;
-                    let buffer = client.get_object(old_id, state);
-                    buffer.send_release(dispatcher);
-                }
+            Some(Some(buffer_object_id)) => {
                 let (x, y) = self.pending.offset;
                 self.pending.offset = (0, 0);
-                self.on_screen.x += x;
-                self.on_screen.y += y;
+                let next = BlockedSurfaceState {
+                    buffer_object_id,
+                    x: self.on_screen.x + x,
+                    y: self.on_screen.y + y,
+                    sync: pending_sync,
+                };
 
-                let buffer = client.get_object(buffer_id, state);
-                buffer.update_texture();
-
-                self.on_screen.buffer = Some(buffer_id);
-                self.on_screen.buffer_object_id = Some(client.object_id(buffer_id));
+                let should_block =
+                    self.syncobj_surface_object.is_some() && !next.sync.acquire.is_ready_now();
+                if should_block {
+                    if let Err(error) = self.install_blocked_surface(
+                        next.clone(),
+                        client.object_id(self.id),
+                        dispatcher,
+                    ) {
+                        log::warn!(
+                            "failed to install acquire waiter for surface {:?}: {:?}; activating immediately",
+                            self.id,
+                            error
+                        );
+                        self.cancel_blocked(client, state, dispatcher);
+                        self.activate_blocked_state(next);
+                    }
+                } else {
+                    self.cancel_blocked(client, state, dispatcher);
+                    self.activate_blocked_state(next);
+                }
             }
         }
 
@@ -216,6 +272,103 @@ impl WlSurface {
         if buffer_changed {
             schedule_active_output(state, dispatcher);
         }
+    }
+
+    fn validate_pending_sync(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) -> bool {
+        if self.syncobj_surface_object.is_none() {
+            return true;
+        }
+
+        let pending_sync = &self.pending.sync;
+        let sync_present = !pending_sync.acquire.is_none() || !pending_sync.release.is_none();
+        let Some(pending_buffer) = self.pending.buffer else {
+            if sync_present {
+                self.send_error(
+                    dispatcher,
+                    wp_linux_drm_syncobj_surface_v1::Error::NoBuffer as u32,
+                    "explicit sync points require a pending non-null buffer",
+                );
+                return false;
+            }
+            return true;
+        };
+
+        let Some(buffer_object_id) = pending_buffer else {
+            if sync_present {
+                self.send_error(
+                    dispatcher,
+                    wp_linux_drm_syncobj_surface_v1::Error::NoBuffer as u32,
+                    "explicit sync points require a pending non-null buffer",
+                );
+                return false;
+            }
+            return true;
+        };
+
+        let Some(object) = state.objects.try_get(buffer_object_id) else {
+            self.send_error(
+                dispatcher,
+                wl_display::Error::InvalidObject as u32,
+                "pending wl_buffer disappeared before commit",
+            );
+            return false;
+        };
+        let Some(buffer) = object.downcast_ref::<WlBuffer>() else {
+            self.send_error(
+                dispatcher,
+                wl_display::Error::InvalidObject as u32,
+                "pending buffer object is not a wl_buffer",
+            );
+            return false;
+        };
+        if !buffer.supports_explicit_sync() {
+            self.send_error(
+                dispatcher,
+                wp_linux_drm_syncobj_surface_v1::Error::UnsupportedBuffer as u32,
+                "explicit sync currently only supports dma-buf wl_buffers",
+            );
+            return false;
+        }
+        if pending_sync.acquire.is_none() {
+            self.send_error(
+                dispatcher,
+                wp_linux_drm_syncobj_surface_v1::Error::NoAcquirePoint as u32,
+                "missing acquire point for explicit-sync surface commit",
+            );
+            return false;
+        }
+        if pending_sync.release.is_none() {
+            self.send_error(
+                dispatcher,
+                wp_linux_drm_syncobj_surface_v1::Error::NoReleasePoint as u32,
+                "missing release point for explicit-sync surface commit",
+            );
+            return false;
+        }
+        if let SurfaceSyncState {
+            acquire:
+                sync::AcquireSync::TimelinePoint { timeline: acquire_timeline, point: acquire_point },
+            release:
+                sync::ReleasePoint::TimelinePoint { timeline: release_timeline, point: release_point },
+        } = pending_sync
+        {
+            if acquire_timeline.handle() == release_timeline.handle()
+                && acquire_point >= release_point
+            {
+                self.send_error(
+                    dispatcher,
+                    wp_linux_drm_syncobj_surface_v1::Error::ConflictingPoints as u32,
+                    "acquire timeline point must be strictly less than release point",
+                );
+                return false;
+            }
+        }
+
+        true
     }
 
     fn flush_frame_callbacks(
@@ -241,7 +394,91 @@ impl WlSurface {
             buffer_object_id: self.on_screen.buffer_object_id?,
             x: self.on_screen.x,
             y: self.on_screen.y,
+            sync: self.on_screen.sync.clone(),
         })
+    }
+
+    pub fn take_retired_buffers(&mut self) -> Vec<RetiredBufferCandidate> {
+        std::mem::take(&mut self.retired_buffers)
+    }
+
+    pub fn activate_blocked_if_waiter_ready(&mut self, waiter_id: u64) -> bool {
+        if self.blocked_waiter_id != Some(waiter_id) {
+            return false;
+        }
+        let Some(blocked) = self.blocked.take() else {
+            return false;
+        };
+        self.blocked_waiter_id = None;
+        self.activate_blocked_state(blocked);
+        true
+    }
+
+    fn install_blocked_surface(
+        &mut self,
+        next: BlockedSurfaceState,
+        surface_object_id: ObjectId,
+        dispatcher: &mut ClientDispatcher,
+    ) -> std::io::Result<()> {
+        self.blocked = Some(next);
+        let acquire = self.blocked.as_ref().unwrap().sync.acquire.clone();
+        let Some(poll_fd) = acquire.prepare_waiter_fd()? else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "missing acquire fd for blocked surface",
+            ));
+        };
+        if let Some(waiter_id) = self.blocked_waiter_id.take() {
+            dispatcher.stop_model::<_, AcquireReadyWaiter>(waiter_id);
+        }
+        let waiter_id = sync::fresh_waiter_id();
+        self.blocked_waiter_id = Some(waiter_id);
+        dispatcher
+            .start_model(waiter_id, AcquireReadyWaiter::new(waiter_id, surface_object_id, poll_fd));
+        Ok(())
+    }
+
+    fn activate_blocked_state(&mut self, next: BlockedSurfaceState) {
+        self.retire_current();
+        self.on_screen = OnScreen {
+            buffer_object_id: Some(next.buffer_object_id),
+            x: next.x,
+            y: next.y,
+            sync: next.sync,
+        };
+    }
+
+    fn retire_current(&mut self) {
+        if let Some(buffer_object_id) = self.on_screen.buffer_object_id.take() {
+            self.retired_buffers.push(RetiredBufferCandidate {
+                buffer_object_id,
+                sync: self.on_screen.sync.clone(),
+            });
+        }
+        self.on_screen.sync = SurfaceSyncState::default();
+    }
+
+    fn cancel_blocked(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        if let Some(waiter_id) = self.blocked_waiter_id.take() {
+            dispatcher.stop_model::<_, AcquireReadyWaiter>(waiter_id);
+        }
+        let Some(blocked) = self.blocked.take() else {
+            return;
+        };
+        sync::resolve_unused_candidate_immediately(
+            client,
+            state,
+            dispatcher,
+            RetiredBufferCandidate {
+                buffer_object_id: blocked.buffer_object_id,
+                sync: blocked.sync,
+            },
+        );
     }
 
     pub fn client_id(&self) -> ClientId {

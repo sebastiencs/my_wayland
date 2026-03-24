@@ -6,8 +6,10 @@ use crate::{
         wl_compositor::WlCompositorGlobal, wl_data_device_manager::WlDataDeviceManagerGlobal,
         wl_seat::WlSeatGlobal, wl_shm::WlShmGlobal, wl_subcompositor::WlSubcompositorGlobal,
         wp_cursor_shape_manager_v1::WpCursorShapeManagerV1Global,
+        wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1Global,
         wp_presentation::WpPresentationGlobal, xdg_activation_v1::XdgActivationV1Global,
-        xdg_wm_base::XdgWmBaseGlobal, zxdg_output_manager_v1::ZxdgOutputManagerV1Global,
+        xdg_wm_base::XdgWmBaseGlobal, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1Global,
+        zxdg_output_manager_v1::ZxdgOutputManagerV1Global,
     },
 };
 
@@ -50,6 +52,8 @@ impl Globals {
             WlSubcompositorGlobal::new,
             WlSeatGlobal::new, // TODO: `WlSeatGlobal` should be added dynamically
             WpPresentationGlobal::new,
+            ZwpLinuxDmabufV1Global::new,
+            WpLinuxDrmSyncobjManagerV1Global::new,
             WpCursorShapeManagerV1Global::new,
             XdgActivationV1Global::new,
             XdgWmBaseGlobal::new,

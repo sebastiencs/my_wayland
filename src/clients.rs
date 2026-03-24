@@ -156,6 +156,8 @@ struct ProcessInfo {
     cred: libc::ucred,
 }
 
+const MIN_SERVER_ID: u32 = 0xff00_0000;
+
 pub struct Client {
     id: ClientId,
     fd: RawFd,
@@ -167,6 +169,7 @@ pub struct Client {
     objects: BTreeMap<WaylandId, ObjectId>,
     info: Option<Rc<ProcessInfo>>,
     pending_fds: VecDeque<RawFd>,
+    next_server_id: u32,
 }
 
 pub enum ClientAction {
@@ -174,6 +177,7 @@ pub enum ClientAction {
     MsgReceived { request: RawRequest<'static> },
     FdsReceived { fds: Box<[RawFd]> },
     SeatEvent { event: SeatClientEvent },
+    ReleaseBuffer { buffer_id: crate::protocol_generated::WlBufferId },
     Close,
 }
 
@@ -186,6 +190,7 @@ impl Client {
             objects: BTreeMap::default(),
             info: None,
             pending_fds: VecDeque::new(),
+            next_server_id: MIN_SERVER_ID,
         }
     }
 
@@ -281,6 +286,26 @@ impl Client {
 
     pub fn remove_wayland_object(&mut self, id: WaylandId) -> Option<ObjectId> {
         self.objects.remove(&id)
+    }
+
+    pub fn allocate_server_object_id<I>(&mut self) -> I
+    where
+        I: From<u32>,
+    {
+        loop {
+            let next = self.next_server_id;
+            self.next_server_id = self
+                .next_server_id
+                .checked_add(1)
+                .expect("per-client server object id space exhausted");
+
+            let wayland_id = WaylandId::from(next);
+            if self.objects.contains_key(&wayland_id) {
+                continue;
+            }
+
+            return I::from(next);
+        }
     }
 
     pub fn insert_object<'a, O: Object>(
@@ -574,6 +599,12 @@ impl Model for Client {
             }
             SeatEvent { event } => {
                 self.handle_seat_event(state, &mut dispatcher, event);
+            }
+            ReleaseBuffer { buffer_id } => {
+                if self.contains_object(buffer_id, state) {
+                    let buffer = self.get_object(buffer_id, state);
+                    buffer.send_release(&mut dispatcher);
+                }
             }
             MsgReceived { mut request } => {
                 let Some(&obj_id) = self.objects.get(&request.object_id()) else {

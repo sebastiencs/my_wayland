@@ -61,6 +61,7 @@ impl Object for WlShmPool {
                 let mem = self.mem.clone();
                 let wl_buffer = match WlBuffer::new(NewWlBufferParams {
                     id,
+                    owner_client_id: client.client_id(),
                     offset,
                     width,
                     height,

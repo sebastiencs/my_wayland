@@ -27,6 +27,7 @@ use crate::{
     io_uring::ring::ReadWriteCompleted,
     runner::{AnyAction, Dispatcher, Model},
     state::{DrmId, State},
+    sync::DeferredRelease,
     transform::{self, OutputPresentationTransform},
     wayland_objects::{wl_buffer::WlBuffer, wl_surface::WlSurface},
 };
@@ -111,6 +112,7 @@ pub struct Drm {
     egl_context: EglContext,
     pub output: DrmOutput,
     driver: Driver,
+    supports_syncobj_timeline: bool,
 }
 
 #[derive(Debug)]
@@ -125,6 +127,7 @@ pub struct DrmOutput {
     frame_scheduled: bool,
     rendering_active: bool,
     page_flip_pending: bool,
+    in_flight_releases: Vec<DeferredRelease>,
 }
 
 impl DrmOutput {
@@ -446,11 +449,40 @@ impl Drm {
         let egl_context = EglContext::make(egl, gbm);
         let output = Self::init_drm(&drm, &egl_context, &resources);
 
-        Self { fd: drm, device, resources, egl_context, driver, output }
+        let supports_syncobj_timeline = drm
+            .get_driver_capability(drm::DriverCapability::TimelineSyncObj)
+            .unwrap_or(0)
+            != 0;
+
+        Self {
+            fd: drm,
+            device,
+            resources,
+            egl_context,
+            driver,
+            output,
+            supports_syncobj_timeline,
+        }
     }
 
     pub fn make_model(&self, drm_id: DrmId) -> DrmModel {
         DrmModel { drm_id }
+    }
+
+    pub fn fd(&self) -> DrmFd {
+        self.fd.clone()
+    }
+
+    pub fn supports_syncobj_timeline(&self) -> bool {
+        self.supports_syncobj_timeline
+    }
+
+    pub fn supported_dmabuf_read_formats(&self) -> Vec<(&'static Format, BTreeSet<Modifier>)> {
+        self.egl_context
+            .opengl_formats
+            .values()
+            .map(|format| (format.format, format.read_modifiers.clone()))
+            .collect()
     }
 
     fn render_output(&self, items: &[RenderItem]) -> crate::egl::RenderCompletion {
@@ -688,6 +720,7 @@ impl Drm {
             frame_scheduled: false,
             rendering_active: false,
             page_flip_pending: false,
+            in_flight_releases: Vec::new(),
         }
     }
 
@@ -1438,16 +1471,18 @@ impl DrmModel {
     }
 
     fn render_frame(&mut self, state: &mut crate::state::State) {
-        let render_items = collect_render_items(state);
+        let (render_items, deferred_releases) = collect_render_items(state, self.drm_id);
         let drm = state.drm.get_mut(self.drm_id);
         if !drm.output.begin_render() {
             log::warn!("DrmModel::render_frame skipped: output not ready");
             return;
         }
 
+        drm.output.in_flight_releases = deferred_releases;
         let render_completion = drm.render_output(&render_items);
         if let Err(error) = drm.submit_render_buffer(render_completion) {
             drm.output.mark_render_failed();
+            drm.output.in_flight_releases.clear();
             log::error!("Could not submit DRM frame: {:?}", error);
         }
     }
@@ -1461,27 +1496,57 @@ impl DrmModel {
         _tv_usec: u32,
         _crtc_id: u32,
     ) {
-        let should_render = state.drm.get_mut(self.drm_id).output.finish_page_flip();
+        let (releases, should_render) = {
+            let drm = state.drm.get_mut(self.drm_id);
+            let releases = std::mem::take(&mut drm.output.in_flight_releases);
+            let should_render = drm.output.finish_page_flip();
+            (releases, should_render)
+        };
+
+        for release in releases {
+            release.resolve(state, dispatcher);
+        }
         if should_render {
             dispatcher.dispatch_to(self.model_id(), DrmAction::RenderFrame);
         }
     }
 }
 
-fn collect_render_items(state: &crate::state::State) -> Vec<RenderItem> {
+fn collect_render_items(
+    state: &mut crate::state::State,
+    drm_id: DrmId,
+) -> (Vec<RenderItem>, Vec<DeferredRelease>) {
     let mut items = Vec::new();
+    let mut deferred_releases = Vec::new();
+    let mut retired_candidates = Vec::new();
+    let surface_oids: Vec<_> = state
+        .objects
+        .iter()
+        .filter_map(|(object_id, object)| object.downcast_ref::<WlSurface>().map(|_| object_id))
+        .collect();
+    let snapshots = {
+        let mut snapshots = Vec::new();
+        for object_id in surface_oids {
+            let mut obj = state.objects.grab(object_id);
+            let Some(surface) = obj.downcast_mut::<WlSurface>() else {
+                continue;
+            };
+            retired_candidates.extend(surface.take_retired_buffers());
+            let Some(surface_state) = surface.render_state() else {
+                continue;
+            };
+            snapshots.push(surface_state);
+        }
+        snapshots
+    };
 
-    for (object_id, object) in state.objects.iter() {
-        let Some(surface) = object.downcast_ref::<WlSurface>() else {
-            continue;
-        };
-        let Some(surface_state) = surface.render_state() else {
-            log::warn!(
-                "collect_render_items: surface has no render_state object_id={:?}",
-                object_id
-            );
-            continue;
-        };
+    for retired in retired_candidates {
+        deferred_releases.push(DeferredRelease::from_candidate(state, retired));
+    }
+
+    let drm = state.drm.get(drm_id);
+
+    for surface_state in snapshots {
         let Some(obj) = state.objects.try_get(surface_state.buffer_object_id) else {
             log::warn!(
                 "collect_render_items: buffer object {:?} missing (destroyed?)",
@@ -1489,14 +1554,24 @@ fn collect_render_items(state: &crate::state::State) -> Vec<RenderItem> {
             );
             continue;
         };
-        let Some(buffer) = obj.downcast_ref::<WlBuffer>() else {
+        let Some(_) = obj.downcast_ref::<WlBuffer>() else {
             log::warn!(
                 "collect_render_items: object {:?} is not a WlBuffer",
                 surface_state.buffer_object_id
             );
             continue;
         };
-        let Some(item) = buffer.render_item(surface_state.x, surface_state.y) else {
+
+        let mut obj = state.objects.grab(surface_state.buffer_object_id);
+        let Some(buffer) = obj.downcast_mut::<WlBuffer>() else {
+            continue;
+        };
+        let Some(item) = buffer.prepare_render(
+            surface_state.x,
+            surface_state.y,
+            &drm.egl_context,
+            &surface_state.sync,
+        ) else {
             log::warn!(
                 "collect_render_items: no render item for buffer_object_id={:?}",
                 surface_state.buffer_object_id
@@ -1506,7 +1581,7 @@ fn collect_render_items(state: &crate::state::State) -> Vec<RenderItem> {
         items.push(item);
     }
 
-    items
+    (items, deferred_releases)
 }
 
 #[cfg(test)]

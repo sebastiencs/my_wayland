@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ffi::CStr,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     ptr,
     time::Duration,
 };
@@ -424,6 +424,28 @@ impl EGL {
             return Err(Self::last_error().unwrap_err());
         }
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    fn wait_sync_khr(
+        &self,
+        display: egl::Display,
+        sync: EglSyncKhr,
+        flags: egl::Int,
+    ) -> Result<(), egl::Error> {
+        type WaitSyncKhr = unsafe extern "system" fn(
+            egl::Display,
+            *mut std::ffi::c_void,
+            egl::Int,
+        ) -> egl::Boolean;
+
+        let proc = unsafe { egl::GetProcAddress(c"eglWaitSyncKHR".as_ptr()) };
+        if proc.is_null() {
+            return Err(egl::Error::BadDisplay);
+        }
+        let wait_sync: WaitSyncKhr = unsafe { std::mem::transmute(proc) };
+        let result = unsafe { wait_sync(display, sync.0, flags) };
+        Self::ok_on(result, egl::TRUE as _)?;
+        Ok(())
     }
 }
 
@@ -1034,6 +1056,19 @@ impl EglContext {
     pub fn make_fb_from_image(&self, image: &EglImage, dmabuf: &DmaBuf) -> EglFrameBuffer {
         let render_buffer = self.make_render_buffer_from_image(image, dmabuf);
         render_buffer.make_framebuffer()
+    }
+
+    pub fn wait_on_native_fence(&self, fence_fd: OwnedFd) -> Result<(), egl::Error> {
+        let raw_fd = fence_fd.into_raw_fd();
+        let sync = self.egl.create_sync_khr(
+            self.display,
+            EGL_SYNC_NATIVE_FENCE_ANDROID,
+            &[EGL_SYNC_NATIVE_FENCE_FD_ANDROID, raw_fd, egl::NONE],
+        )?;
+        let wait_result = self.egl.wait_sync_khr(self.display, sync, 0);
+        let destroy_result = self.egl.destroy_sync_khr(self.display, sync);
+        destroy_result?;
+        wait_result
     }
 
     pub fn make_render_buffer_from_image(
