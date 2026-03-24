@@ -335,8 +335,7 @@ fn hit_test_subtree(
     x: f64,
     y: f64,
 ) -> Option<PointerFocus> {
-    let object = objects.try_get(surface_object_id)?;
-    let surface = object.downcast_ref::<WlSurface>()?;
+    let surface = objects.try_get_ref_of::<WlSurface>(surface_object_id)?;
     let surface_state = surface.render_state_at(base_x, base_y)?;
     let stack = surface.current_stack().to_vec();
 
@@ -360,10 +359,9 @@ fn hit_test_subtree(
                 }
             }
             StackEntry::Child(child_surface_object_id) => {
-                let Some(child_object) = objects.try_get(child_surface_object_id) else {
-                    continue;
-                };
-                let Some(child_surface) = child_object.downcast_ref::<WlSurface>() else {
+                let Some(child_surface) =
+                    objects.try_get_ref_of::<WlSurface>(child_surface_object_id)
+                else {
                     continue;
                 };
                 let (child_x, child_y) = child_surface.current_subsurface_position();
@@ -393,10 +391,7 @@ fn hit_test_surface(
     let mut hit = None;
 
     for object_id in state.root_surface_ids() {
-        let Some(object) = state.objects.try_get(object_id) else {
-            continue;
-        };
-        let Some(surface) = object.downcast_ref::<WlSurface>() else {
+        let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(object_id) else {
             continue;
         };
         if !surface.is_root() {

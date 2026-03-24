@@ -116,21 +116,19 @@ impl Object for WlSubcompositor {
                 }
 
                 {
-                    let Some(surface_object) = state.objects.try_get(surface_object_id) else {
+                    let Some(surface_ref) =
+                        state.objects.try_get_ref_of::<WlSurface>(surface_object_id)
+                    else {
+                        let message = if state.objects.contains(surface_object_id) {
+                            "get_subsurface surface is not a wl_surface"
+                        } else {
+                            "get_subsurface surface disappeared during validation"
+                        };
                         client.send_protocol_error(
                             dispatcher,
                             self.id.into(),
                             wl_subcompositor::Error::BadSurface as u32,
-                            "get_subsurface surface disappeared during validation",
-                        );
-                        return;
-                    };
-                    let Some(surface_ref) = surface_object.downcast_ref::<WlSurface>() else {
-                        client.send_protocol_error(
-                            dispatcher,
-                            self.id.into(),
-                            wl_subcompositor::Error::BadSurface as u32,
-                            "get_subsurface surface is not a wl_surface",
+                            message,
                         );
                         return;
                     };

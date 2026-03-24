@@ -387,6 +387,16 @@ where
     }
 }
 
+impl<K> IndexMap<K, Box<dyn Object>>
+where
+    K: Into<usize> + Copy,
+{
+    pub fn try_get_ref_of<T: Object>(&self, key: K) -> Option<&T> {
+        self.try_get(key)
+            .and_then(|object| object.downcast_ref::<T>())
+    }
+}
+
 index_map_id!(ObjectId);
 index_map_id!(InputId);
 index_map_id!(DrmId);

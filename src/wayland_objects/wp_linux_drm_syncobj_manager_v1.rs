@@ -84,21 +84,21 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                     return;
                 };
                 {
-                    let Some(surface_ref) = state.objects.try_get(surface_oid) else {
+                    if state
+                        .objects
+                        .try_get_ref_of::<WlSurface>(surface_oid)
+                        .is_none()
+                    {
+                        let msg = if state.objects.contains(surface_oid) {
+                            "syncobj surface target is not a wl_surface"
+                        } else {
+                            "invalid wl_surface for syncobj surface"
+                        };
                         client.protocol_violation_disconnect(
                             dispatcher,
                             surface.into(),
                             wl_display::Error::InvalidObject as u32,
-                            "invalid wl_surface for syncobj surface",
-                        );
-                        return;
-                    };
-                    if surface_ref.downcast_ref::<WlSurface>().is_none() {
-                        client.protocol_violation_disconnect(
-                            dispatcher,
-                            surface.into(),
-                            wl_display::Error::InvalidObject as u32,
-                            "syncobj surface target is not a wl_surface",
+                            msg,
                         );
                         return;
                     }

@@ -1593,10 +1593,10 @@ fn collect_surface_snapshots(
     for entry in &stack {
         if let StackEntry::Child(child_surface_object_id) = *entry {
             let child_base = {
-                let Some(child_object) = state.objects.try_get(child_surface_object_id) else {
-                    continue;
-                };
-                let Some(child_surface) = child_object.downcast_ref::<WlSurface>() else {
+                let Some(child_surface) = state
+                    .objects
+                    .try_get_ref_of::<WlSurface>(child_surface_object_id)
+                else {
                     continue;
                 };
                 let (x, y) = child_surface.current_subsurface_position();
@@ -1627,10 +1627,7 @@ fn collect_render_items(
         .root_surface_ids()
         .into_iter()
         .filter(|object_id| {
-            let Some(object) = state.objects.try_get(*object_id) else {
-                return false;
-            };
-            let Some(surface) = object.downcast_ref::<WlSurface>() else {
+            let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(*object_id) else {
                 return false;
             };
             surface.is_root()
@@ -1658,18 +1655,13 @@ fn collect_render_items(
     let drm = state.drm.get(drm_id);
 
     for surface_state in snapshots {
-        let Some(obj) = state.objects.try_get(surface_state.buffer_object_id) else {
-            log::warn!(
-                "collect_render_items: buffer object {:?} missing (destroyed?)",
-                surface_state.buffer_object_id
-            );
+        let buffer_oid = surface_state.buffer_object_id;
+        if !state.objects.contains(buffer_oid) {
+            log::warn!("collect_render_items: buffer object {:?} missing (destroyed?)", buffer_oid);
             continue;
-        };
-        let Some(_) = obj.downcast_ref::<WlBuffer>() else {
-            log::warn!(
-                "collect_render_items: object {:?} is not a WlBuffer",
-                surface_state.buffer_object_id
-            );
+        }
+        let Some(_) = state.objects.try_get_ref_of::<WlBuffer>(buffer_oid) else {
+            log::warn!("collect_render_items: object {:?} is not a WlBuffer", buffer_oid);
             continue;
         };
 

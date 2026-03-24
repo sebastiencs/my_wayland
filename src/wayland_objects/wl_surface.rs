@@ -422,10 +422,7 @@ impl WlSurface {
             if object_id == self_object_id {
                 return true;
             }
-            let Some(object) = state.objects.try_get(object_id) else {
-                return false;
-            };
-            let Some(surface) = object.downcast_ref::<WlSurface>() else {
+            let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(object_id) else {
                 return false;
             };
             current = surface.parent_surface_object_id();
@@ -759,10 +756,7 @@ impl WlSurface {
         let Some(buffer_object_id) = buffer.flatten().or(self.on_screen.buffer_object_id) else {
             return true;
         };
-        let Some(object) = state.objects.try_get(buffer_object_id) else {
-            return true;
-        };
-        let Some(buffer) = object.downcast_ref::<WlBuffer>() else {
+        let Some(buffer) = state.objects.try_get_ref_of::<WlBuffer>(buffer_object_id) else {
             return true;
         };
 
@@ -812,8 +806,7 @@ impl WlSurface {
         y: i32,
         payload: &SurfaceCommitPayload,
     ) -> Option<BlockedSurfaceState> {
-        let object = state.objects.try_get(buffer_object_id)?;
-        let buffer = object.downcast_ref::<WlBuffer>()?;
+        let buffer = state.objects.try_get_ref_of::<WlBuffer>(buffer_object_id)?;
         let buffer_size = buffer.dimensions();
         let buffer_size = SizeI { width: buffer_size.0, height: buffer_size.1 };
         let logical_size = transform::derive_logical_size(
@@ -851,8 +844,7 @@ impl WlSurface {
         logical_size: SizeI,
         payload: &SurfaceCommitPayload,
     ) -> Option<DamageScaffold> {
-        let object = state.objects.try_get(buffer_object_id)?;
-        let buffer = object.downcast_ref::<WlBuffer>()?;
+        let buffer = state.objects.try_get_ref_of::<WlBuffer>(buffer_object_id)?;
         let raw_size = buffer.dimensions();
         let raw_size = SizeI { width: raw_size.0, height: raw_size.1 };
         let surface_to_buffer = payload
@@ -900,10 +892,7 @@ impl WlSurface {
         let Some(parent_object_id) = self.parent_surface_object_id() else {
             return false;
         };
-        let Some(object) = state.objects.try_get(parent_object_id) else {
-            return false;
-        };
-        let Some(parent) = object.downcast_ref::<WlSurface>() else {
+        let Some(parent) = state.objects.try_get_ref_of::<WlSurface>(parent_object_id) else {
             return false;
         };
         parent.behaves_synchronized(state)
@@ -1148,10 +1137,10 @@ impl WlSurface {
                 continue;
             };
             let child_behaves_synchronized = {
-                let Some(object) = state.objects.try_get(child_surface_object_id) else {
-                    continue;
-                };
-                let Some(child_surface) = object.downcast_ref::<WlSurface>() else {
+                let Some(child_surface) = state
+                    .objects
+                    .try_get_ref_of::<WlSurface>(child_surface_object_id)
+                else {
                     continue;
                 };
                 surface_behaves_synchronized
@@ -1285,21 +1274,17 @@ impl WlSurface {
             return true;
         };
 
-        let Some(object) = state.objects.try_get(buffer_object_id) else {
+        let Some(buffer) = state.objects.try_get_ref_of::<WlBuffer>(buffer_object_id) else {
+            let msg = if state.objects.contains(buffer_object_id) {
+                "pending buffer object is not a wl_buffer"
+            } else {
+                "pending wl_buffer disappeared before commit"
+            };
             client.protocol_violation_disconnect(
                 dispatcher,
                 self.id.into(),
                 wl_display::Error::InvalidObject as u32,
-                "pending wl_buffer disappeared before commit",
-            );
-            return false;
-        };
-        let Some(buffer) = object.downcast_ref::<WlBuffer>() else {
-            client.protocol_violation_disconnect(
-                dispatcher,
-                self.id.into(),
-                wl_display::Error::InvalidObject as u32,
-                "pending buffer object is not a wl_buffer",
+                msg,
             );
             return false;
         };
@@ -1566,10 +1551,10 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         let (grandchildren, subsurface_object_id) = {
-            let Some(child_object) = state.objects.try_get(child_surface_object_id) else {
-                return;
-            };
-            let Some(child_surface) = child_object.downcast_ref::<WlSurface>() else {
+            let Some(child_surface) = state
+                .objects
+                .try_get_ref_of::<WlSurface>(child_surface_object_id)
+            else {
                 return;
             };
             (child_surface.child_surface_ids(), child_surface.subsurface_object())
