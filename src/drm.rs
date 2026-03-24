@@ -185,6 +185,7 @@ struct SceneItem {
     texture: gl::Uint,
     damage: DamageRegion,
     sample_damage_padding: i32,
+    state_has_alpha: bool,
     opaque_region: DamageRegion,
     opaque: bool,
     sync: crate::sync::SurfaceSyncState,
@@ -1953,6 +1954,7 @@ impl DrmModel {
                         height: item.state.bounds.height,
                         tex_transform: item.state.tex_transform,
                         damage: item.damage.clone(),
+                        blend: item.state_has_alpha,
                     })
                     .collect();
                 let render_completion =
@@ -2303,6 +2305,7 @@ fn collect_render_items(
             texture,
             damage,
             sample_damage_padding,
+            state_has_alpha: buffer.format().has_alpha,
             opaque_region: opaque_region.clone(),
             opaque: !opaque_region.is_empty(),
             sync: surface_state.sync,

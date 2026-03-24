@@ -551,6 +551,7 @@ pub struct RenderItem {
     /// Future `wl_surface.set_buffer_transform` / scale support plugs in here.
     pub tex_transform: Mat3,
     pub damage: DamageRegion,
+    pub blend: bool,
 }
 
 #[derive(Debug)]
@@ -837,7 +838,6 @@ impl EglFrameBuffer {
             gl::BindFramebuffer(gl::FRAMEBUFFER as _, self.framebuffer_object);
             gl::Viewport(0, 0, self.width, self.height);
             gl::UseProgram(program);
-            gl::Enable(gl::BLEND as _);
             gl::BlendFunc(gl::ONE as _, gl::ONE_MINUS_SRC_ALPHA as _);
             gl::Uniform1i(sampler_location, 0);
             gl::ActiveTexture(gl::TEXTURE0 as _);
@@ -868,6 +868,11 @@ impl EglFrameBuffer {
             let tex_transform = item.tex_transform.to_gl_array();
 
             unsafe {
+                if item.blend {
+                    gl::Enable(gl::BLEND as _);
+                } else {
+                    gl::Disable(gl::BLEND as _);
+                }
                 gl::BindTexture(gl::TEXTURE_2D as _, item.texture);
                 gl::UniformMatrix3fv(transform_location, 1, 0, transform.as_ptr());
                 gl::UniformMatrix3fv(tex_transform_location, 1, 0, tex_transform.as_ptr());
@@ -903,6 +908,7 @@ impl EglFrameBuffer {
 
         unsafe {
             gl::BindTexture(gl::TEXTURE_2D as _, 0);
+            gl::Disable(gl::BLEND as _);
             gl::DisableVertexAttribArray(position_location);
             gl::DisableVertexAttribArray(texcoord_location);
             gl::UseProgram(0);
