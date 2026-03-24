@@ -85,6 +85,15 @@ wayland_id! {
   XwaylandSurfaceV1Id,
   WpCursorShapeManagerV1Id,
   WpCursorShapeDeviceV1Id,
+  WpLinuxDrmSyncobjManagerV1Id,
+  WpLinuxDrmSyncobjTimelineV1Id,
+  WpLinuxDrmSyncobjSurfaceV1Id,
+  ZwpLinuxDmabufV1Id,
+  ZwpLinuxBufferParamsV1Id,
+  ZwpLinuxDmabufFeedbackV1Id,
+  ZwpLinuxExplicitSynchronizationV1Id,
+  ZwpLinuxSurfaceSynchronizationV1Id,
+  ZwpLinuxBufferReleaseV1Id,
   ZwpTabletManagerV2Id,
   ZwpTabletSeatV2Id,
   ZwpTabletToolV2Id,
@@ -8778,6 +8787,1348 @@ pub mod wp_cursor_shape_device_v1 {
     pub enum Error {
         /// The specified shape value is invalid,
         InvalidShape = 1,
+    }
+}
+
+/// Global for providing explicit synchronization
+///
+/// This global is a factory interface, allowing clients to request
+/// explicit synchronization for buffers on a per-surface basis.
+///
+/// See wp_linux_drm_syncobj_surface_v1 for more information.
+pub mod wp_linux_drm_syncobj_manager_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1
+    {
+        const INTERFACE_NAME: &'static str = "wp_linux_drm_syncobj_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WpLinuxDrmSyncobjManagerV1Id {
+        type Object =
+            crate::wayland_objects::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy explicit synchronization factory object
+        ///
+        /// Destroy this explicit synchronization factory object. Other objects
+        /// shall not be affected by this request.
+        Destroy,
+        /// Extend surface interface for explicit synchronization
+        ///
+        /// Instantiate an interface extension for the given wl_surface to provide
+        /// explicit synchronization.
+        ///
+        /// If the given wl_surface already has an explicit synchronization object
+        /// associated, the surface_exists protocol error is raised.
+        ///
+        /// Graphics APIs, like EGL or Vulkan, that manage the buffer queue and
+        /// commits of a wl_surface themselves, are likely to be using this
+        /// extension internally. If a client is using such an API for a
+        /// wl_surface, it should not directly use this extension on that surface,
+        /// to avoid raising a surface_exists protocol error.
+        GetSurface {
+            /// The new synchronization surface object id,
+            id: WpLinuxDrmSyncobjSurfaceV1Id,
+            /// The surface,
+            surface: WlSurfaceId,
+        },
+        /// Import a DRM syncobj timeline
+        ///
+        /// Import a DRM synchronization object timeline.
+        ///
+        /// If the FD cannot be imported, the invalid_timeline error is raised.
+        ImportTimeline {
+            id: WpLinuxDrmSyncobjTimelineV1Id,
+            /// Drm_syncobj file descriptor,
+            fd: RawFd,
+        },
+    }
+    impl Parser
+        for crate::wayland_objects::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetSurface { id: req.id()?, surface: req.id()? },
+                2 => ImportTimeline { id: req.id()?, fd: req.fd()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// The surface already has a synchronization object associated,
+        SurfaceExists = 0,
+        /// The timeline object could not be imported,
+        InvalidTimeline = 1,
+    }
+}
+
+/// Synchronization object timeline
+///
+/// This object represents an explicit synchronization object timeline
+/// imported by the client to the compositor.
+pub mod wp_linux_drm_syncobj_timeline_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1
+    {
+        const INTERFACE_NAME: &'static str = "wp_linux_drm_syncobj_timeline_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WpLinuxDrmSyncobjTimelineV1Id {
+        type Object =
+            crate::wayland_objects::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the timeline
+        ///
+        /// Destroy the synchronization object timeline. Other objects are not
+        /// affected by this request, in particular timeline points set by
+        /// set_acquire_point and set_release_point are not unset.
+        Destroy,
+    }
+    impl Parser
+        for crate::wayland_objects::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
+/// Per-surface explicit synchronization
+///
+/// This object is an add-on interface for wl_surface to enable explicit
+/// synchronization.
+///
+/// Each surface can be associated with only one object of this interface at
+/// any time.
+///
+/// Explicit synchronization is guaranteed to be supported for buffers
+/// created with any version of the linux-dmabuf protocol. Compositors are
+/// free to support explicit synchronization for additional buffer types.
+/// If at surface commit time the attached buffer does not support explicit
+/// synchronization, an unsupported_buffer error is raised.
+///
+/// As long as the wp_linux_drm_syncobj_surface_v1 object is alive, the
+/// compositor may ignore implicit synchronization for buffers attached and
+/// committed to the wl_surface. The delivery of wl_buffer.release events
+/// for buffers attached to the surface becomes undefined.
+///
+/// Clients must set both acquire and release points if and only if a
+/// non-null buffer is attached in the same surface commit. See the
+/// no_buffer, no_acquire_point and no_release_point protocol errors.
+///
+/// If at surface commit time the acquire and release DRM syncobj timelines
+/// are identical, the acquire point value must be strictly less than the
+/// release point value, or else the conflicting_points protocol error is
+/// raised.
+pub mod wp_linux_drm_syncobj_surface_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1
+    {
+        const INTERFACE_NAME: &'static str = "wp_linux_drm_syncobj_surface_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for WpLinuxDrmSyncobjSurfaceV1Id {
+        type Object =
+            crate::wayland_objects::wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the surface synchronization object
+        ///
+        /// Destroy this surface synchronization object.
+        ///
+        /// Any timeline point set by this object with set_acquire_point or
+        /// set_release_point since the last commit may be discarded by the
+        /// compositor. Any timeline point set by this object before the last
+        /// commit will not be affected.
+        Destroy,
+        /// Set the acquire timeline point
+        ///
+        /// Set the timeline point that must be signalled before the compositor may
+        /// sample from the buffer attached with wl_surface.attach.
+        ///
+        /// The 64-bit unsigned value combined from point_hi and point_lo is the
+        /// point value.
+        ///
+        /// The acquire point is double-buffered state, and will be applied on the
+        /// next wl_surface.commit request for the associated surface. Thus, it
+        /// applies only to the buffer that is attached to the surface at commit
+        /// time.
+        ///
+        /// If an acquire point has already been attached during the same commit
+        /// cycle, the new point replaces the old one.
+        ///
+        /// If the associated wl_surface was destroyed, a no_surface error is
+        /// raised.
+        ///
+        /// If at surface commit time there is a pending acquire timeline point set
+        /// but no pending buffer attached, a no_buffer error is raised. If at
+        /// surface commit time there is a pending buffer attached but no pending
+        /// acquire timeline point set, the no_acquire_point protocol error is
+        /// raised.
+        SetAcquirePoint {
+            timeline: WpLinuxDrmSyncobjTimelineV1Id,
+            /// High 32 bits of the point value,
+            point_hi: u32,
+            /// Low 32 bits of the point value,
+            point_lo: u32,
+        },
+        /// Set the release timeline point
+        ///
+        /// Set the timeline point that must be signalled by the compositor when it
+        /// has finished its usage of the buffer attached with wl_surface.attach
+        /// for the relevant commit.
+        ///
+        /// Once the timeline point is signaled, and assuming the associated buffer
+        /// is not pending release from other wl_surface.commit requests, no
+        /// additional explicit or implicit synchronization with the compositor is
+        /// required to safely re-use the buffer.
+        ///
+        /// Note that clients cannot rely on the release point being always
+        /// signaled after the acquire point: compositors may release buffers
+        /// without ever reading from them. In addition, the compositor may use
+        /// different presentation paths for different commits, which may have
+        /// different release behavior. As a result, the compositor may signal the
+        /// release points in a different order than the client committed them.
+        ///
+        /// Because signaling a timeline point also signals every previous point,
+        /// it is generally not safe to use the same timeline object for the
+        /// release points of multiple buffers. The out-of-order signaling
+        /// described above may lead to a release point being signaled before the
+        /// compositor has finished reading. To avoid this, it is strongly
+        /// recommended that each buffer should use a separate timeline for its
+        /// release points.
+        ///
+        /// The 64-bit unsigned value combined from point_hi and point_lo is the
+        /// point value.
+        ///
+        /// The release point is double-buffered state, and will be applied on the
+        /// next wl_surface.commit request for the associated surface. Thus, it
+        /// applies only to the buffer that is attached to the surface at commit
+        /// time.
+        ///
+        /// If a release point has already been attached during the same commit
+        /// cycle, the new point replaces the old one.
+        ///
+        /// If the associated wl_surface was destroyed, a no_surface error is
+        /// raised.
+        ///
+        /// If at surface commit time there is a pending release timeline point set
+        /// but no pending buffer attached, a no_buffer error is raised. If at
+        /// surface commit time there is a pending buffer attached but no pending
+        /// release timeline point set, the no_release_point protocol error is
+        /// raised.
+        SetReleasePoint {
+            timeline: WpLinuxDrmSyncobjTimelineV1Id,
+            /// High 32 bits of the point value,
+            point_hi: u32,
+            /// Low 32 bits of the point value,
+            point_lo: u32,
+        },
+    }
+    impl Parser
+        for crate::wayland_objects::wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => SetAcquirePoint {
+                    timeline: req.id()?,
+                    point_hi: req.uint()?,
+                    point_lo: req.uint()?,
+                },
+                2 => SetReleasePoint {
+                    timeline: req.id()?,
+                    point_hi: req.uint()?,
+                    point_lo: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// The associated wl_surface was destroyed,
+        NoSurface = 1,
+        /// The buffer does not support explicit synchronization,
+        UnsupportedBuffer = 2,
+        /// No buffer was attached,
+        NoBuffer = 3,
+        /// No acquire timeline point was set,
+        NoAcquirePoint = 4,
+        /// No release timeline point was set,
+        NoReleasePoint = 5,
+        /// Acquire and release timeline points are in conflict,
+        ConflictingPoints = 6,
+    }
+}
+
+/// Factory for creating dmabuf-based wl_buffers
+///
+/// Following the interfaces from:
+/// https://www.khronos.org/registry/egl/extensions/EXT/EGL_EXT_image_dma_buf_import.txt
+/// https://www.khronos.org/registry/EGL/extensions/EXT/EGL_EXT_image_dma_buf_import_modifiers.txt
+/// and the Linux DRM sub-system's AddFb2 ioctl.
+///
+/// This interface offers ways to create generic dmabuf-based wl_buffers.
+///
+/// Clients can use the get_surface_feedback request to get dmabuf feedback
+/// for a particular surface. If the client wants to retrieve feedback not
+/// tied to a surface, they can use the get_default_feedback request.
+///
+/// The following are required from clients:
+///
+/// - Clients must ensure that either all data in the dma-buf is
+/// coherent for all subsequent read access or that coherency is
+/// correctly handled by the underlying kernel-side dma-buf
+/// implementation.
+///
+/// - Don't make any more attachments after sending the buffer to the
+/// compositor. Making more attachments later increases the risk of
+/// the compositor not being able to use (re-import) an existing
+/// dmabuf-based wl_buffer.
+///
+/// The underlying graphics stack must ensure the following:
+///
+/// - The dmabuf file descriptors relayed to the server will stay valid
+/// for the whole lifetime of the wl_buffer. This means the server may
+/// at any time use those fds to import the dmabuf into any kernel
+/// sub-system that might accept it.
+///
+/// However, when the underlying graphics stack fails to deliver the
+/// promise, because of e.g. a device hot-unplug which raises internal
+/// errors, after the wl_buffer has been successfully created the
+/// compositor must not raise protocol errors to the client when dmabuf
+/// import later fails.
+///
+/// To create a wl_buffer from one or more dmabufs, a client creates a
+/// zwp_linux_dmabuf_params_v1 object with a zwp_linux_dmabuf_v1.create_params
+/// request. All planes required by the intended format are added with
+/// the 'add' request. Finally, a 'create' or 'create_immed' request is
+/// issued, which has the following outcome depending on the import success.
+///
+/// The 'create' request,
+/// - on success, triggers a 'created' event which provides the final
+/// wl_buffer to the client.
+/// - on failure, triggers a 'failed' event to convey that the server
+/// cannot use the dmabufs received from the client.
+///
+/// For the 'create_immed' request,
+/// - on success, the server immediately imports the added dmabufs to
+/// create a wl_buffer. No event is sent from the server in this case.
+/// - on failure, the server can choose to either:
+/// - terminate the client by raising a fatal error.
+/// - mark the wl_buffer as failed, and send a 'failed' event to the
+/// client. If the client uses a failed wl_buffer as an argument to any
+/// request, the behaviour is compositor implementation-defined.
+///
+/// For all DRM formats and unless specified in another protocol extension,
+/// pre-multiplied alpha is used for pixel values.
+///
+/// Unless specified otherwise in another protocol extension, implicit
+/// synchronization is used. In other words, compositors and clients must
+/// wait and signal fences implicitly passed via the DMA-BUF's reservation
+/// mechanism.
+///
+/// Disclaimer: This protocol extension has been marked stable. This copy is
+/// no longer used and only retained for backwards compatibility. The
+/// canonical version can be found in the stable/ directory.
+pub mod zwp_linux_dmabuf_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 {
+        const INTERFACE_NAME: &'static str = "zwp_linux_dmabuf_v1";
+        const INTERFACE_VERSION: u32 = 5;
+    }
+    impl crate::object::IdToObject for ZwpLinuxDmabufV1Id {
+        type Object = crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Unbind the factory
+        ///
+        /// Objects created through this interface, especially wl_buffers, will
+        /// remain valid.
+        Destroy,
+        /// Create a temporary object for buffer parameters
+        ///
+        /// This temporary object is used to collect multiple dmabuf handles into
+        /// a single batch to create a wl_buffer. It can only be used once and
+        /// should be destroyed after a 'created' or 'failed' event has been
+        /// received.
+        CreateParams {
+            /// The new temporary,
+            params_id: ZwpLinuxBufferParamsV1Id,
+        },
+        /// Get default feedback
+        ///
+        /// This request creates a new wp_linux_dmabuf_feedback object not bound
+        /// to a particular surface. This object will deliver feedback about dmabuf
+        /// parameters to use if the client doesn't support per-surface feedback
+        /// (see get_surface_feedback).
+        GetDefaultFeedback { id: ZwpLinuxDmabufFeedbackV1Id },
+        /// Get feedback for a surface
+        ///
+        /// This request creates a new wp_linux_dmabuf_feedback object for the
+        /// specified wl_surface. This object will deliver feedback about dmabuf
+        /// parameters to use for buffers attached to this surface.
+        ///
+        /// If the surface is destroyed before the wp_linux_dmabuf_feedback object,
+        /// the feedback object becomes inert.
+        GetSurfaceFeedback { id: ZwpLinuxDmabufFeedbackV1Id, surface: WlSurfaceId },
+    }
+    impl Parser for crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => CreateParams { params_id: req.id()? },
+                2 => GetDefaultFeedback { id: req.id()? },
+                3 => GetSurfaceFeedback { id: req.id()?, surface: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Supported buffer format
+        ///
+        /// This event advertises one buffer format that the server supports.
+        /// All the supported formats are advertised once when the client
+        /// binds to this interface. A roundtrip after binding guarantees
+        /// that the client has received all supported formats.
+        ///
+        /// For the definition of the format codes, see the
+        /// zwp_linux_buffer_params_v1::create request.
+        ///
+        /// Starting version 4, the format event is deprecated and must not be
+        /// sent by compositors. Instead, use get_default_feedback or
+        /// get_surface_feedback.
+        Format {
+            /// DRM_FORMAT code,
+            format: u32,
+        },
+        /// Supported buffer format modifier
+        ///
+        /// This event advertises the formats that the server supports, along with
+        /// the modifiers supported for each format. All the supported modifiers
+        /// for all the supported formats are advertised once when the client
+        /// binds to this interface. A roundtrip after binding guarantees that
+        /// the client has received all supported format-modifier pairs.
+        ///
+        /// For legacy support, DRM_FORMAT_MOD_INVALID (that is, modifier_hi ==
+        /// 0x00ffffff and modifier_lo == 0xffffffff) is allowed in this event.
+        /// It indicates that the server can support the format with an implicit
+        /// modifier. When a plane has DRM_FORMAT_MOD_INVALID as its modifier, it
+        /// is as if no explicit modifier is specified. The effective modifier
+        /// will be derived from the dmabuf.
+        ///
+        /// A compositor that sends valid modifiers and DRM_FORMAT_MOD_INVALID for
+        /// a given format supports both explicit modifiers and implicit modifiers.
+        ///
+        /// For the definition of the format and modifier codes, see the
+        /// zwp_linux_buffer_params_v1::create and zwp_linux_buffer_params_v1::add
+        /// requests.
+        ///
+        /// Starting version 4, the modifier event is deprecated and must not be
+        /// sent by compositors. Instead, use get_default_feedback or
+        /// get_surface_feedback.
+        Modifier {
+            /// DRM_FORMAT code,
+            format: u32,
+            /// High 32 bits of layout modifier,
+            modifier_hi: u32,
+            /// Low 32 bits of layout modifier,
+            modifier_lo: u32,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Format { format } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(format);
+                    raw
+                }
+                Modifier { format, modifier_hi, modifier_lo } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 3);
+                    raw.uint(format);
+                    raw.uint(modifier_hi);
+                    raw.uint(modifier_lo);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// Parameters for creating a dmabuf-based wl_buffer
+///
+/// This temporary object is a collection of dmabufs and other
+/// parameters that together form a single logical buffer. The temporary
+/// object may eventually create one wl_buffer unless cancelled by
+/// destroying it before requesting 'create'.
+///
+/// Single-planar formats only require one dmabuf, however
+/// multi-planar formats may require more than one dmabuf. For all
+/// formats, an 'add' request must be called once per plane (even if the
+/// underlying dmabuf fd is identical).
+///
+/// You must use consecutive plane indices ('plane_idx' argument for 'add')
+/// from zero to the number of planes used by the drm_fourcc format code.
+/// All planes required by the format must be given exactly once, but can
+/// be given in any order. Each plane index can be set only once.
+pub mod zwp_linux_buffer_params_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1 {
+        const INTERFACE_NAME: &'static str = "zwp_linux_buffer_params_v1";
+        const INTERFACE_VERSION: u32 = 5;
+    }
+    impl crate::object::IdToObject for ZwpLinuxBufferParamsV1Id {
+        type Object = crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Delete this object, used or not
+        ///
+        /// Cleans up the temporary data sent to the server for dmabuf-based
+        /// wl_buffer creation.
+        Destroy,
+        /// Add a dmabuf to the temporary set
+        ///
+        /// This request adds one dmabuf to the set in this
+        /// zwp_linux_buffer_params_v1.
+        ///
+        /// The 64-bit unsigned value combined from modifier_hi and modifier_lo
+        /// is the dmabuf layout modifier. DRM AddFB2 ioctl calls this the
+        /// fb modifier, which is defined in drm_mode.h of Linux UAPI.
+        /// This is an opaque token. Drivers use this token to express tiling,
+        /// compression, etc. driver-specific modifications to the base format
+        /// defined by the DRM fourcc code.
+        ///
+        /// Starting from version 4, the invalid_format protocol error is sent if
+        /// the format + modifier pair was not advertised as supported.
+        ///
+        /// Starting from version 5, the invalid_format protocol error is sent if
+        /// all planes don't use the same modifier.
+        ///
+        /// This request raises the PLANE_IDX error if plane_idx is too large.
+        /// The error PLANE_SET is raised if attempting to set a plane that
+        /// was already set.
+        Add {
+            /// Dmabuf fd,
+            fd: RawFd,
+            /// Plane index,
+            plane_idx: u32,
+            /// Offset in bytes,
+            offset: u32,
+            /// Stride in bytes,
+            stride: u32,
+            /// High 32 bits of layout modifier,
+            modifier_hi: u32,
+            /// Low 32 bits of layout modifier,
+            modifier_lo: u32,
+        },
+        /// Create a wl_buffer from the given dmabufs
+        ///
+        /// This asks for creation of a wl_buffer from the added dmabuf
+        /// buffers. The wl_buffer is not created immediately but returned via
+        /// the 'created' event if the dmabuf sharing succeeds. The sharing
+        /// may fail at runtime for reasons a client cannot predict, in
+        /// which case the 'failed' event is triggered.
+        ///
+        /// The 'format' argument is a DRM_FORMAT code, as defined by the
+        /// libdrm's drm_fourcc.h. The Linux kernel's DRM sub-system is the
+        /// authoritative source on how the format codes should work.
+        ///
+        /// The 'flags' is a bitfield of the flags defined in enum "flags".
+        /// 'y_invert' means the that the image needs to be y-flipped.
+        ///
+        /// Flag 'interlaced' means that the frame in the buffer is not
+        /// progressive as usual, but interlaced. An interlaced buffer as
+        /// supported here must always contain both top and bottom fields.
+        /// The top field always begins on the first pixel row. The temporal
+        /// ordering between the two fields is top field first, unless
+        /// 'bottom_first' is specified. It is undefined whether 'bottom_first'
+        /// is ignored if 'interlaced' is not set.
+        ///
+        /// This protocol does not convey any information about field rate,
+        /// duration, or timing, other than the relative ordering between the
+        /// two fields in one buffer. A compositor may have to estimate the
+        /// intended field rate from the incoming buffer rate. It is undefined
+        /// whether the time of receiving wl_surface.commit with a new buffer
+        /// attached, applying the wl_surface state, wl_surface.frame callback
+        /// trigger, presentation, or any other point in the compositor cycle
+        /// is used to measure the frame or field times. There is no support
+        /// for detecting missed or late frames/fields/buffers either, and
+        /// there is no support whatsoever for cooperating with interlaced
+        /// compositor output.
+        ///
+        /// The composited image quality resulting from the use of interlaced
+        /// buffers is explicitly undefined. A compositor may use elaborate
+        /// hardware features or software to deinterlace and create progressive
+        /// output frames from a sequence of interlaced input buffers, or it
+        /// may produce substandard image quality. However, compositors that
+        /// cannot guarantee reasonable image quality in all cases are recommended
+        /// to just reject all interlaced buffers.
+        ///
+        /// Any argument errors, including non-positive width or height,
+        /// mismatch between the number of planes and the format, bad
+        /// format, bad offset or stride, may be indicated by fatal protocol
+        /// errors: INCOMPLETE, INVALID_FORMAT, INVALID_DIMENSIONS,
+        /// OUT_OF_BOUNDS.
+        ///
+        /// Dmabuf import errors in the server that are not obvious client
+        /// bugs are returned via the 'failed' event as non-fatal. This
+        /// allows attempting dmabuf sharing and falling back in the client
+        /// if it fails.
+        ///
+        /// This request can be sent only once in the object's lifetime, after
+        /// which the only legal request is destroy. This object should be
+        /// destroyed after issuing a 'create' request. Attempting to use this
+        /// object after issuing 'create' raises ALREADY_USED protocol error.
+        ///
+        /// It is not mandatory to issue 'create'. If a client wants to
+        /// cancel the buffer creation, it can just destroy this object.
+        Create {
+            /// Base plane width in pixels,
+            width: i32,
+            /// Base plane height in pixels,
+            height: i32,
+            /// DRM_FORMAT code,
+            format: u32,
+            /// See enum flags,
+            flags: u32,
+        },
+        /// Immediately create a wl_buffer from the given dmabufs
+        ///
+        /// This asks for immediate creation of a wl_buffer by importing the
+        /// added dmabufs.
+        ///
+        /// In case of import success, no event is sent from the server, and the
+        /// wl_buffer is ready to be used by the client.
+        ///
+        /// Upon import failure, either of the following may happen, as seen fit
+        /// by the implementation:
+        /// - the client is terminated with one of the following fatal protocol
+        /// errors:
+        /// - INCOMPLETE, INVALID_FORMAT, INVALID_DIMENSIONS, OUT_OF_BOUNDS,
+        /// in case of argument errors such as mismatch between the number
+        /// of planes and the format, bad format, non-positive width or
+        /// height, or bad offset or stride.
+        /// - INVALID_WL_BUFFER, in case the cause for failure is unknown or
+        /// platform specific.
+        /// - the server creates an invalid wl_buffer, marks it as failed and
+        /// sends a 'failed' event to the client. The result of using this
+        /// invalid wl_buffer as an argument in any request by the client is
+        /// defined by the compositor implementation.
+        ///
+        /// This takes the same arguments as a 'create' request, and obeys the
+        /// same restrictions.
+        CreateImmed {
+            /// Id for the newly created wl_buffer,
+            buffer_id: WlBufferId,
+            /// Base plane width in pixels,
+            width: i32,
+            /// Base plane height in pixels,
+            height: i32,
+            /// DRM_FORMAT code,
+            format: u32,
+            /// See enum flags,
+            flags: u32,
+        },
+    }
+    impl Parser for crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => Add {
+                    fd: req.fd()?,
+                    plane_idx: req.uint()?,
+                    offset: req.uint()?,
+                    stride: req.uint()?,
+                    modifier_hi: req.uint()?,
+                    modifier_lo: req.uint()?,
+                },
+                2 => Create {
+                    width: req.int()?,
+                    height: req.int()?,
+                    format: req.uint()?,
+                    flags: req.uint()?,
+                },
+                3 => CreateImmed {
+                    buffer_id: req.id()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                    format: req.uint()?,
+                    flags: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Buffer creation succeeded
+        ///
+        /// This event indicates that the attempted buffer creation was
+        /// successful. It provides the new wl_buffer referencing the dmabuf(s).
+        ///
+        /// Upon receiving this event, the client should destroy the
+        /// zwp_linux_buffer_params_v1 object.
+        Created {
+            /// The newly created wl_buffer,
+            buffer: WlBufferId,
+        },
+        /// Buffer creation failed
+        ///
+        /// This event indicates that the attempted buffer creation has
+        /// failed. It usually means that one of the dmabuf constraints
+        /// has not been fulfilled.
+        ///
+        /// Upon receiving this event, the client should destroy the
+        /// zwp_linux_buffer_params_v1 object.
+        Failed,
+    }
+    impl EventWriter for crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Created { buffer } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(buffer);
+                    raw
+                }
+                Failed {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// The dmabuf_batch object has already been used to create a wl_buffer,
+        AlreadyUsed = 0,
+        /// Plane index out of bounds,
+        PlaneIdx = 1,
+        /// The plane index was already set,
+        PlaneSet = 2,
+        /// Missing or too many planes to create a buffer,
+        Incomplete = 3,
+        /// Format not supported,
+        InvalidFormat = 4,
+        /// Invalid width or height,
+        InvalidDimensions = 5,
+        /// Offset + stride * height goes out of dmabuf bounds,
+        OutOfBounds = 6,
+        /// Invalid wl_buffer resulted from importing dmabufs via the create_immed request on given buffer_params,
+        InvalidWlBuffer = 7,
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Flags {
+        /// Contents are y-inverted,
+        YInvert = 1,
+        /// Content is interlaced,
+        Interlaced = 2,
+        /// Bottom field first,
+        BottomFirst = 4,
+    }
+}
+
+/// Dmabuf feedback
+///
+/// This object advertises dmabuf parameters feedback. This includes the
+/// preferred devices and the supported formats/modifiers.
+///
+/// The parameters are sent once when this object is created and whenever they
+/// change. The done event is always sent once after all parameters have been
+/// sent. When a single parameter changes, all parameters are re-sent by the
+/// compositor.
+///
+/// Compositors can re-send the parameters when the current client buffer
+/// allocations are sub-optimal. Compositors should not re-send the
+/// parameters if re-allocating the buffers would not result in a more optimal
+/// configuration. In particular, compositors should avoid sending the exact
+/// same parameters multiple times in a row.
+///
+/// The tranche_target_device and tranche_formats events are grouped by
+/// tranches of preference. For each tranche, a tranche_target_device, one
+/// tranche_flags and one or more tranche_formats events are sent, followed
+/// by a tranche_done event finishing the list. The tranches are sent in
+/// descending order of preference. All formats and modifiers in the same
+/// tranche have the same preference.
+///
+/// To send parameters, the compositor sends one main_device event, tranches
+/// (each consisting of one tranche_target_device event, one tranche_flags
+/// event, tranche_formats events and then a tranche_done event), then one
+/// done event.
+pub mod zwp_linux_dmabuf_feedback_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 {
+        const INTERFACE_NAME: &'static str = "zwp_linux_dmabuf_feedback_v1";
+        const INTERFACE_VERSION: u32 = 5;
+    }
+    impl crate::object::IdToObject for ZwpLinuxDmabufFeedbackV1Id {
+        type Object =
+            crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the feedback object
+        ///
+        /// Using this request a client can tell the server that it is not going to
+        /// use the wp_linux_dmabuf_feedback object anymore.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// All feedback has been sent
+        ///
+        /// This event is sent after all parameters of a wp_linux_dmabuf_feedback
+        /// object have been sent.
+        ///
+        /// This allows changes to the wp_linux_dmabuf_feedback parameters to be
+        /// seen as atomic, even if they happen via multiple events.
+        Done,
+        /// Format and modifier table
+        ///
+        /// This event provides a file descriptor which can be memory-mapped to
+        /// access the format and modifier table.
+        ///
+        /// The table contains a tightly packed array of consecutive format +
+        /// modifier pairs. Each pair is 16 bytes wide. It contains a format as a
+        /// 32-bit unsigned integer, followed by 4 bytes of unused padding, and a
+        /// modifier as a 64-bit unsigned integer. The native endianness is used.
+        ///
+        /// The client must map the file descriptor in read-only private mode.
+        ///
+        /// Compositors are not allowed to mutate the table file contents once this
+        /// event has been sent. Instead, compositors must create a new, separate
+        /// table file and re-send feedback parameters. Compositors are allowed to
+        /// store duplicate format + modifier pairs in the table.
+        FormatTable {
+            /// Table file descriptor,
+            fd: RawFd,
+            /// Table size, in bytes,
+            size: u32,
+        },
+        /// Preferred main device
+        ///
+        /// This event advertises the main device that the server prefers to use
+        /// when direct scan-out to the target device isn't possible. The
+        /// advertised main device may be different for each
+        /// wp_linux_dmabuf_feedback object, and may change over time.
+        ///
+        /// There is exactly one main device. The compositor must send at least
+        /// one preference tranche with tranche_target_device equal to main_device.
+        ///
+        /// Clients need to create buffers that the main device can import and
+        /// read from, otherwise creating the dmabuf wl_buffer will fail (see the
+        /// wp_linux_buffer_params.create and create_immed requests for details).
+        /// The main device will also likely be kept active by the compositor,
+        /// so clients can use it instead of waking up another device for power
+        /// savings.
+        ///
+        /// In general the device is a DRM node. The DRM node type (primary vs.
+        /// render) is unspecified. Clients must not rely on the compositor sending
+        /// a particular node type. Clients cannot check two devices for equality
+        /// by comparing the dev_t value.
+        ///
+        /// If explicit modifiers are not supported and the client performs buffer
+        /// allocations on a different device than the main device, then the client
+        /// must force the buffer to have a linear layout.
+        MainDevice {
+            /// Device dev_t value,
+            device: Array,
+        },
+        /// A preference tranche has been sent
+        ///
+        /// This event splits tranche_target_device and tranche_formats events in
+        /// preference tranches. It is sent after a set of tranche_target_device
+        /// and tranche_formats events; it represents the end of a tranche. The
+        /// next tranche will have a lower preference.
+        TrancheDone,
+        /// Target device
+        ///
+        /// This event advertises the target device that the server prefers to use
+        /// for a buffer created given this tranche. The advertised target device
+        /// may be different for each preference tranche, and may change over time.
+        ///
+        /// There is exactly one target device per tranche.
+        ///
+        /// The target device may be a scan-out device, for example if the
+        /// compositor prefers to directly scan-out a buffer created given this
+        /// tranche. The target device may be a rendering device, for example if
+        /// the compositor prefers to texture from said buffer.
+        ///
+        /// The client can use this hint to allocate the buffer in a way that makes
+        /// it accessible from the target device, ideally directly. The buffer must
+        /// still be accessible from the main device, either through direct import
+        /// or through a potentially more expensive fallback path. If the buffer
+        /// can't be directly imported from the main device then clients must be
+        /// prepared for the compositor changing the tranche priority or making
+        /// wl_buffer creation fail (see the wp_linux_buffer_params.create and
+        /// create_immed requests for details).
+        ///
+        /// If the device is a DRM node, the DRM node type (primary vs. render) is
+        /// unspecified. Clients must not rely on the compositor sending a
+        /// particular node type. Clients cannot check two devices for equality by
+        /// comparing the dev_t value.
+        ///
+        /// This event is tied to a preference tranche, see the tranche_done event.
+        TrancheTargetDevice {
+            /// Device dev_t value,
+            device: Array,
+        },
+        /// Supported buffer format modifier
+        ///
+        /// This event advertises the format + modifier combinations that the
+        /// compositor supports.
+        ///
+        /// It carries an array of indices, each referring to a format + modifier
+        /// pair in the last received format table (see the format_table event).
+        /// Each index is a 16-bit unsigned integer in native endianness.
+        ///
+        /// For legacy support, DRM_FORMAT_MOD_INVALID is an allowed modifier.
+        /// It indicates that the server can support the format with an implicit
+        /// modifier. When a buffer has DRM_FORMAT_MOD_INVALID as its modifier, it
+        /// is as if no explicit modifier is specified. The effective modifier
+        /// will be derived from the dmabuf.
+        ///
+        /// A compositor that sends valid modifiers and DRM_FORMAT_MOD_INVALID for
+        /// a given format supports both explicit modifiers and implicit modifiers.
+        ///
+        /// Compositors must not send duplicate format + modifier pairs within the
+        /// same tranche or across two different tranches with the same target
+        /// device and flags.
+        ///
+        /// This event is tied to a preference tranche, see the tranche_done event.
+        ///
+        /// For the definition of the format and modifier codes, see the
+        /// wp_linux_buffer_params.create request.
+        TrancheFormats {
+            /// Array of 16-bit indexes,
+            indices: Array,
+        },
+        /// Tranche flags
+        ///
+        /// This event sets tranche-specific flags.
+        ///
+        /// The scanout flag is a hint that direct scan-out may be attempted by the
+        /// compositor on the target device if the client appropriately allocates a
+        /// buffer. How to allocate a buffer that can be scanned out on the target
+        /// device is implementation-defined.
+        ///
+        /// This event is tied to a preference tranche, see the tranche_done event.
+        TrancheFlags {
+            /// Tranche flags,
+            flags: u32,
+        },
+    }
+    impl EventWriter
+        for crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 0, 0);
+                    raw
+                }
+                FormatTable { fd, size } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 2);
+                    raw.fd(fd);
+                    raw.uint(size);
+                    raw
+                }
+                MainDevice { device } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.array(device);
+                    raw
+                }
+                TrancheDone {} => {
+                    let mut raw = RawEvent::new(self.id(), 3, 0);
+                    raw
+                }
+                TrancheTargetDevice { device } => {
+                    let mut raw = RawEvent::new(self.id(), 4, 1);
+                    raw.array(device);
+                    raw
+                }
+                TrancheFormats { indices } => {
+                    let mut raw = RawEvent::new(self.id(), 5, 1);
+                    raw.array(indices);
+                    raw
+                }
+                TrancheFlags { flags } => {
+                    let mut raw = RawEvent::new(self.id(), 6, 1);
+                    raw.uint(flags);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum TrancheFlags {
+        /// Direct scan-out tranche,
+        Scanout = 1,
+    }
+}
+
+/// Protocol for providing explicit synchronization
+///
+/// This global is a factory interface, allowing clients to request
+/// explicit synchronization for buffers on a per-surface basis.
+///
+/// See zwp_linux_surface_synchronization_v1 for more information.
+///
+/// This interface is derived from Chromium's
+/// zcr_linux_explicit_synchronization_v1.
+///
+/// Note: this protocol is superseded by linux-drm-syncobj.
+///
+/// Warning! The protocol described in this file is experimental and
+/// backward incompatible changes may be made. Backward compatible changes
+/// may be added together with the corresponding interface version bump.
+/// Backward incompatible changes are done by bumping the version number in
+/// the protocol and interface names and resetting the interface version.
+/// Once the protocol is to be declared stable, the 'z' prefix and the
+/// version number in the protocol and interface names are removed and the
+/// interface version number is reset.
+pub mod zwp_linux_explicit_synchronization_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_linux_explicit_synchronization_v1::ZwpLinuxExplicitSynchronizationV1 {
+    const INTERFACE_NAME: &'static str = "zwp_linux_explicit_synchronization_v1";
+    const INTERFACE_VERSION: u32 = 2;
+  }
+    impl crate::object::IdToObject for ZwpLinuxExplicitSynchronizationV1Id {
+        type Object = crate::wayland_objects::zwp_linux_explicit_synchronization_v1::ZwpLinuxExplicitSynchronizationV1;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy explicit synchronization factory object
+        ///
+        /// Destroy this explicit synchronization factory object. Other objects,
+        /// including zwp_linux_surface_synchronization_v1 objects created by this
+        /// factory, shall not be affected by this request.
+        Destroy,
+        /// Extend surface interface for explicit synchronization
+        ///
+        /// Instantiate an interface extension for the given wl_surface to provide
+        /// explicit synchronization.
+        ///
+        /// If the given wl_surface already has an explicit synchronization object
+        /// associated, the synchronization_exists protocol error is raised.
+        ///
+        /// Graphics APIs, like EGL or Vulkan, that manage the buffer queue and
+        /// commits of a wl_surface themselves, are likely to be using this
+        /// extension internally. If a client is using such an API for a
+        /// wl_surface, it should not directly use this extension on that surface,
+        /// to avoid raising a synchronization_exists protocol error.
+        GetSynchronization {
+            /// The new synchronization interface id,
+            id: ZwpLinuxSurfaceSynchronizationV1Id,
+            /// The surface,
+            surface: WlSurfaceId,
+        },
+    }
+    impl Parser for crate::wayland_objects::zwp_linux_explicit_synchronization_v1::ZwpLinuxExplicitSynchronizationV1 {
+    type Request = Request;
+    fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+      use Request::*;
+      let request = match req.request_id {
+        0 => Destroy,
+        1 => GetSynchronization {
+          id: req.id()?,
+          surface: req.id()?,
+        },
+        _ => return Err(ParserError::InvalidRequest),
+      };
+      Ok(request)
+    }
+  }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// The surface already has a synchronization object associated,
+        SynchronizationExists = 0,
+    }
+}
+
+/// Per-surface explicit synchronization support
+///
+/// This object implements per-surface explicit synchronization.
+///
+/// Synchronization refers to co-ordination of pipelined operations performed
+/// on buffers. Most GPU clients will schedule an asynchronous operation to
+/// render to the buffer, then immediately send the buffer to the compositor
+/// to be attached to a surface.
+///
+/// In implicit synchronization, ensuring that the rendering operation is
+/// complete before the compositor displays the buffer is an implementation
+/// detail handled by either the kernel or userspace graphics driver.
+///
+/// By contrast, in explicit synchronization, dma_fence objects mark when the
+/// asynchronous operations are complete. When submitting a buffer, the
+/// client provides an acquire fence which will be waited on before the
+/// compositor accesses the buffer. The Wayland server, through a
+/// zwp_linux_buffer_release_v1 object, will inform the client with an event
+/// which may be accompanied by a release fence, when the compositor will no
+/// longer access the buffer contents due to the specific commit that
+/// requested the release event.
+///
+/// Each surface can be associated with only one object of this interface at
+/// any time.
+///
+/// In version 1 of this interface, explicit synchronization is only
+/// guaranteed to be supported for buffers created with any version of the
+/// wp_linux_dmabuf buffer factory. Version 2 additionally guarantees
+/// explicit synchronization support for opaque EGL buffers, which is a type
+/// of platform specific buffers described in the EGL_WL_bind_wayland_display
+/// extension. Compositors are free to support explicit synchronization for
+/// additional buffer types.
+pub mod zwp_linux_surface_synchronization_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_linux_surface_synchronization_v1::ZwpLinuxSurfaceSynchronizationV1 {
+    const INTERFACE_NAME: &'static str = "zwp_linux_surface_synchronization_v1";
+    const INTERFACE_VERSION: u32 = 2;
+  }
+    impl crate::object::IdToObject for ZwpLinuxSurfaceSynchronizationV1Id {
+        type Object = crate::wayland_objects::zwp_linux_surface_synchronization_v1::ZwpLinuxSurfaceSynchronizationV1;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy synchronization object
+        ///
+        /// Destroy this explicit synchronization object.
+        ///
+        /// Any fence set by this object with set_acquire_fence since the last
+        /// commit will be discarded by the server. Any fences set by this object
+        /// before the last commit are not affected.
+        ///
+        /// zwp_linux_buffer_release_v1 objects created by this object are not
+        /// affected by this request.
+        Destroy,
+        /// Set the acquire fence
+        ///
+        /// Set the acquire fence that must be signaled before the compositor
+        /// may sample from the buffer attached with wl_surface.attach. The fence
+        /// is a dma_fence kernel object.
+        ///
+        /// The acquire fence is double-buffered state, and will be applied on the
+        /// next wl_surface.commit request for the associated surface. Thus, it
+        /// applies only to the buffer that is attached to the surface at commit
+        /// time.
+        ///
+        /// If the provided fd is not a valid dma_fence fd, then an INVALID_FENCE
+        /// error is raised.
+        ///
+        /// If a fence has already been attached during the same commit cycle, a
+        /// DUPLICATE_FENCE error is raised.
+        ///
+        /// If the associated wl_surface was destroyed, a NO_SURFACE error is
+        /// raised.
+        ///
+        /// If at surface commit time the attached buffer does not support explicit
+        /// synchronization, an UNSUPPORTED_BUFFER error is raised.
+        ///
+        /// If at surface commit time there is no buffer attached, a NO_BUFFER
+        /// error is raised.
+        SetAcquireFence {
+            /// Acquire fence fd,
+            fd: RawFd,
+        },
+        /// Release fence for last-attached buffer
+        ///
+        /// Create a listener for the release of the buffer attached by the
+        /// client with wl_surface.attach. See zwp_linux_buffer_release_v1
+        /// documentation for more information.
+        ///
+        /// The release object is double-buffered state, and will be associated
+        /// with the buffer that is attached to the surface at wl_surface.commit
+        /// time.
+        ///
+        /// If a zwp_linux_buffer_release_v1 object has already been requested for
+        /// the surface in the same commit cycle, a DUPLICATE_RELEASE error is
+        /// raised.
+        ///
+        /// If the associated wl_surface was destroyed, a NO_SURFACE error
+        /// is raised.
+        ///
+        /// If at surface commit time there is no buffer attached, a NO_BUFFER
+        /// error is raised.
+        GetRelease {
+            /// New zwp_linux_buffer_release_v1 object,
+            release: ZwpLinuxBufferReleaseV1Id,
+        },
+    }
+    impl Parser for crate::wayland_objects::zwp_linux_surface_synchronization_v1::ZwpLinuxSurfaceSynchronizationV1 {
+    type Request = Request;
+    fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+      use Request::*;
+      let request = match req.request_id {
+        0 => Destroy,
+        1 => SetAcquireFence {
+          fd: req.fd()?,
+        },
+        2 => GetRelease {
+          release: req.id()?,
+        },
+        _ => return Err(ParserError::InvalidRequest),
+      };
+      Ok(request)
+    }
+  }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// The fence specified by the client could not be imported,
+        InvalidFence = 0,
+        /// Multiple fences added for a single surface commit,
+        DuplicateFence = 1,
+        /// Multiple releases added for a single surface commit,
+        DuplicateRelease = 2,
+        /// The associated wl_surface was destroyed,
+        NoSurface = 3,
+        /// The buffer does not support explicit synchronization,
+        UnsupportedBuffer = 4,
+        /// No buffer was attached,
+        NoBuffer = 5,
+    }
+}
+
+/// Buffer release explicit synchronization
+///
+/// This object is instantiated in response to a
+/// zwp_linux_surface_synchronization_v1.get_release request.
+///
+/// It provides an alternative to wl_buffer.release events, providing a
+/// unique release from a single wl_surface.commit request. The release event
+/// also supports explicit synchronization, providing a fence FD for the
+/// client to synchronize against.
+///
+/// Exactly one event, either a fenced_release or an immediate_release, will
+/// be emitted for the wl_surface.commit request. The compositor can choose
+/// release by release which event it uses.
+///
+/// This event does not replace wl_buffer.release events; servers are still
+/// required to send those events.
+///
+/// Once a buffer release object has delivered a 'fenced_release' or an
+/// 'immediate_release' event it is automatically destroyed.
+pub mod zwp_linux_buffer_release_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_linux_buffer_release_v1::ZwpLinuxBufferReleaseV1 {
+        const INTERFACE_NAME: &'static str = "zwp_linux_buffer_release_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpLinuxBufferReleaseV1Id {
+        type Object = crate::wayland_objects::zwp_linux_buffer_release_v1::ZwpLinuxBufferReleaseV1;
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Release buffer with fence
+        ///
+        /// Sent when the compositor has finalised its usage of the associated
+        /// buffer for the relevant commit, providing a dma_fence which will be
+        /// signaled when all operations by the compositor on that buffer for that
+        /// commit have finished.
+        ///
+        /// Once the fence has signaled, and assuming the associated buffer is not
+        /// pending release from other wl_surface.commit requests, no additional
+        /// explicit or implicit synchronization is required to safely reuse or
+        /// destroy the buffer.
+        ///
+        /// This event destroys the zwp_linux_buffer_release_v1 object.
+        FencedRelease {
+            /// Fence for last operation on buffer,
+            fence: RawFd,
+        },
+        /// Release buffer immediately
+        ///
+        /// Sent when the compositor has finalised its usage of the associated
+        /// buffer for the relevant commit, and either performed no operations
+        /// using it, or has a guarantee that all its operations on that buffer for
+        /// that commit have finished.
+        ///
+        /// Once this event is received, and assuming the associated buffer is not
+        /// pending release from other wl_surface.commit requests, no additional
+        /// explicit or implicit synchronization is required to safely reuse or
+        /// destroy the buffer.
+        ///
+        /// This event destroys the zwp_linux_buffer_release_v1 object.
+        ImmediateRelease,
+    }
+    impl EventWriter for crate::wayland_objects::zwp_linux_buffer_release_v1::ZwpLinuxBufferReleaseV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                FencedRelease { fence } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.fd(fence);
+                    raw
+                }
+                ImmediateRelease {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
     }
 }
 
