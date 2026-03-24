@@ -161,6 +161,8 @@ pub struct DrmOutput {
     in_flight_frame: Option<PendingFrame>,
     displayed_external_fb: Option<DrmFrameBuffer>,
     retiring_external_fb: Option<DrmFrameBuffer>,
+    allow_in_fence_fd: bool,
+    allow_fb_damage_clips: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -588,6 +590,27 @@ pub struct InFormat {
 }
 
 impl Drm {
+    fn optional_plane_attempts(
+        &self,
+        want_damage_clips: bool,
+        want_in_fence: bool,
+    ) -> Vec<(bool, bool)> {
+        let mut attempts = vec![(want_damage_clips, want_in_fence)];
+        if want_damage_clips {
+            attempts.push((false, want_in_fence));
+        }
+        if want_in_fence {
+            attempts.push((want_damage_clips, false));
+        }
+        if want_damage_clips || want_in_fence {
+            attempts.push((false, false));
+        }
+        attempts.sort_unstable();
+        attempts.dedup();
+        attempts.reverse();
+        attempts
+    }
+
     pub fn create_drm(fd: RawFd, device: udev::Device, egl: &EGL) -> Self {
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let drm = DrmFd { fd: Rc::new(fd) };
@@ -684,88 +707,143 @@ impl Drm {
             let fb = output.render_buffer().drm_fb.id();
             (primary_plane.clone(), fb, output.in_use.crtc.handle)
         };
+        let rects: Vec<drm_ffi::drm_mode_rect> = damage
+            .rects()
+            .iter()
+            .map(|rect| drm_ffi::drm_mode_rect {
+                x1: rect.x,
+                y1: rect.y,
+                x2: rect.x2(),
+                y2: rect.y2(),
+            })
+            .collect();
+        let want_damage_clips = self.output.allow_fb_damage_clips
+            && primary_plane.fb_damage_clips.is_some()
+            && !rects.is_empty();
+        let want_in_fence = self.output.allow_in_fence_fd
+            && primary_plane.in_fence_fd.is_some()
+            && render_completion.in_fence_fd.is_some();
+        let mut last_error = None;
 
-        let mut changes = control::atomic::AtomicModeReq::new();
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.fb_id,
-            control::property::Value::Object(Some(fb.into())),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.crtc_id,
-            control::property::Value::CRTC(Some(crtc)),
-        );
-        if let Some(property) = primary_plane.in_fence_fd {
-            let fence_fd = render_completion
-                .in_fence_fd
-                .as_ref()
-                .map(|fd| fd.as_raw_fd() as i64)
-                .unwrap_or(-1);
+        for (use_damage_clips, use_in_fence) in
+            self.optional_plane_attempts(want_damage_clips, want_in_fence)
+        {
+            let mut changes = control::atomic::AtomicModeReq::new();
             changes.add_property(
                 primary_plane.handle,
-                property,
-                control::property::Value::SignedRange(fence_fd),
+                primary_plane.fb_id,
+                control::property::Value::Object(Some(fb.into())),
             );
-            if fence_fd >= 0 {
-                log::debug!(
-                    "drm submit_render_buffer: attached explicit in-fence fd={} plane={:?}",
-                    fence_fd,
-                    primary_plane.handle
-                );
-            }
-        }
+            changes.add_property(
+                primary_plane.handle,
+                primary_plane.crtc_id,
+                control::property::Value::CRTC(Some(crtc)),
+            );
 
-        let mut damage_blob = None;
-        if let Some(property) = primary_plane.fb_damage_clips {
-            let rects: Vec<drm_ffi::drm_mode_rect> = damage
-                .rects()
-                .iter()
-                .map(|rect| drm_ffi::drm_mode_rect {
-                    x1: rect.x,
-                    y1: rect.y,
-                    x2: rect.x2(),
-                    y2: rect.y2(),
-                })
-                .collect();
-            if rects.is_empty() {
+            if let Some(property) = primary_plane.in_fence_fd {
+                let fence_fd = if use_in_fence {
+                    render_completion
+                        .in_fence_fd
+                        .as_ref()
+                        .map(|fd| fd.as_raw_fd() as i64)
+                        .unwrap_or(-1)
+                } else {
+                    -1
+                };
                 changes.add_property(
                     primary_plane.handle,
                     property,
-                    control::property::Value::Blob(0),
+                    control::property::Value::SignedRange(fence_fd),
                 );
-            } else if let Ok(blob) = self.fd.create_property_blob(&rects) {
-                changes.add_property(primary_plane.handle, property, blob);
-                damage_blob = blob.as_blob();
-            } else {
-                log::warn!(
-                    "drm submit_render_buffer: failed to create FB_DAMAGE_CLIPS blob, falling back to Blob(0)"
-                );
-                changes.add_property(
-                    primary_plane.handle,
-                    property,
-                    control::property::Value::Blob(0),
-                );
+                if fence_fd >= 0 {
+                    log::debug!(
+                        "drm submit_render_buffer: attached explicit in-fence fd={} plane={:?}",
+                        fence_fd,
+                        primary_plane.handle
+                    );
+                }
+            }
+
+            let mut damage_blob = None;
+            if let Some(property) = primary_plane.fb_damage_clips {
+                if use_damage_clips {
+                    if let Ok(blob) = self.fd.create_property_blob(&rects) {
+                        changes.add_property(primary_plane.handle, property, blob);
+                        damage_blob = blob.as_blob();
+                    } else {
+                        log::warn!(
+                            "drm submit_render_buffer: failed to create FB_DAMAGE_CLIPS blob, falling back to Blob(0)"
+                        );
+                        changes.add_property(
+                            primary_plane.handle,
+                            property,
+                            control::property::Value::Blob(0),
+                        );
+                    }
+                } else {
+                    changes.add_property(
+                        primary_plane.handle,
+                        property,
+                        control::property::Value::Blob(0),
+                    );
+                }
+            }
+
+            let commit_result = self.fd.atomic_commit(
+                control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
+                changes,
+            );
+            match commit_result {
+                Ok(()) => {
+                    if want_damage_clips && !use_damage_clips {
+                        log::warn!(
+                            "drm submit_render_buffer: driver rejected FB_DAMAGE_CLIPS on {}, disabling output damage clips",
+                            self.driver.name
+                        );
+                        self.output.allow_fb_damage_clips = false;
+                    }
+                    if want_in_fence && !use_in_fence {
+                        log::warn!(
+                            "drm submit_render_buffer: driver rejected IN_FENCE_FD on {}, disabling explicit KMS in-fences",
+                            self.driver.name
+                        );
+                        self.output.allow_in_fence_fd = false;
+                    }
+                    self.output.mark_frame_submitted(PendingFrame::Composited {
+                        buffer_index: self.output.render_buffer_index,
+                        damage: damage.clone(),
+                        scene,
+                        damage_blob,
+                    });
+                    return Ok(());
+                }
+                Err(error) => {
+                    if let Some(blob) = damage_blob {
+                        let _ = self.fd.destroy_property_blob(blob);
+                    }
+                    let retryable = error.raw_os_error() == Some(libc::EINVAL)
+                        && ((want_damage_clips && use_damage_clips)
+                            || (want_in_fence && use_in_fence));
+                    if retryable {
+                        log::warn!(
+                            "drm submit_render_buffer: atomic commit rejected optional props (damage_clips={}, in_fence={}) on {}: {:?}",
+                            use_damage_clips,
+                            use_in_fence,
+                            self.driver.name,
+                            error
+                        );
+                        last_error = Some(error);
+                        continue;
+                    }
+                    return Err(error);
+                }
             }
         }
 
-        let commit_result = self.fd.atomic_commit(
-            control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
-            changes,
-        );
-        if commit_result.is_err() {
-            if let Some(blob) = damage_blob {
-                let _ = self.fd.destroy_property_blob(blob);
-            }
-        }
-        commit_result?;
-        self.output.mark_frame_submitted(PendingFrame::Composited {
-            buffer_index: self.output.render_buffer_index,
-            damage: damage.clone(),
-            scene,
-            damage_blob,
-        });
-        Ok(())
+        let Some(error) = last_error else {
+            return Err(std::io::Error::other("no atomic commit attempt executed"));
+        };
+        return Err(error);
     }
 
     fn submit_direct_scanout(
@@ -834,7 +912,10 @@ impl Drm {
             changes.add_property(primary_plane.handle, property, control::property::Value::Blob(0));
         }
         if let crate::sync::AcquireSync::SyncFile(sync_file) = &candidate.sync.acquire {
-            let Some(property) = primary_plane.in_fence_fd else {
+            let Some(property) = primary_plane
+                .in_fence_fd
+                .filter(|_| self.output.allow_in_fence_fd)
+            else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "scanout sync-file acquire requires IN_FENCE_FD support",
@@ -850,7 +931,10 @@ impl Drm {
                 std::io::ErrorKind::InvalidInput,
                 "scanout currently only supports empty or sync-file acquire fences",
             ));
-        } else if let Some(property) = primary_plane.in_fence_fd {
+        } else if let Some(property) = primary_plane
+            .in_fence_fd
+            .filter(|_| self.output.allow_in_fence_fd)
+        {
             changes.add_property(
                 primary_plane.handle,
                 property,
@@ -1060,6 +1144,8 @@ impl Drm {
             in_flight_frame: None,
             displayed_external_fb: None,
             retiring_external_fb: None,
+            allow_in_fence_fd: true,
+            allow_fb_damage_clips: true,
         }
     }
 
