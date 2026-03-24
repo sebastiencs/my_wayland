@@ -4,7 +4,7 @@ use crate::{
     object::{Object, Parser},
     protocol_generated::{Constants, NewId, WaylandId, WlCompositorId},
     state::State,
-    wayland_objects::wl_surface::WlSurface,
+    wayland_objects::{wl_region::WlRegion, wl_surface::WlSurface},
 };
 
 #[derive(Debug)]
@@ -57,7 +57,9 @@ impl Object for WlCompositor {
             CreateSurface { id } => {
                 client.insert_object(state, WlSurface::new(id, client.client_id(), self.version));
             }
-            CreateRegion { id } => todo!(),
+            CreateRegion { id } => {
+                client.insert_object(state, WlRegion::new(id));
+            }
         }
     }
 }

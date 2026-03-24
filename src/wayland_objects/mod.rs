@@ -10,6 +10,7 @@ pub mod wl_display;
 pub mod wl_keyboard;
 pub mod wl_output;
 pub mod wl_pointer;
+pub mod wl_region;
 pub mod wl_registry;
 pub mod wl_seat;
 pub mod wl_shm;
@@ -57,7 +58,6 @@ fake_obj! {
     // { wl_keyboard, WlKeyboard },
     { wl_touch, WlTouch },
     // { wl_output, WlOutput },
-    { wl_region, WlRegion },
     // { wl_subcompositor, WlSubcompositor },
     { wl_subsurface, WlSubsurface },
     { wl_fixes, WlFixes },

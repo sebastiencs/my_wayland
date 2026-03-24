@@ -121,27 +121,19 @@ impl BufferTransform {
     pub fn normalized_inverse_matrix(self) -> Mat3 {
         match self {
             Self::Normal => Mat3::identity(),
-            Self::Rotate90 => Mat3 {
-                rows: [[0.0, 1.0, 0.0], [-1.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
-            },
-            Self::Rotate180 => Mat3 {
-                rows: [[-1.0, 0.0, 1.0], [0.0, -1.0, 1.0], [0.0, 0.0, 1.0]],
-            },
-            Self::Rotate270 => Mat3 {
-                rows: [[0.0, -1.0, 1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
-            },
-            Self::Flip => Mat3 {
-                rows: [[-1.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            },
-            Self::FlipRotate90 => Mat3 {
-                rows: [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
-            },
-            Self::FlipRotate180 => Mat3 {
-                rows: [[1.0, 0.0, 0.0], [0.0, -1.0, 1.0], [0.0, 0.0, 1.0]],
-            },
-            Self::FlipRotate270 => Mat3 {
-                rows: [[0.0, -1.0, 1.0], [-1.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
-            },
+            Self::Rotate90 => Mat3 { rows: [[0.0, 1.0, 0.0], [-1.0, 0.0, 1.0], [0.0, 0.0, 1.0]] },
+            Self::Rotate180 => Mat3 { rows: [[-1.0, 0.0, 1.0], [0.0, -1.0, 1.0], [0.0, 0.0, 1.0]] },
+            Self::Rotate270 => Mat3 { rows: [[0.0, -1.0, 1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]] },
+            Self::Flip => Mat3 { rows: [[-1.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] },
+            Self::FlipRotate90 => {
+                Mat3 { rows: [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]] }
+            }
+            Self::FlipRotate180 => {
+                Mat3 { rows: [[1.0, 0.0, 0.0], [0.0, -1.0, 1.0], [0.0, 0.0, 1.0]] }
+            }
+            Self::FlipRotate270 => {
+                Mat3 { rows: [[0.0, -1.0, 1.0], [-1.0, 0.0, 1.0], [0.0, 0.0, 1.0]] }
+            }
         }
     }
 }
@@ -231,7 +223,10 @@ pub fn derive_logical_size(
         return dst;
     }
     if let Some(src) = viewport.src {
-        return SizeI { width: src.width.round() as i32, height: src.height.round() as i32 };
+        return SizeI {
+            width: src.width.round() as i32,
+            height: src.height.round() as i32,
+        };
     }
     let transformed = transformed_buffer_size(buffer_size, transform);
     SizeI {
@@ -276,10 +271,21 @@ pub fn transform_rect_bounds(rect: RectF, matrix: Mat3) -> RectF {
         matrix.transform_point(rect.x + rect.width, rect.y + rect.height),
     ];
     let min_x = corners.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-    let max_x = corners.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+    let max_x = corners
+        .iter()
+        .map(|p| p.0)
+        .fold(f32::NEG_INFINITY, f32::max);
     let min_y = corners.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-    let max_y = corners.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
-    RectF { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y }
+    let max_y = corners
+        .iter()
+        .map(|p| p.1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    RectF {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    }
 }
 
 pub fn surface_rect_to_buffer_rect(
@@ -334,10 +340,10 @@ pub fn buffer_rect_to_surface_rect(
 #[cfg(test)]
 mod tests {
     use super::{
-        derive_logical_size, normalized_texcoord_flip_y, output_projection, pre_viewport_logical_size,
-        project_box, rect_contains, surface_rect_to_buffer_rect, surface_sample_transform,
-        transform_rect_bounds, buffer_rect_to_surface_rect, BufferTransform,
-        OutputPresentationTransform, RectF, SizeI, SurfaceViewport,
+        buffer_rect_to_surface_rect, derive_logical_size, normalized_texcoord_flip_y,
+        output_projection, pre_viewport_logical_size, project_box, rect_contains,
+        surface_rect_to_buffer_rect, surface_sample_transform, transform_rect_bounds,
+        BufferTransform, OutputPresentationTransform, RectF, SizeI, SurfaceViewport,
     };
 
     #[test]
@@ -443,7 +449,8 @@ mod tests {
     #[test]
     fn transform_rect_bounds_uses_bounding_box() {
         let rect = RectF { x: 0.0, y: 0.0, width: 0.25, height: 0.5 };
-        let mapped = transform_rect_bounds(rect, BufferTransform::Rotate90.normalized_inverse_matrix());
+        let mapped =
+            transform_rect_bounds(rect, BufferTransform::Rotate90.normalized_inverse_matrix());
         assert_eq!(mapped, RectF { x: 0.0, y: 0.75, width: 0.5, height: 0.25 });
     }
 

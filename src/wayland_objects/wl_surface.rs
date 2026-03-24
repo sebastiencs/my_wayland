@@ -4,12 +4,13 @@ use crate::{
     object::{Object, Parser},
     protocol_generated::{
         wl_surface, wp_linux_drm_syncobj_surface_v1, wp_viewport, xdg_wm_base, WaylandId,
-        WlBufferId, WlCallbackId, WlSurfaceId, XdgSurfaceId,
+        WlBufferId, WlCallbackId, WlRegionId, WlSurfaceId, XdgSurfaceId,
     },
+    region::RegionValue,
     state::{ObjectId, State},
     sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
     transform::{self, BufferTransform, SizeI, SurfaceViewport},
-    wayland_objects::{wl_callback::WlCallback, xdg_surface::XdgSurface},
+    wayland_objects::{wl_callback::WlCallback, wl_region::WlRegion, xdg_surface::XdgSurface},
 };
 
 use {super::wl_buffer::WlBuffer, crate::protocol_generated::wl_display};
@@ -61,6 +62,8 @@ struct Pending {
     viewport: SurfaceViewport,
     damage_surface: Vec<DamageRect>,
     damage_buffer: Vec<DamageRect>,
+    input_region: Option<RegionValue>,
+    opaque_region: Option<RegionValue>,
 }
 
 impl Default for Pending {
@@ -74,6 +77,8 @@ impl Default for Pending {
             viewport: SurfaceViewport::default(),
             damage_surface: Vec::new(),
             damage_buffer: Vec::new(),
+            input_region: None,
+            opaque_region: None,
         }
     }
 }
@@ -89,6 +94,8 @@ struct OnScreen {
     viewport: SurfaceViewport,
     logical_size: Option<SizeI>,
     sample_transform: transform::Mat3,
+    input_region: RegionValue,
+    opaque_region: RegionValue,
 }
 
 impl Default for OnScreen {
@@ -103,6 +110,8 @@ impl Default for OnScreen {
             viewport: SurfaceViewport::default(),
             logical_size: None,
             sample_transform: transform::Mat3::identity(),
+            input_region: RegionValue::infinite(),
+            opaque_region: RegionValue::empty(),
         }
     }
 }
@@ -130,6 +139,8 @@ struct BlockedSurfaceState {
     buffer_transform: BufferTransform,
     buffer_scale: i32,
     viewport: SurfaceViewport,
+    input_region: RegionValue,
+    opaque_region: RegionValue,
 }
 
 struct SurfaceChanges {
@@ -320,6 +331,71 @@ impl WlSurface {
         Ok(())
     }
 
+    fn snapshot_region_request(
+        &self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        region_id: WlRegionId,
+        null_region: RegionValue,
+        request_name: &'static str,
+    ) -> Option<RegionValue> {
+        let raw: u32 = region_id.into();
+        if raw == 0 {
+            return Some(null_region);
+        }
+        if !client.object_is(region_id, state) {
+            client.protocol_violation_disconnect(
+                dispatcher,
+                self.id.into(),
+                wl_display::Error::InvalidObject as u32,
+                format!("invalid wl_region for {request_name}"),
+            );
+            return None;
+        }
+        Some(client.get_object(region_id, state).snapshot())
+    }
+
+    fn on_set_opaque_region(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        region_id: WlRegionId,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let Some(region) = self.snapshot_region_request(
+            client,
+            state,
+            dispatcher,
+            region_id,
+            RegionValue::empty(),
+            "wl_surface.set_opaque_region",
+        ) else {
+            return;
+        };
+        self.pending.opaque_region = Some(region);
+    }
+
+    fn on_set_input_region(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        region_id: WlRegionId,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let Some(region) = self.snapshot_region_request(
+            client,
+            state,
+            dispatcher,
+            region_id,
+            RegionValue::infinite(),
+            "wl_surface.set_input_region",
+        ) else {
+            return;
+        };
+        self.pending.input_region = Some(region);
+    }
+
     fn get_changes(&self) -> SurfaceChanges {
         SurfaceChanges {
             buffer_changed: self.pending.buffer.is_some(),
@@ -335,7 +411,12 @@ impl WlSurface {
         state: &State,
         dispatcher: &mut ClientDispatcher,
     ) -> bool {
-        let Some(buffer_object_id) = self.pending.buffer.flatten().or(self.on_screen.buffer_object_id) else {
+        let Some(buffer_object_id) = self
+            .pending
+            .buffer
+            .flatten()
+            .or(self.on_screen.buffer_object_id)
+        else {
             return true;
         };
         let Some(object) = state.objects.try_get(buffer_object_id) else {
@@ -373,7 +454,8 @@ impl WlSurface {
                 );
                 return false;
             }
-            let content = transform::RectF { x: 0.0, y: 0.0, width: base.width, height: base.height };
+            let content =
+                transform::RectF { x: 0.0, y: 0.0, width: base.width, height: base.height };
             if !transform::rect_contains(content, src) {
                 self.send_viewport_error(
                     client,
@@ -394,6 +476,8 @@ impl WlSurface {
         x: i32,
         y: i32,
         sync: SurfaceSyncState,
+        input_region: RegionValue,
+        opaque_region: RegionValue,
     ) -> Option<BlockedSurfaceState> {
         let object = state.objects.try_get(buffer_object_id)?;
         let buffer = object.downcast_ref::<WlBuffer>()?;
@@ -422,6 +506,8 @@ impl WlSurface {
             buffer_transform: self.pending.buffer_transform,
             buffer_scale: self.pending.buffer_scale,
             viewport: self.pending.viewport,
+            input_region,
+            opaque_region,
         })
     }
 
@@ -509,6 +595,17 @@ impl WlSurface {
         }
 
         let pending_sync = std::mem::take(&mut self.pending.sync);
+        let next_input_region = self
+            .pending
+            .input_region
+            .take()
+            .unwrap_or_else(|| self.on_screen.input_region.clone());
+        let next_opaque_region = self
+            .pending
+            .opaque_region
+            .take()
+            .unwrap_or_else(|| self.on_screen.opaque_region.clone());
+        let mut commit_blocked = false;
         match self.pending.buffer.take() {
             None => {}
             Some(None) => {
@@ -524,6 +621,8 @@ impl WlSurface {
                     viewport: self.pending.viewport,
                     logical_size: None,
                     sample_transform: transform::Mat3::identity(),
+                    input_region: next_input_region.clone(),
+                    opaque_region: next_opaque_region.clone(),
                 };
             }
             Some(Some(buffer_object_id)) => {
@@ -535,6 +634,8 @@ impl WlSurface {
                     self.on_screen.x + x,
                     self.on_screen.y + y,
                     pending_sync,
+                    next_input_region.clone(),
+                    next_opaque_region.clone(),
                 ) else {
                     log::warn!("failed to derive mapped state for buffer {:?}", buffer_object_id);
                     return;
@@ -543,6 +644,7 @@ impl WlSurface {
                 let should_block =
                     self.syncobj_surface_object.is_some() && !next.sync.acquire.is_ready_now();
                 if should_block {
+                    commit_blocked = true;
                     if let Err(error) = self.install_blocked_surface(
                         next.clone(),
                         self.client_id,
@@ -564,7 +666,9 @@ impl WlSurface {
             }
         }
 
-        if !changes.buffer_changed && changes.mapping_changed && self.on_screen.buffer_object_id.is_some()
+        if !changes.buffer_changed
+            && changes.mapping_changed
+            && self.on_screen.buffer_object_id.is_some()
         {
             let Some(next) = self.mapped_state_for_buffer(
                 state,
@@ -572,6 +676,8 @@ impl WlSurface {
                 self.on_screen.x,
                 self.on_screen.y,
                 self.on_screen.sync.clone(),
+                self.on_screen.input_region.clone(),
+                self.on_screen.opaque_region.clone(),
             ) else {
                 log::warn!("failed to recompute mapped state for current surface {:?}", self.id);
                 return;
@@ -581,6 +687,11 @@ impl WlSurface {
             self.on_screen.viewport = next.viewport;
             self.on_screen.logical_size = Some(SizeI { width: next.width, height: next.height });
             self.on_screen.sample_transform = next.tex_transform;
+        }
+
+        if !commit_blocked {
+            self.on_screen.input_region = next_input_region;
+            self.on_screen.opaque_region = next_opaque_region;
         }
 
         let SurfaceChanges { buffer_changed, mapping_changed } = changes;
@@ -766,6 +877,22 @@ impl WlSurface {
         })
     }
 
+    pub fn accepts_input_at(&self, x: f64, y: f64) -> bool {
+        let Some(surface_state) = self.render_state() else {
+            return false;
+        };
+        if x < surface_state.x as f64
+            || y < surface_state.y as f64
+            || x >= (surface_state.x + surface_state.width) as f64
+            || y >= (surface_state.y + surface_state.height) as f64
+        {
+            return false;
+        }
+        let local_x = (x - surface_state.x as f64).floor() as i32;
+        let local_y = (y - surface_state.y as f64).floor() as i32;
+        self.on_screen.input_region.contains(local_x, local_y)
+    }
+
     pub fn logical_size(&self) -> Option<SizeI> {
         self.on_screen.logical_size
     }
@@ -825,6 +952,8 @@ impl WlSurface {
             viewport: next.viewport,
             logical_size: Some(SizeI { width: next.width, height: next.height }),
             sample_transform: next.tex_transform,
+            input_region: next.input_region,
+            opaque_region: next.opaque_region,
         };
     }
 
@@ -905,15 +1034,21 @@ impl Object for WlSurface {
                 self.on_attach(client, state, buffer, x, y, dispatcher);
             }
             Damage { x, y, width, height } => {
-                self.pending.damage_surface.push(DamageRect { x, y, width, height });
+                self.pending
+                    .damage_surface
+                    .push(DamageRect { x, y, width, height });
                 log_wl_surface_damage_ignored_once();
             }
             Frame { callback } => {
                 client.insert_object(state, WlCallback::new(callback));
                 self.pending_frame_callbacks.push(callback);
             }
-            SetOpaqueRegion { region } => todo!(),
-            SetInputRegion { region } => todo!(),
+            SetOpaqueRegion { region } => {
+                self.on_set_opaque_region(client, state, region, dispatcher);
+            }
+            SetInputRegion { region } => {
+                self.on_set_input_region(client, state, region, dispatcher);
+            }
             Commit => {
                 self.on_commit(client, state, dispatcher);
             }
@@ -940,10 +1075,93 @@ impl Object for WlSurface {
                 self.pending.buffer_scale = scale;
             }
             DamageBuffer { x, y, width, height } => {
-                self.pending.damage_buffer.push(DamageRect { x, y, width, height });
+                self.pending
+                    .damage_buffer
+                    .push(DamageRect { x, y, width, height });
                 log_wl_surface_damage_ignored_once();
             }
             Offset { x, y } => todo!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::{OnScreen, WlSurface},
+        crate::{
+            clients::ClientId,
+            protocol_generated::WlSurfaceId,
+            region::{RectI, RegionSpec, RegionValue},
+            state::ObjectId,
+            sync::SurfaceSyncState,
+            transform::{self, BufferTransform, SizeI, SurfaceViewport},
+        },
+    };
+
+    fn make_surface() -> WlSurface {
+        let mut surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(7), 6);
+        surface.on_screen = OnScreen {
+            buffer_object_id: Some(ObjectId::from(1usize)),
+            x: 10,
+            y: 20,
+            sync: SurfaceSyncState::default(),
+            buffer_transform: BufferTransform::Normal,
+            buffer_scale: 1,
+            viewport: SurfaceViewport::default(),
+            logical_size: Some(SizeI { width: 100, height: 80 }),
+            sample_transform: transform::Mat3::identity(),
+            input_region: RegionValue::infinite(),
+            opaque_region: RegionValue::empty(),
+        };
+        surface
+    }
+
+    fn region_value(x: i32, y: i32, width: i32, height: i32) -> RegionValue {
+        let mut spec = RegionSpec::default();
+        spec.add_rect(RectI::new(x, y, width, height).unwrap());
+        RegionValue::from_spec(spec)
+    }
+
+    #[test]
+    fn surface_defaults_match_region_protocol_defaults() {
+        let surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(1), 6);
+        assert_eq!(surface.on_screen.input_region, RegionValue::infinite());
+        assert_eq!(surface.on_screen.opaque_region, RegionValue::empty());
+    }
+
+    #[test]
+    fn hit_testing_uses_committed_input_region_not_pending_region() {
+        let mut surface = make_surface();
+        surface.pending.input_region = Some(region_value(0, 0, 10, 10));
+
+        assert!(surface.accepts_input_at(50.0, 50.0));
+
+        surface.on_screen.input_region = surface.pending.input_region.take().unwrap();
+
+        assert!(surface.accepts_input_at(15.0, 25.0));
+        assert!(!surface.accepts_input_at(50.0, 50.0));
+    }
+
+    #[test]
+    fn committed_input_region_uses_surface_local_coordinates() {
+        let mut surface = make_surface();
+        surface.on_screen.input_region = region_value(5, 5, 10, 10);
+
+        assert!(surface.accepts_input_at(15.0, 25.0));
+        assert!(!surface.accepts_input_at(30.0, 25.0));
+    }
+
+    #[test]
+    fn pending_null_like_regions_can_be_committed_explicitly() {
+        let mut surface = make_surface();
+        surface.pending.input_region = Some(RegionValue::infinite());
+        surface.pending.opaque_region = Some(RegionValue::empty());
+
+        surface.on_screen.input_region = surface.pending.input_region.take().unwrap();
+        surface.on_screen.opaque_region = surface.pending.opaque_region.take().unwrap();
+
+        assert!(surface.accepts_input_at(50.0, 50.0));
+        assert_eq!(surface.on_screen.opaque_region, RegionValue::empty());
     }
 }

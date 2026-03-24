@@ -31,6 +31,13 @@ use crate::{
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
 pub struct ClientId(u64);
 
+#[cfg(test)]
+impl ClientId {
+    pub(crate) fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
 pub struct Clients {
     current_id: u64,
     fd: UnixListener,

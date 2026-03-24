@@ -114,6 +114,7 @@ mod object;
 mod protocol;
 mod protocol_generated;
 mod queue;
+mod region;
 pub mod runner;
 mod seat;
 mod state;

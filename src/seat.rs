@@ -350,11 +350,7 @@ fn hit_test_surface(
             height: surface_state.height,
         };
 
-        let inside = x >= rect.x as f64
-            && y >= rect.y as f64
-            && x < (rect.x + rect.width) as f64
-            && y < (rect.y + rect.height) as f64;
-        if inside {
+        if surface.accepts_input_at(x, y) {
             hit = Some(PointerFocus {
                 target: SurfaceFocus {
                     client_id: surface.client_id(),
