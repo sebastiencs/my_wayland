@@ -378,7 +378,7 @@ impl Client {
         self.info = Some(Rc::new(ProcessInfo { command, cred }))
     }
 
-    pub fn get_object<'a, K>(&self, id: K, state: &'a mut State) -> &'a mut K::Object
+    pub fn ref_object_mut<'a, K>(&self, id: K, state: &'a mut State) -> &'a mut K::Object
     where
         K: Into<WaylandId> + IdToObject,
         K::Object: Object,
@@ -386,6 +386,16 @@ impl Client {
         let id: WaylandId = id.into();
         let obj_id = self.objects[&id].object_id;
         state.objects[obj_id].downcast_mut().unwrap()
+    }
+
+    pub fn ref_object<'a, K>(&self, id: K, state: &'a State) -> &'a K::Object
+    where
+        K: Into<WaylandId> + IdToObject,
+        K::Object: Object,
+    {
+        let id: WaylandId = id.into();
+        let obj_id = self.objects[&id].object_id;
+        state.objects[obj_id].downcast_ref().unwrap()
     }
 
     /// Resolve a client-visible Wayland id to our internal `ObjectId` if the id
@@ -527,7 +537,7 @@ impl Client {
                     if !self.contains_object(pointer_id, state) {
                         continue;
                     }
-                    let pointer: &mut WlPointer = self.get_object(pointer_id, state);
+                    let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
                     pointer.send_enter(serial, surface, x, y, dispatcher);
                 }
             }
@@ -537,7 +547,7 @@ impl Client {
                     if !self.contains_object(pointer_id, state) {
                         continue;
                     }
-                    let pointer: &mut WlPointer = self.get_object(pointer_id, state);
+                    let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
                     pointer.send_leave(serial, surface, dispatcher);
                 }
             }
@@ -547,7 +557,7 @@ impl Client {
                     if !self.contains_object(pointer_id, state) {
                         continue;
                     }
-                    let pointer: &mut WlPointer = self.get_object(pointer_id, state);
+                    let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
                     pointer.send_motion(time, x, y, dispatcher);
                 }
             }
@@ -557,7 +567,7 @@ impl Client {
                     if !self.contains_object(pointer_id, state) {
                         continue;
                     }
-                    let pointer: &mut WlPointer = self.get_object(pointer_id, state);
+                    let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
                     pointer.send_button(serial, time, button, button_state, dispatcher);
                 }
             }
@@ -567,7 +577,7 @@ impl Client {
                     if !self.contains_object(pointer_id, state) {
                         continue;
                     }
-                    let pointer: &mut WlPointer = self.get_object(pointer_id, state);
+                    let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
                     pointer.send_frame(dispatcher);
                 }
             }
@@ -577,7 +587,7 @@ impl Client {
                     if !self.contains_object(keyboard_id, state) {
                         continue;
                     }
-                    let keyboard: &mut WlKeyboard = self.get_object(keyboard_id, state);
+                    let keyboard: &mut WlKeyboard = self.ref_object_mut(keyboard_id, state);
                     keyboard.send_enter(serial, surface, keys.clone(), dispatcher);
                 }
             }
@@ -587,7 +597,7 @@ impl Client {
                     if !self.contains_object(keyboard_id, state) {
                         continue;
                     }
-                    let keyboard: &mut WlKeyboard = self.get_object(keyboard_id, state);
+                    let keyboard: &mut WlKeyboard = self.ref_object_mut(keyboard_id, state);
                     keyboard.send_leave(serial, surface, dispatcher);
                 }
             }
@@ -597,7 +607,7 @@ impl Client {
                     if !self.contains_object(keyboard_id, state) {
                         continue;
                     }
-                    let keyboard: &mut WlKeyboard = self.get_object(keyboard_id, state);
+                    let keyboard: &mut WlKeyboard = self.ref_object_mut(keyboard_id, state);
                     keyboard.send_key(serial, time, key, key_state, dispatcher);
                 }
             }
@@ -613,7 +623,7 @@ impl Client {
                     if !self.contains_object(keyboard_id, state) {
                         continue;
                     }
-                    let keyboard: &mut WlKeyboard = self.get_object(keyboard_id, state);
+                    let keyboard: &mut WlKeyboard = self.ref_object_mut(keyboard_id, state);
                     keyboard.send_modifiers(
                         serial,
                         mods_depressed,
@@ -651,7 +661,7 @@ impl Client {
                     continue;
                 }
                 {
-                    let callback = self.grab_object(callback_id, state);
+                    let callback = self.ref_object(callback_id, state);
                     callback.done(time_msec, dispatcher);
                 }
                 self.delete_id(&display, state, dispatcher, callback_id.into());
@@ -662,7 +672,7 @@ impl Client {
     fn output_resources_for_feedback(&self, state: &State, output_id: OutputId) -> Vec<WaylandId> {
         let mut resources = Vec::new();
         for object_id in self.iter_object_ids_of::<WlOutput>(state) {
-            let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(object_id) else {
+            let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(object_id) else {
                 continue;
             };
             if wl_output.matches_output(output_id) {
@@ -694,7 +704,7 @@ impl Client {
                 continue;
             }
             {
-                let feedback: &mut WpPresentationFeedback = self.get_object(feedback_id, state);
+                let feedback: &mut WpPresentationFeedback = self.ref_object_mut(feedback_id, state);
                 if let Some(sync_outputs) = sync_outputs.as_ref() {
                     for output in sync_outputs {
                         feedback.send_sync_output((*output).into(), dispatcher);
@@ -720,7 +730,7 @@ impl Client {
                 continue;
             }
             {
-                let feedback: &mut WpPresentationFeedback = self.get_object(feedback_id, state);
+                let feedback = self.ref_object(feedback_id, state);
                 feedback.send_discarded(dispatcher);
             }
             self.delete_id(&display, state, dispatcher, feedback_id.into());
@@ -738,7 +748,7 @@ impl Client {
             .objects
             .iter()
             .filter_map(|(wayland_id, entry)| {
-                let surface = state.objects.try_get_ref_of::<WlSurface>(entry.object_id)?;
+                let surface = state.objects.try_ref_object::<WlSurface>(entry.object_id)?;
                 Some(
                     (surface.client_id() == self.id)
                         .then_some(WlSurfaceId::from(u32::from(*wayland_id)))?,
@@ -814,7 +824,7 @@ impl Client {
         version: u32,
     ) {
         for object_id in self.iter_object_ids_of::<WlRegistry>(state) {
-            let Some(registry) = state.objects.try_get_ref_of::<WlRegistry>(object_id) else {
+            let Some(registry) = state.objects.try_ref_object::<WlRegistry>(object_id) else {
                 continue;
             };
             registry.send_global(dispatcher, name, interface.clone(), version);
@@ -828,7 +838,7 @@ impl Client {
         name: u32,
     ) {
         for object_id in self.iter_object_ids_of::<WlRegistry>(state) {
-            let Some(registry) = state.objects.try_get_ref_of::<WlRegistry>(object_id) else {
+            let Some(registry) = state.objects.try_ref_object::<WlRegistry>(object_id) else {
                 continue;
             };
             registry.send_global_remove(dispatcher, name);
@@ -849,7 +859,7 @@ impl Client {
             .collect::<Vec<_>>();
 
         for object_id in xdg_output_ids {
-            let Some(xdg_output) = state.objects.try_get_ref_of::<ZxdgOutputV1>(object_id) else {
+            let Some(xdg_output) = state.objects.try_ref_object::<ZxdgOutputV1>(object_id) else {
                 continue;
             };
             if xdg_output.matches_output(output_id) {
@@ -858,7 +868,7 @@ impl Client {
         }
 
         for object_id in wl_output_ids {
-            let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(object_id) else {
+            let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(object_id) else {
                 continue;
             };
             if wl_output.matches_output(output_id) {
@@ -873,7 +883,7 @@ impl Client {
             .iter_object_ids_of::<WlOutput>(state)
             .collect::<Vec<_>>();
         for object_id in object_ids {
-            let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(object_id) else {
+            let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(object_id) else {
                 continue;
             };
             if wl_output.matches_output(output_id) {
@@ -902,7 +912,7 @@ impl Client {
         if output_object_ids.is_empty() {
             return;
         }
-        let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(surface_object_id) else {
+        let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
             return;
         };
         for output_object_id in output_object_ids {
@@ -925,7 +935,7 @@ impl Client {
             .collect::<Vec<_>>();
         let mut surface_object_ids = Vec::new();
         for object_id in object_ids {
-            let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(object_id) else {
+            let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
                 continue;
             };
             if surface.contains_output(output_id) {
@@ -951,7 +961,7 @@ impl Client {
         let root_surface_ids = state.root_surface_ids();
         log::debug!("refresh_surface_outputs client={:?} roots={:?}", self.id, root_surface_ids);
         for surface_object_id in root_surface_ids {
-            let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(surface_object_id) else {
+            let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
                 continue;
             };
             log::debug!(
@@ -976,7 +986,7 @@ impl Client {
             .iter_object_ids_of::<XdgToplevel>(state)
             .collect::<Vec<_>>();
         for object_id in object_ids {
-            let Some(toplevel_ref) = state.objects.try_get_ref_of::<XdgToplevel>(object_id) else {
+            let Some(toplevel_ref) = state.objects.try_ref_object::<XdgToplevel>(object_id) else {
                 continue;
             };
             let xdg_surface_id = toplevel_ref.xdg_surface_id();
@@ -987,7 +997,7 @@ impl Client {
             };
             let Some(xdg_surface_ref) = state
                 .objects
-                .try_get_ref_of::<XdgSurface>(xdg_surface_object_id)
+                .try_ref_object::<XdgSurface>(xdg_surface_object_id)
             else {
                 continue;
             };
@@ -998,7 +1008,7 @@ impl Client {
             };
             let Some(surface_ref) = state
                 .objects
-                .try_get_ref_of::<WlSurface>(wl_surface_object_id)
+                .try_ref_object::<WlSurface>(wl_surface_object_id)
             else {
                 continue;
             };
@@ -1286,7 +1296,7 @@ impl Model for Client {
             }
             ReleaseBuffer { buffer_id } => {
                 if self.contains_object(buffer_id, state) {
-                    let buffer = self.get_object(buffer_id, state);
+                    let buffer = self.ref_object_mut(buffer_id, state);
                     buffer.send_release(&mut dispatcher);
                 }
             }
@@ -1350,7 +1360,7 @@ impl Model for Client {
 
                     let (xdg_surface_id, parent_surface_id) = {
                         let popup_object_id = self.object_id(popup_id);
-                        let Some(popup) = state.objects.try_get_ref_of::<XdgPopup>(popup_object_id)
+                        let Some(popup) = state.objects.try_ref_object::<XdgPopup>(popup_object_id)
                         else {
                             continue;
                         };
@@ -1369,7 +1379,7 @@ impl Model for Client {
                             let xdg_surface_object_id = self.object_id(xdg_surface_id);
                             let Some(xdg_surface) = state
                                 .objects
-                                .try_get_ref_of::<XdgSurface>(xdg_surface_object_id)
+                                .try_ref_object::<XdgSurface>(xdg_surface_object_id)
                             else {
                                 continue;
                             };
@@ -1384,7 +1394,7 @@ impl Model for Client {
                     }
 
                     {
-                        let popup = self.grab_object(popup_id, state);
+                        let popup = self.ref_object(popup_id, state);
                         popup.send_popup_done(&mut dispatcher);
                     }
                     self.delete_id(&WlDisplay::default(), state, &mut dispatcher, popup_id.into());
@@ -1398,7 +1408,7 @@ impl Model for Client {
                     let toplevel_object_id = self.object_id(xdg_toplevel_id);
                     let Some(toplevel) = state
                         .objects
-                        .try_get_ref_of::<XdgToplevel>(toplevel_object_id)
+                        .try_ref_object::<XdgToplevel>(toplevel_object_id)
                     else {
                         return Ok(());
                     };
@@ -1411,13 +1421,13 @@ impl Model for Client {
                     let xdg_surface_object_id = self.object_id(xdg_surface_id);
                     state
                         .objects
-                        .try_get_ref_of::<XdgSurface>(xdg_surface_object_id)
+                        .try_ref_object::<XdgSurface>(xdg_surface_object_id)
                         .and_then(|xdg_surface| {
                             let wl_surface_object_id =
                                 self.object_id_for_wayland(xdg_surface.wl_surface_id().into())?;
                             let surface = state
                                 .objects
-                                .try_get_ref_of::<WlSurface>(wl_surface_object_id)?;
+                                .try_ref_object::<WlSurface>(wl_surface_object_id)?;
                             let output_id = surface
                                 .active_output_id()
                                 .or_else(|| state.active_output_id())?;

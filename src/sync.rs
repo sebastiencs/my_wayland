@@ -247,7 +247,7 @@ impl DeferredRelease {
     pub fn from_candidate(state: &State, candidate: RetiredBufferCandidate) -> Self {
         let plain_release = state
             .objects
-            .try_get_ref_of::<WlBuffer>(candidate.buffer_object_id)
+            .try_ref_object::<WlBuffer>(candidate.buffer_object_id)
             .and_then(|buffer| buffer.plain_release_target());
 
         Self {
@@ -440,12 +440,12 @@ pub fn resolve_unused_candidate_immediately(
     candidate.sync.release.signal();
     let Some(buffer) = state
         .objects
-        .try_get_ref_of::<WlBuffer>(candidate.buffer_object_id)
+        .try_ref_object::<WlBuffer>(candidate.buffer_object_id)
     else {
         return;
     };
     if let Some(PlainRelease { buffer_id, .. }) = buffer.plain_release_target() {
-        let buffer = client.get_object(buffer_id, state);
+        let buffer = client.ref_object_mut(buffer_id, state);
         buffer.send_release(dispatcher);
     }
 }

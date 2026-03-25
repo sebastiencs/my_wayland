@@ -103,7 +103,7 @@ impl Object for WlSubcompositor {
                 }
 
                 {
-                    let surface_ref = client.get_object(surface, state);
+                    let surface_ref = client.ref_object(surface, state);
                     if surface_ref.has_role() || surface_ref.subsurface_object().is_some() {
                         client.send_protocol_error(
                             dispatcher,
@@ -117,7 +117,7 @@ impl Object for WlSubcompositor {
 
                 {
                     let Some(surface_ref) =
-                        state.objects.try_get_ref_of::<WlSurface>(surface_object_id)
+                        state.objects.try_ref_object::<WlSurface>(surface_object_id)
                     else {
                         let message = if state.objects.contains(surface_object_id) {
                             "get_subsurface surface is not a wl_surface"

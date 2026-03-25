@@ -546,7 +546,7 @@ impl WlSurface {
             if object_id == self_object_id {
                 return true;
             }
-            let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(object_id) else {
+            let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
                 return false;
             };
             current = surface.parent_surface_object_id();
@@ -688,7 +688,7 @@ impl WlSurface {
             );
             return None;
         }
-        Some(client.get_object(region_id, state).snapshot())
+        Some(client.ref_object(region_id, state).snapshot())
     }
 
     fn on_set_opaque_region(
@@ -891,7 +891,7 @@ impl WlSurface {
         let Some(buffer_object_id) = buffer.flatten().or(self.on_screen.buffer_object_id) else {
             return true;
         };
-        let Some(buffer) = state.objects.try_get_ref_of::<WlBuffer>(buffer_object_id) else {
+        let Some(buffer) = state.objects.try_ref_object::<WlBuffer>(buffer_object_id) else {
             return true;
         };
 
@@ -941,7 +941,7 @@ impl WlSurface {
         y: i32,
         payload: &SurfaceCommitPayload,
     ) -> Option<BlockedSurfaceState> {
-        let buffer = state.objects.try_get_ref_of::<WlBuffer>(buffer_object_id)?;
+        let buffer = state.objects.try_ref_object::<WlBuffer>(buffer_object_id)?;
         let buffer_size = buffer.dimensions();
         let buffer_size = SizeI { width: buffer_size.0, height: buffer_size.1 };
         let logical_size = transform::derive_logical_size(
@@ -981,7 +981,7 @@ impl WlSurface {
         logical_size: SizeI,
         payload: &SurfaceCommitPayload,
     ) -> Option<DamageScaffold> {
-        let buffer = state.objects.try_get_ref_of::<WlBuffer>(buffer_object_id)?;
+        let buffer = state.objects.try_ref_object::<WlBuffer>(buffer_object_id)?;
         let raw_size = buffer.dimensions();
         let raw_size = SizeI { width: raw_size.0, height: raw_size.1 };
         let surface_to_buffer = payload
@@ -1094,7 +1094,7 @@ impl WlSurface {
         let Some(parent_object_id) = self.parent_surface_object_id() else {
             return false;
         };
-        let Some(parent) = state.objects.try_get_ref_of::<WlSurface>(parent_object_id) else {
+        let Some(parent) = state.objects.try_ref_object::<WlSurface>(parent_object_id) else {
             return false;
         };
         parent.behaves_synchronized(state)
@@ -1157,7 +1157,7 @@ impl WlSurface {
         let time_msec = monotonic_time_msec();
         for cb in callbacks {
             {
-                let callback = client.grab_object(cb, state);
+                let callback = client.ref_object(cb, state);
                 callback.done(time_msec, dispatcher);
             }
             client.delete_id(&display, state, dispatcher, cb.into());
@@ -1348,7 +1348,7 @@ impl WlSurface {
             let child_behaves_synchronized = {
                 let Some(child_surface) = state
                     .objects
-                    .try_get_ref_of::<WlSurface>(child_surface_object_id)
+                    .try_ref_object::<WlSurface>(child_surface_object_id)
                 else {
                     continue;
                 };
@@ -1530,7 +1530,7 @@ impl WlSurface {
             return true;
         };
 
-        let Some(buffer) = state.objects.try_get_ref_of::<WlBuffer>(buffer_object_id) else {
+        let Some(buffer) = state.objects.try_ref_object::<WlBuffer>(buffer_object_id) else {
             let msg = if state.objects.contains(buffer_object_id) {
                 "pending buffer object is not a wl_buffer"
             } else {
@@ -1652,7 +1652,7 @@ impl WlSurface {
                 continue;
             }
             {
-                let feedback_object = client.grab_object(feedback.id, state);
+                let feedback_object = client.ref_object(feedback.id, state);
                 feedback_object.send_discarded(dispatcher);
             }
             client.delete_id(&WlDisplay::default(), state, dispatcher, feedback.id.into());
@@ -1988,7 +1988,7 @@ impl WlSurface {
         let (grandchildren, subsurface_object_id) = {
             let Some(child_surface) = state
                 .objects
-                .try_get_ref_of::<WlSurface>(child_surface_object_id)
+                .try_ref_object::<WlSurface>(child_surface_object_id)
             else {
                 return;
             };

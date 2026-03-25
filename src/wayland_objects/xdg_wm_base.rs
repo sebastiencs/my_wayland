@@ -104,7 +104,7 @@ impl Object for XdgWmBase {
                     );
                     return;
                 }
-                let wl_surface = client.get_object(surface, state);
+                let wl_surface = client.ref_object_mut(surface, state);
                 if wl_surface.has_attached_or_committed_buffer() {
                     client.send_protocol_error(
                         dispatcher,

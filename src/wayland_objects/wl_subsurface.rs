@@ -32,7 +32,7 @@ impl WlSubsurface {
         let Some(sibling_object_id) = client.try_object_id(sibling, state) else {
             return Err(());
         };
-        let Some(sibling_surface) = state.objects.try_get_ref_of::<WlSurface>(sibling_object_id)
+        let Some(sibling_surface) = state.objects.try_ref_object::<WlSurface>(sibling_object_id)
         else {
             return Err(());
         };

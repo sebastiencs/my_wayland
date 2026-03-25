@@ -66,7 +66,8 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
                     );
                     return;
                 }
-                let timeline: &mut WpLinuxDrmSyncobjTimelineV1 = client.get_object(timeline, state);
+                let timeline: &mut WpLinuxDrmSyncobjTimelineV1 =
+                    client.ref_object_mut(timeline, state);
                 let point = ((point_hi as u64) << 32) | point_lo as u64;
                 surface.pending_sync_mut().acquire =
                     AcquireSync::TimelinePoint { timeline: timeline.timeline().clone(), point };
@@ -81,7 +82,8 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
                     );
                     return;
                 }
-                let timeline: &mut WpLinuxDrmSyncobjTimelineV1 = client.get_object(timeline, state);
+                let timeline: &mut WpLinuxDrmSyncobjTimelineV1 =
+                    client.ref_object_mut(timeline, state);
                 let point = ((point_hi as u64) << 32) | point_lo as u64;
                 surface.pending_sync_mut().release =
                     ReleasePoint::TimelinePoint { timeline: timeline.timeline().clone(), point };

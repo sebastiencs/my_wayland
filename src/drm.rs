@@ -2313,7 +2313,7 @@ fn collect_surface_snapshots(
             let child_base = {
                 let Some(child_surface) = state
                     .objects
-                    .try_get_ref_of::<WlSurface>(child_surface_object_id)
+                    .try_ref_object::<WlSurface>(child_surface_object_id)
                 else {
                     continue;
                 };
@@ -2649,7 +2649,7 @@ fn collect_render_items(
         .root_surface_ids()
         .into_iter()
         .filter(|object_id| {
-            let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(*object_id) else {
+            let Some(surface) = state.objects.try_ref_object::<WlSurface>(*object_id) else {
                 return false;
             };
             surface.is_root()
@@ -2685,7 +2685,7 @@ fn collect_render_items(
             log::warn!("collect_render_items: buffer object {:?} missing (destroyed?)", buffer_oid);
             continue;
         }
-        let Some(_) = objects.try_get_ref_of::<WlBuffer>(buffer_oid) else {
+        let Some(_) = objects.try_ref_object::<WlBuffer>(buffer_oid) else {
             log::warn!("collect_render_items: object {:?} is not a WlBuffer", buffer_oid);
             continue;
         };

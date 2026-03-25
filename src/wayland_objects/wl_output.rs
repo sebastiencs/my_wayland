@@ -36,7 +36,7 @@ impl Global for WlOutputGlobal {
         let id = WlOutputId::from(id);
         let ((_, object_id), _) =
             client.insert_object(state, WlOutput { id, output_id: Some(self.output_id), version });
-        let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(object_id) else {
+        let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(object_id) else {
             return;
         };
         wl_output.send_state(state, dispatcher);

@@ -113,7 +113,7 @@ impl XdgPopup {
             else {
                 return self.positioner.geometry().unwrap_or(self.current_geometry);
             };
-            let Some(parent_surface) = state.objects.try_get_ref_of::<XdgSurface>(parent_object_id)
+            let Some(parent_surface) = state.objects.try_ref_object::<XdgSurface>(parent_object_id)
             else {
                 return self.positioner.geometry().unwrap_or(self.current_geometry);
             };
@@ -235,13 +235,13 @@ impl Object for XdgPopup {
                         let parent_surface_object_id = client.object_id(parent_surface_id);
                         let parent_surface = state
                             .objects
-                            .try_get_ref_of::<XdgSurface>(parent_surface_object_id)
+                            .try_ref_object::<XdgSurface>(parent_surface_object_id)
                             .unwrap();
                         parent_surface.is_popup_parent()
                             && !parent_surface.popup_has_explicit_grab(client, state)
                     };
                     if invalid_parent {
-                        let parent_surface = client.get_object(parent_surface_id, state);
+                        let parent_surface = client.ref_object(parent_surface_id, state);
                         self.send_wm_base_error(
                             parent_surface,
                             client,
@@ -271,12 +271,12 @@ impl Object for XdgPopup {
                     return;
                 };
                 let parent_wl_surface_id = {
-                    let parent_surface = client.get_object(parent_surface_id, state);
+                    let parent_surface = client.ref_object(parent_surface_id, state);
                     parent_surface.wl_surface_id()
                 };
                 self.explicit_grab = true;
                 let popup_surface_id = {
-                    let xdg_surface = client.get_object(self.xdg_surface_id, state);
+                    let xdg_surface = client.ref_object(self.xdg_surface_id, state);
                     xdg_surface.wl_surface_id()
                 };
                 if !crate::seat::request_popup_grab(
@@ -311,13 +311,13 @@ impl Object for XdgPopup {
                 }
                 let positioner = state
                     .objects
-                    .try_get_ref_of::<crate::wayland_objects::xdg_positioner::XdgPositioner>(
+                    .try_ref_object::<crate::wayland_objects::xdg_positioner::XdgPositioner>(
                         client.object_id(positioner),
                     )
                     .unwrap()
                     .snapshot();
                 if !positioner.is_complete() {
-                    let xdg_surface = client.get_object(self.xdg_surface_id, state);
+                    let xdg_surface = client.ref_object(self.xdg_surface_id, state);
                     self.send_wm_base_error(
                         xdg_surface,
                         client,

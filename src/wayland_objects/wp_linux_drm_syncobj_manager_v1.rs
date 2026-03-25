@@ -86,7 +86,7 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                 {
                     if state
                         .objects
-                        .try_get_ref_of::<WlSurface>(surface_oid)
+                        .try_ref_object::<WlSurface>(surface_oid)
                         .is_none()
                     {
                         let msg = if state.objects.contains(surface_oid) {

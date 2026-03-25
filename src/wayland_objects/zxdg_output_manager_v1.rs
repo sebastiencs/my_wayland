@@ -76,7 +76,7 @@ impl Object for ZxdgOutputManagerV1 {
                     );
                     return;
                 };
-                let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(output_oid) else {
+                let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(output_oid) else {
                     client.protocol_violation_disconnect(
                         dispatcher,
                         output.into(),

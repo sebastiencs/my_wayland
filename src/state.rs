@@ -405,7 +405,7 @@ where
 }
 
 impl IndexMap<ObjectId, Box<dyn Object>> {
-    pub fn try_get_ref_of<T: Object>(&self, key: ObjectId) -> Option<&T> {
+    pub fn try_ref_object<T: Object>(&self, key: ObjectId) -> Option<&T> {
         self.try_get(key)
             .and_then(|object| object.downcast_ref::<T>())
     }
@@ -757,7 +757,7 @@ mod tests {
             let object = map.try_grab_object::<TestObject>(key).unwrap();
             assert_eq!(object.id(), WaylandId::from(1u32));
         }
-        assert!(map.try_get_ref_of::<TestObject>(key).is_some());
+        assert!(map.try_ref_object::<TestObject>(key).is_some());
     }
 
     #[test]
@@ -765,7 +765,7 @@ mod tests {
         let mut map = Box::new(IndexMap::<ObjectId, Box<dyn Object>>::default());
         let key = map.insert(Box::new(TestObject { id: WaylandId::from(1u32) }));
         assert!(map.try_grab_object::<OtherTestObject>(key).is_none());
-        assert!(map.try_get_ref_of::<TestObject>(key).is_some());
+        assert!(map.try_ref_object::<TestObject>(key).is_some());
     }
 
     #[test]

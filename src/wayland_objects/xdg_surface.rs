@@ -126,7 +126,7 @@ impl XdgSurface {
         };
         state
             .objects
-            .try_get_ref_of::<XdgPopup>(popup_object_id)
+            .try_ref_object::<XdgPopup>(popup_object_id)
             .is_some_and(XdgPopup::has_explicit_grab)
     }
 
@@ -141,7 +141,7 @@ impl XdgSurface {
         let Some(surface_object_id) = client.object_id_for_wayland(self.wl_surface.into()) else {
             return RectI { x: 0, y: 0, width: 0, height: 0 };
         };
-        let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(surface_object_id) else {
+        let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
             return RectI { x: 0, y: 0, width: 0, height: 0 };
         };
         let Some(size) = surface.logical_size() else {
@@ -462,7 +462,7 @@ impl Object for XdgSurface {
 
                 let positioner_state = state
                     .objects
-                    .try_get_ref_of::<XdgPositioner>(client.object_id(positioner))
+                    .try_ref_object::<XdgPositioner>(client.object_id(positioner))
                     .unwrap()
                     .snapshot();
                 if !positioner_state.is_complete() {
@@ -480,7 +480,7 @@ impl Object for XdgSurface {
                         let parent_surface_object_id = client.object_id(parent_surface_id);
                         let parent_surface = state
                             .objects
-                            .try_get_ref_of::<Self>(parent_surface_object_id)
+                            .try_ref_object::<Self>(parent_surface_object_id)
                             .unwrap();
                         parent_surface.is_toplevel_parent()
                             || (parent_surface.is_popup_parent()
@@ -678,12 +678,12 @@ pub mod xdg_toplevel {
             let xdg_surface_object_id = client.object_id_for_wayland(xdg_surface_id.into())?;
             let xdg_surface = state
                 .objects
-                .try_get_ref_of::<XdgSurface>(xdg_surface_object_id)?;
+                .try_ref_object::<XdgSurface>(xdg_surface_object_id)?;
             let wl_surface_object_id =
                 client.object_id_for_wayland(xdg_surface.wl_surface_id().into())?;
             let active_output_id = state
                 .objects
-                .try_get_ref_of::<WlSurface>(wl_surface_object_id)
+                .try_ref_object::<WlSurface>(wl_surface_object_id)
                 .and_then(WlSurface::active_output_id)
                 .or_else(|| state.active_output_id())?;
             let output = state.outputs.try_get(active_output_id)?;
@@ -821,7 +821,7 @@ pub mod xdg_toplevel {
                 let Some(object_id) = client.object_id_for_wayland(current.into()) else {
                     return true;
                 };
-                let Some(toplevel) = state.objects.try_get_ref_of::<Self>(object_id) else {
+                let Some(toplevel) = state.objects.try_ref_object::<Self>(object_id) else {
                     return true;
                 };
                 let Some(next) = toplevel.parent else {
@@ -982,11 +982,11 @@ pub mod xdg_toplevel {
                         );
                         return;
                     }
-                    let xdg_surface = client.get_object(self.xdg_surface_id, state);
+                    let xdg_surface = client.ref_object(self.xdg_surface_id, state);
                     let surface_id = xdg_surface.wl_surface_id();
                     let surface_object_id = client.object_id(surface_id);
                     let Some(surface) =
-                        state.objects.try_get_ref_of::<WlSurface>(surface_object_id)
+                        state.objects.try_ref_object::<WlSurface>(surface_object_id)
                     else {
                         return;
                     };
@@ -1032,11 +1032,11 @@ pub mod xdg_toplevel {
                         );
                         return;
                     }
-                    let xdg_surface = client.get_object(self.xdg_surface_id, state);
+                    let xdg_surface = client.ref_object(self.xdg_surface_id, state);
                     let surface_id = xdg_surface.wl_surface_id();
                     let surface_object_id = client.object_id(surface_id);
                     let Some(surface) =
-                        state.objects.try_get_ref_of::<WlSurface>(surface_object_id)
+                        state.objects.try_ref_object::<WlSurface>(surface_object_id)
                     else {
                         return;
                     };
