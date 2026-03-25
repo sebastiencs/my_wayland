@@ -1,4 +1,7 @@
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::{
+    num::NonZeroU32,
+    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
+};
 
 use crate::{
     dmabuf::{DmaBuf, DmaBufId, DmaBufPlane},
@@ -105,14 +108,39 @@ impl GbmDevice {
         )
     }
 
+    pub fn create_bo_with_size_no_export(
+        &self,
+        width: u32,
+        height: u32,
+        format: drm::buffer::DrmFourcc,
+        flags: UseFlags,
+        modifiers: &[Modifier],
+    ) -> BufferObject {
+        let bo = self.allocate_bo(width, height, format, flags, modifiers);
+        BufferObject { bo, dmabuf: None }
+    }
+
     pub fn create_bo_with_size(
+        &self,
+        width: u32,
+        height: u32,
+        format: drm::buffer::DrmFourcc,
+        flags: UseFlags,
+        modifiers: &[Modifier],
+    ) -> BufferObject {
+        let bo = self.allocate_bo(width, height, format, flags, modifiers);
+        let dmabuf = make_dmabuf(bo);
+        BufferObject { bo, dmabuf: Some(dmabuf) }
+    }
+
+    fn allocate_bo(
         &self,
         width: u32,
         height: u32,
         format: drm::buffer::DrmFourcc,
         mut flags: UseFlags,
         mut modifiers: &[Modifier],
-    ) -> BufferObject {
+    ) -> *mut gbm_bo {
         let format = format as u32;
         let use_plain_create = modifiers.is_empty()
             || modifiers == [Modifier::INVALID]
@@ -150,9 +178,7 @@ impl GbmDevice {
             }
         };
         assert!(!bo.is_null());
-
-        let dmabuf = make_dmabuf(bo);
-        BufferObject { bo, dmabuf }
+        bo
     }
 }
 
@@ -219,7 +245,7 @@ impl GbmSurface {
 #[derive(Debug)]
 pub struct BufferObject {
     bo: *mut gbm_bo,
-    dmabuf: DmaBuf,
+    dmabuf: Option<DmaBuf>,
 }
 
 impl BufferObject {
@@ -232,8 +258,16 @@ impl BufferObject {
             unsafe { sys::gbm_bo_write(self.bo, buf.as_ptr() as *mut _, buf.len()) };
     }
 
-    pub fn dmabuf(&self) -> &DmaBuf {
-        &self.dmabuf
+    pub fn dmabuf(&self) -> Option<&DmaBuf> {
+        self.dmabuf.as_ref()
+    }
+
+    pub fn plane_count(&self) -> i32 {
+        unsafe { sys::gbm_bo_get_plane_count(self.bo) }
+    }
+
+    pub fn modifier(&self) -> Modifier {
+        Modifier(unsafe { sys::gbm_bo_get_modifier(self.bo) })
     }
 }
 
@@ -259,6 +293,49 @@ impl drm::buffer::Buffer for BufferObject {
         let handle = handle as u32;
 
         unsafe { std::mem::transmute(handle) }
+    }
+}
+
+impl drm::buffer::PlanarBuffer for BufferObject {
+    fn size(&self) -> (u32, u32) {
+        <Self as drm::buffer::Buffer>::size(self)
+    }
+
+    fn format(&self) -> drm::buffer::DrmFourcc {
+        <Self as drm::buffer::Buffer>::format(self)
+    }
+
+    fn modifier(&self) -> Option<drm::buffer::DrmModifier> {
+        match self.modifier() {
+            Modifier::INVALID | Modifier::LINEAR | Modifier::ZERO => None,
+            modifier => Some(drm::buffer::DrmModifier::from(modifier.0)),
+        }
+    }
+
+    fn pitches(&self) -> [u32; 4] {
+        let mut pitches = [0; 4];
+        for index in 0..self.plane_count() {
+            pitches[index as usize] = unsafe { sys::gbm_bo_get_stride_for_plane(self.bo, index) };
+        }
+        pitches
+    }
+
+    fn handles(&self) -> [Option<drm::buffer::Handle>; 4] {
+        let mut handles = [None; 4];
+        for index in 0..self.plane_count() {
+            let handle = unsafe { sys::gbm_bo_get_handle_for_plane(self.bo, index) as u32 };
+            let raw = NonZeroU32::new(handle).unwrap();
+            handles[index as usize] = Some(raw.into());
+        }
+        handles
+    }
+
+    fn offsets(&self) -> [u32; 4] {
+        let mut offsets = [0; 4];
+        for index in 0..self.plane_count() {
+            offsets[index as usize] = unsafe { sys::gbm_bo_get_offset(self.bo, index) };
+        }
+        offsets
     }
 }
 

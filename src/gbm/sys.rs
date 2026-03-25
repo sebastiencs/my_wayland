@@ -112,6 +112,7 @@ extern "C" {
     pub fn gbm_bo_destroy(bo: *mut gbm_bo);
     pub fn gbm_bo_get_fd(bo: *mut gbm_bo) -> libc::c_int;
     pub fn gbm_bo_get_fd_for_plane(bo: *mut gbm_bo, plane: libc::c_int) -> libc::c_int;
+    pub fn gbm_bo_get_handle_for_plane(bo: *mut gbm_bo, plane: libc::c_int) -> u64;
     pub fn gbm_bo_get_plane_count(bo: *mut gbm_bo) -> libc::c_int;
     pub fn gbm_bo_get_stride_for_plane(bo: *mut gbm_bo, plane: libc::c_int) -> u32;
     pub fn gbm_bo_get_width(bo: *mut gbm_bo) -> u32;

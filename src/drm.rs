@@ -26,7 +26,7 @@ use crate::{
     cursor::CursorSourceRef,
     dmabuf::DmaBuf,
     egl::{EglContext, EglFrameBuffer, GlTexture, RenderItem, EGL},
-    gbm::UseFlags,
+    gbm::{BufferObject, UseFlags},
     io_uring::ring::{PollCompleted, ReadWriteCompleted, RingId},
     region::{DamageRegion, RectI},
     runner::{AnyAction, Dispatcher, Model},
@@ -941,15 +941,16 @@ impl Drm {
             return None;
         }
 
-        let bo = self.egl_context.gbm.create_bo_with_size(
+        let bo = self.egl_context.gbm.create_bo_with_size_no_export(
             image.width as u32,
             image.height as u32,
             DrmFourcc::Argb8888,
             UseFlags::SCANOUT | UseFlags::CURSOR | UseFlags::WRITE | UseFlags::LINEAR,
             &[Modifier::LINEAR],
         );
+        let bo_modifier = bo.modifier();
         if !plane_format.modifiers.contains(&Modifier::INVALID)
-            && !plane_format.modifiers.contains(&bo.dmabuf().modifier)
+            && !plane_format.modifiers.contains(&bo_modifier)
         {
             return None;
         }
@@ -961,7 +962,7 @@ impl Drm {
             pitch,
         );
         bo.write(&bytes);
-        let framebuffer = Self::add_framebuffer(&self.fd, bo.dmabuf()).ok()?;
+        let framebuffer = Self::add_framebuffer_for_bo(&self.fd, &bo).ok()?;
         Some(CursorPlaneCandidate {
             x,
             y,
@@ -1572,27 +1573,49 @@ impl Drm {
         }
 
         let bo = egl.gbm.create_bo(&mode, flags, &modifiers);
-        let drm_fb = match Self::add_framebuffer(drm, bo.dmabuf()) {
+        let dmabuf = bo
+            .dmabuf()
+            .expect("render buffer GBM BO must export dmabuf");
+        let drm_fb = match Self::add_framebuffer(drm, dmabuf) {
             Ok(framebuffer) => framebuffer,
             Err(error) => {
                 log::error!(
                     "Failed to create DRM framebuffer: size={}x{} format={} modifier={:?} flags={:?} error={:?}",
-                    bo.dmabuf().width,
-                    bo.dmabuf().height,
-                    bo.dmabuf().format.name,
-                    bo.dmabuf().modifier,
+                    dmabuf.width,
+                    dmabuf.height,
+                    dmabuf.format.name,
+                    dmabuf.modifier,
                     flags,
                     error
                 );
                 return Err(error);
             }
         };
-        let image = egl.import_dmabuf(bo.dmabuf());
-        let gl_framebuffer = egl.make_fb_from_image(&image, bo.dmabuf());
+        let image = egl.import_dmabuf(dmabuf);
+        let gl_framebuffer = egl.make_fb_from_image(&image, dmabuf);
         gl_framebuffer.clear();
         let texture = image.into_texture().unwrap();
 
         Ok(RenderBuffer { bo, drm_fb, gl_framebuffer, texture })
+    }
+
+    fn add_framebuffer_for_bo(drm: &DrmFd, bo: &BufferObject) -> std::io::Result<DrmFrameBuffer> {
+        let flags = match bo.modifier() {
+            Modifier::INVALID | Modifier::LINEAR => FbCmd2Flags::empty(),
+            _ => FbCmd2Flags::MODIFIERS,
+        };
+
+        match drm.add_planar_framebuffer(bo, flags) {
+            Ok(handle) => Ok(DrmFrameBuffer { drm: drm.clone(), handle }),
+            Err(source) => {
+                if bo.plane_count() == 1 && drm::buffer::Buffer::format(bo) == DrmFourcc::Argb8888 {
+                    drm.add_framebuffer(bo, 32, 32)
+                        .map(|handle| DrmFrameBuffer { drm: drm.clone(), handle })
+                } else {
+                    Err(source)
+                }
+            }
+        }
     }
 
     fn add_framebuffer(drm: &DrmFd, dmabuf: &DmaBuf) -> std::io::Result<DrmFrameBuffer> {
