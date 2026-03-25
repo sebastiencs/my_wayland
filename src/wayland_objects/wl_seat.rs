@@ -27,15 +27,18 @@ impl Global for WlSeatGlobal {
         client: &mut Client,
         state: &mut State,
         id: NewId,
-        _version: u32,
+        version: u32,
         dispatcher: &mut ClientDispatcher,
     ) {
         let id = WlSeatId::from(id);
         let wl_seat = WlSeat { id };
 
         wl_seat.send_capabilities(dispatcher);
-        // TODO: Check version
-        wl_seat.send_name(dispatcher);
+        // `name` exists since wl_seat version 2; v1 clients (e.g. weston simple-egl) only
+        // register the capabilities listener and libwayland aborts if we send opcode 1.
+        if version >= 2 {
+            wl_seat.send_name(dispatcher);
+        }
 
         client.insert_object(state, wl_seat);
     }
