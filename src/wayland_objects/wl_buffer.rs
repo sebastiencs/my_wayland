@@ -161,7 +161,7 @@ impl WlBuffer {
 
     pub fn base_tex_transform(&self) -> transform::Mat3 {
         match &self.backing {
-            BufferBacking::Shm { .. } => transform::normalized_texcoord_flip_y(),
+            BufferBacking::Shm { .. } => transform::Mat3::identity(),
             BufferBacking::Dmabuf { y_inverted, .. } => {
                 if *y_inverted {
                     transform::normalized_texcoord_flip_y()
