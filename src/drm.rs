@@ -945,8 +945,8 @@ impl Drm {
             image.width as u32,
             image.height as u32,
             DrmFourcc::Argb8888,
-            UseFlags::SCANOUT | UseFlags::CURSOR | UseFlags::WRITE | UseFlags::LINEAR,
-            &[Modifier::LINEAR],
+            UseFlags::CURSOR | UseFlags::WRITE,
+            &[],
         );
         let bo_modifier = bo.modifier();
         if !plane_format.modifiers.contains(&Modifier::INVALID)
