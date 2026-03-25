@@ -161,12 +161,12 @@ impl Model for Libinput {
                                 };
                                 let x = motion.absolute_x_transformed(width);
                                 let y = motion.absolute_y_transformed(height);
-                                log::debug!(
-                                    "libinput pointer motion absolute x={} y={} time={}",
-                                    x,
-                                    y,
-                                    motion.time()
-                                );
+                                // log::debug!(
+                                //     "libinput pointer motion absolute x={} y={} time={}",
+                                //     x,
+                                //     y,
+                                //     motion.time()
+                                // );
                                 seat::handle_pointer_motion_absolute(
                                     state,
                                     dispatcher,

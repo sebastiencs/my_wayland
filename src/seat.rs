@@ -552,12 +552,12 @@ pub fn handle_pointer_motion_absolute(
 ) {
     state.seat.pointer_pos = (x, y);
     clamp_pointer_to_outputs(state);
-    log::debug!(
-        "seat pointer motion absolute pos=({:.1}, {:.1}) time={}",
-        state.seat.pointer_pos.0,
-        state.seat.pointer_pos.1,
-        time
-    );
+    // log::debug!(
+    //     "seat pointer motion absolute pos=({:.1}, {:.1}) time={}",
+    //     state.seat.pointer_pos.0,
+    //     state.seat.pointer_pos.1,
+    //     time
+    // );
     if apply_pointer_interactive_grab(state, dispatcher) {
         return;
     }
