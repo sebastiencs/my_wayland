@@ -31,6 +31,13 @@ pub enum IoUringAction {
         length: usize,
         dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
     },
+    ReadSome {
+        id: Option<RingId>,
+        fd: RawFd,
+        offset: usize,
+        length: usize,
+        dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
+    },
     Recvmsg {
         id: Option<RingId>,
         fd: RawFd,
@@ -72,6 +79,14 @@ impl std::fmt::Debug for IoUringAction {
             Self::WaitForCompletion => write!(f, "WaitForCompletion"),
             Self::Read { id, fd, offset, length, dispatch_to } => f
                 .debug_struct("Read")
+                .field("id", id)
+                .field("fd", fd)
+                .field("offset", offset)
+                .field("length", length)
+                .field("dispatch_to", dispatch_to)
+                .finish(),
+            Self::ReadSome { id, fd, offset, length, dispatch_to } => f
+                .debug_struct("ReadSome")
                 .field("id", id)
                 .field("fd", fd)
                 .field("offset", offset)
@@ -184,6 +199,11 @@ impl Model for IoUringState {
                     nbytes_processed,
                     neof,
                 });
+            }
+            IoUringAction::ReadSome { id, fd, offset, length, dispatch_to } => {
+                let id = id.unwrap_or_else(RingId::fresh);
+                let buffer = Self::make_buffer(length);
+                self.push_op(Operation::ReadSome { id, fd, offset, buffer, dispatch_to });
             }
             IoUringAction::Cancel { target } => {
                 self.ignored_completions.insert(target);
@@ -324,6 +344,11 @@ impl IoUringState {
                     }
                     return;
                 }
+                Operation::ReadSome { dispatch_to, .. } => {
+                    let error = std::io::Error::from_raw_os_error(-result);
+                    dispatcher.redispatch_to(dispatch_to, Err(error));
+                    return;
+                }
                 _ => {}
             }
             error!("io_uring Operation failed error_code={:?}", result);
@@ -355,6 +380,15 @@ impl IoUringState {
                     .unwrap_or_else(|_| Vec::new())
                     .into();
                 dispatcher.redispatch_to(to, Ok(RecvmsgCompleted { fd, buffer, fds }));
+            }
+            Operation::ReadSome { id: _, fd, offset, buffer, dispatch_to: to } => {
+                let nbytes = result as usize;
+                if nbytes == 0 {
+                    dispatcher.redispatch_to(to, Err(UnexpectedEof.into()));
+                    return;
+                }
+                let buffer = Box::from(&buffer[..nbytes]);
+                dispatcher.redispatch_to(to, Ok(ReadWriteCompleted { fd, offset, buffer }));
             }
             Operation::Sendmsg { id: _, fd, data: _, dispatch_to: to } => {
                 dispatcher.redispatch_to(to, Ok(SendmsgCompleted { fd }));

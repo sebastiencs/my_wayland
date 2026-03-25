@@ -24,7 +24,7 @@ use crate::{
     dmabuf::DmaBuf,
     egl::{EglContext, EglFrameBuffer, GlTexture, RenderItem, EGL},
     gbm::UseFlags,
-    io_uring::ring::{ReadWriteCompleted, RingId},
+    io_uring::ring::{PollCompleted, ReadWriteCompleted, RingId},
     region::{DamageRegion, RectI},
     runner::{AnyAction, Dispatcher, Model},
     state::{BackendOutputRef, DrmId, ObjectId, OutputId, OutputMode, State},
@@ -659,6 +659,21 @@ impl DrmFd {
     }
 }
 
+fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if (flags & libc::O_NONBLOCK) != 0 {
+        return Ok(());
+    }
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 impl drm::Device for DrmFd {}
 impl drm::control::Device for DrmFd {}
 
@@ -889,6 +904,7 @@ impl Drm {
     pub fn create_drm(fd: RawFd, device: udev::Device, egl: &EGL) -> Self {
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let drm = DrmFd { fd: Rc::new(fd) };
+        set_nonblocking(drm.as_raw_fd()).unwrap();
         drm.set_client_capability(drm::ClientCapability::Atomic, true)
             .unwrap();
 
@@ -2116,13 +2132,16 @@ struct DrmReader {
     drm_id: DrmId,
     fd: RawFd,
     read_buffer: DrmBuffer,
+    poll_op_id: Option<RingId>,
     read_op_id: Option<RingId>,
 }
 
 #[derive(Debug)]
 enum DrmReaderAction {
     Start,
+    PollReady,
     ReadChunk { buffer: Box<[u8]> },
+    ReadDrained,
     ReadError { error: std::io::Error },
     Stop,
 }
@@ -2143,7 +2162,18 @@ impl Model for DrmReader {
         match action {
             Start => {
                 log::debug!("DrmReader start: drm_id={:?} fd={}", self.drm_id, self.fd,);
-                self.dispatch_read(dispatcher)
+                self.dispatch_poll(dispatcher);
+            }
+            PollReady => {
+                if self.read_op_id.is_some() {
+                    log::debug!(
+                        "DrmReader poll ready while read pending: drm_id={:?} fd={}",
+                        self.drm_id,
+                        self.fd,
+                    );
+                    return Ok(());
+                }
+                self.dispatch_read_some(dispatcher);
             }
             ReadChunk { buffer } => {
                 self.read_op_id = None;
@@ -2160,17 +2190,17 @@ impl Model for DrmReader {
                         Ok(Some(event)) => event,
                         Ok(None) => {
                             log::debug!(
-                                "DrmReader awaiting more bytes: drm_id={:?} fd={} buffered_bytes={}",
+                                "DrmReader draining more bytes: drm_id={:?} fd={} buffered_bytes={}",
                                 self.drm_id,
                                 self.fd,
                                 self.read_buffer.pos,
                             );
-                            self.dispatch_read(dispatcher);
+                            self.dispatch_read_some(dispatcher);
                             return Ok(());
                         }
                         Err(()) => {
                             log::error!("Invalid DRM event stream");
-                            self.dispatch_read(dispatcher);
+                            self.dispatch_read_some(dispatcher);
                             return Ok(());
                         }
                     };
@@ -2206,12 +2236,25 @@ impl Model for DrmReader {
                     self.read_buffer.consume_event(len);
                 }
             }
+            ReadDrained => {
+                self.read_op_id = None;
+                log::debug!(
+                    "DrmReader drained readable bytes: drm_id={:?} fd={} buffered_bytes={}",
+                    self.drm_id,
+                    self.fd,
+                    self.read_buffer.pos,
+                );
+            }
             ReadError { error } => {
                 self.read_op_id = None;
                 log::error!("Could not read DRM events: {:?}", error);
-                self.dispatch_read(dispatcher);
             }
             Stop => {
+                if let Some(poll_op_id) = self.poll_op_id.take() {
+                    dispatcher.dispatch(crate::io_uring::model::IoUringAction::PollRemove {
+                        target: poll_op_id,
+                    });
+                }
                 if let Some(read_op_id) = self.read_op_id.take() {
                     dispatcher.dispatch(crate::io_uring::model::IoUringAction::Cancel {
                         target: read_op_id,
@@ -2227,32 +2270,63 @@ impl Model for DrmReader {
 
 impl DrmReader {
     fn new(drm_id: DrmId, fd: RawFd) -> Self {
-        Self { drm_id, fd, read_buffer: DrmBuffer::new(), read_op_id: None }
+        Self {
+            drm_id,
+            fd,
+            read_buffer: DrmBuffer::new(),
+            poll_op_id: None,
+            read_op_id: None,
+        }
     }
 
     fn model_id(&self) -> u64 {
         usize::from(self.drm_id) as u64
     }
 
-    fn dispatch_read(&mut self, dispatcher: &mut Dispatcher) {
+    fn dispatch_poll(&mut self, dispatcher: &mut Dispatcher) {
+        use crate::{io_uring::model::IoUringAction, runner::Redispatcher};
+
+        let poll_op_id = RingId::fresh();
+        self.poll_op_id = Some(poll_op_id);
+        log::debug!(
+            "DrmReader dispatch_poll: drm_id={:?} fd={} poll_op_id={:?}",
+            self.drm_id,
+            self.fd,
+            poll_op_id,
+        );
+        dispatcher.dispatch(IoUringAction::Poll {
+            id: Some(poll_op_id),
+            fd: self.fd,
+            dispatch_to: Redispatcher::id(self.model_id(), Self::on_poll_event),
+        });
+    }
+
+    fn dispatch_read_some(&mut self, dispatcher: &mut Dispatcher) {
         use crate::{io_uring::model::IoUringAction, runner::Redispatcher};
 
         let read_op_id = RingId::fresh();
         self.read_op_id = Some(read_op_id);
         log::debug!(
-            "DrmReader dispatch_read: drm_id={:?} fd={} read_op_id={:?} buffered_bytes={}",
+            "DrmReader dispatch_read_some: drm_id={:?} fd={} read_op_id={:?} buffered_bytes={}",
             self.drm_id,
             self.fd,
             read_op_id,
             self.read_buffer.pos,
         );
-        dispatcher.dispatch(IoUringAction::Read {
+        dispatcher.dispatch(IoUringAction::ReadSome {
             id: Some(read_op_id),
             fd: self.fd,
             offset: 0,
             length: 4096,
             dispatch_to: Redispatcher::id(self.model_id(), Self::on_read_event),
         });
+    }
+
+    fn on_poll_event(result: std::io::Result<PollCompleted>) -> AnyAction {
+        match result {
+            Ok(PollCompleted {}) => AnyAction::from(DrmReaderAction::PollReady),
+            Err(error) => AnyAction::from(DrmReaderAction::ReadError { error }),
+        }
     }
 
     fn on_read_event(result: std::io::Result<ReadWriteCompleted>) -> AnyAction {
@@ -2265,6 +2339,10 @@ impl DrmReader {
                     buffer.len(),
                 );
                 AnyAction::from(DrmReaderAction::ReadChunk { buffer })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                log::debug!("DrmReader on_read_event drained: {:?}", error);
+                AnyAction::from(DrmReaderAction::ReadDrained)
             }
             Err(error) => {
                 log::debug!("DrmReader on_read_event error: {:?}", error);

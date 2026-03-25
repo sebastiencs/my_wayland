@@ -158,6 +158,13 @@ pub(super) enum Operation {
         // length: usize,
         // data: &'a mut [u8],
     },
+    ReadSome {
+        id: RingId,
+        fd: RawFd,
+        offset: usize,
+        buffer: Box<[u8]>,
+        dispatch_to: Redispatcher<std::io::Result<ReadWriteCompleted>>,
+    },
     Recvmsg {
         id: RingId,
         fd: RawFd,
@@ -242,6 +249,14 @@ impl Debug for Operation {
                 .field("neof", neof)
                 .field("dispatch_to", dispatch_to)
                 .finish(),
+            Self::ReadSome { id, fd, offset, buffer, dispatch_to } => f
+                .debug_struct("ReadSome")
+                .field("id", id)
+                .field("fd", fd)
+                .field("offset", offset)
+                .field("buffer", &buffer.len())
+                .field("dispatch_to", dispatch_to)
+                .finish(),
             Self::Recvmsg { id, fd, data, dispatch_to } => f
                 .debug_struct("Recvmsg")
                 .field("id", id)
@@ -287,6 +302,7 @@ impl Operation {
     fn id(&self) -> Option<RingId> {
         match self {
             Operation::ReadWrite { id, .. } => Some(*id),
+            Operation::ReadSome { id, .. } => Some(*id),
             Operation::NoOp => None,
             Operation::Recvmsg { id, .. } => Some(*id),
             Operation::Sendmsg { id, .. } => Some(*id),
@@ -352,6 +368,14 @@ impl SubmissionQueueEntry {
                 self.off_addr2 = (offset + nbytes_processed) as u64;
                 self.addr_splice_off_in = unsafe { buffer.as_ptr().add(*nbytes_processed) } as u64;
                 self.len = (buffer.len() - nbytes_processed) as u32;
+                self.user_data = id.to_user_data();
+            }
+            Operation::ReadSome { id, fd, offset, buffer, dispatch_to: _ } => {
+                self.opcode = IORING_OP_READ;
+                self.fd = *fd;
+                self.off_addr2 = *offset as u64;
+                self.addr_splice_off_in = buffer.as_ptr() as u64;
+                self.len = buffer.len() as u32;
                 self.user_data = id.to_user_data();
             }
             // Operation::OpenAt { path } => {
