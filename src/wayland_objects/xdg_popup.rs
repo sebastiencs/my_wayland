@@ -13,6 +13,8 @@ use crate::{
 pub struct XdgPopup {
     id: XdgPopupId,
     xdg_surface_id: XdgSurfaceId,
+    /// `xdg_wm_base` version for this shell (from the factory that created the popup).
+    wm_base_version: u32,
     parent_surface_id: Option<XdgSurfaceId>,
     positioner: PositionerState,
     current_geometry: RectI,
@@ -27,6 +29,7 @@ impl XdgPopup {
         xdg_surface_id: XdgSurfaceId,
         parent_surface_id: Option<XdgSurfaceId>,
         positioner: PositionerState,
+        wm_base_version: u32,
     ) -> Self {
         let current_geometry =
             positioner
@@ -35,6 +38,7 @@ impl XdgPopup {
         Self {
             id,
             xdg_surface_id,
+            wm_base_version,
             parent_surface_id,
             positioner,
             current_geometry,
@@ -142,7 +146,9 @@ impl XdgPopup {
     ) {
         let geometry = self.computed_geometry(client, state);
         if let Some(token) = self.pending_reposition_token.take() {
-            self.send_event(xdg_popup::Event::Repositioned { token }, dispatcher);
+            if self.wm_base_version >= xdg_popup::REPOSITIONED_SINCE {
+                self.send_event(xdg_popup::Event::Repositioned { token }, dispatcher);
+            }
         }
         self.send_event(
             xdg_popup::Event::Configure {

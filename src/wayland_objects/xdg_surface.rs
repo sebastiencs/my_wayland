@@ -510,7 +510,8 @@ impl Object for XdgSurface {
                     return;
                 }
                 self.role_object = RoleObject::Popup(id);
-                let popup = XdgPopup::new(id, self.id, parent, positioner_state);
+                let popup =
+                    XdgPopup::new(id, self.id, parent, positioner_state, self.wm_base_version);
                 client.insert_object(state, popup);
             }
             SetWindowGeometry { x, y, width, height } => {
@@ -695,7 +696,7 @@ pub mod xdg_toplevel {
             configure_bounds: Option<(i32, i32)>,
             dispatcher: &mut ClientDispatcher,
         ) {
-            if self.wm_base_version < 4 {
+            if self.wm_base_version < proto_xdg_toplevel::CONFIGURE_BOUNDS_SINCE {
                 return;
             }
             let Some((width, height)) = configure_bounds else {
@@ -788,7 +789,7 @@ pub mod xdg_toplevel {
         /// `wm_capabilities` exists only since xdg_wm_base version 5; older clients (e.g. wev) must
         /// not receive wire opcode 3 or libwayland aborts with a NULL listener.
         pub fn send_capabilities(&self, dispatcher: &mut ClientDispatcher) {
-            if self.wm_base_version < 5 {
+            if self.wm_base_version < proto_xdg_toplevel::WM_CAPABILITIES_SINCE {
                 return;
             }
             use proto_xdg_toplevel::WmCapabilities;

@@ -16,7 +16,7 @@ use std::{
 use {itertools::Itertools, wayland_scanner::protocol::Interface};
 
 use {
-    heck::ToUpperCamelCase,
+    heck::{ToShoutySnakeCase, ToUpperCamelCase},
     libc::memfd_create,
     wayland_scanner::protocol::{self, Enum, Message},
 };
@@ -254,6 +254,20 @@ fn write_parser(f: &mut impl Write, this_interface: &str, msgs: &[Message]) -> s
     Ok(())
 }
 
+/// Emits `pub const NAME_SINCE: u32 = N` for each wire message (from XML `since`, default 1).
+fn write_message_since_constants(f: &mut impl Write, msgs: &[Message]) -> std::io::Result<()> {
+    for msg in msgs {
+        let const_name = format!("{}_SINCE", msg.name.to_shouty_snake_case());
+        writeln!(
+            f,
+            "  /// Minimum interface version for the `{}` message (XML `since`).",
+            msg.name
+        )?;
+        writeln!(f, "  pub const {}: u32 = {};", const_name, msg.since)?;
+    }
+    Ok(())
+}
+
 fn write_message(f: &mut impl Write, name: &str, msgs: &[Message]) -> std::io::Result<()> {
     writeln!(f, "  #[derive(Debug)]")?;
     writeln!(f, "  pub enum {} {{", name)?;
@@ -417,10 +431,12 @@ pub fn gen() -> std::io::Result<()> {
 
             write_constants(f, interface)?;
             if !interface.requests.is_empty() {
+                write_message_since_constants(f, &interface.requests)?;
                 write_message(f, "Request", &interface.requests)?;
                 write_parser(f, this_interface, &interface.requests)?;
             }
             if !interface.events.is_empty() {
+                write_message_since_constants(f, &interface.events)?;
                 write_message(f, "Event", &interface.events)?;
                 write_event_writer(f, this_interface, &interface.events)?;
             }

@@ -37,7 +37,7 @@ impl Global for WlSeatGlobal {
         wl_seat.send_capabilities(dispatcher);
         // `name` exists since wl_seat version 2; v1 clients (e.g. weston simple-egl) only
         // register the capabilities listener and libwayland aborts if we send opcode 1.
-        if version >= 2 {
+        if version >= wl_seat::NAME_SINCE {
             wl_seat.send_name(dispatcher);
         }
 
@@ -75,7 +75,7 @@ impl Object for WlSeat {
         match client.parse::<Self>(req).unwrap() {
             GetPointer { id } => {
                 let id = WlPointerId::from(id);
-                let wl_pointer = WlPointer::new(id);
+                let wl_pointer = WlPointer::new(id, self.version);
                 state.seat.register_pointer(client.client_id(), id);
                 client.insert_object(state, wl_pointer);
             }
@@ -85,7 +85,7 @@ impl Object for WlSeat {
                 wl_keyboard.send_keymap(&state.xkb, dispatcher);
                 // `repeat_info` exists since wl_keyboard version 4; v1–v3 clients (e.g. weston
                 // simple-egl with wl_seat v1) have no listener slot and libwayland aborts.
-                if self.version >= 4 {
+                if self.version >= wl_keyboard::REPEAT_INFO_SINCE {
                     wl_keyboard.send_repeat_info(dispatcher);
                 }
 

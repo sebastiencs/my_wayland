@@ -150,7 +150,7 @@ impl WlOutput {
     }
 
     pub fn send_scale(&self, state: &State, dispatcher: &mut ClientDispatcher) {
-        if self.version < 2 {
+        if self.version < wl_output::SCALE_SINCE {
             return;
         }
         let scale = wl_output::Event::Scale {
@@ -160,7 +160,7 @@ impl WlOutput {
     }
 
     pub fn send_name(&self, state: &State, dispatcher: &mut ClientDispatcher) {
-        if self.version < 4 {
+        if self.version < wl_output::NAME_SINCE {
             return;
         }
         let Some(output) = self.output(state) else {
@@ -171,7 +171,7 @@ impl WlOutput {
     }
 
     pub fn send_description(&self, state: &State, dispatcher: &mut ClientDispatcher) {
-        if self.version < 4 {
+        if self.version < wl_output::DESCRIPTION_SINCE {
             return;
         }
         let Some(output) = self.output(state) else {
@@ -182,7 +182,7 @@ impl WlOutput {
     }
 
     pub fn send_done(&self, dispatcher: &mut ClientDispatcher) {
-        if self.version < 2 {
+        if self.version < wl_output::DONE_SINCE {
             return;
         }
         self.send_event(wl_output::Event::Done, dispatcher);

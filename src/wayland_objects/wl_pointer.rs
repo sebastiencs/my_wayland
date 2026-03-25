@@ -9,11 +9,13 @@ use crate::{
 #[derive(Debug)]
 pub struct WlPointer {
     id: WlPointerId,
+    /// `wl_seat` version the client used when creating this object (`get_pointer`).
+    version: u32,
 }
 
 impl WlPointer {
-    pub fn new(id: WlPointerId) -> Self {
-        Self { id }
+    pub fn new(id: WlPointerId, version: u32) -> Self {
+        Self { id, version }
     }
 
     pub fn send_enter(
@@ -50,6 +52,9 @@ impl WlPointer {
     }
 
     pub fn send_frame(&self, dispatcher: &mut ClientDispatcher) {
+        if self.version < wl_pointer::FRAME_SINCE {
+            return;
+        }
         self.send_event(wl_pointer::Event::Frame, dispatcher);
     }
 }

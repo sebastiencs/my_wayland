@@ -5,6 +5,9 @@ use crate::{
     state::{Output, OutputId, State},
 };
 
+/// `xdg_output.done` is not sent for client objects at version 3+ (use `wl_output.done` instead).
+const DONE_EVENT_NOT_SENT_SINCE: u32 = 3;
+
 #[derive(Debug)]
 pub struct ZxdgOutputV1 {
     id: ZxdgOutputV1Id,
@@ -60,7 +63,7 @@ impl ZxdgOutputV1 {
     }
 
     pub fn send_name(&self, state: &State, dispatcher: &mut ClientDispatcher) {
-        if self.version < 2 {
+        if self.version < zxdg_output_v1::NAME_SINCE {
             return;
         }
         let Some(output) = self.output(state) else {
@@ -71,7 +74,7 @@ impl ZxdgOutputV1 {
     }
 
     pub fn send_description(&self, state: &State, dispatcher: &mut ClientDispatcher) {
-        if self.version < 2 {
+        if self.version < zxdg_output_v1::DESCRIPTION_SINCE {
             return;
         }
         let Some(output) = self.output(state) else {
@@ -82,7 +85,7 @@ impl ZxdgOutputV1 {
     }
 
     pub fn send_done(&self, dispatcher: &mut ClientDispatcher) {
-        if self.version >= 3 {
+        if self.version >= DONE_EVENT_NOT_SENT_SINCE {
             return;
         }
         self.send_event(zxdg_output_v1::Event::Done, dispatcher);

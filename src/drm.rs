@@ -2372,6 +2372,9 @@ fn dispatch_submission_frame_callbacks(
     }
 }
 
+/// `wp_presentation_feedback.presented`: v1 requires `refresh` to be 0 when the refresh rate is not constant.
+const WP_PRESENTATION_FEEDBACK_PRESENTED_REFRESH_RELAXED_SINCE: u32 = 2;
+
 fn presentation_refresh_interval_ns(
     refresh_millihz: i32,
     feedback_version: u32,
@@ -2380,7 +2383,9 @@ fn presentation_refresh_interval_ns(
     if refresh_millihz <= 0 {
         return 0;
     }
-    if feedback_version <= 1 && !refresh_is_constant {
+    if feedback_version < WP_PRESENTATION_FEEDBACK_PRESENTED_REFRESH_RELAXED_SINCE
+        && !refresh_is_constant
+    {
         return 0;
     }
     let refresh = u64::try_from(refresh_millihz).unwrap_or(0);

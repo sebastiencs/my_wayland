@@ -1331,8 +1331,8 @@ mod xdg_seat_tests {
             globals::Globals,
             object::Object,
             protocol_generated::{
-                xdg_toplevel, WlSeatId, WlSurfaceId, XdgPopupId, XdgPositionerId, XdgSurfaceId,
-                XdgToplevelId, XdgWmBaseId,
+                xdg_toplevel, Constants, WlSeatId, WlSurfaceId, XdgPopupId, XdgPositionerId,
+                XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
             },
             runner::Dispatcher,
             state::{ObjectId, State},
@@ -1342,6 +1342,7 @@ mod xdg_seat_tests {
                 xdg_popup::XdgPopup,
                 xdg_positioner::{PositionerState, XdgPositioner},
                 xdg_surface::{xdg_toplevel::XdgToplevel, XdgSurface},
+                xdg_wm_base::XdgWmBase,
             },
             xkb::Xkb,
         },
@@ -1534,6 +1535,7 @@ mod xdg_seat_tests {
                 XdgSurfaceId::from(21),
                 Some(XdgSurfaceId::from(20)),
                 PositionerState::default(),
+                XdgWmBase::INTERFACE_VERSION,
             ),
         );
 
@@ -1591,6 +1593,7 @@ mod xdg_seat_tests {
                 XdgSurfaceId::from(21),
                 Some(XdgSurfaceId::from(20)),
                 PositionerState::default(),
+                XdgWmBase::INTERFACE_VERSION,
             ),
         );
 

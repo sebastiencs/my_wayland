@@ -632,7 +632,7 @@ impl WlSurface {
         y: i32,
         dispatcher: &mut ClientDispatcher,
     ) -> Result<(), wl_surface::Error> {
-        if self.version >= 5 {
+        if self.version >= wl_surface::OFFSET_SINCE {
             if x != 0 || y != 0 {
                 self.send_error(
                     dispatcher,
@@ -2106,6 +2106,15 @@ impl Object for WlSurface {
                 self.on_commit(client, state, dispatcher);
             }
             SetBufferTransform { transform } => {
+                if self.version < wl_surface::SET_BUFFER_TRANSFORM_SINCE {
+                    client.protocol_violation_disconnect(
+                        dispatcher,
+                        self.id.into(),
+                        wl_display::Error::InvalidMethod as u32,
+                        "wl_surface.set_buffer_transform requires wl_surface version >= 2",
+                    );
+                    return;
+                }
                 let Some(transform) = BufferTransform::from_wayland(transform) else {
                     self.send_error(
                         dispatcher,
@@ -2117,6 +2126,15 @@ impl Object for WlSurface {
                 self.pending.buffer_transform = transform;
             }
             SetBufferScale { scale } => {
+                if self.version < wl_surface::SET_BUFFER_SCALE_SINCE {
+                    client.protocol_violation_disconnect(
+                        dispatcher,
+                        self.id.into(),
+                        wl_display::Error::InvalidMethod as u32,
+                        "wl_surface.set_buffer_scale requires wl_surface version >= 3",
+                    );
+                    return;
+                }
                 if scale < 1 {
                     self.send_error(
                         dispatcher,
@@ -2128,11 +2146,29 @@ impl Object for WlSurface {
                 self.pending.buffer_scale = scale;
             }
             DamageBuffer { x, y, width, height } => {
+                if self.version < wl_surface::DAMAGE_BUFFER_SINCE {
+                    client.protocol_violation_disconnect(
+                        dispatcher,
+                        self.id.into(),
+                        wl_display::Error::InvalidMethod as u32,
+                        "wl_surface.damage_buffer requires wl_surface version >= 4",
+                    );
+                    return;
+                }
                 self.pending
                     .damage_buffer
                     .push(DamageRect { x, y, width, height });
             }
             Offset { x, y } => {
+                if self.version < wl_surface::OFFSET_SINCE {
+                    client.protocol_violation_disconnect(
+                        dispatcher,
+                        self.id.into(),
+                        wl_display::Error::InvalidMethod as u32,
+                        "wl_surface.offset requires wl_surface version >= 5",
+                    );
+                    return;
+                }
                 if self.role != Role::Subsurface {
                     self.pending.offset = (x, y);
                 }

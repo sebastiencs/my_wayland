@@ -9,6 +9,9 @@ use crate::{
     wayland_objects::wl_display::WlDisplay,
 };
 
+/// `Shape::DndAsk` and `Shape::AllResize` were added in `wp_cursor_shape_device_v1` protocol version 2.
+const CURSOR_SHAPE_EXTENDED_ENUM_VALUES_SINCE: u32 = 2;
+
 #[derive(Clone, Copy, Debug)]
 enum DeviceKind {
     Pointer { pointer_id: WlPointerId },
@@ -130,8 +133,16 @@ pub fn cursor_icon_names(shape: u32, version: u32) -> Option<&'static [&'static 
         value if value == Shape::AllScroll as u32 => &["all-scroll", "fleur", "size_all"],
         value if value == Shape::ZoomIn as u32 => &["zoom-in"],
         value if value == Shape::ZoomOut as u32 => &["zoom-out"],
-        value if value == Shape::DndAsk as u32 && version >= 2 => &["dnd-ask", "question_arrow"],
-        value if value == Shape::AllResize as u32 && version >= 2 => {
+        value
+            if value == Shape::DndAsk as u32
+                && version >= CURSOR_SHAPE_EXTENDED_ENUM_VALUES_SINCE =>
+        {
+            &["dnd-ask", "question_arrow"]
+        }
+        value
+            if value == Shape::AllResize as u32
+                && version >= CURSOR_SHAPE_EXTENDED_ENUM_VALUES_SINCE =>
+        {
             &["all-resize", "fleur", "size_all"]
         }
         _ => return None,
