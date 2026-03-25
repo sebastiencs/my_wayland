@@ -923,14 +923,16 @@ impl Client {
     ) {
         let root_surface_ids = state.root_surface_ids();
         for surface_object_id in root_surface_ids {
-            let Some(surface) = state
-                .objects
-                .try_grab_object::<WlSurface>(surface_object_id)
-            else {
-                continue;
-            };
-            if surface.client_id() != self.id || !surface.is_root() {
-                continue;
+            {
+                let Some(surface) = state
+                    .objects
+                    .try_grab_object::<WlSurface>(surface_object_id)
+                else {
+                    continue;
+                };
+                if surface.client_id() != self.id || !surface.is_root() {
+                    continue;
+                }
             }
             refresh_surface_tree_outputs(self, state, dispatcher, surface_object_id, 0, 0);
         }
