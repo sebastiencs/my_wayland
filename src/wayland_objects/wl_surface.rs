@@ -432,10 +432,12 @@ impl WlSurface {
     }
 
     pub fn send_output_enter(&self, output: WlOutputId, dispatcher: &mut ClientDispatcher) {
+        log::debug!("sending wl_surface.enter surface={:?} output={:?}", self.id, output);
         self.send_event(wl_surface::Event::Enter { output }, dispatcher);
     }
 
     pub fn send_output_leave(&self, output: WlOutputId, dispatcher: &mut ClientDispatcher) {
+        log::debug!("sending wl_surface.leave surface={:?} output={:?}", self.id, output);
         self.send_event(wl_surface::Event::Leave { output }, dispatcher);
     }
 
@@ -1473,6 +1475,12 @@ impl WlSurface {
         };
 
         if changed {
+            log::debug!(
+                "wl_surface commit scheduling RefreshSurfaceOutputs client={:?} surface={:?} changed={}",
+                client.client_id(),
+                self.id,
+                changed
+            );
             dispatcher.dispatch_to(
                 client.client_id(),
                 crate::clients::ClientAction::RefreshSurfaceOutputs,

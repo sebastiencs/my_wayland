@@ -871,6 +871,13 @@ impl Client {
         entered: bool,
     ) {
         let output_object_ids = self.output_object_ids_for_output(state, output_id);
+        log::debug!(
+            "surface output event surface={:?} output={:?} entered={} wl_output_resources={:?}",
+            surface_object_id,
+            output_id,
+            entered,
+            output_object_ids
+        );
         if output_object_ids.is_empty() {
             return;
         }
@@ -922,6 +929,7 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
     ) {
         let root_surface_ids = state.root_surface_ids();
+        log::debug!("refresh_surface_outputs client={:?} roots={:?}", self.id, root_surface_ids);
         for surface_object_id in root_surface_ids {
             {
                 let Some(surface) = state
@@ -930,6 +938,12 @@ impl Client {
                 else {
                     continue;
                 };
+                log::debug!(
+                    "refresh_surface_outputs root candidate object={:?} client={:?} is_root={}",
+                    surface_object_id,
+                    surface.client_id(),
+                    surface.is_root()
+                );
                 if surface.client_id() != self.id || !surface.is_root() {
                     continue;
                 }
@@ -1069,11 +1083,22 @@ fn refresh_surface_tree_outputs(
             .unwrap_or_default();
         let child_base =
             (surface_origin.0 + current_position.0, surface_origin.1 + current_position.1);
-        (
-            surface.current_stack().to_vec(),
+        log::debug!(
+            "surface output refresh surface={:?} render={:?} child_base={:?} next_outputs={:?}",
+            surface_object_id,
+            render_state.as_ref().map(|r| (r.x, r.y, r.width, r.height)),
             child_base,
-            surface.update_output_membership(next_outputs),
-        )
+            next_outputs
+        );
+        let delta = surface.update_output_membership(next_outputs);
+        log::debug!(
+            "surface output delta surface={:?} entered={:?} left={:?} active_changed={}",
+            surface_object_id,
+            delta.entered,
+            delta.left,
+            delta.active_output_changed
+        );
+        (surface.current_stack().to_vec(), child_base, delta)
     };
 
     for output_id in delta.left {
