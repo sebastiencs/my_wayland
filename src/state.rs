@@ -5,6 +5,7 @@ use crate::{
     input::Input,
     object::Object,
     protocol_generated::WaylandId,
+    region::RectI,
     seat::SeatState,
     xkb::{KeyboardState, Xkb},
 };
@@ -507,6 +508,11 @@ impl Output {
             _ => (self.current_mode.width, self.current_mode.height),
         };
         (width / scale, height / scale)
+    }
+
+    pub fn logical_bounds(&self) -> Option<RectI> {
+        let (width, height) = self.logical_size();
+        RectI::new(self.x, self.y, width, height)
     }
 
     fn mode_from_connector(mode: &drm::control::Mode) -> OutputMode {

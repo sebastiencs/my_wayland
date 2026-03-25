@@ -674,6 +674,7 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
     };
     match grab {
         PointerInteractiveGrab::Move {
+            client_id,
             root_surface_object_id,
             initial_pointer_pos,
             initial_root_pos,
@@ -690,6 +691,7 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
                 return true;
             };
             surface.set_root_position(initial_root_pos.0 + dx, initial_root_pos.1 + dy);
+            dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
             schedule_active_output(state, dispatcher);
         }
         PointerInteractiveGrab::Resize {
@@ -729,6 +731,7 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
             if let Some(surface) = surface_object.downcast_mut::<WlSurface>() {
                 surface.set_root_position(x, y);
             }
+            dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
             schedule_active_output(state, dispatcher);
 
             if last_size != (width, height) {

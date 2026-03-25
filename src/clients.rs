@@ -19,8 +19,8 @@ use crate::{
     },
     object::{IdToObject, Object, Parser, ParserError},
     protocol_generated::{
-        wl_display, Array, Constants, WaylandId, WlSurfaceId, WpPresentationFeedbackId, XdgPopupId,
-        XdgToplevelId,
+        wl_display, Array, Constants, WaylandId, WlOutputId, WlSurfaceId, WpPresentationFeedbackId,
+        XdgPopupId, XdgToplevelId,
     },
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     seat::SeatClientEvent,
@@ -254,6 +254,7 @@ pub enum ClientAction {
     OutputRemoved {
         output_id: OutputId,
     },
+    RefreshSurfaceOutputs,
     ReleaseBuffer {
         buffer_id: crate::protocol_generated::WlBufferId,
     },
@@ -650,7 +651,7 @@ impl Client {
                 continue;
             };
             if wl_output.matches_output(output_id) {
-                resources.push(wl_output.id());
+                resources.push(wl_output.wl_output_id().into());
             }
         }
         resources
@@ -820,7 +821,7 @@ impl Client {
     }
 
     fn handle_output_state_changed(
-        &self,
+        &mut self,
         state: &State,
         dispatcher: &mut ClientDispatcher,
         output_id: OutputId,
@@ -846,7 +847,141 @@ impl Client {
         }
     }
 
-    fn handle_output_removed(&self, state: &mut State, output_id: OutputId) {
+    fn output_object_ids_for_output(&self, state: &State, output_id: OutputId) -> Vec<WlOutputId> {
+        let mut output_object_ids = Vec::new();
+        for &object_id in self.objects.values() {
+            let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(object_id) else {
+                continue;
+            };
+            if wl_output.matches_output(output_id) {
+                output_object_ids.push(wl_output.wl_output_id());
+            }
+        }
+        output_object_ids
+    }
+
+    fn send_surface_output_membership_event(
+        &self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        surface_object_id: ObjectId,
+        output_id: OutputId,
+        entered: bool,
+    ) {
+        let output_object_ids = self.output_object_ids_for_output(state, output_id);
+        if output_object_ids.is_empty() {
+            return;
+        }
+        let Some(mut surface_object) = state.objects.try_grab(surface_object_id) else {
+            return;
+        };
+        let Some(surface) = surface_object.downcast_mut::<WlSurface>() else {
+            return;
+        };
+        for output_object_id in output_object_ids {
+            if entered {
+                surface.send_output_enter(output_object_id, dispatcher);
+            } else {
+                surface.send_output_leave(output_object_id, dispatcher);
+            }
+        }
+    }
+
+    pub(crate) fn replay_surface_output_for_output(
+        &self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        output_id: OutputId,
+    ) {
+        let surface_object_ids = self
+            .objects
+            .values()
+            .copied()
+            .filter(|object_id| {
+                state
+                    .objects
+                    .try_get_ref_of::<WlSurface>(*object_id)
+                    .is_some_and(|surface| surface.contains_output(output_id))
+            })
+            .collect::<Vec<_>>();
+        for surface_object_id in surface_object_ids {
+            self.send_surface_output_membership_event(
+                state,
+                dispatcher,
+                surface_object_id,
+                output_id,
+                true,
+            );
+        }
+    }
+
+    pub(crate) fn refresh_surface_outputs(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let root_surface_ids = state.root_surface_ids();
+        for surface_object_id in root_surface_ids {
+            let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(surface_object_id) else {
+                continue;
+            };
+            if surface.client_id() != self.id || !surface.is_root() {
+                continue;
+            }
+            refresh_surface_tree_outputs(self, state, dispatcher, surface_object_id, 0, 0);
+        }
+    }
+
+    fn reconfigure_mapped_toplevels(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let object_ids = self.objects.values().copied().collect::<Vec<_>>();
+        for object_id in object_ids {
+            let Some(toplevel_ref) = state.objects.try_get_ref_of::<XdgToplevel>(object_id) else {
+                continue;
+            };
+            let xdg_surface_id = toplevel_ref.xdg_surface_id();
+            let toplevel_id = toplevel_ref.toplevel_id();
+            let Some(xdg_surface_object_id) = self.object_id_for_wayland(xdg_surface_id.into())
+            else {
+                continue;
+            };
+            let Some(xdg_surface_ref) = state
+                .objects
+                .try_get_ref_of::<XdgSurface>(xdg_surface_object_id)
+            else {
+                continue;
+            };
+            let wl_surface_id = xdg_surface_ref.wl_surface_id();
+            let Some(wl_surface_object_id) = self.object_id_for_wayland(wl_surface_id.into())
+            else {
+                continue;
+            };
+            let Some(surface_ref) = state
+                .objects
+                .try_get_ref_of::<WlSurface>(wl_surface_object_id)
+            else {
+                continue;
+            };
+            if surface_ref.logical_size().is_none() {
+                continue;
+            }
+
+            let mut xdg_surface = self.grab_object(xdg_surface_id, state);
+            let mut toplevel = self.grab_object(toplevel_id, state);
+            toplevel.schedule_configure(self, state, &mut xdg_surface, dispatcher);
+        }
+    }
+
+    fn handle_output_removed(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        output_id: OutputId,
+    ) {
+        self.refresh_surface_outputs(state, dispatcher);
         let object_ids = self.objects.values().copied().collect::<Vec<_>>();
 
         for object_id in object_ids {
@@ -864,6 +999,107 @@ impl Client {
                     xdg_output.mark_removed();
                 }
             }
+        }
+        self.reconfigure_mapped_toplevels(state, dispatcher);
+    }
+}
+
+fn surface_intersecting_outputs(
+    state: &State,
+    render_state: &crate::wayland_objects::wl_surface::SurfaceRenderState,
+) -> Vec<OutputId> {
+    let Some(surface_bounds) = crate::region::RectI::new(
+        render_state.x,
+        render_state.y,
+        render_state.width,
+        render_state.height,
+    ) else {
+        return Vec::new();
+    };
+    state
+        .outputs
+        .iter()
+        .filter_map(|(output_id, output)| {
+            output
+                .logical_bounds()?
+                .intersects(surface_bounds)
+                .then_some(output_id)
+        })
+        .collect()
+}
+
+fn refresh_surface_tree_outputs(
+    client: &mut Client,
+    state: &mut State,
+    dispatcher: &mut ClientDispatcher,
+    surface_object_id: ObjectId,
+    base_x: i32,
+    base_y: i32,
+) {
+    let (stack, current_position, surface_origin, render_state) = {
+        let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(surface_object_id) else {
+            return;
+        };
+        let render_state = surface.render_state_at(base_x, base_y);
+        let surface_origin = render_state
+            .as_ref()
+            .map(|render_state| (render_state.x, render_state.y))
+            .unwrap_or_else(|| {
+                let (x, y) = surface.root_position();
+                (base_x + x, base_y + y)
+            });
+        (
+            surface.current_stack().to_vec(),
+            surface.current_subsurface_position(),
+            surface_origin,
+            render_state,
+        )
+    };
+
+    let next_outputs = render_state
+        .as_ref()
+        .map(|render_state| surface_intersecting_outputs(state, render_state))
+        .unwrap_or_default();
+    let delta = {
+        let mut surface_object = state.objects.grab(surface_object_id);
+        let Some(surface) = surface_object.downcast_mut::<WlSurface>() else {
+            return;
+        };
+        surface.update_output_membership(next_outputs)
+    };
+
+    for output_id in delta.left {
+        client.send_surface_output_membership_event(
+            state,
+            dispatcher,
+            surface_object_id,
+            output_id,
+            false,
+        );
+    }
+    for output_id in delta.entered {
+        client.send_surface_output_membership_event(
+            state,
+            dispatcher,
+            surface_object_id,
+            output_id,
+            true,
+        );
+    }
+
+    let child_base = (surface_origin.0 + current_position.0, surface_origin.1 + current_position.1);
+    for entry in stack {
+        if let crate::wayland_objects::wl_surface::StackEntry::Child(child_surface_object_id) =
+            entry
+        {
+            refresh_surface_tree_outputs(
+                client,
+                state,
+                dispatcher,
+                child_surface_object_id,
+                child_base.0,
+                child_base.1,
+            );
         }
     }
 }
@@ -979,9 +1215,14 @@ impl Model for Client {
             }
             OutputStateChanged { output_id } => {
                 self.handle_output_state_changed(state, &mut dispatcher, output_id);
+                self.refresh_surface_outputs(state, &mut dispatcher);
+                self.reconfigure_mapped_toplevels(state, &mut dispatcher);
             }
             OutputRemoved { output_id } => {
-                self.handle_output_removed(state, output_id);
+                self.handle_output_removed(state, &mut dispatcher, output_id);
+            }
+            RefreshSurfaceOutputs => {
+                self.refresh_surface_outputs(state, &mut dispatcher);
             }
             ReleaseBuffer { buffer_id } => {
                 if self.contains_object(buffer_id, state) {
@@ -1109,6 +1350,8 @@ impl Model for Client {
                 let mut xdg_surface = self.grab_object(xdg_surface_id, state);
                 let mut toplevel = self.grab_object(xdg_toplevel_id, state);
                 toplevel.send_interactive_resize_configure(
+                    self,
+                    state,
                     &mut xdg_surface,
                     width,
                     height,

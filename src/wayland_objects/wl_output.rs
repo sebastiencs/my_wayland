@@ -34,11 +34,13 @@ impl Global for WlOutputGlobal {
         dispatcher: &mut ClientDispatcher,
     ) {
         let id = WlOutputId::from(id);
-        let wl_output = WlOutput { id, output_id: Some(self.output_id), version };
-
+        let ((_, object_id), _) =
+            client.insert_object(state, WlOutput { id, output_id: Some(self.output_id), version });
+        let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(object_id) else {
+            return;
+        };
         wl_output.send_state(state, dispatcher);
-
-        client.insert_object(state, wl_output);
+        client.replay_surface_output_for_output(state, dispatcher, self.output_id);
     }
 }
 
@@ -73,6 +75,10 @@ impl Object for WlOutput {
 }
 
 impl WlOutput {
+    pub fn wl_output_id(&self) -> WlOutputId {
+        self.id
+    }
+
     pub fn output_id(&self) -> Option<OutputId> {
         self.output_id
     }

@@ -1,10 +1,12 @@
+use std::collections::BTreeSet;
+
 use crate::{
     clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest},
     drm::schedule_active_output,
     object::{Object, Parser},
     protocol_generated::{
         wl_surface, wp_linux_drm_syncobj_surface_v1, wp_viewport, xdg_wm_base, WaylandId,
-        WlBufferId, WlCallbackId, WlRegionId, WlSubsurfaceId, WlSurfaceId,
+        WlBufferId, WlCallbackId, WlOutputId, WlRegionId, WlSubsurfaceId, WlSurfaceId,
         WpPresentationFeedbackId, XdgSurfaceId,
     },
     region::{DamageRegion, RectI, RegionValue},
@@ -105,6 +107,8 @@ pub struct WlSurface {
     cached_commit: Option<CachedCommit>,
     subsurface: Option<SubsurfaceState>,
     tree: SurfaceTreeState,
+    output_membership: BTreeSet<OutputId>,
+    active_output: Option<OutputId>,
 }
 
 #[derive(Clone, Debug)]
@@ -245,6 +249,13 @@ struct DamageScaffold {
     buffer_to_surface: Vec<transform::RectF>,
 }
 
+#[derive(Debug, Default)]
+pub struct SurfaceOutputDelta {
+    pub entered: Vec<OutputId>,
+    pub left: Vec<OutputId>,
+    pub active_output_changed: bool,
+}
+
 impl WlSurface {
     pub fn new(id: WlSurfaceId, client_id: ClientId, version: u32) -> Self {
         Self {
@@ -265,6 +276,8 @@ impl WlSurface {
             cached_commit: None,
             subsurface: None,
             tree: SurfaceTreeState::default(),
+            output_membership: BTreeSet::new(),
+            active_output: None,
         }
     }
 
@@ -379,6 +392,51 @@ impl WlSurface {
 
     pub fn root_position(&self) -> (i32, i32) {
         (self.on_screen.x, self.on_screen.y)
+    }
+
+    pub fn active_output_id(&self) -> Option<OutputId> {
+        self.active_output
+    }
+
+    pub fn contains_output(&self, output_id: OutputId) -> bool {
+        self.output_membership.contains(&output_id)
+    }
+
+    pub fn update_output_membership(
+        &mut self,
+        outputs_in_priority_order: Vec<OutputId>,
+    ) -> SurfaceOutputDelta {
+        let mut next_membership = BTreeSet::new();
+        let mut next_active_output = None;
+        for output_id in outputs_in_priority_order {
+            if next_membership.insert(output_id) && next_active_output.is_none() {
+                next_active_output = Some(output_id);
+            }
+        }
+
+        let left = self
+            .output_membership
+            .difference(&next_membership)
+            .copied()
+            .collect();
+        let entered = next_membership
+            .difference(&self.output_membership)
+            .copied()
+            .collect();
+        let active_output_changed = self.active_output != next_active_output;
+
+        self.output_membership = next_membership;
+        self.active_output = next_active_output;
+
+        SurfaceOutputDelta { entered, left, active_output_changed }
+    }
+
+    pub fn send_output_enter(&self, output: WlOutputId, dispatcher: &mut ClientDispatcher) {
+        self.send_event(wl_surface::Event::Enter { output }, dispatcher);
+    }
+
+    pub fn send_output_leave(&self, output: WlOutputId, dispatcher: &mut ClientDispatcher) {
+        self.send_event(wl_surface::Event::Leave { output }, dispatcher);
     }
 
     pub fn set_root_position(&mut self, x: i32, y: i32) {
@@ -1408,6 +1466,10 @@ impl WlSurface {
             )
         };
 
+        if changed {
+            client.refresh_surface_outputs(state, dispatcher);
+        }
+
         if changed || needs_frame {
             schedule_active_output(state, dispatcher);
         }
@@ -1723,6 +1785,7 @@ impl WlSurface {
         self.retire_current();
         self.on_screen.logical_size = None;
         self.on_screen.damage.clear();
+        client.refresh_surface_outputs(state, dispatcher);
     }
 
     pub fn take_retired_buffers(&mut self) -> Vec<RetiredBufferCandidate> {
