@@ -1,24 +1,23 @@
-//! `wl_output` global: one instance per DRM device in this compositor, describing the
-//! currently selected connector (see [`crate::drm::DrmOutput::in_use`]). A full multi-output
-//! setup should register one global per logical connector.
+//! `wl_output` global backed by compositor-facing logical outputs. The DRM backend still owns
+//! presentation/runtime state, but protocol-facing geometry and metadata live in
+//! [`crate::state::Output`].
 
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
-    drm::Drm,
     globals::Global,
     object::{Object, Parser},
     protocol_generated::{wl_output, Constants, NewId, WaylandId, WlOutputId},
-    state::{DrmId, State},
+    state::{Output, OutputId, State},
 };
 
 #[derive(Debug)]
 pub struct WlOutputGlobal {
-    drm_id: DrmId,
+    output_id: OutputId,
 }
 
 impl WlOutputGlobal {
-    pub fn new(drm_id: DrmId) -> Box<dyn Global> {
-        Box::new(Self { drm_id })
+    pub fn new(output_id: OutputId) -> Box<dyn Global> {
+        Box::new(Self { output_id })
     }
 }
 
@@ -31,18 +30,13 @@ impl Global for WlOutputGlobal {
         client: &mut Client,
         state: &mut State,
         id: NewId,
-        _version: u32,
+        version: u32,
         dispatcher: &mut ClientDispatcher,
     ) {
         let id = WlOutputId::from(id);
-        let wl_output = WlOutput { id, drm_id: self.drm_id };
+        let wl_output = WlOutput { id, output_id: Some(self.output_id), version };
 
-        wl_output.send_geometry(state, dispatcher);
-        wl_output.send_mode(state, dispatcher);
-        // TODO: Check versions
-        wl_output.send_scale(dispatcher);
-        wl_output.send_name(state, dispatcher);
-        wl_output.send_done(dispatcher);
+        wl_output.send_state(state, dispatcher);
 
         client.insert_object(state, wl_output);
     }
@@ -51,7 +45,8 @@ impl Global for WlOutputGlobal {
 #[derive(Debug)]
 pub struct WlOutput {
     id: WlOutputId,
-    drm_id: DrmId,
+    output_id: Option<OutputId>,
+    version: u32,
 }
 
 impl Object for WlOutput {
@@ -62,75 +57,128 @@ impl Object for WlOutput {
     fn on(
         &mut self,
         client: &mut Client,
-        _: &mut State,
+        state: &mut State,
         req: RawRequest,
-        _: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) {
         use wl_output::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
-            Release => todo!(),
+            Release => {
+                use crate::wayland_objects::wl_display::WlDisplay;
+                client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
+            }
         }
     }
 }
 
 impl WlOutput {
-    fn get_drm<'a>(&self, state: &'a State) -> &'a Drm {
-        state.drm.get(self.drm_id)
+    pub fn output_id(&self) -> Option<OutputId> {
+        self.output_id
+    }
+
+    pub fn matches_output(&self, output_id: OutputId) -> bool {
+        self.output_id == Some(output_id)
+    }
+
+    pub fn mark_removed(&mut self) {
+        self.output_id = None;
+    }
+
+    fn output<'a>(&self, state: &'a State) -> Option<&'a Output> {
+        self.output_id
+            .and_then(|output_id| state.outputs.try_get(output_id))
+    }
+
+    pub fn send_state(&self, state: &State, dispatcher: &mut ClientDispatcher) {
+        if self.output(state).is_none() {
+            return;
+        }
+        self.send_geometry(state, dispatcher);
+        self.send_mode(state, dispatcher);
+        self.send_scale(state, dispatcher);
+        self.send_name(state, dispatcher);
+        self.send_description(state, dispatcher);
+        self.send_done(dispatcher);
     }
 
     pub fn send_geometry(&self, state: &State, dispatcher: &mut ClientDispatcher) {
-        let drm = self.get_drm(state);
-        let in_use = &drm.output.in_use;
+        let Some(output) = self.output(state) else {
+            return;
+        };
 
         let geometry = wl_output::Event::Geometry {
-            x: 0,
-            y: 0,
-            physical_width: in_use.connector.mm_width as i32,
-            physical_height: in_use.connector.mm_height as i32,
+            x: output.x,
+            y: output.y,
+            physical_width: output.physical_width,
+            physical_height: output.physical_height,
             subpixel: wl_output::Subpixel::Unknown as i32,
-            make: in_use.connector.manufacturer_id.clone(),
-            model: in_use.connector.model_name.clone().unwrap_or_default(),
-            transform: wl_output::Transform::Normal as i32,
+            make: output.make.clone(),
+            model: output.model.clone(),
+            transform: output.transform,
         };
         self.send_event(geometry, dispatcher);
     }
 
     pub fn send_mode(&self, state: &State, dispatcher: &mut ClientDispatcher) {
-        let drm = self.get_drm(state);
-        let in_use = &drm.output.in_use;
-
-        let mode = in_use.connector.preferred_mode.as_ref().unwrap();
-        let (width, height) = mode.size();
-
-        let refresh = {
-            let clock_milli_hertz = mode.clock() as u64 * 1_000_000;
-            let (_, _, htotal) = mode.hsync();
-            let (_, _, vtotal) = mode.vsync();
-            ((clock_milli_hertz / htotal as u64) + (vtotal as u64 / 2)) / vtotal as u64
+        let Some(output) = self.output(state) else {
+            return;
         };
+        let mode = &output.current_mode;
+        let mut flags = wl_output::Mode::Current as u32;
+        if output
+            .preferred_mode
+            .as_ref()
+            .is_some_and(|preferred| preferred == mode)
+        {
+            flags |= wl_output::Mode::Preferred as u32;
+        }
 
         let mode = wl_output::Event::Mode {
-            flags: wl_output::Mode::Current as u32,
-            width: width as i32,
-            height: height as i32,
-            refresh: refresh as i32,
+            flags,
+            width: mode.width,
+            height: mode.height,
+            refresh: mode.refresh_millihz,
         };
         self.send_event(mode, dispatcher);
     }
 
-    pub fn send_scale(&self, dispatcher: &mut ClientDispatcher) {
-        let scale = wl_output::Event::Scale { factor: 1 }; // TODO: Support other
+    pub fn send_scale(&self, state: &State, dispatcher: &mut ClientDispatcher) {
+        if self.version < 2 {
+            return;
+        }
+        let scale = wl_output::Event::Scale {
+            factor: self.output(state).map(|output| output.scale).unwrap_or(1),
+        };
         self.send_event(scale, dispatcher);
     }
 
     pub fn send_name(&self, state: &State, dispatcher: &mut ClientDispatcher) {
-        let drm = self.get_drm(state);
-        let name = drm.output.in_use.connector.interface_name.clone();
+        if self.version < 4 {
+            return;
+        }
+        let Some(output) = self.output(state) else {
+            return;
+        };
+        let name = output.name.clone();
         self.send_event(wl_output::Event::Name { name }, dispatcher);
     }
 
+    pub fn send_description(&self, state: &State, dispatcher: &mut ClientDispatcher) {
+        if self.version < 4 {
+            return;
+        }
+        let Some(output) = self.output(state) else {
+            return;
+        };
+        let description = output.description.clone();
+        self.send_event(wl_output::Event::Description { description }, dispatcher);
+    }
+
     pub fn send_done(&self, dispatcher: &mut ClientDispatcher) {
+        if self.version < 2 {
+            return;
+        }
         self.send_event(wl_output::Event::Done, dispatcher);
     }
 }

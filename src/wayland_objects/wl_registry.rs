@@ -15,15 +15,29 @@ impl WlRegistry {
         Self { id }
     }
 
+    pub fn send_global(
+        &self,
+        dispatcher: &mut ClientDispatcher,
+        name: u32,
+        interface: String,
+        version: u32,
+    ) {
+        self.send_event(wl_registry::Event::Global { name, interface, version }, dispatcher);
+    }
+
+    pub fn send_global_remove(&self, dispatcher: &mut ClientDispatcher, name: u32) {
+        self.send_event(wl_registry::Event::GlobalRemove { name }, dispatcher);
+    }
+
     pub fn list_global_objects(&self, state: &mut State, dispatcher: &mut ClientDispatcher) {
         for (name, global) in state.globals.iter() {
             let (interface_name, interface_version) = global.interface();
-            let global = wl_registry::Event::Global {
-                name: name.as_u32(),
-                interface: interface_name.to_string(),
-                version: interface_version,
-            };
-            self.send_event(global, dispatcher);
+            self.send_global(
+                dispatcher,
+                name.as_u32(),
+                interface_name.to_string(),
+                interface_version,
+            );
         }
     }
 }

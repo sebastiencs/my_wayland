@@ -27,7 +27,7 @@ use crate::{
     io_uring::ring::{ReadWriteCompleted, RingId},
     region::{DamageRegion, RectI},
     runner::{AnyAction, Dispatcher, Model},
-    state::{DrmId, ObjectId, State},
+    state::{BackendOutputRef, DrmId, ObjectId, OutputId, OutputMode, State},
     sync::{DeferredRelease, RetiredBufferCandidate},
     transform::{self, OutputPresentationTransform},
     wayland_objects::{
@@ -596,6 +596,28 @@ pub struct InFormat {
 }
 
 impl Drm {
+    pub fn current_output_mode(&self) -> Option<OutputMode> {
+        let mode_blob = self.output.in_use.crtc.mode_id;
+        if mode_blob == 0 {
+            return None;
+        }
+        let blob = self.fd.get_property_blob(mode_blob as u64).ok()?;
+        if blob.len() < std::mem::size_of::<drm_ffi::drm_sys::drm_mode_modeinfo>() {
+            return None;
+        }
+        let raw: drm_ffi::drm_sys::drm_mode_modeinfo = unsafe {
+            std::ptr::read_unaligned(blob.as_ptr() as *const drm_ffi::drm_sys::drm_mode_modeinfo)
+        };
+        let clock_milli_hertz = raw.clock as u64 * 1_000_000;
+        let refresh_millihz = (((clock_milli_hertz / raw.htotal as u64) + (raw.vtotal as u64 / 2))
+            / raw.vtotal as u64) as i32;
+        Some(OutputMode {
+            width: raw.hdisplay as i32,
+            height: raw.vdisplay as i32,
+            refresh_millihz,
+        })
+    }
+
     fn optional_plane_attempts(
         &self,
         want_damage_clips: bool,
@@ -667,6 +689,10 @@ impl Drm {
 
     pub fn fd(&self) -> DrmFd {
         self.fd.clone()
+    }
+
+    pub fn devnum(&self) -> Option<libc::dev_t> {
+        self.device.devnum()
     }
 
     pub fn supports_syncobj_timeline(&self) -> bool {
@@ -1861,14 +1887,27 @@ pub enum DrmAction {
     Stop,
 }
 
-pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
-    let Some((drm_id, _)) = state.drm.iter().next() else {
-        log::warn!("schedule_active_output: no active DRM output");
+pub fn sync_output_nodes_for_backend(state: &mut State, drm_id: DrmId) {
+    state.refresh_outputs_for_backend(BackendOutputRef::new(drm_id));
+}
+
+pub fn schedule_output(state: &State, output_id: OutputId, dispatcher: &mut Dispatcher) {
+    let Some(backend) = state.backend_for_output(output_id) else {
+        log::warn!("schedule_output: invalid logical output {:?}", output_id);
         return;
     };
 
-    let model_id = usize::from(drm_id) as u64;
+    let model_id = usize::from(backend.drm_id) as u64;
     dispatcher.dispatch_to(model_id, DrmAction::ScheduleFrame);
+}
+
+pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
+    let Some(output_id) = state.active_output_id() else {
+        log::warn!("schedule_active_output: no active logical output");
+        return;
+    };
+
+    schedule_output(state, output_id, dispatcher);
 }
 
 impl Model for DrmModel {
@@ -1884,13 +1923,16 @@ impl Model for DrmModel {
     ) -> Result<(), ()> {
         match action {
             DrmAction::Start => {
+                sync_output_nodes_for_backend(state, self.drm_id);
                 let fd = state.drm.get(self.drm_id).fd.as_raw_fd();
                 dispatcher.start_model(self.model_id(), DrmReader::new(self.drm_id, fd));
             }
             DrmAction::ScheduleFrame => {
+                sync_output_nodes_for_backend(state, self.drm_id);
                 self.schedule_frame(state, dispatcher);
             }
             DrmAction::RenderFrame => {
+                sync_output_nodes_for_backend(state, self.drm_id);
                 self.render_frame(state, dispatcher);
             }
             DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id } => {
@@ -2021,6 +2063,7 @@ impl DrmModel {
             let drm = state.drm.get(self.drm_id);
             let _ = drm.fd.destroy_property_blob(blob);
         }
+        sync_output_nodes_for_backend(state, self.drm_id);
         if should_render {
             dispatcher.dispatch_to(self.model_id(), DrmAction::RenderFrame);
         }
@@ -2104,7 +2147,11 @@ fn build_frame_plan(output: &DrmOutput, mut items: Vec<SceneItem>) -> FramePlan 
     let last_scene = &output.last_scene;
     let order_changed = scene_order(last_scene) != scene_order(&scene);
 
-    if !ENABLE_DAMAGE || output.force_full_redraw || order_changed || scene.len() != last_scene.len() {
+    if !ENABLE_DAMAGE
+        || output.force_full_redraw
+        || order_changed
+        || scene.len() != last_scene.len()
+    {
         base_damage.add_rect(output_bounds);
     } else {
         for (current, previous) in items.iter().zip(last_scene.iter()) {
@@ -2369,6 +2416,9 @@ mod surface_tree_render_tests {
             root_surfaces: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
+            outputs: Default::default(),
+            active_output: None,
+            backend_syncobj_globals: Default::default(),
             globals,
             egl: EGL::new(),
             seat: Default::default(),

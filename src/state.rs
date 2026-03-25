@@ -1,7 +1,7 @@
 use crate::{
     drm::Drm,
     egl::EGL,
-    globals::{Global, Globals},
+    globals::{Global, GlobalName, Globals},
     input::Input,
     object::Object,
     protocol_generated::WaylandId,
@@ -9,7 +9,7 @@ use crate::{
     xkb::{KeyboardState, Xkb},
 };
 
-use std::{marker::PhantomData, ptr::NonNull, rc::Rc};
+use std::{collections::BTreeMap, marker::PhantomData, ptr::NonNull, rc::Rc};
 
 #[derive(Debug)]
 enum ValueOrEmpty<V> {
@@ -400,12 +400,136 @@ where
 index_map_id!(ObjectId);
 index_map_id!(InputId);
 index_map_id!(DrmId);
+index_map_id!(OutputId);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackendOutputRef {
+    pub drm_id: DrmId,
+}
+
+impl BackendOutputRef {
+    pub fn new(drm_id: DrmId) -> Self {
+        Self { drm_id }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputMode {
+    pub width: i32,
+    pub height: i32,
+    pub refresh_millihz: i32,
+}
+
+#[derive(Clone, Debug)]
+pub struct Output {
+    pub backend: BackendOutputRef,
+    pub global_name: Option<GlobalName>,
+    pub x: i32,
+    pub y: i32,
+    pub physical_width: i32,
+    pub physical_height: i32,
+    pub scale: i32,
+    pub transform: i32,
+    pub make: String,
+    pub model: String,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub current_mode: OutputMode,
+    pub preferred_mode: Option<OutputMode>,
+}
+
+impl Output {
+    pub fn new(backend: BackendOutputRef, drm: &Drm) -> Self {
+        let mut output = Self {
+            backend,
+            global_name: None,
+            x: 0,
+            y: 0,
+            physical_width: 0,
+            physical_height: 0,
+            scale: 1,
+            transform: 0,
+            make: String::new(),
+            model: String::new(),
+            name: String::new(),
+            description: String::new(),
+            enabled: false,
+            current_mode: OutputMode { width: 0, height: 0, refresh_millihz: 0 },
+            preferred_mode: None,
+        };
+        output.refresh_from_backend(drm);
+        output
+    }
+
+    pub fn backend(&self) -> BackendOutputRef {
+        self.backend
+    }
+
+    pub fn refresh_from_backend(&mut self, drm: &Drm) {
+        let in_use = &drm.output.in_use;
+        let connector = &in_use.connector;
+
+        let preferred_mode = connector
+            .preferred_mode
+            .as_ref()
+            .map(Self::mode_from_connector);
+        let current_mode = drm
+            .current_output_mode()
+            .or_else(|| preferred_mode.clone())
+            .unwrap_or(OutputMode { width: 0, height: 0, refresh_millihz: 0 });
+
+        let make = connector.manufacturer_id.clone();
+        let model = connector.model_name.clone().unwrap_or_default();
+        let name = connector.interface_name.clone();
+        let description = match (make.is_empty(), model.is_empty()) {
+            (false, false) => format!("{make} {model}"),
+            (false, true) => make.clone(),
+            (true, false) => model.clone(),
+            (true, true) => name.clone(),
+        };
+
+        self.physical_width = connector.mm_width as i32;
+        self.physical_height = connector.mm_height as i32;
+        self.make = make;
+        self.model = model;
+        self.name = name;
+        self.description = description;
+        self.enabled = true;
+        self.current_mode = current_mode;
+        self.preferred_mode = preferred_mode;
+    }
+
+    pub fn logical_size(&self) -> (i32, i32) {
+        let scale = self.scale.max(1);
+        let (width, height) = match self.transform {
+            1 | 3 | 5 | 7 => (self.current_mode.height, self.current_mode.width),
+            _ => (self.current_mode.width, self.current_mode.height),
+        };
+        (width / scale, height / scale)
+    }
+
+    fn mode_from_connector(mode: &drm::control::Mode) -> OutputMode {
+        let (width, height) = mode.size();
+        let refresh_millihz = {
+            let clock_milli_hertz = mode.clock() as u64 * 1_000_000;
+            let (_, _, htotal) = mode.hsync();
+            let (_, _, vtotal) = mode.vsync();
+            (((clock_milli_hertz / htotal as u64) + (vtotal as u64 / 2)) / vtotal as u64) as i32
+        };
+
+        OutputMode { width: width as i32, height: height as i32, refresh_millihz }
+    }
+}
 
 pub struct State {
     pub objects: Box<IndexMap<ObjectId, Box<dyn Object>>>,
     pub root_surfaces: Vec<ObjectId>,
     pub inputs: IndexMap<InputId, Input>,
     pub drm: IndexMap<DrmId, Drm>,
+    pub outputs: IndexMap<OutputId, Output>,
+    pub active_output: Option<OutputId>,
+    pub backend_syncobj_globals: BTreeMap<DrmId, GlobalName>,
     pub globals: Globals,
     pub egl: EGL,
     pub seat: SeatState,
@@ -444,8 +568,75 @@ impl State {
             .collect()
     }
 
-    pub fn insert_global(&mut self, global: Box<dyn Global>) {
-        self.globals.insert(global);
+    pub fn insert_global(&mut self, global: Box<dyn Global>) -> GlobalName {
+        self.globals.insert(global)
+    }
+
+    pub fn remove_global(&mut self, name: GlobalName) -> Option<Box<dyn Global>> {
+        self.globals.remove(name)
+    }
+
+    pub fn insert_output(&mut self, output: Output) -> OutputId {
+        let output_id = self.outputs.insert(output);
+        self.active_output.get_or_insert(output_id);
+        output_id
+    }
+
+    pub fn remove_output(&mut self, output_id: OutputId) -> Option<Output> {
+        let removed = self.outputs.remove(output_id)?;
+        if self.active_output == Some(output_id) {
+            self.active_output = self.outputs.iter().next().map(|(other_id, _)| other_id);
+        }
+        Some(removed)
+    }
+
+    pub fn active_output_id(&self) -> Option<OutputId> {
+        self.active_output
+            .or_else(|| self.outputs.iter().next().map(|(output_id, _)| output_id))
+    }
+
+    pub fn backend_for_output(&self, output_id: OutputId) -> Option<BackendOutputRef> {
+        self.outputs
+            .try_get(output_id)
+            .map(|output| output.backend())
+    }
+
+    pub fn refresh_output_from_backend(&mut self, output_id: OutputId) -> bool {
+        let Some(backend) = self.backend_for_output(output_id) else {
+            return false;
+        };
+        let Some(drm) = self.drm.try_get(backend.drm_id) else {
+            return false;
+        };
+        let Some(output) = self.outputs.try_get_mut(output_id) else {
+            return false;
+        };
+        output.refresh_from_backend(drm);
+        true
+    }
+
+    pub fn refresh_outputs_for_backend(&mut self, backend: BackendOutputRef) {
+        let Some(drm) = self.drm.try_get(backend.drm_id) else {
+            return;
+        };
+        let output_ids = self
+            .outputs
+            .iter()
+            .filter_map(|(output_id, output)| (output.backend == backend).then_some(output_id))
+            .collect::<Vec<_>>();
+
+        for output_id in output_ids {
+            if let Some(output) = self.outputs.try_get_mut(output_id) {
+                output.refresh_from_backend(drm);
+            }
+        }
+    }
+
+    pub fn output_ids_for_backend(&self, backend: BackendOutputRef) -> Vec<OutputId> {
+        self.outputs
+            .iter()
+            .filter_map(|(output_id, output)| (output.backend == backend).then_some(output_id))
+            .collect()
     }
 }
 

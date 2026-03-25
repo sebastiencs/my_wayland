@@ -67,8 +67,12 @@ impl Globals {
         self.map.iter()
     }
 
-    pub fn insert(&mut self, global: Box<dyn Global>) {
-        self.map.insert(global);
+    pub fn insert(&mut self, global: Box<dyn Global>) -> GlobalName {
+        self.map.insert(global)
+    }
+
+    pub fn remove(&mut self, name: GlobalName) -> Option<Box<dyn Global>> {
+        self.map.remove(name)
     }
 
     pub fn contains_interface(&self, interface: &str) -> bool {

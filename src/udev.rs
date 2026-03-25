@@ -17,15 +17,16 @@ use nix::{
 };
 
 use crate::{
+    clients::ClientsAction,
     dbus::DbusAction,
-    drm::Drm,
+    drm::{sync_output_nodes_for_backend, Drm, DrmModel},
     input::LibinputAction,
     io_uring::{
         model::IoUringAction,
         ring::{PollCompleted, RingId},
     },
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
-    state::State,
+    state::{BackendOutputRef, DrmId, Output, OutputId, State},
     wayland_objects::{
         wl_output::WlOutputGlobal,
         wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1Global,
@@ -64,6 +65,7 @@ pub enum UdevAction {
     Start,
     Event,
     DeviceTaken { fd: RawFd, inactive: bool, devnum: libc::dev_t },
+    FinalizeBackendRemoval { drm_id: DrmId },
     Stop,
 }
 
@@ -86,7 +88,7 @@ impl Model for Udev {
             UdevAction::Event => {
                 // TODO: Remove `collect()`
                 for event in self.udev_monitor.iter().collect::<Vec<_>>() {
-                    self.handle_event(event, dispatcher)
+                    self.handle_event(event, state, dispatcher)
                 }
             }
             UdevAction::DeviceTaken { fd, inactive, devnum } => {
@@ -103,6 +105,9 @@ impl Model for Udev {
                 //     return Ok(());
                 // };
                 // log::warn!("DEVICE TAKEN devum={:?} fd={:?} inactive={:?} {:?}", devnum, fd, inactive, path_node);
+            }
+            UdevAction::FinalizeBackendRemoval { drm_id } => {
+                let _ = state.drm.remove(drm_id);
             }
             UdevAction::Stop => {
                 if let Some(poll_op_id) = self.poll_op_id.take() {
@@ -150,16 +155,70 @@ impl Udev {
         Ok(())
     }
 
-    fn handle_event(&mut self, event: udev::Event, dispatcher: &mut Dispatcher) {
+    fn handle_event(&mut self, event: udev::Event, state: &mut State, dispatcher: &mut Dispatcher) {
         use udev::EventType::*;
 
         match event.event_type() {
             Add => self.handle_new_device(event.device(), dispatcher),
-            Change | Remove | Bind | Unbind | Unknown => {
-                // TODO
-                log::trace!("Ignored event {:?}", event.action())
-            }
+            Change => self.handle_change_device(event.device(), state, dispatcher),
+            Remove => self.handle_remove_device(event.device(), state, dispatcher),
+            Bind | Unbind | Unknown => log::trace!("Ignored event {:?}", event.action()),
         }
+    }
+
+    fn find_drm_id_for_devnum(state: &State, devnum: libc::dev_t) -> Option<DrmId> {
+        state
+            .drm
+            .iter()
+            .find_map(|(drm_id, drm)| (drm.devnum() == Some(devnum)).then_some(drm_id))
+    }
+
+    fn handle_change_device(
+        &mut self,
+        device: udev::Device,
+        state: &mut State,
+        dispatcher: &mut Dispatcher,
+    ) {
+        let Some(devnum) = device.devnum() else {
+            return;
+        };
+        let Some(drm_id) = Self::find_drm_id_for_devnum(state, devnum) else {
+            log::trace!("Ignored change event for unmanaged DRM device {:?}", device.devnode());
+            return;
+        };
+        sync_output_nodes_for_backend(state, drm_id);
+        for output_id in state.output_ids_for_backend(BackendOutputRef::new(drm_id)) {
+            dispatcher.dispatch(ClientsAction::OutputStateChanged { output_id });
+        }
+    }
+
+    fn handle_remove_device(
+        &mut self,
+        device: udev::Device,
+        state: &mut State,
+        dispatcher: &mut Dispatcher,
+    ) {
+        let Some(devnum) = device.devnum() else {
+            return;
+        };
+        let Some(drm_id) = Self::find_drm_id_for_devnum(state, devnum) else {
+            log::trace!("Ignored remove event for unmanaged DRM device {:?}", device.devnode());
+            return;
+        };
+
+        let backend = BackendOutputRef::new(drm_id);
+        for output_id in state.output_ids_for_backend(backend) {
+            self.remove_output_node(output_id, state, dispatcher);
+        }
+
+        if let Some(global_name) = state.backend_syncobj_globals.remove(&drm_id) {
+            let _ = state.remove_global(global_name);
+            dispatcher
+                .dispatch(ClientsAction::RegistryGlobalRemoved { name: global_name.as_u32() });
+        }
+
+        dispatcher.stop_model::<_, DrmModel>(usize::from(drm_id) as u64);
+        dispatcher.dispatch(UdevAction::FinalizeBackendRemoval { drm_id });
     }
 
     fn handle_new_device(&mut self, device: udev::Device, dispatcher: &mut Dispatcher) {
@@ -239,16 +298,61 @@ impl Udev {
 
         let drm = Drm::create_drm(fd, device, &state.egl);
         let drm_id = state.drm.insert(drm);
+        let output = Output::new(BackendOutputRef::new(drm_id), state.drm.get(drm_id));
+        let output_id = state.insert_output(output);
+        sync_output_nodes_for_backend(state, drm_id);
         let drm_model = state.drm.get(drm_id).make_model(drm_id);
         dispatcher.start_model(usize::from(drm_id) as u64, drm_model);
-        state.insert_global(WlOutputGlobal::new(drm_id)); // TODO: Should we notify clients ?
-        if state.drm.get(drm_id).supports_linux_drm_syncobj()
-            && !state
-                .globals
-                .contains_interface("wp_linux_drm_syncobj_manager_v1")
-        {
-            state.insert_global(WpLinuxDrmSyncobjManagerV1Global::new(drm_id));
+        self.publish_output_node(output_id, state, dispatcher);
+        if state.drm.get(drm_id).supports_linux_drm_syncobj() {
+            let global = WpLinuxDrmSyncobjManagerV1Global::new(drm_id);
+            let (interface, version) = global.interface();
+            let name = state.insert_global(global);
+            state.backend_syncobj_globals.insert(drm_id, name);
+            dispatcher.dispatch(ClientsAction::RegistryGlobalAdded {
+                name: name.as_u32(),
+                interface: interface.to_string(),
+                version,
+            });
         }
+    }
+
+    fn publish_output_node(
+        &self,
+        output_id: OutputId,
+        state: &mut State,
+        dispatcher: &mut Dispatcher,
+    ) {
+        let global = WlOutputGlobal::new(output_id);
+        let (interface, version) = global.interface();
+        let global_name = state.insert_global(global);
+        if let Some(output) = state.outputs.try_get_mut(output_id) {
+            output.global_name = Some(global_name);
+        }
+        dispatcher.dispatch(ClientsAction::RegistryGlobalAdded {
+            name: global_name.as_u32(),
+            interface: interface.to_string(),
+            version,
+        });
+    }
+
+    fn remove_output_node(
+        &self,
+        output_id: OutputId,
+        state: &mut State,
+        dispatcher: &mut Dispatcher,
+    ) {
+        dispatcher.dispatch(ClientsAction::OutputRemoved { output_id });
+        let global_name = state
+            .outputs
+            .try_get(output_id)
+            .and_then(|output| output.global_name);
+        if let Some(global_name) = global_name {
+            let _ = state.remove_global(global_name);
+            dispatcher
+                .dispatch(ClientsAction::RegistryGlobalRemoved { name: global_name.as_u32() });
+        }
+        let _ = state.remove_output(output_id);
     }
 }
 

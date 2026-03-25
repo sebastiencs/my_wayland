@@ -31,6 +31,7 @@ pub mod xdg_wm_base;
 pub mod zwp_linux_buffer_params_v1;
 pub mod zwp_linux_dmabuf_v1;
 pub mod zxdg_output_manager_v1;
+pub mod zxdg_output_v1;
 
 macro_rules! fake_obj {
     ($({$module:ident, $name:ident },)+) => ($(
@@ -88,7 +89,6 @@ fake_obj! {
     { xwayland_shell_v1, XwaylandShellV1 },
     { ext_session_lock_surface_v1, ExtSessionLockSurfaceV1 },
     { xwayland_surface_v1, XwaylandSurfaceV1 },
-    { zxdg_output_v1, ZxdgOutputV1 },
     { wp_cursor_shape_device_v1, WpCursorShapeDeviceV1 },
     { zwp_linux_buffer_release_v1, ZwpLinuxBufferReleaseV1 },
     { zwp_linux_dmabuf_feedback_v1, ZwpLinuxDmabufFeedbackV1 },

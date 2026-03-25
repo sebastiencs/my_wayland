@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     os::{
-        fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::net::UnixListener,
     },
     path::PathBuf,
@@ -20,13 +20,16 @@ use crate::{
     protocol_generated::{wl_display, Array, Constants, WaylandId, WlSurfaceId},
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     seat::SeatClientEvent,
-    state::{GrabbedObject, ObjectId, State},
+    state::{GrabbedObject, ObjectId, OutputId, State},
     udev::Udev,
     wayland_objects::{
-        wl_display::WlDisplay, wl_keyboard::WlKeyboard, wl_pointer::WlPointer,
-        wl_surface::WlSurface,
+        wl_display::WlDisplay, wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer,
+        wl_registry::WlRegistry, wl_surface::WlSurface, zxdg_output_v1::ZxdgOutputV1,
     },
 };
+
+#[cfg(test)]
+use std::os::fd::IntoRawFd;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
 pub struct ClientId(u64);
@@ -51,6 +54,10 @@ pub enum ClientsAction {
     NewClient { new_client: RawFd },
     LibinputEvent,
     UdevEvent,
+    RegistryGlobalAdded { name: u32, interface: String, version: u32 },
+    RegistryGlobalRemoved { name: u32 },
+    OutputStateChanged { output_id: OutputId },
+    OutputRemoved { output_id: OutputId },
     Close { id: ClientId },
 }
 
@@ -150,6 +157,34 @@ impl Model for Clients {
                 //     // eprintln!("EVENT={:?}", e);
                 // }
             }
+            RegistryGlobalAdded { name, interface, version } => {
+                for client_id in self.set.iter().copied() {
+                    dispatcher.dispatch_to(
+                        client_id,
+                        ClientAction::RegistryGlobalAdded {
+                            name,
+                            interface: interface.clone(),
+                            version,
+                        },
+                    );
+                }
+            }
+            RegistryGlobalRemoved { name } => {
+                for client_id in self.set.iter().copied() {
+                    dispatcher.dispatch_to(client_id, ClientAction::RegistryGlobalRemoved { name });
+                }
+            }
+            OutputStateChanged { output_id } => {
+                for client_id in self.set.iter().copied() {
+                    dispatcher
+                        .dispatch_to(client_id, ClientAction::OutputStateChanged { output_id });
+                }
+            }
+            OutputRemoved { output_id } => {
+                for client_id in self.set.iter().copied() {
+                    dispatcher.dispatch_to(client_id, ClientAction::OutputRemoved { output_id });
+                }
+            }
             Close { id } => {
                 log::trace!("client {:?} closed", id);
                 self.set.remove(&id);
@@ -187,6 +222,10 @@ pub enum ClientAction {
     MsgReceived { request: RawRequest<'static> },
     FdsReceived { fds: Box<[RawFd]> },
     SeatEvent { event: SeatClientEvent },
+    RegistryGlobalAdded { name: u32, interface: String, version: u32 },
+    RegistryGlobalRemoved { name: u32 },
+    OutputStateChanged { output_id: OutputId },
+    OutputRemoved { output_id: OutputId },
     ReleaseBuffer { buffer_id: crate::protocol_generated::WlBufferId },
     CompleteSurfaceFrameCallbacks { surface_ids: Vec<WlSurfaceId> },
     CancelBlockedSurface { surface_object_id: ObjectId, waiter_id: u64 },
@@ -591,6 +630,84 @@ impl Client {
         }
         result
     }
+
+    fn handle_registry_global_added(
+        &self,
+        state: &State,
+        dispatcher: &mut ClientDispatcher,
+        name: u32,
+        interface: String,
+        version: u32,
+    ) {
+        for &object_id in self.objects.values() {
+            let Some(registry) = state.objects.try_get_ref_of::<WlRegistry>(object_id) else {
+                continue;
+            };
+            registry.send_global(dispatcher, name, interface.clone(), version);
+        }
+    }
+
+    fn handle_registry_global_removed(
+        &self,
+        state: &State,
+        dispatcher: &mut ClientDispatcher,
+        name: u32,
+    ) {
+        for &object_id in self.objects.values() {
+            let Some(registry) = state.objects.try_get_ref_of::<WlRegistry>(object_id) else {
+                continue;
+            };
+            registry.send_global_remove(dispatcher, name);
+        }
+    }
+
+    fn handle_output_state_changed(
+        &self,
+        state: &State,
+        dispatcher: &mut ClientDispatcher,
+        output_id: OutputId,
+    ) {
+        let object_ids = self.objects.values().copied().collect::<Vec<_>>();
+
+        for object_id in &object_ids {
+            let Some(xdg_output) = state.objects.try_get_ref_of::<ZxdgOutputV1>(*object_id) else {
+                continue;
+            };
+            if xdg_output.matches_output(output_id) {
+                xdg_output.send_state(state, dispatcher);
+            }
+        }
+
+        for object_id in object_ids {
+            let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(object_id) else {
+                continue;
+            };
+            if wl_output.matches_output(output_id) {
+                wl_output.send_state(state, dispatcher);
+            }
+        }
+    }
+
+    fn handle_output_removed(&self, state: &mut State, output_id: OutputId) {
+        let object_ids = self.objects.values().copied().collect::<Vec<_>>();
+
+        for object_id in object_ids {
+            let Some(object) = state.objects.try_get_mut(object_id) else {
+                continue;
+            };
+            if let Some(wl_output) = object.downcast_mut::<WlOutput>() {
+                if wl_output.matches_output(output_id) {
+                    wl_output.mark_removed();
+                }
+                continue;
+            }
+            if let Some(xdg_output) = object.downcast_mut::<ZxdgOutputV1>() {
+                if xdg_output.matches_output(output_id) {
+                    xdg_output.mark_removed();
+                }
+            }
+        }
+    }
 }
 
 /// A specialized `Dispatcher`
@@ -695,6 +812,18 @@ impl Model for Client {
             }
             SeatEvent { event } => {
                 self.handle_seat_event(state, &mut dispatcher, event);
+            }
+            RegistryGlobalAdded { name, interface, version } => {
+                self.handle_registry_global_added(state, &mut dispatcher, name, interface, version);
+            }
+            RegistryGlobalRemoved { name } => {
+                self.handle_registry_global_removed(state, &mut dispatcher, name);
+            }
+            OutputStateChanged { output_id } => {
+                self.handle_output_state_changed(state, &mut dispatcher, output_id);
+            }
+            OutputRemoved { output_id } => {
+                self.handle_output_removed(state, output_id);
             }
             ReleaseBuffer { buffer_id } => {
                 if self.contains_object(buffer_id, state) {

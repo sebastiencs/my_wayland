@@ -504,10 +504,23 @@ fn clamp_pointer_to_outputs(state: &mut State) {
 }
 
 fn output_size(state: &State) -> Option<(f64, f64)> {
-    let (_, drm) = state.drm.iter().next()?;
-    let mode = drm.output.in_use.connector.preferred_mode.as_ref()?;
-    let (width, height) = mode.size();
-    Some((width as f64, height as f64))
+    let mut max_width = 0;
+    let mut max_height = 0;
+
+    for (_, output) in state.outputs.iter() {
+        if !output.enabled {
+            continue;
+        }
+        let (width, height) = output.logical_size();
+        max_width = max_width.max(output.x + width);
+        max_height = max_height.max(output.y + height);
+    }
+
+    if max_width <= 0 || max_height <= 0 {
+        return None;
+    }
+
+    Some((max_width as f64, max_height as f64))
 }
 
 fn local_coords(rect: SurfaceRect, pointer_pos: (f64, f64)) -> (f32, f32) {
@@ -580,6 +593,9 @@ mod surface_tree_hit_test_tests {
             root_surfaces: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
+            outputs: Default::default(),
+            active_output: None,
+            backend_syncobj_globals: Default::default(),
             globals,
             egl: EGL::new(),
             seat: Default::default(),
