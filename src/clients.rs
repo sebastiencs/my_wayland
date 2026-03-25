@@ -2,7 +2,7 @@ use std::{
     any::TypeId,
     collections::{BTreeMap, BTreeSet, VecDeque},
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
         unix::net::UnixListener,
     },
     path::PathBuf,
@@ -40,9 +40,6 @@ use crate::{
         zxdg_output_v1::ZxdgOutputV1,
     },
 };
-
-#[cfg(test)]
-use std::os::fd::IntoRawFd;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
 pub struct ClientId(u64);
@@ -233,7 +230,7 @@ pub struct Client {
     // TODO: Replace `BTreeMap` with a `IndexMap` here ?
     objects: BTreeMap<WaylandId, ClientObjectEntry>,
     info: Option<Rc<ProcessInfo>>,
-    pending_fds: VecDeque<RawFd>,
+    pending_fds: VecDeque<OwnedFd>,
     next_server_id: u32,
 }
 
@@ -1273,7 +1270,11 @@ impl Model for Client {
                 dispatcher.start_model(client_reader_id, client_reader);
             }
             FdsReceived { fds } => {
-                self.pending_fds.extend(fds.iter());
+                self.pending_fds.extend(
+                    fds.into_vec()
+                        .into_iter()
+                        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) }),
+                );
             }
             SeatEvent { event } => {
                 self.handle_seat_event(state, &mut dispatcher, event);
@@ -1479,19 +1480,29 @@ impl Model for Client {
             }
             Close => {
                 log::info!("client_id={:?} closed", self.id);
+                if let Some(id) = self.reader_id.take() {
+                    dispatcher.stop_model::<_, ClientReader>(id);
+                };
                 let cursor_changed = state.seat.remove_client(self.id);
-                let wayland_ids: Vec<WaylandId> = self.objects.keys().copied().collect();
-                for wid in wayland_ids {
-                    if let Some(oid) = self.objects.remove(&wid) {
-                        let _ = state.remove_object(oid.object_id);
+                let client_objects: Vec<(WaylandId, ObjectId)> = self
+                    .objects
+                    .iter()
+                    .map(|(wid, entry)| (*wid, entry.object_id))
+                    .collect();
+                let had_client_objects = !client_objects.is_empty();
+                for (_, object_id) in &client_objects {
+                    if let Some(mut object) = state.objects.try_grab(*object_id) {
+                        object.on_client_disconnect(self, state, &mut dispatcher);
                     }
                 }
-                if cursor_changed {
+                for (wid, object_id) in client_objects {
+                    self.objects.remove(&wid);
+                    let _ = state.remove_object(object_id);
+                }
+                self.pending_fds.clear();
+                if cursor_changed || had_client_objects {
                     schedule_active_output(state, &mut dispatcher);
                 }
-                if let Some(id) = self.reader_id {
-                    dispatcher.stop_model::<_, ClientReader>(id)
-                };
             }
         };
 
@@ -1839,7 +1850,7 @@ pub struct RawRequest<'a> {
     #[deref]
     #[deref_mut]
     pub arguments: Arguments,
-    pub fds: Option<&'a mut VecDeque<RawFd>>,
+    pub fds: Option<&'a mut VecDeque<OwnedFd>>,
 }
 
 impl RawRequest<'_> {
@@ -1852,6 +1863,7 @@ impl RawRequest<'_> {
             .as_mut()
             .unwrap()
             .pop_front()
+            .map(IntoRawFd::into_raw_fd)
             .ok_or(ParserError::MissingFileDescriptor)
     }
 }
@@ -1955,7 +1967,10 @@ impl Arguments {
 
 #[cfg(test)]
 mod clients_wire_tests {
-    use std::collections::VecDeque;
+    use std::{
+        collections::VecDeque,
+        os::fd::{FromRawFd, IntoRawFd, OwnedFd},
+    };
 
     use super::{Arguments, ParserError, RawRequest};
 
@@ -1978,5 +1993,22 @@ mod clients_wire_tests {
     #[test]
     fn raw_request_try_from_rejects_short_buffer() {
         assert!(RawRequest::try_from([1u8, 0, 0, 0].as_slice()).is_err());
+    }
+
+    #[test]
+    fn raw_request_fd_consumes_owned_fd_queue() {
+        let raw = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+        let mut fds = VecDeque::from([unsafe { OwnedFd::from_raw_fd(raw) }]);
+        let mut request = RawRequest {
+            object_id: 1,
+            request_id: 2,
+            arguments: Arguments { args: VecDeque::new() },
+            fds: Some(&mut fds),
+        };
+
+        let returned = request.fd().unwrap();
+        let _returned = unsafe { OwnedFd::from_raw_fd(returned) };
+
+        assert!(fds.is_empty());
     }
 }

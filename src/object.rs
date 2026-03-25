@@ -18,6 +18,16 @@ where
         request: RawRequest,
         dispatcher: &mut ClientDispatcher,
     );
+
+    /// Silent compositor-side cleanup before tearing down all objects owned by a disconnected
+    /// client. Unlike normal protocol destruction, this should not try to talk to the client.
+    fn on_client_disconnect(
+        &mut self,
+        _client: &mut Client,
+        _state: &mut State,
+        _dispatcher: &mut ClientDispatcher,
+    ) {
+    }
 }
 
 impl dyn Object {

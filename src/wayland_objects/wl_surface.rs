@@ -2175,6 +2175,17 @@ impl Object for WlSurface {
             }
         }
     }
+
+    fn on_client_disconnect(
+        &mut self,
+        _client: &mut Client,
+        _state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        if let Some(waiter_id) = self.blocked_waiter_id.take() {
+            dispatcher.stop_model::<_, AcquireReadyWaiter>(waiter_id);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2784,5 +2795,25 @@ mod tests {
         assert!(grandchild.render_state().is_none());
         assert!(!client.contains_object(WlSubsurfaceId::from(61), &state));
         assert!(!client.contains_object(WlSubsurfaceId::from(62), &state));
+    }
+
+    #[test]
+    fn client_disconnect_clears_blocked_surface_state() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut surface = make_surface();
+        surface.blocked_waiter_id = Some(42);
+
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            crate::object::Object::on_client_disconnect(
+                &mut surface,
+                &mut client,
+                &mut state,
+                &mut client_dispatcher,
+            );
+        }
+
+        assert_eq!(surface.blocked_waiter_id, None);
     }
 }
