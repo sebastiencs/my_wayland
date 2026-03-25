@@ -319,6 +319,7 @@ impl IoUringState {
         }
 
         if result < 0 {
+            let io_err = || std::io::Error::from_raw_os_error(-result);
             match op {
                 Operation::Cancel { target, .. } => {
                     if !self.pending.contains_key(&target) {
@@ -345,14 +346,34 @@ impl IoUringState {
                     return;
                 }
                 Operation::ReadSome { dispatch_to, .. } => {
-                    let error = std::io::Error::from_raw_os_error(-result);
-                    dispatcher.redispatch_to(dispatch_to, Err(error));
+                    dispatcher.redispatch_to(dispatch_to, Err(io_err()));
                     return;
                 }
-                _ => {}
+                Operation::ReadWrite { dispatch_to, .. } => {
+                    dispatcher.redispatch_to(dispatch_to, Err(io_err()));
+                    return;
+                }
+                Operation::Recvmsg { dispatch_to, .. } => {
+                    dispatcher.redispatch_to(dispatch_to, Err(io_err()));
+                    return;
+                }
+                Operation::Sendmsg { dispatch_to, .. } => {
+                    dispatcher.redispatch_to(dispatch_to, Err(io_err()));
+                    return;
+                }
+                Operation::Accept { dispatch_to, .. } => {
+                    dispatcher.redispatch_to(dispatch_to, Err(io_err()));
+                    return;
+                }
+                Operation::Poll { dispatch_to, .. } => {
+                    dispatcher.redispatch_to(dispatch_to, Err(io_err()));
+                    return;
+                }
+                Operation::NoOp => {
+                    error!("io_uring NoOp failed error_code={result:?}");
+                    return;
+                }
             }
-            error!("io_uring Operation failed error_code={:?}", result);
-            panic!()
         }
         // log::trace!("result={} completed={:?}", result, op);
         match op {
