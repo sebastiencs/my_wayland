@@ -808,11 +808,20 @@ impl Drm {
     pub fn create_drm(fd: OwnedFd, device: udev::Device, egl: &EGL) -> Self {
         let drm = DrmFd { fd: Rc::new(fd) };
         set_nonblocking(drm.as_raw_fd()).unwrap();
+        match drm.set_client_capability(drm::ClientCapability::UniversalPlanes, true) {
+            Ok(()) => log::info!("Enabled DRM client capability: UniversalPlanes"),
+            Err(error) => {
+                log::warn!("Failed to enable DRM client capability UniversalPlanes: {:?}", error)
+            }
+        }
         drm.set_client_capability(drm::ClientCapability::Atomic, true)
+            .map(|()| log::info!("Enabled DRM client capability: Atomic"))
             .unwrap();
-        if let Err(error) = drm.set_client_capability(drm::ClientCapability::UniversalPlanes, true)
-        {
-            log::warn!("Failed to enable universal planes: {:?}", error);
+        match drm.set_client_capability(drm::ClientCapability::CursorPlaneHotspot, true) {
+            Ok(()) => log::info!("Enabled DRM client capability: CursorPlaneHotspot"),
+            Err(error) => {
+                log::warn!("Failed to enable DRM client capability CursorPlaneHotspot: {:?}", error)
+            }
         }
 
         let driver: Driver = drm.get_driver().unwrap().into();
@@ -1336,14 +1345,29 @@ impl Drm {
             (height, width)
         };
 
+        let plane_handles = drm.plane_handles().unwrap().to_vec();
+        log::info!("DRM plane handles reported by kernel: count={}", plane_handles.len());
+
         let make_plane = |plane: plane::Handle| Self::make_plane(drm, plane);
-        let planes: BTreeMap<plane::Handle, Plane> = drm
-            .plane_handles()
-            .unwrap()
-            .iter()
-            .copied()
-            .map(make_plane)
-            .collect();
+        let planes: BTreeMap<plane::Handle, Plane> =
+            plane_handles.iter().copied().map(make_plane).collect();
+        for plane in planes.values() {
+            let kind = match plane.kind {
+                PlaneType::Primary => "Primary",
+                PlaneType::Cursor => "Cursor",
+                PlaneType::Overlay => "Overlay",
+            };
+            log::info!(
+                "Discovered DRM plane: handle={:?} kind={} possible_crtcs=0x{:x} current_crtc={:?} current_fb={:?} argb8888={} xrgb8888={}",
+                plane.handle,
+                kind,
+                plane.possible_crtcs,
+                plane.crtc_handle,
+                plane.fb_handle,
+                plane.formats.contains_key(&DrmFourcc::Argb8888),
+                plane.formats.contains_key(&DrmFourcc::Xrgb8888)
+            );
+        }
 
         let make_crtc = |(index, crtc)| Self::make_crtc(drm, index, crtc, &planes);
         let crtcs: BTreeMap<crtc::Handle, Crtc> = resources
