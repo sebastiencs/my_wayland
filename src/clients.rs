@@ -867,17 +867,13 @@ impl Client {
         }
     }
 
-    fn output_object_ids_for_output(
-        &self,
-        state: &mut State,
-        output_id: OutputId,
-    ) -> Vec<WlOutputId> {
+    fn output_object_ids_for_output(&self, state: &State, output_id: OutputId) -> Vec<WlOutputId> {
         let mut output_object_ids = Vec::new();
         let object_ids = self
             .iter_object_ids_of::<WlOutput>(state)
             .collect::<Vec<_>>();
         for object_id in object_ids {
-            let Some(wl_output) = state.objects.try_grab_object::<WlOutput>(object_id) else {
+            let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(object_id) else {
                 continue;
             };
             if wl_output.matches_output(output_id) {
@@ -906,10 +902,7 @@ impl Client {
         if output_object_ids.is_empty() {
             return;
         }
-        let Some(surface) = state
-            .objects
-            .try_grab_object::<WlSurface>(surface_object_id)
-        else {
+        let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(surface_object_id) else {
             return;
         };
         for output_object_id in output_object_ids {
@@ -932,7 +925,7 @@ impl Client {
             .collect::<Vec<_>>();
         let mut surface_object_ids = Vec::new();
         for object_id in object_ids {
-            let Some(surface) = state.objects.try_grab_object::<WlSurface>(object_id) else {
+            let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(object_id) else {
                 continue;
             };
             if surface.contains_output(output_id) {
@@ -958,22 +951,17 @@ impl Client {
         let root_surface_ids = state.root_surface_ids();
         log::debug!("refresh_surface_outputs client={:?} roots={:?}", self.id, root_surface_ids);
         for surface_object_id in root_surface_ids {
-            {
-                let Some(surface) = state
-                    .objects
-                    .try_grab_object::<WlSurface>(surface_object_id)
-                else {
-                    continue;
-                };
-                log::debug!(
-                    "refresh_surface_outputs root candidate object={:?} client={:?} is_root={}",
-                    surface_object_id,
-                    surface.client_id(),
-                    surface.is_root()
-                );
-                if surface.client_id() != self.id || !surface.is_root() {
-                    continue;
-                }
+            let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(surface_object_id) else {
+                continue;
+            };
+            log::debug!(
+                "refresh_surface_outputs root candidate object={:?} client={:?} is_root={}",
+                surface_object_id,
+                surface.client_id(),
+                surface.is_root()
+            );
+            if surface.client_id() != self.id || !surface.is_root() {
+                continue;
             }
             refresh_surface_tree_outputs(self, state, dispatcher, surface_object_id, 0, 0);
         }
