@@ -53,7 +53,7 @@ impl Globals {
             WlSeatGlobal::new, // TODO: `WlSeatGlobal` should be added dynamically
             WpPresentationGlobal::new,
             WpViewporterGlobal::new,
-            ZwpLinuxDmabufV1Global::new,
+            // ZwpLinuxDmabufV1Global::new,
             WpCursorShapeManagerV1Global::new,
             XdgActivationV1Global::new,
             XdgWmBaseGlobal::new,
