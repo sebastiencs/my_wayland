@@ -165,6 +165,8 @@ pub struct DrmOutput {
     allow_in_fence_fd: bool,
     allow_fb_damage_clips: bool,
     next_submission_id: u64,
+    perf_window: DrmPerfWindow,
+    perf_last_summary_msec: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -229,6 +231,7 @@ struct OutputSubmission {
     frame_callback_surfaces: Vec<SurfaceKey>,
     presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
     zero_copy: bool,
+    submit_monotonic_msec: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,7 +261,80 @@ struct CompletedSubmission {
     damage_blob: Option<u64>,
 }
 
+#[derive(Debug, Default)]
+struct DrmPerfWindow {
+    frames_requested: u32,
+    frames_scheduled: u32,
+    frame_schedule_blocked: u32,
+    renders_started: u32,
+    render_rejected: u32,
+    render_blocked_by_flip_pending: u32,
+    render_blocked_other: u32,
+    idle_frames: u32,
+    submissions_ok: u32,
+    submissions_failed: u32,
+    direct_scanout_ok: u32,
+    direct_scanout_failed: u32,
+    frame_callback_dispatches: u32,
+    frame_callback_surfaces: u32,
+    flips_completed: u32,
+    submit_to_flip_total_msec: u64,
+    submit_to_flip_max_msec: u32,
+}
+
 impl DrmOutput {
+    fn output_name(&self) -> &str {
+        &self.in_use.connector.interface_name
+    }
+
+    fn maybe_log_perf_summary(&mut self, now_msec: u32) {
+        if self.perf_last_summary_msec == 0 {
+            self.perf_last_summary_msec = now_msec;
+            return;
+        }
+        if now_msec.saturating_sub(self.perf_last_summary_msec) < 1000 {
+            return;
+        }
+        let avg_submit_to_flip_msec = if self.perf_window.flips_completed == 0 {
+            0
+        } else {
+            (self.perf_window.submit_to_flip_total_msec
+                / u64::from(self.perf_window.flips_completed)) as u32
+        };
+        log::info!(
+            "drm perf {}: req={} scheduled={} schedule_blocked={} render_started={} render_rejected={} render_blocked_flip={} render_blocked_other={} idle={} submit_ok={} submit_fail={} scanout_ok={} scanout_fail={} callbacks={} callback_surfaces={} flips={} submit_to_flip_avg_ms={} submit_to_flip_max_ms={}",
+            self.output_name(),
+            self.perf_window.frames_requested,
+            self.perf_window.frames_scheduled,
+            self.perf_window.frame_schedule_blocked,
+            self.perf_window.renders_started,
+            self.perf_window.render_rejected,
+            self.perf_window.render_blocked_by_flip_pending,
+            self.perf_window.render_blocked_other,
+            self.perf_window.idle_frames,
+            self.perf_window.submissions_ok,
+            self.perf_window.submissions_failed,
+            self.perf_window.direct_scanout_ok,
+            self.perf_window.direct_scanout_failed,
+            self.perf_window.frame_callback_dispatches,
+            self.perf_window.frame_callback_surfaces,
+            self.perf_window.flips_completed,
+            avg_submit_to_flip_msec,
+            self.perf_window.submit_to_flip_max_msec,
+        );
+        self.perf_window = DrmPerfWindow::default();
+        self.perf_last_summary_msec = now_msec;
+    }
+
+    fn note_frame_callbacks_dispatched(&mut self, surface_count: usize) {
+        self.perf_window.frame_callback_dispatches =
+            self.perf_window.frame_callback_dispatches.saturating_add(1);
+        self.perf_window.frame_callback_surfaces = self
+            .perf_window
+            .frame_callback_surfaces
+            .saturating_add(surface_count.min(u32::MAX as usize) as u32);
+    }
+
     fn output_bounds(&self) -> RectI {
         let framebuffer = &self.render_buffer().gl_framebuffer;
         RectI::new(0, 0, framebuffer.width, framebuffer.height)
@@ -266,39 +342,102 @@ impl DrmOutput {
     }
 
     fn request_frame(&mut self) -> bool {
+        let now_msec = monotonic_time_msec();
+        self.maybe_log_perf_summary(now_msec);
+        self.perf_window.frames_requested = self.perf_window.frames_requested.saturating_add(1);
         self.needs_frame = true;
 
         if self.frame_scheduled || self.rendering_active || self.page_flip_pending {
+            self.perf_window.frame_schedule_blocked =
+                self.perf_window.frame_schedule_blocked.saturating_add(1);
+            log::debug!(
+                "drm request_frame blocked: connector={} needs_frame={} frame_scheduled={} rendering_active={} page_flip_pending={}",
+                self.output_name(),
+                self.needs_frame,
+                self.frame_scheduled,
+                self.rendering_active,
+                self.page_flip_pending,
+            );
             return false;
         }
 
         self.frame_scheduled = true;
+        self.perf_window.frames_scheduled = self.perf_window.frames_scheduled.saturating_add(1);
+        log::debug!(
+            "drm request_frame scheduled: connector={} render_buffer_index={} displayed_buffer_index={}",
+            self.output_name(),
+            self.render_buffer_index,
+            self.displayed_buffer_index,
+        );
         true
     }
 
     fn begin_render(&mut self) -> bool {
+        let now_msec = monotonic_time_msec();
+        self.maybe_log_perf_summary(now_msec);
         if !self.needs_frame
             || !self.frame_scheduled
             || self.rendering_active
             || self.page_flip_pending
         {
+            self.perf_window.render_rejected = self.perf_window.render_rejected.saturating_add(1);
+            if self.page_flip_pending {
+                self.perf_window.render_blocked_by_flip_pending = self
+                    .perf_window
+                    .render_blocked_by_flip_pending
+                    .saturating_add(1);
+            } else {
+                self.perf_window.render_blocked_other =
+                    self.perf_window.render_blocked_other.saturating_add(1);
+            }
+            log::debug!(
+                "drm begin_render rejected: connector={} needs_frame={} frame_scheduled={} rendering_active={} page_flip_pending={}",
+                self.output_name(),
+                self.needs_frame,
+                self.frame_scheduled,
+                self.rendering_active,
+                self.page_flip_pending,
+            );
             return false;
         }
 
         self.frame_scheduled = false;
         self.rendering_active = true;
+        self.perf_window.renders_started = self.perf_window.renders_started.saturating_add(1);
+        log::debug!(
+            "drm begin_render started: connector={} render_buffer_index={} displayed_buffer_index={} force_full_redraw={}",
+            self.output_name(),
+            self.render_buffer_index,
+            self.displayed_buffer_index,
+            self.force_full_redraw,
+        );
         true
     }
 
     fn mark_render_failed(&mut self) {
+        self.maybe_log_perf_summary(monotonic_time_msec());
         self.rendering_active = false;
         self.force_full_redraw = true;
         self.in_flight_frame = None;
+        log::debug!(
+            "drm mark_render_failed: connector={} render_buffer_index={} page_flip_pending={}",
+            self.output_name(),
+            self.render_buffer_index,
+            self.page_flip_pending,
+        );
     }
 
     fn mark_frame_idle(&mut self) {
+        self.maybe_log_perf_summary(monotonic_time_msec());
         self.rendering_active = false;
         self.needs_frame = false;
+        self.perf_window.idle_frames = self.perf_window.idle_frames.saturating_add(1);
+        log::debug!(
+            "drm mark_frame_idle: connector={} render_buffer_index={} displayed_buffer_index={}",
+            self.output_name(),
+            self.render_buffer_index,
+            self.displayed_buffer_index,
+        );
     }
 
     fn allocate_submission(
@@ -308,6 +447,7 @@ impl DrmOutput {
         frame_callback_surfaces: Vec<SurfaceKey>,
         presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
         zero_copy: bool,
+        submit_monotonic_msec: u32,
     ) -> OutputSubmission {
         let id = self.next_submission_id;
         self.next_submission_id = self.next_submission_id.saturating_add(1);
@@ -318,13 +458,42 @@ impl DrmOutput {
             frame_callback_surfaces,
             presentation_feedbacks,
             zero_copy,
+            submit_monotonic_msec,
         }
     }
 
     fn mark_frame_submitted(&mut self, frame: SubmittedFrame) {
+        self.maybe_log_perf_summary(monotonic_time_msec());
         self.rendering_active = false;
         self.page_flip_pending = true;
         self.needs_frame = false;
+        match &frame {
+            SubmittedFrame::Composited { buffer_index, damage, submission, .. } => {
+                self.perf_window.submissions_ok = self.perf_window.submissions_ok.saturating_add(1);
+                log::debug!(
+                    "drm mark_frame_submitted composited: connector={} submission_id={} buffer_index={} damage_rects={} callbacks={} feedbacks={} submit_msec={}",
+                    self.output_name(),
+                    submission.id,
+                    buffer_index,
+                    damage.rects().len(),
+                    submission.frame_callback_surfaces.len(),
+                    submission.presentation_feedbacks.len(),
+                    submission.submit_monotonic_msec,
+                );
+            }
+            SubmittedFrame::DirectScanout { submission, .. } => {
+                self.perf_window.direct_scanout_ok =
+                    self.perf_window.direct_scanout_ok.saturating_add(1);
+                log::debug!(
+                    "drm mark_frame_submitted direct_scanout: connector={} submission_id={} callbacks={} feedbacks={} submit_msec={}",
+                    self.output_name(),
+                    submission.id,
+                    submission.frame_callback_surfaces.len(),
+                    submission.presentation_feedbacks.len(),
+                    submission.submit_monotonic_msec,
+                );
+            }
+        }
         self.in_flight_frame = Some(frame);
         self.retiring_external_fb = self.displayed_external_fb.take();
     }
@@ -838,6 +1007,19 @@ impl Drm {
         let want_in_fence = self.output.allow_in_fence_fd
             && primary_plane.in_fence_fd.is_some()
             && render_completion.in_fence_fd.is_some();
+        log::debug!(
+            "drm submit_render_buffer start: connector={} render_buffer_index={} fb={:?} damage_rects={} callbacks={} feedbacks={} want_damage_clips={} want_in_fence={} page_flip_pending={} blocking_fallback={}",
+            self.output.output_name(),
+            self.output.render_buffer_index,
+            fb,
+            rects.len(),
+            frame_callback_surfaces.len(),
+            presentation_feedbacks.len(),
+            want_damage_clips,
+            want_in_fence,
+            self.output.page_flip_pending,
+            render_completion.used_blocking_fallback,
+        );
         let mut last_error = None;
 
         for (use_damage_clips, use_in_fence) in
@@ -904,6 +1086,7 @@ impl Drm {
                 }
             }
 
+            let submit_monotonic_msec = monotonic_time_msec();
             let commit_result = self.fd.atomic_commit(
                 control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
                 changes,
@@ -930,6 +1113,7 @@ impl Drm {
                         frame_callback_surfaces,
                         presentation_feedbacks,
                         false,
+                        submit_monotonic_msec,
                     );
                     let callback_surfaces = submission.frame_callback_surfaces.clone();
                     self.output
@@ -939,6 +1123,13 @@ impl Drm {
                             submission,
                             damage_blob,
                         });
+                    log::debug!(
+                        "drm submit_render_buffer queued: connector={} submit_msec={} page_flip_pending={} render_buffer_index={}",
+                        self.output.output_name(),
+                        submit_monotonic_msec,
+                        self.output.page_flip_pending,
+                        self.output.render_buffer_index,
+                    );
                     return Ok(callback_surfaces);
                 }
                 Err(error) => {
@@ -959,6 +1150,14 @@ impl Drm {
                         last_error = Some(error);
                         continue;
                     }
+                    log::debug!(
+                        "drm submit_render_buffer failed: connector={} damage_rects={} callbacks={} feedbacks={} error={:?}",
+                        self.output.output_name(),
+                        rects.len(),
+                        frame_callback_surfaces.len(),
+                        presentation_feedbacks.len(),
+                        error,
+                    );
                     return Err(error);
                 }
             }
@@ -1073,19 +1272,29 @@ impl Drm {
             control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
             changes,
         )?;
+        let submit_monotonic_msec = monotonic_time_msec();
         let submission = self.output.allocate_submission(
             output_id,
             scene,
             frame_callback_surfaces,
             presentation_feedbacks,
             true,
+            submit_monotonic_msec,
         );
         let callback_surfaces = submission.frame_callback_surfaces.clone();
+        let feedback_count = submission.presentation_feedbacks.len();
         self.output
             .mark_frame_submitted(SubmittedFrame::DirectScanout {
                 submission,
                 framebuffer: candidate.framebuffer,
             });
+        log::debug!(
+            "drm submit_direct_scanout queued: connector={} submit_msec={} callbacks={} feedbacks={}",
+            self.output.output_name(),
+            submit_monotonic_msec,
+            callback_surfaces.len(),
+            feedback_count,
+        );
         Ok(callback_surfaces)
     }
 
@@ -1282,6 +1491,8 @@ impl Drm {
             allow_in_fence_fd: true,
             allow_fb_damage_clips: true,
             next_submission_id: 1,
+            perf_window: DrmPerfWindow::default(),
+            perf_last_summary_msec: 0,
         }
     }
 
@@ -2164,11 +2375,24 @@ impl DrmModel {
                     frame_callback_surfaces.clone(),
                     presentation_feedbacks.clone(),
                 ) {
+                    drm.output.perf_window.direct_scanout_failed = drm
+                        .output
+                        .perf_window
+                        .direct_scanout_failed
+                        .saturating_add(1);
                     log::debug!(
                         "direct scanout rejected, falling back to composition: {:?}",
                         error
                     );
                 } else {
+                    drm.output
+                        .note_frame_callbacks_dispatched(frame_callback_surfaces.len());
+                    log::debug!(
+                        "drm frame_callbacks dispatched after direct scanout submit: connector={} surfaces={} frame_time_msec={}",
+                        drm.output.output_name(),
+                        frame_callback_surfaces.len(),
+                        frame_time_msec,
+                    );
                     dispatch_submission_frame_callbacks(
                         &frame_callback_surfaces,
                         frame_time_msec,
@@ -2182,6 +2406,14 @@ impl DrmModel {
             if damage.is_empty() {
                 drm.output.mark_frame_idle();
                 let releases = std::mem::take(&mut drm.output.in_flight_releases);
+                drm.output
+                    .note_frame_callbacks_dispatched(frame_callback_surfaces.len());
+                log::debug!(
+                    "drm frame_callbacks dispatched for idle frame: connector={} surfaces={} frame_time_msec={}",
+                    drm.output.output_name(),
+                    frame_callback_surfaces.len(),
+                    frame_time_msec,
+                );
                 dispatch_submission_frame_callbacks(
                     &frame_callback_surfaces,
                     frame_time_msec,
@@ -2213,6 +2445,8 @@ impl DrmModel {
                     frame_callback_surfaces,
                     presentation_feedbacks.clone(),
                 ) {
+                    drm.output.perf_window.submissions_failed =
+                        drm.output.perf_window.submissions_failed.saturating_add(1);
                     drm.output.mark_render_failed();
                     let failed_releases = std::mem::take(&mut drm.output.in_flight_releases);
                     dispatch_presentation_feedback_discarded(dispatcher, &presentation_feedbacks);
@@ -2231,6 +2465,14 @@ impl DrmModel {
                     log::error!("Could not submit DRM frame: {:?}", error);
                     Some(failed_releases)
                 } else {
+                    drm.output
+                        .note_frame_callbacks_dispatched(callback_surfaces.len());
+                    log::debug!(
+                        "drm frame_callbacks dispatched after render submit: connector={} surfaces={} frame_time_msec={}",
+                        drm.output.output_name(),
+                        callback_surfaces.len(),
+                        frame_time_msec,
+                    );
                     dispatch_submission_frame_callbacks(
                         &callback_surfaces,
                         frame_time_msec,
@@ -2257,10 +2499,52 @@ impl DrmModel {
         tv_usec: u32,
         _crtc_id: u32,
     ) {
+        let flip_complete_msec = monotonic_time_msec();
         let (releases, should_render, completed_submission) = {
             let drm = state.drm.get_mut(self.drm_id);
+            drm.output.maybe_log_perf_summary(flip_complete_msec);
+            drm.output.perf_window.flips_completed =
+                drm.output.perf_window.flips_completed.saturating_add(1);
             let releases = std::mem::take(&mut drm.output.in_flight_releases);
             let (should_render, completed_submission) = drm.output.finish_page_flip();
+            if let Some(ref completed_submission) = completed_submission {
+                let submit_to_flip_msec = monotonic_elapsed_msec(
+                    flip_complete_msec,
+                    completed_submission.submission.submit_monotonic_msec,
+                );
+                drm.output.perf_window.submit_to_flip_total_msec = drm
+                    .output
+                    .perf_window
+                    .submit_to_flip_total_msec
+                    .saturating_add(u64::from(submit_to_flip_msec));
+                drm.output.perf_window.submit_to_flip_max_msec = drm
+                    .output
+                    .perf_window
+                    .submit_to_flip_max_msec
+                    .max(submit_to_flip_msec);
+                log::debug!(
+                    "drm flip_complete: connector={} submission_id={} zero_copy={} submit_to_flip_ms={} should_render={} needs_frame={} sequence={} tv_sec={} tv_usec={}",
+                    drm.output.output_name(),
+                    completed_submission.submission.id,
+                    completed_submission.submission.zero_copy,
+                    submit_to_flip_msec,
+                    should_render,
+                    drm.output.needs_frame,
+                    sequence,
+                    tv_sec,
+                    tv_usec,
+                );
+            } else {
+                log::debug!(
+                    "drm flip_complete without submission: connector={} should_render={} needs_frame={} sequence={} tv_sec={} tv_usec={}",
+                    drm.output.output_name(),
+                    should_render,
+                    drm.output.needs_frame,
+                    sequence,
+                    tv_sec,
+                    tv_usec,
+                );
+            }
             (releases, should_render, completed_submission)
         };
 
@@ -2347,6 +2631,10 @@ fn monotonic_time_msec() -> u32 {
         .saturating_mul(1000)
         .saturating_add((ts.tv_nsec as u64) / 1_000_000);
     millis.min(u64::from(u32::MAX)) as u32
+}
+
+fn monotonic_elapsed_msec(now_msec: u32, earlier_msec: u32) -> u32 {
+    now_msec.saturating_sub(earlier_msec)
 }
 
 fn dispatch_submission_frame_callbacks(
@@ -2925,6 +3213,7 @@ mod presentation_timing_tests {
                 frame_callback_surfaces: Vec::new(),
                 presentation_feedbacks: vec![submission_feedback(4, 2)],
                 zero_copy: false,
+                submit_monotonic_msec: 0,
             },
             damage_blob: None,
         };
