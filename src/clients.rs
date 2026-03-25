@@ -240,7 +240,7 @@ pub enum ClientAction {
         request: RawRequest<'static>,
     },
     FdsReceived {
-        fds: Box<[RawFd]>,
+        fds: Vec<OwnedFd>,
     },
     SeatEvent {
         event: SeatClientEvent,
@@ -1270,11 +1270,7 @@ impl Model for Client {
                 dispatcher.start_model(client_reader_id, client_reader);
             }
             FdsReceived { fds } => {
-                self.pending_fds.extend(
-                    fds.into_vec()
-                        .into_iter()
-                        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) }),
-                );
+                self.pending_fds.extend(fds);
             }
             SeatEvent { event } => {
                 self.handle_seat_event(state, &mut dispatcher, event);
@@ -1582,7 +1578,7 @@ struct ClientReader {
 
 enum ClientReaderAction {
     Start,
-    ReadMsg { buffer: Box<[u8]>, fds: Box<[RawFd]> },
+    ReadMsg { buffer: Box<[u8]>, fds: Vec<OwnedFd> },
     ErrorOnSocket { error: std::io::Error },
     Stop,
 }

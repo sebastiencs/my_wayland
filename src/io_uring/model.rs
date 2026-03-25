@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io::ErrorKind::UnexpectedEof,
     ops::Range,
-    os::fd::RawFd,
+    os::fd::{FromRawFd, OwnedFd, RawFd},
 };
 
 use {libc::cmsghdr, log::error};
@@ -397,9 +397,8 @@ impl IoUringState {
             Operation::Recvmsg { id: _, fd, data, dispatch_to: to } => {
                 let nbytes = result as usize;
                 let buffer = Box::from(&data.buffer_read[..nbytes]);
-                let fds = read_fds(&data.buffer_aux[..data.msghdr.msg_controllen])
-                    .unwrap_or_else(|_| Vec::new())
-                    .into();
+                let fds =
+                    read_fds(&data.buffer_aux[..data.msghdr.msg_controllen]).unwrap_or_default();
                 dispatcher.redispatch_to(to, Ok(RecvmsgCompleted { fd, buffer, fds }));
             }
             Operation::ReadSome { id: _, fd, offset, buffer, dispatch_to: to } => {
@@ -486,7 +485,7 @@ fn write_fds(fds: &[RawFd]) -> Box<[u8]> {
     bytes.into_boxed_slice()
 }
 
-fn read_fds(mut data: &[u8]) -> std::io::Result<Vec<RawFd>> {
+fn read_fds(mut data: &[u8]) -> std::io::Result<Vec<OwnedFd>> {
     let mut fds = Vec::default();
 
     while !data.is_empty() {
@@ -497,12 +496,17 @@ fn read_fds(mut data: &[u8]) -> std::io::Result<Vec<RawFd>> {
             continue;
         }
 
-        let chunks = msg_data
+        for raw in msg_data
             .iter()
             .copied()
             .array_chunks::<4>()
-            .map(i32::from_ne_bytes);
-        fds.extend(chunks);
+            .map(i32::from_ne_bytes)
+        {
+            if fds.capacity() == 0 {
+                fds.reserve(8); // avoid reallocations
+            }
+            fds.push(unsafe { OwnedFd::from_raw_fd(raw) });
+        }
     }
 
     Ok(fds)

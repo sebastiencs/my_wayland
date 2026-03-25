@@ -3,7 +3,7 @@ use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     os::{
-        fd::{AsRawFd, RawFd},
+        fd::{AsRawFd, OwnedFd, RawFd},
         unix::net::UnixStream,
     },
 };
@@ -443,7 +443,7 @@ impl Model for Dbus {
 struct DbusReader {
     fd: RawFd,
     read_buffer: DbusBuffer,
-    fds: Vec<RawFd>,
+    fds: Vec<OwnedFd>,
     neof: usize,
     recvmsg_op_id: Option<RingId>,
 }
@@ -453,7 +453,7 @@ const DBUS_READER_ID: u64 = 0;
 #[derive(Debug)]
 enum DbusReaderAction {
     Start,
-    ReadMsg { buffer: Box<[u8]>, fds: Box<[RawFd]> },
+    ReadMsg { buffer: Box<[u8]>, fds: Vec<OwnedFd> },
     Stop,
 }
 
@@ -478,7 +478,7 @@ impl Model for DbusReader {
                     return self.dispatch_close(dispatcher);
                 }
                 self.read_buffer.append(&buffer);
-                self.fds.extend(fds.iter());
+                self.fds.extend(fds);
                 loop {
                     let msg: &[u8] = match self.read_buffer.get_whole_message() {
                         Some(msg) => msg,
@@ -487,8 +487,9 @@ impl Model for DbusReader {
                             return Ok(());
                         }
                     };
+                    let raw_fds: Vec<RawFd> = self.fds.iter().map(AsRawFd::as_raw_fd).collect();
                     let (msg, _offset) =
-                        match Message::decode_with_fds(msg.to_vec().into(), &self.fds) {
+                        match Message::decode_with_fds(msg.to_vec().into(), &raw_fds) {
                             Ok((msg, offset, _)) => (msg, offset),
                             Err(e) => panic!("{:?}", e),
                         };

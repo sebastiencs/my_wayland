@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fmt::Debug,
-    os::unix::io::RawFd,
+    os::{fd::OwnedFd, unix::io::RawFd},
     ptr::NonNull,
     sync::atomic::{
         AtomicU32,
@@ -75,7 +75,7 @@ impl ReadWriteCompleted {
 pub struct RecvmsgCompleted {
     pub fd: RawFd,
     pub buffer: Box<[u8]>,
-    pub fds: Box<[RawFd]>,
+    pub fds: Vec<OwnedFd>,
 }
 
 #[derive(Debug)]
