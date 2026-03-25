@@ -1,4 +1,5 @@
 use std::{
+    any::TypeId,
     collections::{BTreeMap, BTreeSet, VecDeque},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
@@ -215,6 +216,12 @@ struct ProcessInfo {
 
 const MIN_SERVER_ID: u32 = 0xff00_0000;
 
+#[derive(Clone, Copy, Debug)]
+struct ClientObjectEntry {
+    type_id: TypeId,
+    object_id: ObjectId,
+}
+
 pub struct Client {
     id: ClientId,
     fd: OwnedFd,
@@ -223,7 +230,7 @@ pub struct Client {
     /// the value `ObjectId` is an index in our `State::objects`
     /// So this `objects` is just used to lookup into `State::objects`, from the client `WaylandId`
     // TODO: Replace `BTreeMap` with a `IndexMap` here ?
-    objects: BTreeMap<WaylandId, ObjectId>,
+    objects: BTreeMap<WaylandId, ClientObjectEntry>,
     info: Option<Rc<ProcessInfo>>,
     pending_fds: VecDeque<RawFd>,
     next_server_id: u32,
@@ -377,7 +384,7 @@ impl Client {
         K::Object: Object,
     {
         let id: WaylandId = id.into();
-        let obj_id = self.objects[&id];
+        let obj_id = self.objects[&id].object_id;
         state.objects[obj_id].downcast_mut().unwrap()
     }
 
@@ -392,8 +399,19 @@ impl Client {
         K: Into<WaylandId>,
     {
         let id: WaylandId = id.into();
-        let object_id = self.objects.get(&id).copied()?;
+        let object_id = self.objects.get(&id)?.object_id;
         state.objects.contains(object_id).then_some(object_id)
+    }
+
+    fn iter_object_ids_of<'a, T: Object>(
+        &'a self,
+        state: &'a State,
+    ) -> impl Iterator<Item = ObjectId> + 'a {
+        let type_id = TypeId::of::<T>();
+        self.objects.values().filter_map(move |entry| {
+            (entry.type_id == type_id && state.objects.contains(entry.object_id))
+                .then_some(entry.object_id)
+        })
     }
 
     /// Return whether a client-visible Wayland id currently refers to a live
@@ -407,12 +425,11 @@ impl Client {
         K: Into<WaylandId> + IdToObject,
         K::Object: Object,
     {
-        let Some(object_id) = self.try_object_id(id, state) else {
+        let id: WaylandId = id.into();
+        let Some(entry) = self.objects.get(&id) else {
             return false;
         };
-        state.objects[object_id]
-            .downcast_ref::<K::Object>()
-            .is_some()
+        entry.type_id == TypeId::of::<K::Object>() && state.objects.contains(entry.object_id)
     }
 
     pub fn grab_object<K>(&self, id: K, state: &mut State) -> GrabbedObject<K::Object>
@@ -421,7 +438,7 @@ impl Client {
         K::Object: Object,
     {
         let id: WaylandId = id.into();
-        let obj_id = self.objects[&id];
+        let obj_id = self.objects[&id].object_id;
         state.objects.grab_object(obj_id)
     }
 
@@ -430,15 +447,15 @@ impl Client {
         K: Into<WaylandId>,
     {
         let id: WaylandId = id.into();
-        self.objects[&id]
+        self.objects[&id].object_id
     }
 
     pub fn object_id_for_wayland(&self, id: WaylandId) -> Option<ObjectId> {
-        self.objects.get(&id).copied()
+        self.objects.get(&id).map(|entry| entry.object_id)
     }
 
     pub fn remove_wayland_object(&mut self, id: WaylandId) -> Option<ObjectId> {
-        self.objects.remove(&id)
+        self.objects.remove(&id).map(|entry| entry.object_id)
     }
 
     pub fn allocate_server_object_id<I>(&mut self) -> I
@@ -467,7 +484,8 @@ impl Client {
         object: O,
     ) -> ((WaylandId, ObjectId), &'a mut O) {
         let (wayland_id, object_id) = state.insert_object(object);
-        self.objects.insert(wayland_id, object_id);
+        self.objects
+            .insert(wayland_id, ClientObjectEntry { type_id: TypeId::of::<O>(), object_id });
         let object: &mut O = state.objects[object_id].downcast_mut::<O>().unwrap();
         ((wayland_id, object_id), object)
     }
@@ -477,7 +495,7 @@ impl Client {
         K: Into<WaylandId> + IdToObject,
     {
         let id: WaylandId = id.into();
-        let Some(obj_id) = self.objects.get(&id).cloned() else {
+        let Some(obj_id) = self.objects.get(&id).map(|entry| entry.object_id) else {
             return false;
         };
         state.objects.contains(obj_id)
@@ -490,7 +508,7 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
         id: WaylandId,
     ) {
-        let object_id = self.objects.remove(&id).unwrap();
+        let object_id = self.objects.remove(&id).unwrap().object_id;
         state.remove_object(object_id);
         wl_display.send_event(wl_display::Event::DeleteId { id: id.into() }, dispatcher);
     }
@@ -643,7 +661,7 @@ impl Client {
 
     fn output_resources_for_feedback(&self, state: &State, output_id: OutputId) -> Vec<WaylandId> {
         let mut resources = Vec::new();
-        for object_id in self.objects.values().copied() {
+        for object_id in self.iter_object_ids_of::<WlOutput>(state) {
             let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(object_id) else {
                 continue;
             };
@@ -719,8 +737,8 @@ impl Client {
         let surface_ids = self
             .objects
             .iter()
-            .filter_map(|(wayland_id, object_id)| {
-                let surface = state.objects.try_get_ref_of::<WlSurface>(*object_id)?;
+            .filter_map(|(wayland_id, entry)| {
+                let surface = state.objects.try_get_ref_of::<WlSurface>(entry.object_id)?;
                 Some(
                     (surface.client_id() == self.id)
                         .then_some(WlSurfaceId::from(u32::from(*wayland_id)))?,
@@ -795,7 +813,7 @@ impl Client {
         interface: String,
         version: u32,
     ) {
-        for &object_id in self.objects.values() {
+        for object_id in self.iter_object_ids_of::<WlRegistry>(state) {
             let Some(registry) = state.objects.try_get_ref_of::<WlRegistry>(object_id) else {
                 continue;
             };
@@ -809,7 +827,7 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
         name: u32,
     ) {
-        for &object_id in self.objects.values() {
+        for object_id in self.iter_object_ids_of::<WlRegistry>(state) {
             let Some(registry) = state.objects.try_get_ref_of::<WlRegistry>(object_id) else {
                 continue;
             };
@@ -823,10 +841,15 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
         output_id: OutputId,
     ) {
-        let object_ids = self.objects.values().copied().collect::<Vec<_>>();
+        let xdg_output_ids = self
+            .iter_object_ids_of::<ZxdgOutputV1>(state)
+            .collect::<Vec<_>>();
+        let wl_output_ids = self
+            .iter_object_ids_of::<WlOutput>(state)
+            .collect::<Vec<_>>();
 
-        for object_id in &object_ids {
-            let Some(xdg_output) = state.objects.try_get_ref_of::<ZxdgOutputV1>(*object_id) else {
+        for object_id in xdg_output_ids {
+            let Some(xdg_output) = state.objects.try_get_ref_of::<ZxdgOutputV1>(object_id) else {
                 continue;
             };
             if xdg_output.matches_output(output_id) {
@@ -834,7 +857,7 @@ impl Client {
             }
         }
 
-        for object_id in object_ids {
+        for object_id in wl_output_ids {
             let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(object_id) else {
                 continue;
             };
@@ -850,7 +873,9 @@ impl Client {
         output_id: OutputId,
     ) -> Vec<WlOutputId> {
         let mut output_object_ids = Vec::new();
-        let object_ids = self.objects.values().copied().collect::<Vec<_>>();
+        let object_ids = self
+            .iter_object_ids_of::<WlOutput>(state)
+            .collect::<Vec<_>>();
         for object_id in object_ids {
             let Some(wl_output) = state.objects.try_grab_object::<WlOutput>(object_id) else {
                 continue;
@@ -902,7 +927,9 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
         output_id: OutputId,
     ) {
-        let object_ids = self.objects.values().copied().collect::<Vec<_>>();
+        let object_ids = self
+            .iter_object_ids_of::<WlSurface>(state)
+            .collect::<Vec<_>>();
         let mut surface_object_ids = Vec::new();
         for object_id in object_ids {
             let Some(surface) = state.objects.try_grab_object::<WlSurface>(object_id) else {
@@ -957,7 +984,9 @@ impl Client {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let object_ids = self.objects.values().copied().collect::<Vec<_>>();
+        let object_ids = self
+            .iter_object_ids_of::<XdgToplevel>(state)
+            .collect::<Vec<_>>();
         for object_id in object_ids {
             let Some(toplevel_ref) = state.objects.try_get_ref_of::<XdgToplevel>(object_id) else {
                 continue;
@@ -1007,22 +1036,33 @@ impl Client {
         output_id: OutputId,
     ) {
         self.refresh_surface_outputs(state, dispatcher);
-        let object_ids = self.objects.values().copied().collect::<Vec<_>>();
+        let wl_output_ids = self
+            .iter_object_ids_of::<WlOutput>(state)
+            .collect::<Vec<_>>();
+        let xdg_output_ids = self
+            .iter_object_ids_of::<ZxdgOutputV1>(state)
+            .collect::<Vec<_>>();
 
-        for object_id in object_ids {
+        for object_id in wl_output_ids {
             let Some(object) = state.objects.try_get_mut(object_id) else {
                 continue;
             };
-            if let Some(wl_output) = object.downcast_mut::<WlOutput>() {
-                if wl_output.matches_output(output_id) {
-                    wl_output.mark_removed();
-                }
+            let Some(wl_output) = object.downcast_mut::<WlOutput>() else {
                 continue;
+            };
+            if wl_output.matches_output(output_id) {
+                wl_output.mark_removed();
             }
-            if let Some(xdg_output) = object.downcast_mut::<ZxdgOutputV1>() {
-                if xdg_output.matches_output(output_id) {
-                    xdg_output.mark_removed();
-                }
+        }
+        for object_id in xdg_output_ids {
+            let Some(object) = state.objects.try_get_mut(object_id) else {
+                continue;
+            };
+            let Some(xdg_output) = object.downcast_mut::<ZxdgOutputV1>() else {
+                continue;
+            };
+            if xdg_output.matches_output(output_id) {
+                xdg_output.mark_removed();
             }
         }
         self.reconfigure_mapped_toplevels(state, dispatcher);
@@ -1411,7 +1451,11 @@ impl Model for Client {
                 );
             }
             MsgReceived { mut request } => {
-                let Some(&obj_id) = self.objects.get(&request.object_id()) else {
+                let Some(obj_id) = self
+                    .objects
+                    .get(&request.object_id())
+                    .map(|entry| entry.object_id)
+                else {
                     log::warn!(
                         "unknown Wayland object id {:?} from client {:?}",
                         request.object_id(),
@@ -1440,7 +1484,7 @@ impl Model for Client {
                 let wayland_ids: Vec<WaylandId> = self.objects.keys().copied().collect();
                 for wid in wayland_ids {
                     if let Some(oid) = self.objects.remove(&wid) {
-                        let _ = state.remove_object(oid);
+                        let _ = state.remove_object(oid.object_id);
                     }
                 }
                 if cursor_changed {
