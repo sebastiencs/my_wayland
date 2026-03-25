@@ -1613,7 +1613,7 @@ impl Drm {
 
         let (mm_width, mm_height) = connector.size().unwrap_or((0, 0));
 
-        dbg!(&edid);
+        // dbg!(&edid);
 
         let mut manufacturer_id = String::new();
         let mut model_name = None;
