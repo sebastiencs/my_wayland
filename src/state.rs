@@ -315,7 +315,7 @@ where
         }
     }
 
-    /// Like [`Self::grab`], but returns [`None`] if the slot is empty, out of range, or already grabbed.
+    /// Like [`Self::grab`], but returns [`None`] if the slot is empty, out of range.
     pub fn try_grab<Key: Into<K> + Copy>(self: &mut Box<Self>, key: Key) -> Option<Grab<K, V>>
     where
         K: Into<usize> + Copy + From<usize>,
@@ -323,8 +323,10 @@ where
         let key: K = key.into();
         let index: usize = key.into();
         let entry = self.map.get_mut(index)?;
-        if !matches!(entry, ValueOrEmpty::Value(_)) {
-            return None;
+        match entry {
+            ValueOrEmpty::Empty { .. } | ValueOrEmpty::GrabbedToRemove => return None,
+            ValueOrEmpty::Grabbed => panic!("invalid state"),
+            ValueOrEmpty::Value(_) => {}
         }
         let value = match std::mem::replace(entry, ValueOrEmpty::Grabbed) {
             ValueOrEmpty::Value(value) => value,
