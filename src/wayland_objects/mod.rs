@@ -23,6 +23,7 @@ pub mod wp_linux_drm_syncobj_manager_v1;
 pub mod wp_linux_drm_syncobj_surface_v1;
 pub mod wp_linux_drm_syncobj_timeline_v1;
 pub mod wp_presentation;
+pub mod wp_presentation_feedback;
 pub mod wp_viewport;
 pub mod wp_viewporter;
 pub mod xdg_activation_v1;
@@ -65,7 +66,7 @@ fake_obj! {
     // { wl_subcompositor, WlSubcompositor },
     { wl_fixes, WlFixes },
     // { wp_presentation, WpPresentation },
-    { wp_presentation_feedback, WpPresentationFeedback },
+    // { wp_presentation_feedback, WpPresentationFeedback },
     // { xdg_wm_base, XdgWmBase },
     // { xdg_positioner, XdgPositioner },
     // { xdg_surface, XdgSurface },

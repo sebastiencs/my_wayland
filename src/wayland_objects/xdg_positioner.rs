@@ -469,10 +469,9 @@ impl Object for XdgPositioner {
 
 #[cfg(test)]
 mod tests {
-    use super::PositionerState;
-    use crate::{
-        protocol_generated::xdg_positioner,
-        region::RectI,
+    use {
+        super::PositionerState,
+        crate::{protocol_generated::xdg_positioner, region::RectI},
     };
 
     #[test]

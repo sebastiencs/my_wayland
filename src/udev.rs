@@ -19,7 +19,7 @@ use nix::{
 use crate::{
     clients::ClientsAction,
     dbus::DbusAction,
-    drm::{sync_output_nodes_for_backend, Drm, DrmModel},
+    drm::{discard_backend_presentation_feedbacks, sync_output_nodes_for_backend, Drm, DrmModel},
     input::LibinputAction,
     io_uring::{
         model::IoUringAction,
@@ -217,6 +217,24 @@ impl Udev {
                 .dispatch(ClientsAction::RegistryGlobalRemoved { name: global_name.as_u32() });
         }
 
+        let client_ids = state
+            .objects
+            .iter()
+            .filter_map(|(_, object)| {
+                object
+                    .downcast_ref::<crate::wayland_objects::wl_surface::WlSurface>()
+                    .map(|surface| surface.client_id())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        for client_id in client_ids {
+            dispatcher.dispatch_to(
+                client_id,
+                crate::clients::ClientAction::DiscardSurfacePresentationFeedbacksForBackend {
+                    drm_id,
+                },
+            );
+        }
+        discard_backend_presentation_feedbacks(state, drm_id, dispatcher);
         dispatcher.stop_model::<_, DrmModel>(usize::from(drm_id) as u64);
         dispatcher.dispatch(UdevAction::FinalizeBackendRemoval { drm_id });
     }

@@ -32,14 +32,14 @@ use crate::{
     transform::{self, OutputPresentationTransform},
     wayland_objects::{
         wl_buffer::WlBuffer,
-        wl_surface::{StackEntry, WlSurface},
+        wl_surface::{StackEntry, SurfacePresentationFeedback, WlSurface},
     },
     ENABLE_DAMAGE,
 };
 
 use crate::{
     clients::{ClientAction, ClientId},
-    protocol_generated::WlSurfaceId,
+    protocol_generated::{WlSurfaceId, WpPresentationFeedbackId},
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -159,14 +159,15 @@ pub struct DrmOutput {
     last_scene: Vec<SceneItemState>,
     force_full_redraw: bool,
     rendered_buffer_present_id: [Option<u64>; 2],
-    in_flight_frame: Option<PendingFrame>,
+    in_flight_frame: Option<SubmittedFrame>,
     displayed_external_fb: Option<DrmFrameBuffer>,
     retiring_external_fb: Option<DrmFrameBuffer>,
     allow_in_fence_fd: bool,
     allow_fb_damage_clips: bool,
+    next_submission_id: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct SurfaceKey {
     client_id: ClientId,
     surface_id: WlSurfaceId,
@@ -191,6 +192,7 @@ struct SceneItem {
     opaque: bool,
     sync: crate::sync::SurfaceSyncState,
     direct_scanout: Option<DrmFrameBuffer>,
+    presentation_feedbacks: Vec<SurfacePresentationFeedback>,
 }
 
 #[derive(Debug)]
@@ -204,23 +206,48 @@ struct DirectScanoutCandidate {
 struct FramePlan {
     items: Vec<SceneItem>,
     scene: Vec<SceneItemState>,
+    frame_callback_surfaces: Vec<SurfaceKey>,
+    presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
     damage: DamageRegion,
     direct_scanout: Option<DirectScanoutCandidate>,
     preserve_contents: bool,
 }
 
 #[derive(Debug)]
-enum PendingFrame {
+struct OutputSubmission {
+    id: u64,
+    output_id: Option<OutputId>,
+    scene: Vec<SceneItemState>,
+    frame_callback_surfaces: Vec<SurfaceKey>,
+    presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
+    zero_copy: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SubmissionPresentationFeedback {
+    client_id: ClientId,
+    feedback_id: WpPresentationFeedbackId,
+    version: u32,
+}
+
+#[derive(Debug)]
+enum SubmittedFrame {
     Composited {
         buffer_index: usize,
         damage: DamageRegion,
-        scene: Vec<SceneItemState>,
+        submission: OutputSubmission,
         damage_blob: Option<u64>,
     },
     DirectScanout {
-        scene: Vec<SceneItemState>,
+        submission: OutputSubmission,
         framebuffer: DrmFrameBuffer,
     },
+}
+
+#[derive(Debug)]
+struct CompletedSubmission {
+    submission: OutputSubmission,
+    damage_blob: Option<u64>,
 }
 
 impl DrmOutput {
@@ -266,7 +293,27 @@ impl DrmOutput {
         self.needs_frame = false;
     }
 
-    fn mark_frame_submitted(&mut self, frame: PendingFrame) {
+    fn allocate_submission(
+        &mut self,
+        output_id: Option<OutputId>,
+        scene: Vec<SceneItemState>,
+        frame_callback_surfaces: Vec<SurfaceKey>,
+        presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
+        zero_copy: bool,
+    ) -> OutputSubmission {
+        let id = self.next_submission_id;
+        self.next_submission_id = self.next_submission_id.saturating_add(1);
+        OutputSubmission {
+            id,
+            output_id,
+            scene,
+            frame_callback_surfaces,
+            presentation_feedbacks,
+            zero_copy,
+        }
+    }
+
+    fn mark_frame_submitted(&mut self, frame: SubmittedFrame) {
         self.rendering_active = false;
         self.page_flip_pending = true;
         self.needs_frame = false;
@@ -274,17 +321,26 @@ impl DrmOutput {
         self.retiring_external_fb = self.displayed_external_fb.take();
     }
 
-    fn finish_page_flip(&mut self) -> (bool, Option<u64>) {
+    fn take_in_flight_presentation_feedbacks_for_discard(
+        &mut self,
+    ) -> (Vec<SubmissionPresentationFeedback>, Option<u64>) {
+        let Some(in_flight) = self.in_flight_frame.take() else {
+            return (Vec::new(), None);
+        };
+        submitted_frame_feedbacks_for_discard(in_flight)
+    }
+
+    fn finish_page_flip(&mut self) -> (bool, Option<CompletedSubmission>) {
         if !self.page_flip_pending {
             return (false, None);
         }
 
         self.page_flip_pending = false;
         self.present_count = self.present_count.saturating_add(1);
-        let mut damage_blob = None;
+        let mut completed_submission = None;
 
         match self.in_flight_frame.take() {
-            Some(PendingFrame::Composited { buffer_index, damage, scene, damage_blob: blob }) => {
+            Some(SubmittedFrame::Composited { buffer_index, damage, submission, damage_blob }) => {
                 self.displayed_buffer_index = buffer_index;
                 self.render_buffer_index = if buffer_index == 0 { 1 } else { 0 };
                 self.rendered_buffer_present_id[buffer_index] = Some(self.present_count);
@@ -292,17 +348,18 @@ impl DrmOutput {
                 while self.damage_history.len() > 4 {
                     self.damage_history.pop_back();
                 }
-                self.last_scene = scene;
+                self.last_scene = submission.scene.clone();
                 self.displayed_external_fb = None;
                 self.force_full_redraw = false;
-                damage_blob = blob;
+                completed_submission = Some(CompletedSubmission { submission, damage_blob });
             }
-            Some(PendingFrame::DirectScanout { scene, framebuffer }) => {
+            Some(SubmittedFrame::DirectScanout { submission, framebuffer }) => {
                 self.force_full_redraw = true;
-                self.last_scene = scene;
+                self.last_scene = submission.scene.clone();
                 self.displayed_external_fb = Some(framebuffer);
                 self.rendered_buffer_present_id = [None, None];
                 self.damage_history.clear();
+                completed_submission = Some(CompletedSubmission { submission, damage_blob: None });
             }
             None => {}
         }
@@ -310,10 +367,10 @@ impl DrmOutput {
 
         if self.needs_frame && !self.frame_scheduled {
             self.frame_scheduled = true;
-            return (true, damage_blob);
+            return (true, completed_submission);
         }
 
-        (false, damage_blob)
+        (false, completed_submission)
     }
 
     fn render_buffer(&self) -> &RenderBuffer {
@@ -364,6 +421,19 @@ impl DrmOutput {
             damage.add_region(previous);
         }
         damage
+    }
+}
+
+fn submitted_frame_feedbacks_for_discard(
+    in_flight: SubmittedFrame,
+) -> (Vec<SubmissionPresentationFeedback>, Option<u64>) {
+    match in_flight {
+        SubmittedFrame::Composited { submission, damage_blob, .. } => {
+            (submission.presentation_feedbacks, damage_blob)
+        }
+        SubmittedFrame::DirectScanout { submission, .. } => {
+            (submission.presentation_feedbacks, None)
+        }
     }
 }
 
@@ -732,8 +802,11 @@ impl Drm {
         &mut self,
         render_completion: &crate::egl::RenderCompletion,
         damage: &DamageRegion,
+        output_id: Option<OutputId>,
         scene: Vec<SceneItemState>,
-    ) -> std::io::Result<()> {
+        frame_callback_surfaces: Vec<SurfaceKey>,
+        presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
+    ) -> std::io::Result<Vec<SurfaceKey>> {
         let (primary_plane, fb, crtc) = {
             let output = &self.output;
             let (primary_plane, _) = output.in_use.primary_plane();
@@ -843,13 +916,22 @@ impl Drm {
                         );
                         self.output.allow_in_fence_fd = false;
                     }
-                    self.output.mark_frame_submitted(PendingFrame::Composited {
-                        buffer_index: self.output.render_buffer_index,
-                        damage: damage.clone(),
+                    let submission = self.output.allocate_submission(
+                        output_id,
                         scene,
-                        damage_blob,
-                    });
-                    return Ok(());
+                        frame_callback_surfaces,
+                        presentation_feedbacks,
+                        false,
+                    );
+                    let callback_surfaces = submission.frame_callback_surfaces.clone();
+                    self.output
+                        .mark_frame_submitted(SubmittedFrame::Composited {
+                            buffer_index: self.output.render_buffer_index,
+                            damage: damage.clone(),
+                            submission,
+                            damage_blob,
+                        });
+                    return Ok(callback_surfaces);
                 }
                 Err(error) => {
                     if let Some(blob) = damage_blob {
@@ -883,8 +965,11 @@ impl Drm {
     fn submit_direct_scanout(
         &mut self,
         candidate: DirectScanoutCandidate,
+        output_id: Option<OutputId>,
         scene: Vec<SceneItemState>,
-    ) -> std::io::Result<()> {
+        frame_callback_surfaces: Vec<SurfaceKey>,
+        presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
+    ) -> std::io::Result<Vec<SurfaceKey>> {
         let (primary_plane, crtc) = {
             let output = &self.output;
             let (primary_plane, _) = output.in_use.primary_plane();
@@ -980,12 +1065,20 @@ impl Drm {
             control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
             changes,
         )?;
+        let submission = self.output.allocate_submission(
+            output_id,
+            scene,
+            frame_callback_surfaces,
+            presentation_feedbacks,
+            true,
+        );
+        let callback_surfaces = submission.frame_callback_surfaces.clone();
         self.output
-            .mark_frame_submitted(PendingFrame::DirectScanout {
-                scene,
+            .mark_frame_submitted(SubmittedFrame::DirectScanout {
+                submission,
                 framebuffer: candidate.framebuffer,
             });
-        Ok(())
+        Ok(callback_surfaces)
     }
 
     fn list_resources(drm: &DrmFd) -> DrmResources {
@@ -1180,6 +1273,7 @@ impl Drm {
             retiring_external_fb: None,
             allow_in_fence_fd: true,
             allow_fb_damage_clips: true,
+            next_submission_id: 1,
         }
     }
 
@@ -1910,6 +2004,71 @@ pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
     schedule_output(state, output_id, dispatcher);
 }
 
+pub fn discard_backend_presentation_feedbacks(
+    state: &mut State,
+    drm_id: DrmId,
+    dispatcher: &mut Dispatcher,
+) {
+    let (feedbacks, damage_blob) = {
+        let drm = state.drm.get_mut(drm_id);
+        drm.output
+            .take_in_flight_presentation_feedbacks_for_discard()
+    };
+    if let Some(blob) = damage_blob {
+        let drm = state.drm.get(drm_id);
+        let _ = drm.fd.destroy_property_blob(blob);
+    }
+    if feedbacks.is_empty() {
+        return;
+    }
+    dispatch_presentation_feedback_discarded(dispatcher, &feedbacks);
+}
+
+fn output_overlap_area(scene: &[SceneItemState], output: &crate::state::Output) -> i64 {
+    let (width, height) = output.logical_size();
+    let Some(output_rect) = RectI::new(output.x, output.y, width, height) else {
+        return 0;
+    };
+    scene
+        .iter()
+        .map(|item| {
+            let x1 = item.bounds.x.max(output_rect.x);
+            let y1 = item.bounds.y.max(output_rect.y);
+            let x2 = item.bounds.x2().min(output_rect.x2());
+            let y2 = item.bounds.y2().min(output_rect.y2());
+            let width = (x2 - x1).max(0) as i64;
+            let height = (y2 - y1).max(0) as i64;
+            width * height
+        })
+        .sum()
+}
+
+fn select_presentation_output_for_scene(
+    state: &State,
+    drm_id: DrmId,
+    scene: &[SceneItemState],
+) -> Option<OutputId> {
+    let backend = BackendOutputRef::new(drm_id);
+    let output_ids = state.output_ids_for_backend(backend);
+    let mut best = None;
+    let mut best_area = -1i64;
+    for output_id in output_ids {
+        let Some(output) = state.outputs.try_get(output_id) else {
+            continue;
+        };
+        let area = output_overlap_area(scene, output);
+        if area > best_area {
+            best_area = area;
+            best = Some(output_id);
+        }
+    }
+    best.or_else(|| {
+        state
+            .active_output_id()
+            .filter(|output_id| state.backend_for_output(*output_id) == Some(backend))
+    })
+}
+
 impl Model for DrmModel {
     type Action = DrmAction;
     const START: Option<Self::Action> = Some(DrmAction::Start);
@@ -1959,6 +2118,7 @@ impl DrmModel {
     }
 
     fn render_frame(&mut self, state: &mut crate::state::State, dispatcher: &mut Dispatcher) {
+        let frame_time_msec = monotonic_time_msec();
         let ready = {
             let drm = state.drm.get_mut(self.drm_id);
             drm.output.begin_render()
@@ -1969,19 +2129,43 @@ impl DrmModel {
                 return;
             }
             let (scene_items, deferred_releases) = collect_render_items(state, self.drm_id);
+            let (plan, output_id) = {
+                let drm = state.drm.get(self.drm_id);
+                let plan = build_frame_plan(&drm.output, scene_items);
+                let output_id =
+                    select_presentation_output_for_scene(state, self.drm_id, &plan.scene);
+                (plan, output_id)
+            };
+            let FramePlan {
+                items,
+                scene,
+                frame_callback_surfaces,
+                presentation_feedbacks,
+                damage,
+                direct_scanout,
+                preserve_contents,
+            } = plan;
             let drm = state.drm.get_mut(self.drm_id);
-
             drm.output.in_flight_releases = deferred_releases;
-            let plan = build_frame_plan(&drm.output, scene_items);
-            let FramePlan { items, scene, damage, direct_scanout, preserve_contents } = plan;
 
             if let Some(candidate) = direct_scanout {
-                if let Err(error) = drm.submit_direct_scanout(candidate, scene.clone()) {
+                if let Err(error) = drm.submit_direct_scanout(
+                    candidate,
+                    output_id,
+                    scene.clone(),
+                    frame_callback_surfaces.clone(),
+                    presentation_feedbacks.clone(),
+                ) {
                     log::debug!(
                         "direct scanout rejected, falling back to composition: {:?}",
                         error
                     );
                 } else {
+                    dispatch_submission_frame_callbacks(
+                        &frame_callback_surfaces,
+                        frame_time_msec,
+                        dispatcher,
+                    );
                     drm.output.force_full_redraw = true;
                     return;
                 }
@@ -1990,7 +2174,11 @@ impl DrmModel {
             if damage.is_empty() {
                 drm.output.mark_frame_idle();
                 let releases = std::mem::take(&mut drm.output.in_flight_releases);
-                dispatch_scene_frame_callbacks(&scene, dispatcher);
+                dispatch_submission_frame_callbacks(
+                    &frame_callback_surfaces,
+                    frame_time_msec,
+                    dispatcher,
+                );
                 Some(releases)
             } else {
                 let render_items: Vec<RenderItem> = items
@@ -2008,9 +2196,18 @@ impl DrmModel {
                     .collect();
                 let render_completion =
                     drm.render_output(&render_items, &damage, preserve_contents);
-                if let Err(error) = drm.submit_render_buffer(&render_completion, &damage, scene) {
+                let callback_surfaces = frame_callback_surfaces.clone();
+                if let Err(error) = drm.submit_render_buffer(
+                    &render_completion,
+                    &damage,
+                    output_id,
+                    scene,
+                    frame_callback_surfaces,
+                    presentation_feedbacks.clone(),
+                ) {
                     drm.output.mark_render_failed();
                     let failed_releases = std::mem::take(&mut drm.output.in_flight_releases);
+                    dispatch_presentation_feedback_discarded(dispatcher, &presentation_feedbacks);
                     if !render_completion.used_blocking_fallback {
                         if let Some(in_fence_fd) = render_completion.in_fence_fd {
                             if let Err(wait_error) =
@@ -2026,6 +2223,11 @@ impl DrmModel {
                     log::error!("Could not submit DRM frame: {:?}", error);
                     Some(failed_releases)
                 } else {
+                    dispatch_submission_frame_callbacks(
+                        &callback_surfaces,
+                        frame_time_msec,
+                        dispatcher,
+                    );
                     None
                 }
             }
@@ -2042,26 +2244,37 @@ impl DrmModel {
         &mut self,
         state: &mut crate::state::State,
         dispatcher: &mut Dispatcher,
-        _sequence: u32,
-        _tv_sec: u32,
-        _tv_usec: u32,
+        sequence: u32,
+        tv_sec: u32,
+        tv_usec: u32,
         _crtc_id: u32,
     ) {
-        let (releases, should_render, damage_blob, scene) = {
+        let (releases, should_render, completed_submission) = {
             let drm = state.drm.get_mut(self.drm_id);
             let releases = std::mem::take(&mut drm.output.in_flight_releases);
-            let (should_render, damage_blob) = drm.output.finish_page_flip();
-            let scene = drm.output.last_scene.clone();
-            (releases, should_render, damage_blob, scene)
+            let (should_render, completed_submission) = drm.output.finish_page_flip();
+            (releases, should_render, completed_submission)
         };
 
         for release in releases {
             release.resolve(state, dispatcher);
         }
-        dispatch_scene_frame_callbacks(&scene, dispatcher);
-        if let Some(blob) = damage_blob {
-            let drm = state.drm.get(self.drm_id);
-            let _ = drm.fd.destroy_property_blob(blob);
+        if let Some(completed_submission) = completed_submission {
+            dispatch_presentation_feedback_presented(
+                state,
+                self.drm_id,
+                dispatcher,
+                completed_submission.submission.output_id,
+                &completed_submission.submission.presentation_feedbacks,
+                completed_submission.submission.zero_copy,
+                tv_sec,
+                tv_usec,
+                sequence,
+            );
+            if let Some(blob) = completed_submission.damage_blob {
+                let drm = state.drm.get(self.drm_id);
+                let _ = drm.fd.destroy_property_blob(blob);
+            }
         }
         sync_output_nodes_for_backend(state, self.drm_id);
         if should_render {
@@ -2120,20 +2333,152 @@ fn scene_order(scene: &[SceneItemState]) -> Vec<SurfaceKey> {
     scene.iter().map(|item| item.key).collect()
 }
 
-fn dispatch_scene_frame_callbacks(scene: &[SceneItemState], dispatcher: &mut Dispatcher) {
+fn monotonic_time_msec() -> u32 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return 0;
+    }
+    let millis = (ts.tv_sec as u64)
+        .saturating_mul(1000)
+        .saturating_add((ts.tv_nsec as u64) / 1_000_000);
+    millis.min(u64::from(u32::MAX)) as u32
+}
+
+fn dispatch_submission_frame_callbacks(
+    callback_surfaces: &[SurfaceKey],
+    frame_time_msec: u32,
+    dispatcher: &mut Dispatcher,
+) {
     let mut per_client = BTreeMap::<ClientId, Vec<WlSurfaceId>>::new();
     let mut seen = BTreeSet::<(ClientId, WlSurfaceId)>::new();
-    for item in scene {
-        let client_id = item.key.client_id;
-        let surface_id = item.key.surface_id;
+    for surface in callback_surfaces {
+        let client_id = surface.client_id;
+        let surface_id = surface.surface_id;
         if !seen.insert((client_id, surface_id)) {
             continue;
         }
         per_client.entry(client_id).or_default().push(surface_id);
     }
     for (client_id, surface_ids) in per_client {
+        dispatcher.dispatch_to(
+            client_id,
+            ClientAction::CompleteSurfaceFrameCallbacks { surface_ids, time_msec: frame_time_msec },
+        );
+    }
+}
+
+fn presentation_refresh_interval_ns(
+    refresh_millihz: i32,
+    feedback_version: u32,
+    refresh_is_constant: bool,
+) -> u32 {
+    if refresh_millihz <= 0 {
+        return 0;
+    }
+    if feedback_version <= 1 && !refresh_is_constant {
+        return 0;
+    }
+    let refresh = u64::try_from(refresh_millihz).unwrap_or(0);
+    let refresh_ns = 1_000_000_000_000u64 / refresh;
+    refresh_ns.min(u64::from(u32::MAX)) as u32
+}
+
+fn refresh_interval_ns_for_drm(state: &State, drm_id: DrmId, feedback_version: u32) -> u32 {
+    let Some(mode) = state.drm.get(drm_id).current_output_mode() else {
+        return 0;
+    };
+    let refresh_is_constant = true;
+    presentation_refresh_interval_ns(mode.refresh_millihz, feedback_version, refresh_is_constant)
+}
+
+fn presentation_feedback_flags(zero_copy: bool) -> u32 {
+    use crate::protocol_generated::wp_presentation_feedback::Kind;
+
+    let mut flags = Kind::Vsync as u32 | Kind::HwCompletion as u32;
+    if zero_copy {
+        flags |= Kind::ZeroCopy as u32;
+    }
+    flags
+}
+
+fn sanitize_present_timestamp(tv_sec: u32, tv_usec: u32) -> (u64, u32) {
+    if tv_usec < 1_000_000 && tv_sec > 2 {
+        return (u64::from(tv_sec), tv_usec.saturating_mul(1000));
+    }
+
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return (u64::from(tv_sec), tv_usec.min(999_999).saturating_mul(1000));
+    }
+
+    let tv_sec = u64::try_from(ts.tv_sec.max(0)).unwrap_or(0);
+    let tv_nsec = u32::try_from(ts.tv_nsec.clamp(0, 999_999_999)).unwrap_or(0);
+    (tv_sec, tv_nsec)
+}
+
+fn dispatch_presentation_feedback_discarded(
+    dispatcher: &mut Dispatcher,
+    feedbacks: &[SubmissionPresentationFeedback],
+) {
+    let mut per_client = BTreeMap::<ClientId, Vec<WpPresentationFeedbackId>>::new();
+    for feedback in feedbacks {
+        per_client
+            .entry(feedback.client_id)
+            .or_default()
+            .push(feedback.feedback_id);
+    }
+    for (client_id, feedback_ids) in per_client {
         dispatcher
-            .dispatch_to(client_id, ClientAction::CompleteSurfaceFrameCallbacks { surface_ids });
+            .dispatch_to(client_id, ClientAction::PresentationFeedbackDiscarded { feedback_ids });
+    }
+}
+
+fn dispatch_presentation_feedback_presented(
+    state: &State,
+    drm_id: DrmId,
+    dispatcher: &mut Dispatcher,
+    output_id: Option<OutputId>,
+    feedbacks: &[SubmissionPresentationFeedback],
+    zero_copy: bool,
+    tv_sec: u32,
+    tv_usec: u32,
+    sequence: u32,
+) {
+    if feedbacks.is_empty() {
+        return;
+    }
+    let (tv_sec, tv_nsec) = sanitize_present_timestamp(tv_sec, tv_usec);
+    let tv_sec_hi = (tv_sec >> 32) as u32;
+    let tv_sec_lo = tv_sec as u32;
+    let sequence = u64::from(sequence);
+    let seq_hi = (sequence >> 32) as u32;
+    let seq_lo = sequence as u32;
+    let flags = presentation_feedback_flags(zero_copy);
+
+    let mut per_client = BTreeMap::<(ClientId, u32), Vec<WpPresentationFeedbackId>>::new();
+    for feedback in feedbacks {
+        per_client
+            .entry((feedback.client_id, feedback.version))
+            .or_default()
+            .push(feedback.feedback_id);
+    }
+
+    for ((client_id, feedback_version), feedback_ids) in per_client {
+        let refresh = refresh_interval_ns_for_drm(state, drm_id, feedback_version);
+        dispatcher.dispatch_to(
+            client_id,
+            ClientAction::PresentationFeedbackPresented {
+                feedback_ids,
+                output_id,
+                tv_sec_hi,
+                tv_sec_lo,
+                tv_nsec,
+                refresh,
+                seq_hi,
+                seq_lo,
+                flags,
+            },
+        );
     }
 }
 
@@ -2143,6 +2488,25 @@ fn build_frame_plan(output: &DrmOutput, mut items: Vec<SceneItem>) -> FramePlan 
     let scene = items
         .iter()
         .map(|item| item.state.clone())
+        .collect::<Vec<_>>();
+    let mut frame_callback_surfaces = Vec::new();
+    let mut seen_callbacks = BTreeSet::new();
+    for item in &items {
+        if seen_callbacks.insert(item.state.key) {
+            frame_callback_surfaces.push(item.state.key);
+        }
+    }
+    let presentation_feedbacks = items
+        .iter()
+        .flat_map(|item| {
+            item.presentation_feedbacks.iter().copied().map(|feedback| {
+                SubmissionPresentationFeedback {
+                    client_id: item.state.key.client_id,
+                    feedback_id: feedback.id,
+                    version: feedback.version,
+                }
+            })
+        })
         .collect::<Vec<_>>();
     let last_scene = &output.last_scene;
     let order_changed = scene_order(last_scene) != scene_order(&scene);
@@ -2173,6 +2537,9 @@ fn build_frame_plan(output: &DrmOutput, mut items: Vec<SceneItem>) -> FramePlan 
 
     base_damage = output.accumulate_damage_from_age(&base_damage);
     base_damage.intersect_rect(output_bounds);
+    if !presentation_feedbacks.is_empty() && !scene.is_empty() && base_damage.is_empty() {
+        base_damage.add_rect(output_bounds);
+    }
     for item in &items {
         if item.sample_damage_padding <= 0 {
             continue;
@@ -2215,6 +2582,8 @@ fn build_frame_plan(output: &DrmOutput, mut items: Vec<SceneItem>) -> FramePlan 
     FramePlan {
         items,
         scene,
+        frame_callback_surfaces,
+        presentation_feedbacks,
         damage: base_damage,
         direct_scanout,
         preserve_contents: ENABLE_DAMAGE
@@ -2366,6 +2735,7 @@ fn collect_render_items(
             opaque: !opaque_region.is_empty(),
             sync: surface_state.sync,
             direct_scanout,
+            presentation_feedbacks: surface_state.presentation_feedbacks,
         });
     }
 
@@ -2388,6 +2758,151 @@ mod drm_event_tests {
             crtc_id: 0,
         };
         assert_eq!(f.len(), 32);
+    }
+}
+
+#[cfg(test)]
+mod presentation_timing_tests {
+    use {
+        super::{
+            presentation_feedback_flags, presentation_refresh_interval_ns,
+            sanitize_present_timestamp, select_presentation_output_for_scene,
+            submitted_frame_feedbacks_for_discard, OutputSubmission, SceneItemState,
+            SubmissionPresentationFeedback, SubmittedFrame, SurfaceKey,
+        },
+        crate::{
+            clients::ClientId,
+            egl::EGL,
+            globals::Globals,
+            protocol_generated::WpPresentationFeedbackId,
+            region::{DamageRegion, RectI},
+            state::{BackendOutputRef, DrmId, Output, OutputId, OutputMode, State},
+            transform,
+            xkb::Xkb,
+        },
+    };
+
+    fn submission_feedback(id: u32, version: u32) -> SubmissionPresentationFeedback {
+        SubmissionPresentationFeedback {
+            client_id: ClientId::from_raw(1),
+            feedback_id: WpPresentationFeedbackId::from(id),
+            version,
+        }
+    }
+
+    fn make_state() -> State {
+        let xkb = Xkb::new();
+        let keyboard = xkb.create_keyboard_state();
+        let mut globals = Globals::new();
+        globals.initialize();
+        State {
+            objects: Default::default(),
+            root_surfaces: Default::default(),
+            inputs: Default::default(),
+            drm: Default::default(),
+            outputs: Default::default(),
+            active_output: None,
+            backend_syncobj_globals: Default::default(),
+            globals,
+            egl: EGL::new(),
+            seat: Default::default(),
+            keyboard,
+            xkb,
+        }
+    }
+
+    fn make_output(backend: BackendOutputRef, x: i32, y: i32, width: i32, height: i32) -> Output {
+        Output {
+            backend,
+            global_name: None,
+            x,
+            y,
+            physical_width: 0,
+            physical_height: 0,
+            scale: 1,
+            transform: 0,
+            make: String::new(),
+            model: String::new(),
+            name: String::new(),
+            description: String::new(),
+            enabled: true,
+            current_mode: OutputMode { width, height, refresh_millihz: 60_000 },
+            preferred_mode: None,
+        }
+    }
+
+    #[test]
+    fn presentation_flags_do_not_claim_hw_clock() {
+        let flags = presentation_feedback_flags(false);
+        let hw_clock = crate::protocol_generated::wp_presentation_feedback::Kind::HwClock as u32;
+        assert_eq!(flags & hw_clock, 0);
+    }
+
+    #[test]
+    fn presentation_flags_only_add_zero_copy_for_scanout() {
+        let base_flags = presentation_feedback_flags(false);
+        let zero_copy_flags = presentation_feedback_flags(true);
+        let zero_copy = crate::protocol_generated::wp_presentation_feedback::Kind::ZeroCopy as u32;
+        assert_eq!(base_flags & zero_copy, 0);
+        assert_ne!(zero_copy_flags & zero_copy, 0);
+    }
+
+    #[test]
+    fn v1_feedback_uses_zero_refresh_when_rate_is_not_constant() {
+        assert_eq!(presentation_refresh_interval_ns(60_000, 1, false), 0);
+        assert_ne!(presentation_refresh_interval_ns(60_000, 2, false), 0);
+    }
+
+    #[test]
+    fn submitted_frame_discard_helper_returns_feedbacks() {
+        let frame = SubmittedFrame::Composited {
+            buffer_index: 0,
+            damage: DamageRegion::new(),
+            submission: OutputSubmission {
+                id: 7,
+                output_id: Some(OutputId::from(0usize)),
+                scene: Vec::new(),
+                frame_callback_surfaces: Vec::new(),
+                presentation_feedbacks: vec![submission_feedback(4, 2)],
+                zero_copy: false,
+            },
+            damage_blob: None,
+        };
+
+        let (feedbacks, blob) = submitted_frame_feedbacks_for_discard(frame);
+
+        assert_eq!(feedbacks, vec![submission_feedback(4, 2)]);
+        assert!(blob.is_none());
+    }
+
+    #[test]
+    fn select_presentation_output_prefers_largest_overlap() {
+        let mut state = make_state();
+        let drm_id = DrmId::from(0usize);
+        let backend = BackendOutputRef::new(drm_id);
+        let left = state.insert_output(make_output(backend, 0, 0, 100, 100));
+        let right = state.insert_output(make_output(backend, 100, 0, 100, 100));
+        let scene = vec![SceneItemState {
+            key: SurfaceKey {
+                client_id: ClientId::from_raw(1),
+                surface_id: crate::protocol_generated::WlSurfaceId::from(1),
+            },
+            buffer_object_id: crate::state::ObjectId::from(1usize),
+            bounds: RectI::new(80, 0, 80, 100).unwrap(),
+            tex_transform: transform::Mat3::identity(),
+        }];
+
+        let selected = select_presentation_output_for_scene(&state, drm_id, &scene);
+
+        assert_eq!(selected, Some(right));
+        assert_ne!(selected, Some(left));
+    }
+
+    #[test]
+    fn sanitize_present_timestamp_falls_back_for_suspicious_values() {
+        let (tv_sec, tv_nsec) = sanitize_present_timestamp(1, 2_000_000);
+        assert!(tv_sec > 0);
+        assert!(tv_nsec < 1_000_000_000);
     }
 }
 

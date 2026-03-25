@@ -285,9 +285,11 @@ impl SeatState {
     }
 
     fn popup_grab_contains_surface(&self, surface_id: WlSurfaceId) -> bool {
-        self.popup_grab
-            .as_ref()
-            .is_some_and(|grab| grab.popup_stack.iter().any(|(_, candidate)| *candidate == surface_id))
+        self.popup_grab.as_ref().is_some_and(|grab| {
+            grab.popup_stack
+                .iter()
+                .any(|(_, candidate)| *candidate == surface_id)
+        })
     }
 
     fn start_popup_grab(
@@ -589,10 +591,11 @@ fn maybe_dismiss_popup_grab_on_button(
     let Some(_grab_client_id) = state.seat.popup_grab_client() else {
         return false;
     };
-    let inside_popup_stack = state
-        .seat
-        .pointer_focus
-        .is_some_and(|focus| state.seat.popup_grab_contains_surface(focus.target.surface_id));
+    let inside_popup_stack = state.seat.pointer_focus.is_some_and(|focus| {
+        state
+            .seat
+            .popup_grab_contains_surface(focus.target.surface_id)
+    });
     if inside_popup_stack {
         return false;
     }
@@ -1250,15 +1253,15 @@ mod surface_tree_hit_test_tests {
 #[cfg(test)]
 mod xdg_seat_tests {
     use {
-        super::{remove_popup_grab, begin_popup_grab, SeatState, SurfaceFocus},
+        super::{begin_popup_grab, remove_popup_grab, SeatState, SurfaceFocus},
         crate::{
             clients::{Client, ClientId, RawEvent},
             egl::EGL,
             globals::Globals,
             object::Object,
             protocol_generated::{
-                xdg_toplevel, WlSeatId, WlSurfaceId, XdgPopupId, XdgPositionerId,
-                XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
+                xdg_toplevel, WlSeatId, WlSurfaceId, XdgPopupId, XdgPositionerId, XdgSurfaceId,
+                XdgToplevelId, XdgWmBaseId,
             },
             runner::Dispatcher,
             state::{ObjectId, State},
@@ -1298,12 +1301,9 @@ mod xdg_seat_tests {
         (Client::new_for_tests(ClientId::from_raw(7)), Dispatcher::default())
     }
 
-    fn insert_surface(
-        state: &mut State,
-        client: &mut Client,
-        surface_id: WlSurfaceId,
-    ) -> ObjectId {
-        let ((_, object_id), _) = client.insert_object(state, WlSurface::new(surface_id, client.client_id(), 6));
+    fn insert_surface(state: &mut State, client: &mut Client, surface_id: WlSurfaceId) -> ObjectId {
+        let ((_, object_id), _) =
+            client.insert_object(state, WlSurface::new(surface_id, client.client_id(), 6));
         state.register_root_surface(object_id);
         object_id
     }
@@ -1414,7 +1414,12 @@ mod xdg_seat_tests {
     ) -> ObjectId {
         let mut xdg_surface_object = state.objects.grab(xdg_surface_object_id);
         let xdg_surface = xdg_surface_object.downcast_mut::<XdgSurface>().unwrap();
-        xdg_surface.on(client, state, get_toplevel_request(xdg_surface_id, toplevel_id), dispatcher);
+        xdg_surface.on(
+            client,
+            state,
+            get_toplevel_request(xdg_surface_id, toplevel_id),
+            dispatcher,
+        );
         drop(xdg_surface_object);
         client.object_id(toplevel_id)
     }
@@ -1536,7 +1541,11 @@ mod xdg_seat_tests {
             );
         }
 
-        let popup = state.objects.get(popup_object_id).downcast_ref::<XdgPopup>().unwrap();
+        let popup = state
+            .objects
+            .get(popup_object_id)
+            .downcast_ref::<XdgPopup>()
+            .unwrap();
         assert!(popup.has_explicit_grab());
         assert_eq!(
             state.seat.popup_grab.as_ref().unwrap().popup_stack,
@@ -1544,7 +1553,10 @@ mod xdg_seat_tests {
         );
         assert_eq!(
             state.seat.keyboard_focus,
-            Some(SurfaceFocus { client_id: client.client_id(), surface_id: WlSurfaceId::from(11) })
+            Some(SurfaceFocus {
+                client_id: client.client_id(),
+                surface_id: WlSurfaceId::from(11)
+            })
         );
 
         let parent_surface = state
@@ -1566,10 +1578,14 @@ mod xdg_seat_tests {
         let mut state = make_state();
         let (_client, mut dispatcher) = make_client();
 
-        let parent_focus =
-            SurfaceFocus { client_id: ClientId::from_raw(7), surface_id: WlSurfaceId::from(50) };
-        let popup_focus =
-            SurfaceFocus { client_id: ClientId::from_raw(7), surface_id: WlSurfaceId::from(51) };
+        let parent_focus = SurfaceFocus {
+            client_id: ClientId::from_raw(7),
+            surface_id: WlSurfaceId::from(50),
+        };
+        let popup_focus = SurfaceFocus {
+            client_id: ClientId::from_raw(7),
+            surface_id: WlSurfaceId::from(51),
+        };
 
         begin_popup_grab(
             &mut state,
@@ -1592,10 +1608,14 @@ mod xdg_seat_tests {
         let mut state = make_state();
         let (_client, mut dispatcher) = make_client();
 
-        let parent_focus =
-            SurfaceFocus { client_id: ClientId::from_raw(7), surface_id: WlSurfaceId::from(50) };
-        let popup_focus =
-            SurfaceFocus { client_id: ClientId::from_raw(7), surface_id: WlSurfaceId::from(51) };
+        let parent_focus = SurfaceFocus {
+            client_id: ClientId::from_raw(7),
+            surface_id: WlSurfaceId::from(50),
+        };
+        let popup_focus = SurfaceFocus {
+            client_id: ClientId::from_raw(7),
+            surface_id: WlSurfaceId::from(51),
+        };
 
         state.seat.keyboard_focus = Some(parent_focus);
         begin_popup_grab(
@@ -1607,12 +1627,7 @@ mod xdg_seat_tests {
         );
         state.seat.keyboard_focus = Some(popup_focus);
 
-        remove_popup_grab(
-            &mut state,
-            &mut dispatcher,
-            XdgPopupId::from(60),
-            Some(parent_focus),
-        );
+        remove_popup_grab(&mut state, &mut dispatcher, XdgPopupId::from(60), Some(parent_focus));
 
         assert!(state.seat.popup_grab.is_none());
         assert_eq!(state.seat.keyboard_focus, Some(parent_focus));
@@ -1651,8 +1666,10 @@ mod xdg_seat_tests {
             surface.test_map(ObjectId::from(500usize), 40, 50, 120, 80);
         }
 
-        let focus =
-            SurfaceFocus { client_id: client.client_id(), surface_id: WlSurfaceId::from(70) };
+        let focus = SurfaceFocus {
+            client_id: client.client_id(),
+            surface_id: WlSurfaceId::from(70),
+        };
         let serial = state.seat.next_serial();
         state.seat.record_pointer_button(1, serial, Some(focus));
 
@@ -1730,8 +1747,10 @@ mod xdg_seat_tests {
             surface.test_map(ObjectId::from(700usize), 10, 20, 80, 60);
         }
 
-        let focus =
-            SurfaceFocus { client_id: client.client_id(), surface_id: WlSurfaceId::from(100) };
+        let focus = SurfaceFocus {
+            client_id: client.client_id(),
+            surface_id: WlSurfaceId::from(100),
+        };
         let serial = state.seat.next_serial();
         state.seat.record_keyboard_trigger(serial, focus);
 

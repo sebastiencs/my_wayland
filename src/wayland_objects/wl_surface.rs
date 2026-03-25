@@ -4,10 +4,11 @@ use crate::{
     object::{Object, Parser},
     protocol_generated::{
         wl_surface, wp_linux_drm_syncobj_surface_v1, wp_viewport, xdg_wm_base, WaylandId,
-        WlBufferId, WlCallbackId, WlRegionId, WlSubsurfaceId, WlSurfaceId, XdgSurfaceId,
+        WlBufferId, WlCallbackId, WlRegionId, WlSubsurfaceId, WlSurfaceId,
+        WpPresentationFeedbackId, XdgSurfaceId,
     },
     region::{DamageRegion, RectI, RegionValue},
-    state::{ObjectId, State},
+    state::{ObjectId, OutputId, State},
     sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
     transform::{self, BufferTransform, SizeI, SurfaceViewport},
     wayland_objects::{wl_callback::WlCallback, wl_region::WlRegion, xdg_surface::XdgSurface},
@@ -15,6 +16,24 @@ use crate::{
 };
 
 use {super::wl_buffer::WlBuffer, crate::protocol_generated::wl_display};
+
+fn monotonic_time_msec() -> u32 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return 0;
+    }
+    let millis = (ts.tv_sec as u64)
+        .saturating_mul(1000)
+        .saturating_add((ts.tv_nsec as u64) / 1_000_000);
+    millis.min(u64::from(u32::MAX)) as u32
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SurfacePresentationFeedback {
+    pub id: WpPresentationFeedbackId,
+    pub version: u32,
+    pub output_id: Option<OutputId>,
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Role {
@@ -27,6 +46,7 @@ pub enum Role {
 struct CachedCommit {
     payload: SurfaceCommitPayload,
     frame_callbacks: Vec<WlCallbackId>,
+    presentation_feedbacks: Vec<SurfacePresentationFeedback>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +101,7 @@ pub struct WlSurface {
     retired_buffers: Vec<RetiredBufferCandidate>,
     /// `wl_surface.frame` callbacks to complete on the next `commit`.
     pending_frame_callbacks: Vec<WlCallbackId>,
+    pending_presentation_feedbacks: Vec<SurfacePresentationFeedback>,
     cached_commit: Option<CachedCommit>,
     subsurface: Option<SubsurfaceState>,
     tree: SurfaceTreeState,
@@ -145,6 +166,7 @@ struct OnScreen {
     sample_transform: transform::Mat3,
     damage: DamageRegion,
     frame_callbacks: Vec<WlCallbackId>,
+    presentation_feedbacks: Vec<SurfacePresentationFeedback>,
     input_region: RegionValue,
     opaque_region: RegionValue,
 }
@@ -163,6 +185,7 @@ impl Default for OnScreen {
             sample_transform: transform::Mat3::identity(),
             damage: DamageRegion::new(),
             frame_callbacks: Vec::new(),
+            presentation_feedbacks: Vec::new(),
             input_region: RegionValue::infinite(),
             opaque_region: RegionValue::empty(),
         }
@@ -182,6 +205,7 @@ pub struct SurfaceRenderState {
     pub damage: DamageRegion,
     pub opaque_region: DamageRegion,
     pub sync: SurfaceSyncState,
+    pub presentation_feedbacks: Vec<SurfacePresentationFeedback>,
 }
 
 #[derive(Clone, Debug)]
@@ -194,6 +218,7 @@ struct BlockedSurfaceState {
     tex_transform: transform::Mat3,
     sync: SurfaceSyncState,
     frame_callbacks: Vec<WlCallbackId>,
+    presentation_feedbacks: Vec<SurfacePresentationFeedback>,
     buffer_transform: BufferTransform,
     buffer_scale: i32,
     viewport: SurfaceViewport,
@@ -236,6 +261,7 @@ impl WlSurface {
             viewport_object: None,
             retired_buffers: Vec::new(),
             pending_frame_callbacks: Vec::new(),
+            pending_presentation_feedbacks: Vec::new(),
             cached_commit: None,
             subsurface: None,
             tree: SurfaceTreeState::default(),
@@ -682,6 +708,7 @@ impl WlSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
+        self.discard_all_presentation_feedbacks(client, state, dispatcher);
         self.cancel_blocked(client, state, dispatcher);
         self.retire_current();
         self.on_screen = OnScreen {
@@ -696,6 +723,7 @@ impl WlSurface {
             sample_transform: transform::Mat3::identity(),
             damage: DamageRegion::new(),
             frame_callbacks: std::mem::take(&mut self.on_screen.frame_callbacks),
+            presentation_feedbacks: Vec::new(),
             input_region: self.on_screen.input_region.clone(),
             opaque_region: self.on_screen.opaque_region.clone(),
         };
@@ -728,7 +756,8 @@ impl WlSurface {
         &mut self,
         payload: SurfaceCommitPayload,
         frame_callbacks: Vec<WlCallbackId>,
-    ) {
+        presentation_feedbacks: Vec<SurfacePresentationFeedback>,
+    ) -> Vec<SurfacePresentationFeedback> {
         // Follow a Smithay-like "compose cached state until the apply root commits"
         // model rather than treating the first cached commit as immutable.
         match self.cached_commit.as_mut() {
@@ -746,9 +775,15 @@ impl WlSurface {
                 cached.payload.input_region = payload.input_region;
                 cached.payload.opaque_region = payload.opaque_region;
                 cached.frame_callbacks.extend(frame_callbacks);
+                return std::mem::replace(
+                    &mut cached.presentation_feedbacks,
+                    presentation_feedbacks,
+                );
             }
             None => {
-                self.cached_commit = Some(CachedCommit { payload, frame_callbacks });
+                self.cached_commit =
+                    Some(CachedCommit { payload, frame_callbacks, presentation_feedbacks });
+                Vec::new()
             }
         }
     }
@@ -870,6 +905,7 @@ impl WlSurface {
             tex_transform,
             sync: payload.sync.clone(),
             frame_callbacks: Vec::new(),
+            presentation_feedbacks: Vec::new(),
             buffer_transform: payload.buffer_transform,
             buffer_scale: payload.buffer_scale,
             viewport: payload.viewport,
@@ -1058,10 +1094,11 @@ impl WlSurface {
     ) {
         use crate::wayland_objects::wl_display::WlDisplay;
         let display = WlDisplay::default();
+        let time_msec = monotonic_time_msec();
         for cb in callbacks {
             {
                 let callback = client.grab_object(cb, state);
-                callback.done(dispatcher);
+                callback.done(time_msec, dispatcher);
             }
             client.delete_id(&display, state, dispatcher, cb.into());
         }
@@ -1077,6 +1114,7 @@ impl WlSurface {
         let changes = self.get_changes_for_payload(payload);
         let mut commit_blocked = false;
         let mut committed_damage = DamageRegion::new();
+        let previous_feedbacks = std::mem::take(&mut self.on_screen.presentation_feedbacks);
 
         match payload.buffer {
             None => {}
@@ -1095,6 +1133,7 @@ impl WlSurface {
                     sample_transform: transform::Mat3::identity(),
                     damage: DamageRegion::new(),
                     frame_callbacks: std::mem::take(&mut self.on_screen.frame_callbacks),
+                    presentation_feedbacks: Vec::new(),
                     input_region: payload.input_region.clone(),
                     opaque_region: payload.opaque_region.clone(),
                 };
@@ -1108,6 +1147,7 @@ impl WlSurface {
                     payload,
                 ) else {
                     log::warn!("failed to derive mapped state for buffer {:?}", buffer_object_id);
+                    self.on_screen.presentation_feedbacks = previous_feedbacks;
                     return false;
                 };
 
@@ -1127,6 +1167,7 @@ impl WlSurface {
                             error
                         );
                         self.cancel_blocked(client, state, dispatcher);
+                        self.on_screen.presentation_feedbacks = previous_feedbacks;
                         return false;
                     }
                 } else {
@@ -1159,6 +1200,7 @@ impl WlSurface {
                 },
             ) else {
                 log::warn!("failed to recompute mapped state for current surface {:?}", self.id);
+                self.on_screen.presentation_feedbacks = previous_feedbacks;
                 return false;
             };
             self.on_screen.buffer_transform = next.buffer_transform;
@@ -1203,6 +1245,8 @@ impl WlSurface {
             );
         }
 
+        self.discard_presentation_feedbacks(client, state, dispatcher, previous_feedbacks);
+
         buffer_changed || mapping_changed || !committed_damage.is_empty()
     }
 
@@ -1222,6 +1266,7 @@ impl WlSurface {
             dispatcher,
             cached_commit.payload,
             cached_commit.frame_callbacks,
+            cached_commit.presentation_feedbacks,
             surface_behaves_synchronized,
         );
         changed || needs_frame
@@ -1276,6 +1321,7 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
         payload: SurfaceCommitPayload,
         frame_callbacks: Vec<WlCallbackId>,
+        presentation_feedbacks: Vec<SurfacePresentationFeedback>,
         surface_behaves_synchronized: bool,
     ) -> (bool, bool) {
         let mut changed = self.apply_surface_payload(client, state, dispatcher, &payload);
@@ -1286,9 +1332,12 @@ impl WlSurface {
             dispatcher,
             surface_behaves_synchronized,
         );
+        let (discarded_feedbacks, needs_presentation_frame) =
+            self.route_presentation_feedbacks(presentation_feedbacks);
+        self.discard_presentation_feedbacks(client, state, dispatcher, discarded_feedbacks);
         let (immediate_callbacks, needs_frame) = self.route_frame_callbacks(frame_callbacks);
         self.flush_frame_callbacks_list(immediate_callbacks, client, state, dispatcher);
-        (changed, needs_frame)
+        (changed, needs_frame || needs_presentation_frame)
     }
 
     fn on_commit(
@@ -1323,15 +1372,20 @@ impl WlSurface {
 
         let payload = self.build_commit_payload();
         let frame_callbacks = std::mem::take(&mut self.pending_frame_callbacks);
+        let presentation_feedbacks = std::mem::take(&mut self.pending_presentation_feedbacks);
 
         if self.behaves_synchronized(state) {
-            self.cache_commit_payload(payload, frame_callbacks);
+            let discarded =
+                self.cache_commit_payload(payload, frame_callbacks, presentation_feedbacks);
+            self.discard_presentation_feedbacks(client, state, dispatcher, discarded);
             return;
         }
 
         let has_cached_commit = self.cached_commit.is_some();
         let (changed, needs_frame) = if has_cached_commit {
-            self.cache_commit_payload(payload, frame_callbacks);
+            let discarded =
+                self.cache_commit_payload(payload, frame_callbacks, presentation_feedbacks);
+            self.discard_presentation_feedbacks(client, state, dispatcher, discarded);
             let cached_commit = self.cached_commit.take().unwrap();
             self.apply_surface_update(
                 client,
@@ -1339,10 +1393,19 @@ impl WlSurface {
                 dispatcher,
                 cached_commit.payload,
                 cached_commit.frame_callbacks,
+                cached_commit.presentation_feedbacks,
                 false,
             )
         } else {
-            self.apply_surface_update(client, state, dispatcher, payload, frame_callbacks, false)
+            self.apply_surface_update(
+                client,
+                state,
+                dispatcher,
+                payload,
+                frame_callbacks,
+                presentation_feedbacks,
+                false,
+            )
         };
 
         if changed || needs_frame {
@@ -1477,6 +1540,114 @@ impl WlSurface {
         (callbacks, false)
     }
 
+    fn route_presentation_feedbacks(
+        &mut self,
+        feedbacks: Vec<SurfacePresentationFeedback>,
+    ) -> (Vec<SurfacePresentationFeedback>, bool) {
+        if feedbacks.is_empty() {
+            return (Vec::new(), false);
+        }
+        if let Some(blocked) = self.blocked.as_mut() {
+            let superseded = std::mem::replace(&mut blocked.presentation_feedbacks, feedbacks);
+            return (superseded, false);
+        }
+        if self.on_screen.logical_size.is_some() {
+            let superseded =
+                std::mem::replace(&mut self.on_screen.presentation_feedbacks, feedbacks);
+            return (superseded, true);
+        }
+        (feedbacks, false)
+    }
+
+    fn discard_presentation_feedbacks(
+        &self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        feedbacks: Vec<SurfacePresentationFeedback>,
+    ) {
+        use crate::wayland_objects::wl_display::WlDisplay;
+
+        for feedback in feedbacks {
+            if !client.contains_object(feedback.id, state) {
+                continue;
+            }
+            {
+                let feedback_object = client.grab_object(feedback.id, state);
+                feedback_object.send_discarded(dispatcher);
+            }
+            client.delete_id(&WlDisplay::default(), state, dispatcher, feedback.id.into());
+        }
+    }
+
+    pub fn discard_all_presentation_feedbacks(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let pending_feedbacks = std::mem::take(&mut self.pending_presentation_feedbacks);
+        self.discard_presentation_feedbacks(client, state, dispatcher, pending_feedbacks);
+        let cached_feedbacks = self
+            .cached_commit
+            .as_mut()
+            .map(|cached| std::mem::take(&mut cached.presentation_feedbacks))
+            .unwrap_or_default();
+        self.discard_presentation_feedbacks(client, state, dispatcher, cached_feedbacks);
+        let on_screen_feedbacks = std::mem::take(&mut self.on_screen.presentation_feedbacks);
+        self.discard_presentation_feedbacks(client, state, dispatcher, on_screen_feedbacks);
+        let blocked_feedbacks = self
+            .blocked
+            .as_mut()
+            .map(|blocked| std::mem::take(&mut blocked.presentation_feedbacks))
+            .unwrap_or_default();
+        self.discard_presentation_feedbacks(client, state, dispatcher, blocked_feedbacks);
+    }
+
+    pub fn discard_presentation_feedbacks_for_backend(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        backend: crate::state::BackendOutputRef,
+    ) {
+        let split_feedbacks = |feedbacks: &mut Vec<SurfacePresentationFeedback>, state: &State| {
+            let mut retained = Vec::new();
+            let mut discarded = Vec::new();
+            for feedback in feedbacks.drain(..) {
+                let matches_backend = match feedback.output_id {
+                    Some(output_id) => state.backend_for_output(output_id) == Some(backend),
+                    None => true,
+                };
+                if matches_backend {
+                    discarded.push(feedback);
+                } else {
+                    retained.push(feedback);
+                }
+            }
+            *feedbacks = retained;
+            discarded
+        };
+
+        let pending_feedbacks = split_feedbacks(&mut self.pending_presentation_feedbacks, state);
+        self.discard_presentation_feedbacks(client, state, dispatcher, pending_feedbacks);
+        let cached_feedbacks = self
+            .cached_commit
+            .as_mut()
+            .map(|cached| split_feedbacks(&mut cached.presentation_feedbacks, state))
+            .unwrap_or_default();
+        self.discard_presentation_feedbacks(client, state, dispatcher, cached_feedbacks);
+        let on_screen_feedbacks =
+            split_feedbacks(&mut self.on_screen.presentation_feedbacks, state);
+        self.discard_presentation_feedbacks(client, state, dispatcher, on_screen_feedbacks);
+        let blocked_feedbacks = self
+            .blocked
+            .as_mut()
+            .map(|blocked| split_feedbacks(&mut blocked.presentation_feedbacks, state))
+            .unwrap_or_default();
+        self.discard_presentation_feedbacks(client, state, dispatcher, blocked_feedbacks);
+    }
+
     pub fn render_state(&self) -> Option<SurfaceRenderState> {
         self.render_state_at(0, 0)
     }
@@ -1506,11 +1677,13 @@ impl WlSurface {
                 .to_region_clipped(local_bounds)
                 .translated(x, y),
             sync: self.on_screen.sync.clone(),
+            presentation_feedbacks: Vec::new(),
         })
     }
 
     pub fn take_render_state_at(&mut self, base_x: i32, base_y: i32) -> Option<SurfaceRenderState> {
-        let state = self.render_state_at(base_x, base_y)?;
+        let mut state = self.render_state_at(base_x, base_y)?;
+        state.presentation_feedbacks = std::mem::take(&mut self.on_screen.presentation_feedbacks);
         self.on_screen.damage.clear();
         Some(state)
     }
@@ -1545,6 +1718,7 @@ impl WlSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
+        self.discard_all_presentation_feedbacks(client, state, dispatcher);
         self.cancel_blocked(client, state, dispatcher);
         self.retire_current();
         self.on_screen.logical_size = None;
@@ -1576,6 +1750,7 @@ impl WlSurface {
             sample_transform: transform::Mat3::identity(),
             damage: Self::full_damage_for_logical_size(SizeI { width, height }),
             frame_callbacks: Vec::new(),
+            presentation_feedbacks: Vec::new(),
             input_region: RegionValue::infinite(),
             opaque_region: RegionValue::empty(),
         };
@@ -1644,6 +1819,7 @@ impl WlSurface {
                 height: next.height,
             }),
             frame_callbacks,
+            presentation_feedbacks: next.presentation_feedbacks,
             input_region: next.input_region,
             opaque_region: next.opaque_region,
         };
@@ -1674,6 +1850,12 @@ impl WlSurface {
         let Some(blocked) = self.blocked.take() else {
             return;
         };
+        self.discard_presentation_feedbacks(
+            client,
+            state,
+            dispatcher,
+            blocked.presentation_feedbacks,
+        );
         sync::resolve_unused_candidate_immediately(
             client,
             state,
@@ -1768,6 +1950,7 @@ impl WlSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
+        self.discard_all_presentation_feedbacks(client, state, dispatcher);
         for child_surface_object_id in self.child_surface_ids() {
             Self::detach_subsurface_tree(child_surface_object_id, client, state, dispatcher);
         }
@@ -1790,6 +1973,16 @@ impl WlSurface {
 
     pub fn surface_id(&self) -> WlSurfaceId {
         self.id
+    }
+
+    pub fn queue_presentation_feedback(
+        &mut self,
+        feedback: WpPresentationFeedbackId,
+        version: u32,
+        output_id: Option<OutputId>,
+    ) {
+        self.pending_presentation_feedbacks
+            .push(SurfacePresentationFeedback { id: feedback, version, output_id });
     }
 }
 
@@ -1869,12 +2062,14 @@ impl Object for WlSurface {
 #[cfg(test)]
 mod tests {
     use {
-        super::{DamageRect, OnScreen, SurfaceCommitPayload, WlSurface},
+        super::{
+            DamageRect, OnScreen, SurfaceCommitPayload, SurfacePresentationFeedback, WlSurface,
+        },
         crate::{
             clients::{Client, ClientId},
             egl::EGL,
             globals::Globals,
-            protocol_generated::{WlSubsurfaceId, WlSurfaceId},
+            protocol_generated::{WlSubsurfaceId, WlSurfaceId, WpPresentationFeedbackId},
             region::{DamageRegion, RectI, RegionSpec, RegionValue},
             runner::Dispatcher,
             state::{ObjectId, State},
@@ -1898,6 +2093,7 @@ mod tests {
             sample_transform: transform::Mat3::identity(),
             damage: DamageRegion::new(),
             frame_callbacks: Vec::new(),
+            presentation_feedbacks: Vec::new(),
             input_region: RegionValue::infinite(),
             opaque_region: RegionValue::empty(),
         };
@@ -1939,6 +2135,14 @@ mod tests {
         let mut spec = RegionSpec::default();
         spec.add_rect(RectI::new(x, y, width, height).unwrap());
         RegionValue::from_spec(spec)
+    }
+
+    fn feedback(id: u32, version: u32) -> SurfacePresentationFeedback {
+        SurfacePresentationFeedback {
+            id: WpPresentationFeedbackId::from(id),
+            version,
+            output_id: None,
+        }
     }
 
     #[test]
@@ -2282,7 +2486,7 @@ mod tests {
     #[test]
     fn repeated_synchronized_cache_updates_compose_latest_state() {
         let mut surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(1), 6);
-        surface.cache_commit_payload(
+        let discarded = surface.cache_commit_payload(
             SurfaceCommitPayload {
                 buffer: Some(Some(ObjectId::from(1usize))),
                 offset: (10, 20),
@@ -2296,8 +2500,10 @@ mod tests {
                 opaque_region: RegionValue::empty(),
             },
             vec![crate::protocol_generated::WlCallbackId::from(7)],
+            vec![feedback(17, 2)],
         );
-        surface.cache_commit_payload(
+        assert!(discarded.is_empty());
+        let discarded = surface.cache_commit_payload(
             SurfaceCommitPayload {
                 buffer: Some(Some(ObjectId::from(2usize))),
                 offset: (30, 40),
@@ -2311,7 +2517,9 @@ mod tests {
                 opaque_region: RegionValue::infinite(),
             },
             vec![crate::protocol_generated::WlCallbackId::from(8)],
+            vec![feedback(18, 2)],
         );
+        assert_eq!(discarded, vec![feedback(17, 2)]);
 
         let cached = surface.cached_commit.as_ref().unwrap();
         assert_eq!(cached.payload.buffer, Some(Some(ObjectId::from(2usize))));
@@ -2326,6 +2534,59 @@ mod tests {
                 crate::protocol_generated::WlCallbackId::from(8),
             ]
         );
+        assert_eq!(cached.presentation_feedbacks, vec![feedback(18, 2)]);
+    }
+
+    #[test]
+    fn route_presentation_feedbacks_replaces_superseded_on_screen_commit() {
+        let mut surface = make_surface();
+        surface.on_screen.presentation_feedbacks = vec![feedback(21, 2)];
+
+        let (discarded, needs_frame) = surface.route_presentation_feedbacks(vec![feedback(22, 2)]);
+
+        assert_eq!(discarded, vec![feedback(21, 2)]);
+        assert!(needs_frame);
+        assert_eq!(surface.on_screen.presentation_feedbacks, vec![feedback(22, 2)]);
+    }
+
+    #[test]
+    fn route_presentation_feedbacks_on_unmapped_surface_discards_immediately() {
+        let mut surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(1), 6);
+
+        let (discarded, needs_frame) = surface.route_presentation_feedbacks(vec![feedback(23, 2)]);
+
+        assert_eq!(discarded, vec![feedback(23, 2)]);
+        assert!(!needs_frame);
+    }
+
+    #[test]
+    fn take_render_state_drains_presentation_feedbacks() {
+        let mut surface = make_surface();
+        surface.on_screen.presentation_feedbacks = vec![feedback(31, 2), feedback(32, 1)];
+
+        let render_state = surface.take_render_state_at(0, 0).unwrap();
+
+        assert_eq!(render_state.presentation_feedbacks, vec![feedback(31, 2), feedback(32, 1)]);
+        assert!(surface.on_screen.presentation_feedbacks.is_empty());
+    }
+
+    #[test]
+    fn backend_discard_also_clears_unassigned_feedbacks() {
+        let mut surface = make_surface();
+        surface.pending_presentation_feedbacks = vec![feedback(41, 2)];
+        let (mut client, mut dispatcher) = make_client();
+        let mut dispatcher = client.test_dispatcher(&mut dispatcher);
+        let mut state = make_state();
+        let backend = crate::state::BackendOutputRef::new(crate::state::DrmId::from(0usize));
+
+        surface.discard_presentation_feedbacks_for_backend(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            backend,
+        );
+
+        assert!(surface.pending_presentation_feedbacks.is_empty());
     }
 
     #[test]

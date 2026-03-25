@@ -2,9 +2,14 @@ use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     globals::Global,
     object::{Object, Parser},
-    protocol_generated::{wp_presentation, Constants, NewId, WaylandId, WpPresentationId},
+    protocol_generated::{
+        wl_display, wp_presentation, Constants, NewId, WaylandId, WlSurfaceId,
+        WpPresentationFeedbackId, WpPresentationId,
+    },
     state::State,
 };
+
+use super::{wl_display::WlDisplay, wp_presentation_feedback::WpPresentationFeedback};
 
 #[derive(Debug)]
 pub struct WpPresentationGlobal;
@@ -24,11 +29,11 @@ impl Global for WpPresentationGlobal {
         client: &mut Client,
         state: &mut State,
         id: NewId,
-        _version: u32,
+        version: u32,
         dispatcher: &mut ClientDispatcher,
     ) {
         let id = WpPresentationId::from(id);
-        let wp_presentation = WpPresentation { id };
+        let wp_presentation = WpPresentation { id, version };
 
         wp_presentation.send_clock_id(dispatcher);
 
@@ -39,11 +44,12 @@ impl Global for WpPresentationGlobal {
 #[derive(Debug)]
 pub struct WpPresentation {
     id: WpPresentationId,
+    version: u32,
 }
 
 impl WpPresentation {
-    pub fn new(id: WpPresentationId) -> Self {
-        Self { id }
+    pub fn new(id: WpPresentationId, version: u32) -> Self {
+        Self { id, version }
     }
 }
 
@@ -55,15 +61,19 @@ impl Object for WpPresentation {
     fn on(
         &mut self,
         client: &mut Client,
-        _: &mut State,
+        state: &mut State,
         req: RawRequest,
-        _: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) {
         use wp_presentation::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
-            Destroy => todo!(),
-            Feedback { surface, callback } => todo!(),
+            Destroy => {
+                client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
+            }
+            Feedback { surface, callback } => {
+                self.on_feedback(client, state, dispatcher, surface, callback);
+            }
         }
     }
 }
@@ -72,5 +82,29 @@ impl WpPresentation {
     pub fn send_clock_id(&self, dispatcher: &mut ClientDispatcher) {
         let clock_id = wp_presentation::Event::ClockId { clk_id: libc::CLOCK_MONOTONIC as u32 };
         self.send_event(clock_id, dispatcher);
+    }
+
+    fn on_feedback(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        surface: WlSurfaceId,
+        callback: WpPresentationFeedbackId,
+    ) {
+        if !client.object_is(surface, state) {
+            client.protocol_violation_disconnect(
+                dispatcher,
+                self.id.into(),
+                wl_display::Error::InvalidObject as u32,
+                "wp_presentation.feedback requires a live wl_surface",
+            );
+            return;
+        }
+
+        client.insert_object(state, WpPresentationFeedback::new(callback, self.version));
+
+        let mut surface = client.grab_object(surface, state);
+        surface.queue_presentation_feedback(callback, self.version, None);
     }
 }

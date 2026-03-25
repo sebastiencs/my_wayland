@@ -6,6 +6,17 @@ use crate::{
     wayland_objects::{wl_callback::WlCallback, wl_registry::WlRegistry},
 };
 
+fn monotonic_time_msec() -> u32 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return 0;
+    }
+    let millis = (ts.tv_sec as u64)
+        .saturating_mul(1000)
+        .saturating_add((ts.tv_nsec as u64) / 1_000_000);
+    millis.min(u64::from(u32::MAX)) as u32
+}
+
 #[derive(Debug)]
 pub struct WlDisplay {
     id: WlDisplayId,
@@ -34,7 +45,7 @@ impl Object for WlDisplay {
         match client.parse::<Self>(request).unwrap() {
             Sync { callback } => {
                 let ((id, _), callback) = client.insert_object(state, WlCallback::new(callback));
-                callback.done(dispatcher);
+                callback.done(monotonic_time_msec(), dispatcher);
                 client.delete_id(self, state, dispatcher, id);
             }
             GetRegistry { registry } => {

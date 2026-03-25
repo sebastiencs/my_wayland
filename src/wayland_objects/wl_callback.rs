@@ -15,8 +15,7 @@ impl WlCallback {
         Self { id }
     }
 
-    pub fn done(&self, dispatcher: &mut ClientDispatcher) {
-        let callback_data = self.id.into();
+    pub fn done(&self, callback_data: u32, dispatcher: &mut ClientDispatcher) {
         self.send_event(wl_callback::Event::Done { callback_data }, dispatcher);
     }
 }

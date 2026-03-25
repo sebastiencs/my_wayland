@@ -18,7 +18,8 @@ use crate::{
     },
     object::{IdToObject, Object, Parser, ParserError},
     protocol_generated::{
-        wl_display, Array, Constants, WaylandId, WlSurfaceId, XdgPopupId, XdgToplevelId,
+        wl_display, Array, Constants, WaylandId, WlSurfaceId, WpPresentationFeedbackId, XdgPopupId,
+        XdgToplevelId,
     },
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     seat::SeatClientEvent,
@@ -31,6 +32,7 @@ use crate::{
         wl_pointer::WlPointer,
         wl_registry::WlRegistry,
         wl_surface::WlSurface,
+        wp_presentation_feedback::WpPresentationFeedback,
         xdg_popup::XdgPopup,
         xdg_surface::{xdg_toplevel::XdgToplevel, XdgSurface},
         zxdg_output_v1::ZxdgOutputV1,
@@ -256,6 +258,24 @@ pub enum ClientAction {
     },
     CompleteSurfaceFrameCallbacks {
         surface_ids: Vec<WlSurfaceId>,
+        time_msec: u32,
+    },
+    PresentationFeedbackPresented {
+        feedback_ids: Vec<WpPresentationFeedbackId>,
+        output_id: Option<OutputId>,
+        tv_sec_hi: u32,
+        tv_sec_lo: u32,
+        tv_nsec: u32,
+        refresh: u32,
+        seq_hi: u32,
+        seq_lo: u32,
+        flags: u32,
+    },
+    PresentationFeedbackDiscarded {
+        feedback_ids: Vec<WpPresentationFeedbackId>,
+    },
+    DiscardSurfacePresentationFeedbacksForBackend {
+        drm_id: crate::state::DrmId,
     },
     CancelBlockedSurface {
         surface_object_id: ObjectId,
@@ -593,6 +613,7 @@ impl Client {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
         surface_ids: Vec<WlSurfaceId>,
+        time_msec: u32,
     ) {
         let display = WlDisplay::default();
         for surface_id in surface_ids {
@@ -614,10 +635,105 @@ impl Client {
                 }
                 {
                     let callback = self.grab_object(callback_id, state);
-                    callback.done(dispatcher);
+                    callback.done(time_msec, dispatcher);
                 }
                 self.delete_id(&display, state, dispatcher, callback_id.into());
             }
+        }
+    }
+
+    fn output_resources_for_feedback(&self, state: &State, output_id: OutputId) -> Vec<WaylandId> {
+        let mut resources = Vec::new();
+        for object_id in self.objects.values().copied() {
+            let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(object_id) else {
+                continue;
+            };
+            if wl_output.matches_output(output_id) {
+                resources.push(wl_output.id());
+            }
+        }
+        resources
+    }
+
+    fn present_feedback(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        feedback_ids: Vec<WpPresentationFeedbackId>,
+        output_id: Option<OutputId>,
+        tv_sec_hi: u32,
+        tv_sec_lo: u32,
+        tv_nsec: u32,
+        refresh: u32,
+        seq_hi: u32,
+        seq_lo: u32,
+        flags: u32,
+    ) {
+        let display = WlDisplay::default();
+        let sync_outputs =
+            output_id.map(|output_id| self.output_resources_for_feedback(state, output_id));
+        for feedback_id in feedback_ids {
+            if !self.contains_object(feedback_id, state) {
+                continue;
+            }
+            {
+                let feedback: &mut WpPresentationFeedback = self.get_object(feedback_id, state);
+                if let Some(sync_outputs) = sync_outputs.as_ref() {
+                    for output in sync_outputs {
+                        feedback.send_sync_output((*output).into(), dispatcher);
+                    }
+                }
+                feedback.send_presented(
+                    tv_sec_hi, tv_sec_lo, tv_nsec, refresh, seq_hi, seq_lo, flags, dispatcher,
+                );
+            }
+            self.delete_id(&display, state, dispatcher, feedback_id.into());
+        }
+    }
+
+    fn discard_presentation_feedback(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        feedback_ids: Vec<WpPresentationFeedbackId>,
+    ) {
+        let display = WlDisplay::default();
+        for feedback_id in feedback_ids {
+            if !self.contains_object(feedback_id, state) {
+                continue;
+            }
+            {
+                let feedback: &mut WpPresentationFeedback = self.get_object(feedback_id, state);
+                feedback.send_discarded(dispatcher);
+            }
+            self.delete_id(&display, state, dispatcher, feedback_id.into());
+        }
+    }
+
+    fn discard_surface_presentation_feedbacks_for_backend(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        drm_id: crate::state::DrmId,
+    ) {
+        let backend = crate::state::BackendOutputRef::new(drm_id);
+        let surface_ids = self
+            .objects
+            .iter()
+            .filter_map(|(wayland_id, object_id)| {
+                let surface = state.objects.try_get_ref_of::<WlSurface>(*object_id)?;
+                Some(
+                    (surface.client_id() == self.id)
+                        .then_some(WlSurfaceId::from(u32::from(*wayland_id)))?,
+                )
+            })
+            .collect::<Vec<_>>();
+        for surface_id in surface_ids {
+            if !self.contains_object(surface_id, state) {
+                continue;
+            }
+            let mut surface = self.grab_object(surface_id, state);
+            surface.discard_presentation_feedbacks_for_backend(self, state, dispatcher, backend);
         }
     }
 
@@ -872,8 +988,48 @@ impl Model for Client {
                     buffer.send_release(&mut dispatcher);
                 }
             }
-            CompleteSurfaceFrameCallbacks { surface_ids } => {
-                self.complete_surface_frame_callbacks(state, &mut dispatcher, surface_ids);
+            CompleteSurfaceFrameCallbacks { surface_ids, time_msec } => {
+                self.complete_surface_frame_callbacks(
+                    state,
+                    &mut dispatcher,
+                    surface_ids,
+                    time_msec,
+                );
+            }
+            PresentationFeedbackPresented {
+                feedback_ids,
+                output_id,
+                tv_sec_hi,
+                tv_sec_lo,
+                tv_nsec,
+                refresh,
+                seq_hi,
+                seq_lo,
+                flags,
+            } => {
+                self.present_feedback(
+                    state,
+                    &mut dispatcher,
+                    feedback_ids,
+                    output_id,
+                    tv_sec_hi,
+                    tv_sec_lo,
+                    tv_nsec,
+                    refresh,
+                    seq_hi,
+                    seq_lo,
+                    flags,
+                );
+            }
+            PresentationFeedbackDiscarded { feedback_ids } => {
+                self.discard_presentation_feedback(state, &mut dispatcher, feedback_ids);
+            }
+            DiscardSurfacePresentationFeedbacksForBackend { drm_id } => {
+                self.discard_surface_presentation_feedbacks_for_backend(
+                    state,
+                    &mut dispatcher,
+                    drm_id,
+                );
             }
             CancelBlockedSurface { surface_object_id, waiter_id } => {
                 let Some(mut surface_obj) = state.objects.try_grab(surface_object_id) else {
