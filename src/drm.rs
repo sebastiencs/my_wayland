@@ -941,9 +941,13 @@ impl Drm {
             return None;
         }
 
+        // virtio rejects AddFB2 framebuffers smaller than 32x32 even for cursor planes.
+        let min_cursor_fb_size = if self.driver.name == "virtio_gpu" { 32 } else { 1 };
+        let fb_width = (image.width as u32).max(min_cursor_fb_size);
+        let fb_height = (image.height as u32).max(min_cursor_fb_size);
         let bo = self.egl_context.gbm.create_bo_with_size_no_export(
-            image.width as u32,
-            image.height as u32,
+            fb_width,
+            fb_height,
             DrmFourcc::Argb8888,
             UseFlags::CURSOR | UseFlags::WRITE,
             &[],
@@ -965,6 +969,7 @@ impl Drm {
             image.width as usize,
             image.height as usize,
             pitch,
+            fb_height as usize,
         );
         bo.write(&bytes);
         let framebuffer = match Self::add_framebuffer_for_bo(&self.fd, &bo) {
@@ -980,9 +985,11 @@ impl Drm {
             }
         };
         log::debug!(
-            "Prepared DRM cursor plane candidate: size={}x{} pos=({}, {}) hotspot=({}, {}) fb={:?} modifier={:?}",
+            "Prepared DRM cursor plane candidate: visible_size={}x{} fb_size={}x{} pos=({}, {}) hotspot=({}, {}) fb={:?} modifier={:?}",
             image.width,
             image.height,
+            fb_width,
+            fb_height,
             x,
             y,
             image.hotspot_x,
@@ -3338,8 +3345,14 @@ fn collect_named_cursor_render_item(
     }
 }
 
-fn rgba_to_drm_argb8888(src: &[u8], width: usize, height: usize, pitch: usize) -> Vec<u8> {
-    let mut dst = vec![0; pitch.saturating_mul(height)];
+fn rgba_to_drm_argb8888(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    pitch: usize,
+    output_height: usize,
+) -> Vec<u8> {
+    let mut dst = vec![0; pitch.saturating_mul(output_height)];
     let src_stride = width.saturating_mul(4);
     for row in 0..height {
         let src_row = &src[row * src_stride..(row + 1) * src_stride];
@@ -3801,12 +3814,25 @@ mod presentation_timing_tests {
             2,
             2,
             12,
+            2,
         );
         assert_eq!(
             converted,
             vec![
                 0x33, 0x22, 0x11, 0x44, 0x77, 0x66, 0x55, 0x88, 0x00, 0x00, 0x00, 0x00, 0xbb, 0xaa,
                 0x99, 0xcc, 0xff, 0xee, 0xdd, 0x10, 0x00, 0x00, 0x00, 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn rgba_to_drm_argb8888_zero_fills_padded_rows() {
+        let converted = rgba_to_drm_argb8888(&[0x11, 0x22, 0x33, 0x44], 1, 1, 8, 3);
+        assert_eq!(
+            converted,
+            vec![
+                0x33, 0x22, 0x11, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ]
         );
     }
