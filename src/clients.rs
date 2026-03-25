@@ -200,8 +200,9 @@ impl Model for Clients {
             }
             Close { id } => {
                 log::trace!("client {:?} closed", id);
-                self.set.remove(&id);
-                dispatcher.stop_model::<_, Client>(id);
+                if self.set.remove(&id) {
+                    dispatcher.stop_model::<_, Client>(id);
+                }
             }
         }
         Ok(())
