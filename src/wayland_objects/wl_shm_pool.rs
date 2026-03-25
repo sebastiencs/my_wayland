@@ -30,6 +30,37 @@ impl WlShmPool {
         let mem = SharedMemory::mmap(fd.as_raw_fd(), size);
         Self { id, fd, size, mem }
     }
+
+    fn validate_create_buffer(
+        &self,
+        offset: i32,
+        width: i32,
+        height: i32,
+        stride: i32,
+        format_bpp: usize,
+    ) -> Result<(), ()> {
+        let offset = usize::try_from(offset).map_err(|_| ())?;
+        let width = usize::try_from(width).map_err(|_| ())?;
+        let height = usize::try_from(height).map_err(|_| ())?;
+        let stride = usize::try_from(stride).map_err(|_| ())?;
+
+        if width == 0 || height == 0 || stride == 0 {
+            return Err(());
+        }
+
+        let min_stride = width.checked_mul(format_bpp).ok_or(())?;
+        if stride < min_stride {
+            return Err(());
+        }
+
+        let bytes = stride.checked_mul(height).ok_or(())?;
+        let end = offset.checked_add(bytes).ok_or(())?;
+        if end > self.size {
+            return Err(());
+        }
+
+        Ok(())
+    }
 }
 
 impl Object for WlShmPool {
@@ -58,6 +89,18 @@ impl Object for WlShmPool {
                     );
                     return;
                 };
+                if self
+                    .validate_create_buffer(offset, width, height, stride, format.bpp as usize)
+                    .is_err()
+                {
+                    client.send_protocol_error(
+                        dispatcher,
+                        self.id(),
+                        wl_shm::Error::InvalidStride as u32,
+                        "invalid SHM buffer parameters",
+                    );
+                    return;
+                }
                 let mem = self.mem.clone();
                 let wl_buffer = match WlBuffer::new(NewWlBufferParams {
                     id,
@@ -85,7 +128,48 @@ impl Object for WlShmPool {
             Destroy => {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
-            Resize { size } => todo!(),
+            Resize { size } => {
+                if size <= 0 {
+                    client.send_protocol_error(
+                        dispatcher,
+                        self.id(),
+                        wl_shm::Error::InvalidStride as u32,
+                        "invalid SHM pool size",
+                    );
+                    return;
+                }
+
+                let size = usize::try_from(size).unwrap();
+                if size < self.size {
+                    client.send_protocol_error(
+                        dispatcher,
+                        self.id(),
+                        wl_shm::Error::InvalidStride as u32,
+                        "shrinking a SHM pool is forbidden",
+                    );
+                    return;
+                }
+
+                if size == self.size {
+                    return;
+                }
+
+                match SharedMemory::try_mmap(self.fd.as_raw_fd(), size) {
+                    Ok(mem) => {
+                        self.mem = mem;
+                        self.size = size;
+                    }
+                    Err(err) => {
+                        log::warn!("failed to resize SHM pool {:?}: {:?}", self.id, err);
+                        client.send_protocol_error(
+                            dispatcher,
+                            self.id(),
+                            wl_shm::Error::InvalidFd as u32,
+                            "failed to resize SHM pool mapping",
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -106,8 +190,12 @@ impl Drop for SharedMemory {
 
 impl SharedMemory {
     fn mmap(fd: RawFd, size: usize) -> Rc<Self> {
-        let ptr = sys::mmap(fd, size).unwrap();
-        Rc::new(Self { ptr, length: size })
+        Self::try_mmap(fd, size).unwrap()
+    }
+
+    fn try_mmap(fd: RawFd, size: usize) -> std::io::Result<Rc<Self>> {
+        let ptr = sys::mmap(fd, size)?;
+        Ok(Rc::new(Self { ptr, length: size }))
     }
 
     pub fn slice(self: Rc<Self>) -> SliceSharedMemory {
@@ -116,7 +204,9 @@ impl SharedMemory {
     }
 
     pub fn slice_at(self: Rc<Self>, offset: usize, length: usize) -> SliceSharedMemory {
-        assert!(offset + length <= self.length);
+        assert!(offset
+            .checked_add(length)
+            .is_some_and(|end| end <= self.length));
         SliceSharedMemory { mem: self.clone(), offset, length }
     }
 }
