@@ -810,6 +810,10 @@ impl Drm {
         set_nonblocking(drm.as_raw_fd()).unwrap();
         drm.set_client_capability(drm::ClientCapability::Atomic, true)
             .unwrap();
+        if let Err(error) = drm.set_client_capability(drm::ClientCapability::UniversalPlanes, true)
+        {
+            log::warn!("Failed to enable universal planes: {:?}", error);
+        }
 
         let driver: Driver = drm.get_driver().unwrap().into();
         log::info!(
