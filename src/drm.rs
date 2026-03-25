@@ -805,8 +805,7 @@ impl Drm {
         attempts
     }
 
-    pub fn create_drm(fd: RawFd, device: udev::Device, egl: &EGL) -> Self {
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    pub fn create_drm(fd: OwnedFd, device: udev::Device, egl: &EGL) -> Self {
         let drm = DrmFd { fd: Rc::new(fd) };
         set_nonblocking(drm.as_raw_fd()).unwrap();
         drm.set_client_capability(drm::ClientCapability::Atomic, true)

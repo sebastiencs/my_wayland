@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -96,9 +96,8 @@ impl Libinput {
         });
     }
 
-    fn insert_device_fd(&mut self, fd: RawFd, devnum: u64) {
+    fn insert_device_fd(&mut self, fd: OwnedFd, devnum: u64) {
         let mut dev_to_fd = self.dev_to_fd.lock().unwrap();
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         dev_to_fd.insert(devnum, fd);
     }
 }
@@ -107,7 +106,7 @@ impl Libinput {
 pub enum LibinputAction {
     Start,
     Event,
-    OpenInput { devnode: String, fd: RawFd, devnum: u64 },
+    OpenInput { devnode: String, fd: OwnedFd, devnum: u64 },
     Stop,
 }
 

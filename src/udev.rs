@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     os::{
-        fd::{AsRawFd, RawFd},
+        fd::{AsRawFd, OwnedFd, RawFd},
         unix::prelude::OsStrExt,
     },
     path::PathBuf,
@@ -64,7 +64,7 @@ pub struct Udev {
 pub enum UdevAction {
     Start,
     Event,
-    DeviceTaken { fd: RawFd, inactive: bool, devnum: libc::dev_t },
+    DeviceTaken { fd: OwnedFd, inactive: bool, devnum: libc::dev_t },
     FinalizeBackendRemoval { drm_id: DrmId },
     Stop,
 }
@@ -283,7 +283,7 @@ impl Udev {
     fn on_input_taken(
         &mut self,
         device: udev::Device,
-        fd: RawFd,
+        fd: OwnedFd,
         inactive: bool,
         devnum: libc::dev_t,
         dispatcher: &mut Dispatcher,
@@ -295,7 +295,7 @@ impl Udev {
             return;
         };
         let devnode = devnode.to_string();
-        set_non_blocking(fd);
+        set_non_blocking(fd.as_raw_fd());
 
         dispatcher.dispatch(LibinputAction::OpenInput { devnode, fd, devnum });
     }
@@ -303,7 +303,7 @@ impl Udev {
     fn on_drm_taken(
         &mut self,
         device: udev::Device,
-        fd: RawFd,
+        fd: OwnedFd,
         inactive: bool,
         state: &mut State,
         dispatcher: &mut Dispatcher,

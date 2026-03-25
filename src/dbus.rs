@@ -374,7 +374,7 @@ impl Dbus {
         msg_serial
     }
 
-    fn handle_message(&mut self, msg: Message, dispatcher: &mut Dispatcher) {
+    fn handle_message(&mut self, msg: Message, mut fds: Vec<OwnedFd>, dispatcher: &mut Dispatcher) {
         use {dbus_message_parser::message::MessageType::*, Value::*};
 
         let reply_serial = msg.get_reply_serial().map(DbusSerial);
@@ -387,10 +387,14 @@ impl Dbus {
             MethodCall => todo!(),
             MethodReturn => match pending {
                 Pending::TakeDevice { devnum } => {
-                    let [UnixFD(fd), Boolean(inactive)] = msg.get_body() else {
+                    let [UnixFD(raw_fd), Boolean(inactive)] = msg.get_body() else {
                         panic!();
                     };
-                    let (fd, inactive) = (*fd, *inactive);
+                    let inactive = *inactive;
+                    let Some(fd) = (!fds.is_empty()).then(|| fds.remove(0)) else {
+                        panic!("TakeDevice reply missing owned fd payload");
+                    };
+                    debug_assert_eq!(fd.as_raw_fd(), *raw_fd);
                     dispatcher.dispatch(UdevAction::DeviceTaken { fd, inactive, devnum });
                 }
             },
@@ -405,7 +409,7 @@ impl Dbus {
 pub enum DbusAction {
     Start,
     TakeDevice { devnum: libc::dev_t },
-    MsgReceived { msg: Message },
+    MsgReceived { msg: Message, fds: Vec<OwnedFd> },
 }
 
 impl Model for Dbus {
@@ -429,8 +433,8 @@ impl Model for Dbus {
                 let serial = self.take_device(devnum, dispatcher);
                 self.pending.insert(serial, Pending::TakeDevice { devnum });
             }
-            MsgReceived { msg } => {
-                self.handle_message(msg, dispatcher);
+            MsgReceived { msg, fds } => {
+                self.handle_message(msg, fds, dispatcher);
             }
         };
 
@@ -493,10 +497,12 @@ impl Model for DbusReader {
                             Ok((msg, offset, _)) => (msg, offset),
                             Err(e) => panic!("{:?}", e),
                         };
-                    if let Some(nfds) = msg.get_unix_fds() {
-                        self.fds.drain(0..nfds as usize);
-                    }
-                    dispatcher.dispatch(DbusAction::MsgReceived { msg });
+                    let message_fds = if let Some(nfds) = msg.get_unix_fds() {
+                        self.fds.drain(0..nfds as usize).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    dispatcher.dispatch(DbusAction::MsgReceived { msg, fds: message_fds });
                     self.read_buffer.consume_msg();
                 }
             }
