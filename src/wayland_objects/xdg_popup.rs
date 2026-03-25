@@ -108,23 +108,29 @@ impl XdgPopup {
     }
 
     fn computed_geometry(&self, client: &Client, state: &State) -> RectI {
-        let Some(mut geometry) = self.positioner.geometry() else {
-            return self.current_geometry;
-        };
         if let Some(parent_surface_id) = self.parent_surface_id {
             let Some(parent_object_id) = client.object_id_for_wayland(parent_surface_id.into())
             else {
-                return geometry;
+                return self.positioner.geometry().unwrap_or(self.current_geometry);
             };
             let Some(parent_surface) = state.objects.try_get_ref_of::<XdgSurface>(parent_object_id)
             else {
-                return geometry;
+                return self.positioner.geometry().unwrap_or(self.current_geometry);
             };
             let parent_geometry = parent_surface.parent_geometry(client, state);
+            let Some(mut geometry) = self.positioner.geometry_in_bounds(RectI {
+                x: 0,
+                y: 0,
+                width: parent_geometry.width,
+                height: parent_geometry.height,
+            }) else {
+                return self.current_geometry;
+            };
             geometry.x += parent_geometry.x;
             geometry.y += parent_geometry.y;
+            return geometry;
         }
-        geometry
+        self.positioner.geometry().unwrap_or(self.current_geometry)
     }
 
     fn send_configure_sequence(
@@ -283,12 +289,14 @@ impl Object for XdgPopup {
                     popup_surface_id,
                 ) {
                     self.explicit_grab = false;
-                    self.send_error(
-                        client,
-                        dispatcher,
-                        xdg_popup::Error::InvalidGrab,
-                        "xdg_popup.grab requires a valid implicit seat grab serial",
-                    );
+                    if let Some(parent_surface_id) = self.parent_surface_id {
+                        if client.contains_object(parent_surface_id, state) {
+                            let mut parent_surface = client.grab_object(parent_surface_id, state);
+                            parent_surface.remove_popup_child(self.id);
+                        }
+                    }
+                    let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
+                    self.dismiss(&mut xdg_surface, client, state, dispatcher);
                 }
             }
             Reposition { positioner, token } => {

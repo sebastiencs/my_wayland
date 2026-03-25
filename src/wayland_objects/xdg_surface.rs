@@ -426,12 +426,6 @@ impl Object for XdgSurface {
                 client.insert_object(state, xdg_toplevel);
             }
             GetPopup { id, parent, positioner } => {
-                if self
-                    .set_role_kind(RoleKind::Popup, client, dispatcher)
-                    .is_err()
-                {
-                    return;
-                }
                 if !client.object_is(positioner, state) {
                     client.protocol_violation_disconnect(
                         dispatcher,
@@ -443,7 +437,15 @@ impl Object for XdgSurface {
                 }
 
                 let parent = match u32::from(parent) {
-                    0 => None,
+                    0 => {
+                        self.send_wm_base_error(
+                            client,
+                            dispatcher,
+                            xdg_wm_base::Error::InvalidPopupParent,
+                            "popup parent must be provided for xdg_surface.get_popup",
+                        );
+                        return;
+                    }
                     _ => {
                         if !client.object_is(parent, state) {
                             client.protocol_violation_disconnect(
@@ -497,6 +499,16 @@ impl Object for XdgSurface {
                     parent_surface.add_popup_child(id);
                 }
 
+                if self
+                    .set_role_kind(RoleKind::Popup, client, dispatcher)
+                    .is_err()
+                {
+                    if let Some(parent_surface_id) = parent {
+                        let mut parent_surface = client.grab_object(parent_surface_id, state);
+                        parent_surface.remove_popup_child(id);
+                    }
+                    return;
+                }
                 self.role_object = RoleObject::Popup(id);
                 let popup = XdgPopup::new(id, self.id, parent, positioner_state);
                 client.insert_object(state, popup);

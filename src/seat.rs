@@ -245,17 +245,22 @@ impl SeatState {
         self.last_keyboard_trigger = Some(KeyboardTriggerState { serial, focus });
     }
 
-    fn validate_pointer_grab_serial(
+    fn validate_implicit_grab_serial(
         &self,
         client_id: ClientId,
         surface_id: WlSurfaceId,
         serial: u32,
     ) -> bool {
-        self.pointer_button_count > 0
+        (self.pointer_button_count > 0
             && self.last_pointer_press.is_some_and(|press| {
                 press.serial == serial
                     && press.focus.client_id == client_id
                     && press.focus.surface_id == surface_id
+            }))
+            || self.last_keyboard_trigger.is_some_and(|trigger| {
+                trigger.serial == serial
+                    && trigger.focus.client_id == client_id
+                    && trigger.focus.surface_id == surface_id
             })
     }
 
@@ -265,12 +270,7 @@ impl SeatState {
         surface_id: WlSurfaceId,
         serial: u32,
     ) -> bool {
-        self.validate_pointer_grab_serial(client_id, surface_id, serial)
-            || self.last_keyboard_trigger.is_some_and(|trigger| {
-                trigger.serial == serial
-                    && trigger.focus.client_id == client_id
-                    && trigger.focus.surface_id == surface_id
-            })
+        self.validate_implicit_grab_serial(client_id, surface_id, serial)
     }
 
     fn popup_grab_client(&self) -> Option<ClientId> {
@@ -282,6 +282,12 @@ impl SeatState {
             .as_ref()
             .and_then(|grab| grab.popup_stack.last())
             .map(|(_, surface_id)| *surface_id)
+    }
+
+    fn popup_grab_contains_surface(&self, surface_id: WlSurfaceId) -> bool {
+        self.popup_grab
+            .as_ref()
+            .is_some_and(|grab| grab.popup_stack.iter().any(|(_, candidate)| *candidate == surface_id))
     }
 
     fn start_popup_grab(
@@ -580,14 +586,14 @@ fn maybe_dismiss_popup_grab_on_button(
     if button_state != 1 {
         return false;
     }
-    let Some(grab_client_id) = state.seat.popup_grab_client() else {
+    let Some(_grab_client_id) = state.seat.popup_grab_client() else {
         return false;
     };
-    let inside_grabbed_client = state
+    let inside_popup_stack = state
         .seat
         .pointer_focus
-        .is_some_and(|focus| focus.target.client_id == grab_client_id);
-    if inside_grabbed_client {
+        .is_some_and(|focus| state.seat.popup_grab_contains_surface(focus.target.surface_id));
+    if inside_popup_stack {
         return false;
     }
     let Some((client_id, popup_ids)) = state.seat.dismiss_popup_grab() else {
@@ -986,7 +992,7 @@ pub fn request_toplevel_move(
 ) -> bool {
     if !state
         .seat
-        .validate_pointer_grab_serial(client_id, surface_id, serial)
+        .validate_implicit_grab_serial(client_id, surface_id, serial)
     {
         return false;
     }
@@ -1009,7 +1015,7 @@ pub fn request_toplevel_resize(
 ) -> bool {
     if !state
         .seat
-        .validate_pointer_grab_serial(client_id, surface_id, serial)
+        .validate_implicit_grab_serial(client_id, surface_id, serial)
     {
         return false;
     }
@@ -1251,8 +1257,8 @@ mod xdg_seat_tests {
             globals::Globals,
             object::Object,
             protocol_generated::{
-                xdg_toplevel, WlSeatId, WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgToplevelId,
-                XdgWmBaseId,
+                xdg_toplevel, WlSeatId, WlSurfaceId, XdgPopupId, XdgPositionerId,
+                XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
             },
             runner::Dispatcher,
             state::{ObjectId, State},
@@ -1260,7 +1266,7 @@ mod xdg_seat_tests {
                 wl_seat::WlSeat,
                 wl_surface::{Role, WlSurface},
                 xdg_popup::XdgPopup,
-                xdg_positioner::PositionerState,
+                xdg_positioner::{PositionerState, XdgPositioner},
                 xdg_surface::{xdg_toplevel::XdgToplevel, XdgSurface},
             },
             xkb::Xkb,
@@ -1359,6 +1365,45 @@ mod xdg_seat_tests {
         (&*event.into_bytes()).try_into().unwrap()
     }
 
+    fn get_popup_request(
+        xdg_surface_id: XdgSurfaceId,
+        popup_id: XdgPopupId,
+        parent_id: XdgSurfaceId,
+        positioner_id: XdgPositionerId,
+    ) -> crate::clients::RawRequest<'static> {
+        let mut event = RawEvent::new(xdg_surface_id.into(), 2, 3);
+        event.id(popup_id);
+        event.id(parent_id);
+        event.id(positioner_id);
+        (&*event.into_bytes()).try_into().unwrap()
+    }
+
+    fn positioner_set_size_request(
+        positioner_id: XdgPositionerId,
+        width: i32,
+        height: i32,
+    ) -> crate::clients::RawRequest<'static> {
+        let mut event = RawEvent::new(positioner_id.into(), 1, 2);
+        event.int(width);
+        event.int(height);
+        (&*event.into_bytes()).try_into().unwrap()
+    }
+
+    fn positioner_set_anchor_rect_request(
+        positioner_id: XdgPositionerId,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> crate::clients::RawRequest<'static> {
+        let mut event = RawEvent::new(positioner_id.into(), 2, 4);
+        event.int(x);
+        event.int(y);
+        event.int(width);
+        event.int(height);
+        (&*event.into_bytes()).try_into().unwrap()
+    }
+
     fn assign_toplevel_role(
         state: &mut State,
         client: &mut Client,
@@ -1372,6 +1417,64 @@ mod xdg_seat_tests {
         xdg_surface.on(client, state, get_toplevel_request(xdg_surface_id, toplevel_id), dispatcher);
         drop(xdg_surface_object);
         client.object_id(toplevel_id)
+    }
+
+    #[test]
+    fn popup_grab_dismisses_popup_when_serial_is_invalid() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        client.insert_object(&mut state, WlSeat::new(WlSeatId::from(2)));
+
+        let (_parent_wl_surface_object_id, parent_xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(10),
+            XdgSurfaceId::from(20),
+        );
+        let _parent_toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            parent_xdg_surface_object_id,
+            XdgSurfaceId::from(20),
+            XdgToplevelId::from(30),
+        );
+        let (_popup_wl_surface_object_id, _popup_xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(11),
+            XdgSurfaceId::from(21),
+        );
+
+        let ((_, popup_object_id), _) = client.insert_object(
+            &mut state,
+            XdgPopup::new(
+                XdgPopupId::from(40),
+                XdgSurfaceId::from(21),
+                Some(XdgSurfaceId::from(20)),
+                PositionerState::default(),
+            ),
+        );
+
+        {
+            let mut popup_object = state.objects.grab(popup_object_id);
+            let popup = popup_object.downcast_mut::<XdgPopup>().unwrap();
+            popup.on(
+                &mut client,
+                &mut state,
+                popup_grab_request(XdgPopupId::from(40), WlSeatId::from(2), 999),
+                &mut client_dispatcher,
+            );
+        }
+
+        assert!(!state.objects.contains(popup_object_id));
+        assert!(!client.contains_object(XdgPopupId::from(40), &state));
+        assert!(state.seat.popup_grab.is_none());
+        assert_eq!(state.seat.keyboard_focus, None);
     }
 
     #[test]
@@ -1415,22 +1518,6 @@ mod xdg_seat_tests {
             ),
         );
 
-        {
-            let mut popup_object = state.objects.grab(popup_object_id);
-            let popup = popup_object.downcast_mut::<XdgPopup>().unwrap();
-            popup.on(
-                &mut client,
-                &mut state,
-                popup_grab_request(XdgPopupId::from(40), WlSeatId::from(2), 999),
-                &mut client_dispatcher,
-            );
-        }
-
-        let popup = state.objects.get(popup_object_id).downcast_ref::<XdgPopup>().unwrap();
-        assert!(!popup.has_explicit_grab());
-        assert!(state.seat.popup_grab.is_none());
-        assert_eq!(state.seat.keyboard_focus, None);
-
         let parent_focus = SurfaceFocus {
             client_id: client.client_id(),
             surface_id: WlSurfaceId::from(10),
@@ -1472,6 +1559,32 @@ mod xdg_seat_tests {
             .downcast_ref::<XdgSurface>()
             .unwrap();
         assert_eq!(popup_xdg_surface.wl_surface_id(), WlSurfaceId::from(11));
+    }
+
+    #[test]
+    fn popup_parent_click_dismisses_grab() {
+        let mut state = make_state();
+        let (_client, mut dispatcher) = make_client();
+
+        let parent_focus =
+            SurfaceFocus { client_id: ClientId::from_raw(7), surface_id: WlSurfaceId::from(50) };
+        let popup_focus =
+            SurfaceFocus { client_id: ClientId::from_raw(7), surface_id: WlSurfaceId::from(51) };
+
+        begin_popup_grab(
+            &mut state,
+            &mut dispatcher,
+            parent_focus.client_id,
+            XdgPopupId::from(60),
+            popup_focus.surface_id,
+        );
+        state.seat.pointer_focus = Some(super::PointerFocus {
+            target: parent_focus,
+            rect: super::SurfaceRect { x: 0, y: 0, width: 100, height: 100 },
+        });
+
+        assert!(super::maybe_dismiss_popup_grab_on_button(&mut state, &mut dispatcher, 1, 1000));
+        assert!(state.seat.popup_grab.is_none());
     }
 
     #[test]
@@ -1582,5 +1695,131 @@ mod xdg_seat_tests {
             Some(super::PointerInteractiveGrab::Resize { edges, .. })
                 if edges == xdg_toplevel::ResizeEdge::Right as u32
         ));
+    }
+
+    #[test]
+    fn toplevel_resize_accepts_keyboard_trigger_serial() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        client.insert_object(&mut state, WlSeat::new(WlSeatId::from(4)));
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(100),
+            XdgSurfaceId::from(110),
+        );
+        let toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(110),
+            XdgToplevelId::from(120),
+        );
+
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(700usize), 10, 20, 80, 60);
+        }
+
+        let focus =
+            SurfaceFocus { client_id: client.client_id(), surface_id: WlSurfaceId::from(100) };
+        let serial = state.seat.next_serial();
+        state.seat.record_keyboard_trigger(serial, focus);
+
+        {
+            let mut toplevel_object = state.objects.grab(toplevel_object_id);
+            let toplevel = toplevel_object.downcast_mut::<XdgToplevel>().unwrap();
+            toplevel.on(
+                &mut client,
+                &mut state,
+                toplevel_resize_request(
+                    XdgToplevelId::from(120),
+                    WlSeatId::from(4),
+                    serial,
+                    xdg_toplevel::ResizeEdge::BottomRight as u32,
+                ),
+                &mut client_dispatcher,
+            );
+        }
+
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Resize { edges, .. })
+                if edges == xdg_toplevel::ResizeEdge::BottomRight as u32
+        ));
+    }
+
+    #[test]
+    fn get_popup_rejects_null_parent_without_poisoning_surface_role() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (_wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(130),
+            XdgSurfaceId::from(140),
+        );
+        let ((_, positioner_object_id), _) =
+            client.insert_object(&mut state, XdgPositioner::new(XdgPositionerId::from(150)));
+
+        {
+            let mut positioner_object = state.objects.grab(positioner_object_id);
+            let positioner = positioner_object.downcast_mut::<XdgPositioner>().unwrap();
+            positioner.on(
+                &mut client,
+                &mut state,
+                positioner_set_size_request(XdgPositionerId::from(150), 40, 30),
+                &mut client_dispatcher,
+            );
+            positioner.on(
+                &mut client,
+                &mut state,
+                positioner_set_anchor_rect_request(XdgPositionerId::from(150), 0, 0, 10, 10),
+                &mut client_dispatcher,
+            );
+        }
+
+        {
+            let mut xdg_surface_object = state.objects.grab(xdg_surface_object_id);
+            let xdg_surface = xdg_surface_object.downcast_mut::<XdgSurface>().unwrap();
+            xdg_surface.on(
+                &mut client,
+                &mut state,
+                get_popup_request(
+                    XdgSurfaceId::from(140),
+                    XdgPopupId::from(160),
+                    XdgSurfaceId::from(0),
+                    XdgPositionerId::from(150),
+                ),
+                &mut client_dispatcher,
+            );
+        }
+
+        assert!(!client.contains_object(XdgPopupId::from(160), &state));
+
+        {
+            let mut xdg_surface_object = state.objects.grab(xdg_surface_object_id);
+            let xdg_surface = xdg_surface_object.downcast_mut::<XdgSurface>().unwrap();
+            xdg_surface.on(
+                &mut client,
+                &mut state,
+                get_toplevel_request(XdgSurfaceId::from(140), XdgToplevelId::from(170)),
+                &mut client_dispatcher,
+            );
+        }
+
+        assert!(client.contains_object(XdgToplevelId::from(170), &state));
     }
 }
