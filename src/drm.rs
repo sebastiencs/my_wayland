@@ -1997,13 +1997,13 @@ struct DrmBuffer {
 #[derive(Debug)]
 enum ParsedDrmEvent {
     FlipComplete { len: usize, sequence: u32, tv_sec: u32, tv_usec: u32, crtc_id: u32 },
-    Ignored { len: usize },
+    Ignored { len: usize, type_: u32 },
 }
 
 impl ParsedDrmEvent {
     fn len(&self) -> usize {
         match self {
-            Self::FlipComplete { len, .. } | Self::Ignored { len } => *len,
+            Self::FlipComplete { len, .. } | Self::Ignored { len, .. } => *len,
         }
     }
 }
@@ -2023,6 +2023,7 @@ impl DrmBuffer {
 
         self.data[pos..pos + buffer_len].copy_from_slice(buffer);
         self.pos += buffer_len;
+        log::debug!("drm reader append: chunk_len={} buffered_bytes={}", buffer_len, self.pos,);
     }
 
     fn next_event(&self) -> Result<Option<ParsedDrmEvent>, ()> {
@@ -2035,10 +2036,28 @@ impl DrmBuffer {
 
         let header: drm_ffi::drm_event = unsafe { std::ptr::read_unaligned(header.as_ptr() as _) };
         let len = header.length as usize;
+        log::debug!(
+            "drm reader header: buffered_bytes={} event_type={} event_len={}",
+            data.len(),
+            header.type_,
+            len,
+        );
         if len < header_len {
+            log::error!(
+                "drm reader invalid event header: event_type={} event_len={} header_len={}",
+                header.type_,
+                len,
+                header_len,
+            );
             return Err(());
         }
         if len > data.len() {
+            log::debug!(
+                "drm reader waiting for full event: event_type={} event_len={} buffered_bytes={}",
+                header.type_,
+                len,
+                data.len(),
+            );
             return Ok(None);
         }
 
@@ -2051,6 +2070,14 @@ impl DrmBuffer {
                 let bytes = &data[..event_len];
                 let event: drm_ffi::drm_event_vblank =
                     unsafe { std::ptr::read_unaligned(bytes.as_ptr() as _) };
+                log::debug!(
+                    "drm reader parsed flip_complete: len={} sequence={} tv_sec={} tv_usec={} crtc_id={}",
+                    len,
+                    event.sequence,
+                    event.tv_sec,
+                    event.tv_usec,
+                    event.crtc_id,
+                );
                 Ok(Some(ParsedDrmEvent::FlipComplete {
                     len,
                     sequence: event.sequence,
@@ -2059,11 +2086,15 @@ impl DrmBuffer {
                     crtc_id: event.crtc_id,
                 }))
             }
-            _ => Ok(Some(ParsedDrmEvent::Ignored { len })),
+            _ => {
+                log::debug!("drm reader ignored event: type={} len={}", header.type_, len);
+                Ok(Some(ParsedDrmEvent::Ignored { len, type_: header.type_ }))
+            }
         }
     }
 
     fn consume_event(&mut self, len: usize) {
+        let buffered_before = self.pos;
         if self.pos == len {
             self.pos = 0;
         } else {
@@ -2071,6 +2102,12 @@ impl DrmBuffer {
             self.data.copy_within(len..self.pos, 0);
             self.pos -= len;
         }
+        log::debug!(
+            "drm reader consume_event: consumed_len={} buffered_before={} buffered_after={}",
+            len,
+            buffered_before,
+            self.pos,
+        );
     }
 }
 
@@ -2104,14 +2141,30 @@ impl Model for DrmReader {
         use DrmReaderAction::*;
 
         match action {
-            Start => self.dispatch_read(dispatcher),
+            Start => {
+                log::debug!("DrmReader start: drm_id={:?} fd={}", self.drm_id, self.fd,);
+                self.dispatch_read(dispatcher)
+            }
             ReadChunk { buffer } => {
                 self.read_op_id = None;
+                log::debug!(
+                    "DrmReader ReadChunk: drm_id={:?} fd={} chunk_len={} buffered_before={}",
+                    self.drm_id,
+                    self.fd,
+                    buffer.len(),
+                    self.read_buffer.pos,
+                );
                 self.read_buffer.append(&buffer);
                 loop {
                     let event = match self.read_buffer.next_event() {
                         Ok(Some(event)) => event,
                         Ok(None) => {
+                            log::debug!(
+                                "DrmReader awaiting more bytes: drm_id={:?} fd={} buffered_bytes={}",
+                                self.drm_id,
+                                self.fd,
+                                self.read_buffer.pos,
+                            );
                             self.dispatch_read(dispatcher);
                             return Ok(());
                         }
@@ -2126,11 +2179,29 @@ impl Model for DrmReader {
                     match event {
                         ParsedDrmEvent::FlipComplete {
                             sequence, tv_sec, tv_usec, crtc_id, ..
-                        } => dispatcher.dispatch_to(
-                            self.model_id(),
-                            DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id },
-                        ),
-                        ParsedDrmEvent::Ignored { .. } => {}
+                        } => {
+                            log::debug!(
+                                "DrmReader dispatch flip_complete: drm_id={:?} fd={} sequence={} tv_sec={} tv_usec={} crtc_id={}",
+                                self.drm_id,
+                                self.fd,
+                                sequence,
+                                tv_sec,
+                                tv_usec,
+                                crtc_id,
+                            );
+                            dispatcher.dispatch_to(
+                                self.model_id(),
+                                DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id },
+                            )
+                        }
+                        ParsedDrmEvent::Ignored { type_, .. } => {
+                            log::debug!(
+                                "DrmReader ignored parsed event: drm_id={:?} fd={} type={}",
+                                self.drm_id,
+                                self.fd,
+                                type_,
+                            );
+                        }
                     }
                     self.read_buffer.consume_event(len);
                 }
@@ -2168,6 +2239,13 @@ impl DrmReader {
 
         let read_op_id = RingId::fresh();
         self.read_op_id = Some(read_op_id);
+        log::debug!(
+            "DrmReader dispatch_read: drm_id={:?} fd={} read_op_id={:?} buffered_bytes={}",
+            self.drm_id,
+            self.fd,
+            read_op_id,
+            self.read_buffer.pos,
+        );
         dispatcher.dispatch(IoUringAction::Read {
             id: Some(read_op_id),
             fd: self.fd,
@@ -2179,10 +2257,19 @@ impl DrmReader {
 
     fn on_read_event(result: std::io::Result<ReadWriteCompleted>) -> AnyAction {
         match result {
-            Ok(ReadWriteCompleted { fd: _, offset: _, buffer }) => {
+            Ok(ReadWriteCompleted { fd, offset, buffer }) => {
+                log::debug!(
+                    "DrmReader on_read_event ok: fd={} offset={} chunk_len={}",
+                    fd,
+                    offset,
+                    buffer.len(),
+                );
                 AnyAction::from(DrmReaderAction::ReadChunk { buffer })
             }
-            Err(error) => AnyAction::from(DrmReaderAction::ReadError { error }),
+            Err(error) => {
+                log::debug!("DrmReader on_read_event error: {:?}", error);
+                AnyAction::from(DrmReaderAction::ReadError { error })
+            }
         }
     }
 }
@@ -2314,6 +2401,14 @@ impl Model for DrmModel {
                 self.render_frame(state, dispatcher);
             }
             DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id } => {
+                log::debug!(
+                    "DrmModel received FlipComplete: drm_id={:?} sequence={} tv_sec={} tv_usec={} crtc_id={}",
+                    self.drm_id,
+                    sequence,
+                    tv_sec,
+                    tv_usec,
+                    crtc_id,
+                );
                 self.handle_flip_complete(state, dispatcher, sequence, tv_sec, tv_usec, crtc_id);
             }
             DrmAction::Stop => {
@@ -2497,8 +2592,16 @@ impl DrmModel {
         sequence: u32,
         tv_sec: u32,
         tv_usec: u32,
-        _crtc_id: u32,
+        crtc_id: u32,
     ) {
+        log::debug!(
+            "DrmModel handle_flip_complete enter: drm_id={:?} sequence={} tv_sec={} tv_usec={} crtc_id={}",
+            self.drm_id,
+            sequence,
+            tv_sec,
+            tv_usec,
+            crtc_id,
+        );
         let flip_complete_msec = monotonic_time_msec();
         let (releases, should_render, completed_submission) = {
             let drm = state.drm.get_mut(self.drm_id);
@@ -2523,7 +2626,7 @@ impl DrmModel {
                     .submit_to_flip_max_msec
                     .max(submit_to_flip_msec);
                 log::debug!(
-                    "drm flip_complete: connector={} submission_id={} zero_copy={} submit_to_flip_ms={} should_render={} needs_frame={} sequence={} tv_sec={} tv_usec={}",
+                    "drm flip_complete: connector={} submission_id={} zero_copy={} submit_to_flip_ms={} should_render={} needs_frame={} sequence={} tv_sec={} tv_usec={} crtc_id={}",
                     drm.output.output_name(),
                     completed_submission.submission.id,
                     completed_submission.submission.zero_copy,
@@ -2533,16 +2636,18 @@ impl DrmModel {
                     sequence,
                     tv_sec,
                     tv_usec,
+                    crtc_id,
                 );
             } else {
                 log::debug!(
-                    "drm flip_complete without submission: connector={} should_render={} needs_frame={} sequence={} tv_sec={} tv_usec={}",
+                    "drm flip_complete without submission: connector={} should_render={} needs_frame={} sequence={} tv_sec={} tv_usec={} crtc_id={}",
                     drm.output.output_name(),
                     should_render,
                     drm.output.needs_frame,
                     sequence,
                     tv_sec,
                     tv_usec,
+                    crtc_id,
                 );
             }
             (releases, should_render, completed_submission)
@@ -3096,7 +3201,7 @@ mod drm_event_tests {
 
     #[test]
     fn parsed_drm_event_len() {
-        let e = ParsedDrmEvent::Ignored { len: 64 };
+        let e = ParsedDrmEvent::Ignored { len: 64, type_: 0 };
         assert_eq!(e.len(), 64);
         let f = ParsedDrmEvent::FlipComplete {
             len: 32,
