@@ -959,6 +959,15 @@ pub mod xdg_toplevel {
                     }
                 }
                 Resize { seat, serial, edges } => {
+                    if edges == proto_xdg_toplevel::ResizeEdge::None as u32 {
+                        self.send_error(
+                            client,
+                            dispatcher,
+                            proto_xdg_toplevel::Error::InvalidResizeEdge,
+                            "xdg_toplevel.resize requires a non-zero resize edge",
+                        );
+                        return;
+                    }
                     if decode_resize_edge(edges).is_none() {
                         self.send_error(
                             client,

@@ -94,6 +94,12 @@ struct PointerPressState {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct KeyboardTriggerState {
+    serial: u32,
+    focus: SurfaceFocus,
+}
+
+#[derive(Clone, Copy, Debug)]
 enum PointerInteractiveGrab {
     Move {
         client_id: ClientId,
@@ -120,6 +126,7 @@ pub struct SeatState {
     keyboard_focus: Option<SurfaceFocus>,
     pointer_button_count: u32,
     last_pointer_press: Option<PointerPressState>,
+    last_keyboard_trigger: Option<KeyboardTriggerState>,
     popup_grab: Option<PopupGrabState>,
     pointer_interactive_grab: Option<PointerInteractiveGrab>,
     pointer_resources: BTreeMap<ClientId, Vec<WlPointerId>>,
@@ -135,6 +142,7 @@ impl Default for SeatState {
             keyboard_focus: None,
             pointer_button_count: 0,
             last_pointer_press: None,
+            last_keyboard_trigger: None,
             popup_grab: None,
             pointer_interactive_grab: None,
             pointer_resources: BTreeMap::default(),
@@ -233,6 +241,10 @@ impl SeatState {
         }
     }
 
+    fn record_keyboard_trigger(&mut self, serial: u32, focus: SurfaceFocus) {
+        self.last_keyboard_trigger = Some(KeyboardTriggerState { serial, focus });
+    }
+
     fn validate_pointer_grab_serial(
         &self,
         client_id: ClientId,
@@ -244,6 +256,20 @@ impl SeatState {
                 press.serial == serial
                     && press.focus.client_id == client_id
                     && press.focus.surface_id == surface_id
+            })
+    }
+
+    fn validate_popup_grab_serial(
+        &self,
+        client_id: ClientId,
+        surface_id: WlSurfaceId,
+        serial: u32,
+    ) -> bool {
+        self.validate_pointer_grab_serial(client_id, surface_id, serial)
+            || self.last_keyboard_trigger.is_some_and(|trigger| {
+                trigger.serial == serial
+                    && trigger.focus.client_id == client_id
+                    && trigger.focus.surface_id == surface_id
             })
     }
 
@@ -385,7 +411,7 @@ pub fn handle_pointer_button(
         .seat
         .record_pointer_button(button_state, serial, pointer_focus.map(|focus| focus.target));
 
-    if maybe_dismiss_popup_grab_on_button(state, dispatcher, button_state) {
+    if maybe_dismiss_popup_grab_on_button(state, dispatcher, button_state, time) {
         return;
     }
 
@@ -462,6 +488,7 @@ pub fn handle_keyboard_key(
     };
 
     let serial = state.seat.next_serial();
+    state.seat.record_keyboard_trigger(serial, focus);
     log::debug!(
         "seat dispatch keyboard key client={:?} serial={} key={} state={}",
         focus.client_id,
@@ -548,6 +575,7 @@ fn maybe_dismiss_popup_grab_on_button(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     button_state: u32,
+    time: u32,
 ) -> bool {
     if button_state != 1 {
         return false;
@@ -566,7 +594,8 @@ fn maybe_dismiss_popup_grab_on_button(
         return false;
     };
     dispatch_client_action(dispatcher, client_id, ClientAction::DismissPopupGrab { popup_ids });
-    set_keyboard_focus(state, dispatcher, None);
+    refresh_pointer_focus(state, dispatcher, time, false);
+    set_keyboard_focus(state, dispatcher, state.seat.pointer_focus.map(|focus| focus.target));
     true
 }
 
@@ -910,12 +939,40 @@ pub fn begin_popup_grab(
     }
 }
 
-pub fn remove_popup_grab(state: &mut State, dispatcher: &mut Dispatcher, popup_id: XdgPopupId) {
+pub fn request_popup_grab(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    client_id: ClientId,
+    parent_surface_id: WlSurfaceId,
+    serial: u32,
+    popup_id: XdgPopupId,
+    popup_surface_id: WlSurfaceId,
+) -> bool {
+    if !state
+        .seat
+        .validate_popup_grab_serial(client_id, parent_surface_id, serial)
+    {
+        return false;
+    }
+    begin_popup_grab(state, dispatcher, client_id, popup_id, popup_surface_id);
+    true
+}
+
+pub fn remove_popup_grab(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    popup_id: XdgPopupId,
+    fallback_focus: Option<SurfaceFocus>,
+) {
     state.seat.remove_popup_grab(popup_id);
     if let Some(focus) = popup_keyboard_focus(state) {
         set_keyboard_focus(state, dispatcher, Some(focus));
     } else if state.seat.popup_grab.is_none() {
-        set_keyboard_focus(state, dispatcher, None);
+        set_keyboard_focus(
+            state,
+            dispatcher,
+            fallback_focus.or_else(|| state.seat.pointer_focus.map(|focus| focus.target)),
+        );
     }
 }
 

@@ -191,6 +191,7 @@ impl Object for XdgPopup {
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
                 let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
+                let mut fallback_focus = None;
                 if let Some(parent_surface_id) = self.parent_surface_id {
                     let mut parent_surface = client.grab_object(parent_surface_id, state);
                     if !parent_surface.is_topmost_popup(self.id) {
@@ -203,13 +204,17 @@ impl Object for XdgPopup {
                         );
                         return;
                     }
+                    fallback_focus = Some(crate::seat::SurfaceFocus {
+                        client_id: client.client_id(),
+                        surface_id: parent_surface.wl_surface_id(),
+                    });
                     parent_surface.remove_popup_child(self.id);
                 }
-                crate::seat::remove_popup_grab(state, dispatcher, self.id);
+                crate::seat::remove_popup_grab(state, dispatcher, self.id, fallback_focus);
                 xdg_surface.destroy_popup_role(self.id);
                 self.delete_self(client, state, dispatcher);
             }
-            Grab { seat: _, serial: _ } => {
+            Grab { seat, serial } => {
                 if self.mapped {
                     self.send_error(
                         client,
@@ -241,18 +246,50 @@ impl Object for XdgPopup {
                         return;
                     }
                 }
+                if !client.object_is(seat, state) {
+                    client.protocol_violation_disconnect(
+                        dispatcher,
+                        self.id.into(),
+                        crate::protocol_generated::wl_display::Error::InvalidObject as u32,
+                        "xdg_popup.grab requires a live wl_seat",
+                    );
+                    return;
+                }
+                let Some(parent_surface_id) = self.parent_surface_id else {
+                    self.send_error(
+                        client,
+                        dispatcher,
+                        xdg_popup::Error::InvalidGrab,
+                        "xdg_popup.grab requires a parent surface",
+                    );
+                    return;
+                };
+                let parent_wl_surface_id = {
+                    let parent_surface = client.get_object(parent_surface_id, state);
+                    parent_surface.wl_surface_id()
+                };
                 self.explicit_grab = true;
                 let popup_surface_id = {
                     let xdg_surface = client.get_object(self.xdg_surface_id, state);
                     xdg_surface.wl_surface_id()
                 };
-                crate::seat::begin_popup_grab(
+                if !crate::seat::request_popup_grab(
                     state,
                     dispatcher,
                     client.client_id(),
+                    parent_wl_surface_id,
+                    serial,
                     self.id,
                     popup_surface_id,
-                );
+                ) {
+                    self.explicit_grab = false;
+                    self.send_error(
+                        client,
+                        dispatcher,
+                        xdg_popup::Error::InvalidGrab,
+                        "xdg_popup.grab requires a valid implicit seat grab serial",
+                    );
+                }
             }
             Reposition { positioner, token } => {
                 if !client.object_is(positioner, state) {
