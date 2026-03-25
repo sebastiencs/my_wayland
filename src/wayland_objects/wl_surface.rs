@@ -5,8 +5,8 @@ use crate::{
     drm::schedule_active_output,
     object::{Object, Parser},
     protocol_generated::{
-        wl_surface, wp_linux_drm_syncobj_surface_v1, wp_viewport, xdg_wm_base, WaylandId,
-        WlBufferId, WlCallbackId, WlOutputId, WlRegionId, WlSubsurfaceId, WlSurfaceId,
+        wl_pointer, wl_surface, wp_linux_drm_syncobj_surface_v1, wp_viewport, xdg_wm_base,
+        WaylandId, WlBufferId, WlCallbackId, WlOutputId, WlRegionId, WlSubsurfaceId, WlSurfaceId,
         WpPresentationFeedbackId, XdgSurfaceId,
     },
     region::{DamageRegion, RectI, RegionValue},
@@ -40,6 +40,7 @@ pub struct SurfacePresentationFeedback {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Role {
     None,
+    Cursor,
     XdgSurface,
     Subsurface,
 }
@@ -321,6 +322,10 @@ impl WlSurface {
 
     pub fn has_role(&self) -> bool {
         self.role != Role::None
+    }
+
+    pub fn has_cursor_role(&self) -> bool {
+        self.role == Role::Cursor
     }
 
     pub fn has_pending_buffer_attach(&self) -> bool {
@@ -616,6 +621,18 @@ impl WlSurface {
             return Err(xdg_wm_base::Error::Role);
         }
         self.role = new_role;
+        Ok(())
+    }
+
+    pub fn set_cursor_role(
+        &mut self,
+        dispatcher: &mut ClientDispatcher,
+    ) -> Result<(), wl_pointer::Error> {
+        if self.role != Role::None && self.role != Role::Cursor {
+            self.send_error(dispatcher, wl_pointer::Error::Role as u32, "invalid cursor role");
+            return Err(wl_pointer::Error::Role);
+        }
+        self.role = Role::Cursor;
         Ok(())
     }
 
@@ -1385,6 +1402,11 @@ impl WlSurface {
         surface_behaves_synchronized: bool,
     ) -> (bool, bool) {
         let mut changed = self.apply_surface_payload(client, state, dispatcher, &payload);
+        changed |= state.seat.apply_cursor_surface_offset(
+            client.object_id(self.id),
+            payload.offset.0,
+            payload.offset.1,
+        );
         changed |= self.apply_pending_tree_state(state);
         changed |= self.release_synchronized_children(
             client,
@@ -2031,6 +2053,8 @@ impl WlSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
+        let object_id = client.object_id(self.id);
+        state.seat.clear_cursor_surface(object_id);
         self.discard_all_presentation_feedbacks(client, state, dispatcher);
         for child_surface_object_id in self.child_surface_ids() {
             Self::detach_subsurface_tree(child_surface_object_id, client, state, dispatcher);
@@ -2043,7 +2067,7 @@ impl WlSurface {
                 parent_surface.remove_child_from_tree(client.object_id(self.id));
             }
         }
-        state.unregister_root_surface(client.object_id(self.id));
+        state.unregister_root_surface(object_id);
         use crate::wayland_objects::wl_display::WlDisplay;
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
         schedule_active_output(state, dispatcher);
@@ -2192,13 +2216,17 @@ impl Object for WlSurface {
 mod tests {
     use {
         super::{
-            DamageRect, OnScreen, SurfaceCommitPayload, SurfacePresentationFeedback, WlSurface,
+            DamageRect, OnScreen, Role, SurfaceCommitPayload, SurfacePresentationFeedback,
+            WlSurface,
         },
         crate::{
             clients::{Client, ClientId},
+            cursor::CursorSourceRef,
             egl::EGL,
             globals::Globals,
-            protocol_generated::{WlSubsurfaceId, WlSurfaceId, WpPresentationFeedbackId},
+            protocol_generated::{
+                xdg_wm_base, WlSubsurfaceId, WlSurfaceId, WpPresentationFeedbackId,
+            },
             region::{DamageRegion, RectI, RegionSpec, RegionValue},
             runner::Dispatcher,
             state::{ObjectId, State},
@@ -2272,6 +2300,45 @@ mod tests {
             version,
             output_id: None,
         }
+    }
+
+    #[test]
+    fn cursor_role_conflicts_with_xdg_role() {
+        let mut surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(3), 6);
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        assert!(surface.set_cursor_role(&mut client_dispatcher).is_ok());
+        assert!(surface.has_cursor_role());
+        assert_eq!(
+            surface.set_role(Role::XdgSurface, &mut client_dispatcher),
+            Err(xdg_wm_base::Error::Role)
+        );
+    }
+
+    #[test]
+    fn deleting_active_cursor_surface_clears_seat_cursor_state() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let ((_, object_id), _) = client
+            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(5), client.client_id(), 6));
+        state.register_root_surface(object_id);
+        let surface_id = WlSurfaceId::from(5);
+
+        assert!(state
+            .seat
+            .set_cursor_surface(client.client_id(), surface_id, object_id, 1, 2,));
+        assert!(matches!(
+            state.seat.visible_cursor_source(),
+            Some(CursorSourceRef::Surface { owner_client_id, cursor })
+                if owner_client_id == client.client_id() && cursor.object_id == object_id
+        ));
+
+        let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+        surface.delete_self(&mut client, &mut state, &mut client_dispatcher);
+
+        assert!(state.seat.visible_cursor_source().is_none());
     }
 
     #[test]

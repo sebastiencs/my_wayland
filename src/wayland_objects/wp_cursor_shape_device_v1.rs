@@ -76,6 +76,10 @@ impl Object for WpCursorShapeDeviceV1 {
                     return;
                 };
                 if state.seat.set_named_cursor(client.client_id(), icon_names) {
+                    dispatcher.dispatch_to(
+                        client.client_id(),
+                        crate::clients::ClientAction::RefreshSurfaceOutputs,
+                    );
                     schedule_active_output(state, dispatcher);
                 }
             }

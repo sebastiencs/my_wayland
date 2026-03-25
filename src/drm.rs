@@ -3,6 +3,7 @@ use std::{
     num::NonZeroU32,
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
     rc::Rc,
+    time::Duration,
 };
 
 use {drm::control::FbCmd2Flags, khronos_types::gl};
@@ -17,10 +18,12 @@ use {
         },
         Device,
     },
+    nix::sys::timerfd::{self, Expiration, TimerFd, TimerFlags, TimerSetTimeFlags},
     once_cell::sync::Lazy,
 };
 
 use crate::{
+    cursor::CursorSourceRef,
     dmabuf::DmaBuf,
     egl::{EglContext, EglFrameBuffer, GlTexture, RenderItem, EGL},
     gbm::UseFlags,
@@ -162,6 +165,10 @@ pub struct DrmOutput {
     in_flight_frame: Option<SubmittedFrame>,
     displayed_external_fb: Option<DrmFrameBuffer>,
     retiring_external_fb: Option<DrmFrameBuffer>,
+    displayed_cursor_buffer: Option<CursorPlaneBuffer>,
+    retiring_cursor_buffer: Option<CursorPlaneBuffer>,
+    cursor_plane_state: CursorPlaneState,
+    cursor_animation_delay_msec: Option<u32>,
     allow_in_fence_fd: bool,
     allow_fb_damage_clips: bool,
     next_submission_id: u64,
@@ -211,6 +218,34 @@ struct DirectScanoutCandidate {
 }
 
 #[derive(Debug)]
+struct CursorPlaneBuffer {
+    bo: crate::gbm::BufferObject,
+    framebuffer: DrmFrameBuffer,
+}
+
+#[derive(Debug)]
+struct CursorPlaneCandidate {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    buffer: CursorPlaneBuffer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CursorPlaneState {
+    Ready,
+    Backoff { remaining_frames: u8, consecutive_failures: u8 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CursorOutputVisibility {
+    Hidden,
+    PartiallyVisible,
+    FullyVisible,
+}
+
+#[derive(Debug)]
 struct FramePlan {
     items: Vec<SceneItem>,
     scene: Vec<SceneItemState>,
@@ -218,6 +253,7 @@ struct FramePlan {
     presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
     damage: DamageRegion,
     direct_scanout: Option<DirectScanoutCandidate>,
+    cursor_plane: Option<CursorPlaneCandidate>,
     preserve_contents: bool,
 }
 
@@ -245,10 +281,12 @@ enum SubmittedFrame {
         damage: DamageRegion,
         submission: OutputSubmission,
         damage_blob: Option<u64>,
+        cursor_buffer: Option<CursorPlaneBuffer>,
     },
     DirectScanout {
         submission: OutputSubmission,
         framebuffer: DrmFrameBuffer,
+        cursor_buffer: Option<CursorPlaneBuffer>,
     },
 }
 
@@ -331,6 +369,7 @@ impl DrmOutput {
         self.needs_frame = false;
         self.in_flight_frame = Some(frame);
         self.retiring_external_fb = self.displayed_external_fb.take();
+        self.retiring_cursor_buffer = self.displayed_cursor_buffer.take();
     }
 
     fn take_in_flight_presentation_feedbacks_for_discard(
@@ -352,7 +391,13 @@ impl DrmOutput {
         let mut completed_submission = None;
 
         match self.in_flight_frame.take() {
-            Some(SubmittedFrame::Composited { buffer_index, damage, submission, damage_blob }) => {
+            Some(SubmittedFrame::Composited {
+                buffer_index,
+                damage,
+                submission,
+                damage_blob,
+                cursor_buffer,
+            }) => {
                 self.displayed_buffer_index = buffer_index;
                 self.render_buffer_index = if buffer_index == 0 { 1 } else { 0 };
                 self.rendered_buffer_present_id[buffer_index] = Some(self.present_count);
@@ -362,13 +407,15 @@ impl DrmOutput {
                 }
                 self.last_scene = submission.scene.clone();
                 self.displayed_external_fb = None;
+                self.displayed_cursor_buffer = cursor_buffer;
                 self.force_full_redraw = false;
                 completed_submission = Some(CompletedSubmission { submission, damage_blob });
             }
-            Some(SubmittedFrame::DirectScanout { submission, framebuffer }) => {
+            Some(SubmittedFrame::DirectScanout { submission, framebuffer, cursor_buffer }) => {
                 self.force_full_redraw = true;
                 self.last_scene = submission.scene.clone();
                 self.displayed_external_fb = Some(framebuffer);
+                self.displayed_cursor_buffer = cursor_buffer;
                 self.rendered_buffer_present_id = [None, None];
                 self.damage_history.clear();
                 completed_submission = Some(CompletedSubmission { submission, damage_blob: None });
@@ -376,6 +423,7 @@ impl DrmOutput {
             None => {}
         }
         self.retiring_external_fb = None;
+        self.retiring_cursor_buffer = None;
 
         if self.needs_frame && !self.frame_scheduled {
             self.frame_scheduled = true;
@@ -405,6 +453,20 @@ impl DrmOutput {
             .checked_sub(last_presented)?
             .saturating_add(1);
         usize::try_from(age).ok()
+    }
+
+    fn cursor_plane_available(&mut self) -> bool {
+        let (next_state, available) = advance_cursor_plane_state(self.cursor_plane_state);
+        self.cursor_plane_state = next_state;
+        available
+    }
+
+    fn note_cursor_plane_failure(&mut self) {
+        self.cursor_plane_state = next_cursor_plane_backoff_state(self.cursor_plane_state);
+    }
+
+    fn note_cursor_plane_success(&mut self) {
+        self.cursor_plane_state = CursorPlaneState::Ready;
     }
 
     fn preserve_render_buffer_contents(&self) -> bool {
@@ -656,6 +718,13 @@ impl ConnectorInUse {
         let format = &plane.formats[&DrmFourcc::Xrgb8888];
         (plane, &format.modifiers)
     }
+
+    pub fn cursor_plane(&self) -> Option<&Plane> {
+        self.planes.iter().find(|plane| {
+            matches!(plane.kind, PlaneType::Cursor)
+                && plane.formats.contains_key(&DrmFourcc::Argb8888)
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Copy)]
@@ -826,6 +895,151 @@ impl Drm {
         )
     }
 
+    fn collect_cursor_plane_candidate(
+        &self,
+        state: &State,
+        output_bounds: RectI,
+        now_msec: u32,
+    ) -> Option<CursorPlaneCandidate> {
+        let plane = self.output.in_use.cursor_plane()?;
+        let CursorSourceRef::Named { image, .. } = state.seat.visible_cursor_source_at(now_msec)?
+        else {
+            return None;
+        };
+        if image.width <= 0
+            || image.height <= 0
+            || image.width as u64 > self.resources.cursor_width
+            || image.height as u64 > self.resources.cursor_height
+        {
+            return None;
+        }
+        let x = state.seat.pointer_position().0.round() as i32 - image.hotspot_x;
+        let y = state.seat.pointer_position().1.round() as i32 - image.hotspot_y;
+        let bounds = RectI::new(x, y, image.width, image.height)?;
+        if classify_cursor_output_visibility(bounds, output_bounds)
+            != CursorOutputVisibility::FullyVisible
+        {
+            return None;
+        }
+        let plane_format = plane.formats.get(&DrmFourcc::Argb8888)?;
+        if !plane_format.modifiers.contains(&Modifier::INVALID)
+            && !plane_format.modifiers.contains(&Modifier::LINEAR)
+            && !plane_format.modifiers.contains(&Modifier::ZERO)
+        {
+            return None;
+        }
+
+        let bo = self.egl_context.gbm.create_bo_with_size(
+            image.width as u32,
+            image.height as u32,
+            DrmFourcc::Argb8888,
+            UseFlags::SCANOUT | UseFlags::CURSOR | UseFlags::WRITE | UseFlags::LINEAR,
+            &[Modifier::LINEAR],
+        );
+        if !plane_format.modifiers.contains(&Modifier::INVALID)
+            && !plane_format.modifiers.contains(&bo.dmabuf().modifier)
+        {
+            return None;
+        }
+        let pitch = drm::buffer::Buffer::pitch(&bo) as usize;
+        let bytes = rgba_to_drm_argb8888(
+            &image.pixels_rgba,
+            image.width as usize,
+            image.height as usize,
+            pitch,
+        );
+        bo.write(&bytes);
+        let framebuffer = Self::add_framebuffer(&self.fd, bo.dmabuf()).ok()?;
+        Some(CursorPlaneCandidate {
+            x,
+            y,
+            width: image.width,
+            height: image.height,
+            buffer: CursorPlaneBuffer { bo, framebuffer },
+        })
+    }
+
+    fn append_cursor_plane_changes(
+        &self,
+        changes: &mut control::atomic::AtomicModeReq,
+        cursor: Option<&CursorPlaneCandidate>,
+    ) {
+        let Some(plane) = self.output.in_use.cursor_plane() else {
+            return;
+        };
+        let crtc = self.output.in_use.crtc.handle;
+        let (fb, crtc_value, x, y, width, height, src_width, src_height) = match cursor {
+            Some(cursor) => (
+                control::property::Value::Object(Some(cursor.buffer.framebuffer.id().into())),
+                control::property::Value::CRTC(Some(crtc)),
+                cursor.x as u64,
+                cursor.y as u64,
+                cursor.width as u64,
+                cursor.height as u64,
+                (cursor.width as u64) << 16,
+                (cursor.height as u64) << 16,
+            ),
+            None => (
+                control::property::Value::Object(None),
+                control::property::Value::CRTC(None),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ),
+        };
+        changes.add_property(plane.handle, plane.fb_id, fb);
+        changes.add_property(plane.handle, plane.crtc_id, crtc_value);
+        changes.add_property(
+            plane.handle,
+            plane.crtc.x.handle,
+            control::property::Value::UnsignedRange(x),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.crtc.y.handle,
+            control::property::Value::UnsignedRange(y),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.crtc.width.handle,
+            control::property::Value::UnsignedRange(width),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.crtc.height.handle,
+            control::property::Value::UnsignedRange(height),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.src.x.handle,
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.src.y.handle,
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.src.width.handle,
+            control::property::Value::UnsignedRange(src_width),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.src.height.handle,
+            control::property::Value::UnsignedRange(src_height),
+        );
+        if let Some(property) = plane.in_fence_fd {
+            changes.add_property(plane.handle, property, control::property::Value::SignedRange(-1));
+        }
+        if let Some(property) = plane.fb_damage_clips {
+            changes.add_property(plane.handle, property, control::property::Value::Blob(0));
+        }
+    }
+
     fn submit_render_buffer(
         &mut self,
         render_completion: &crate::egl::RenderCompletion,
@@ -834,6 +1048,7 @@ impl Drm {
         scene: Vec<SceneItemState>,
         frame_callback_surfaces: Vec<SurfaceKey>,
         presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
+        cursor_plane: Option<CursorPlaneCandidate>,
     ) -> std::io::Result<Vec<SurfaceKey>> {
         let (primary_plane, fb, crtc) = {
             let output = &self.output;
@@ -874,6 +1089,7 @@ impl Drm {
                 primary_plane.crtc_id,
                 control::property::Value::CRTC(Some(crtc)),
             );
+            self.append_cursor_plane_changes(&mut changes, cursor_plane.as_ref());
 
             if let Some(property) = primary_plane.in_fence_fd {
                 let fence_fd = if use_in_fence {
@@ -951,6 +1167,7 @@ impl Drm {
                             damage: damage.clone(),
                             submission,
                             damage_blob,
+                            cursor_buffer: cursor_plane.map(|cursor| cursor.buffer),
                         });
                     return Ok(callback_surfaces);
                 }
@@ -990,6 +1207,7 @@ impl Drm {
         scene: Vec<SceneItemState>,
         frame_callback_surfaces: Vec<SurfaceKey>,
         presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
+        cursor_plane: Option<CursorPlaneCandidate>,
     ) -> std::io::Result<Vec<SurfaceKey>> {
         let (primary_plane, crtc) = {
             let output = &self.output;
@@ -1008,6 +1226,7 @@ impl Drm {
             primary_plane.crtc_id,
             control::property::Value::CRTC(Some(crtc)),
         );
+        self.append_cursor_plane_changes(&mut changes, cursor_plane.as_ref());
         changes.add_property(
             primary_plane.handle,
             primary_plane.crtc.x.handle,
@@ -1098,6 +1317,7 @@ impl Drm {
             .mark_frame_submitted(SubmittedFrame::DirectScanout {
                 submission,
                 framebuffer: candidate.framebuffer,
+                cursor_buffer: cursor_plane.map(|cursor| cursor.buffer),
             });
         Ok(callback_surfaces)
     }
@@ -1292,6 +1512,10 @@ impl Drm {
             in_flight_frame: None,
             displayed_external_fb: None,
             retiring_external_fb: None,
+            displayed_cursor_buffer: None,
+            retiring_cursor_buffer: None,
+            cursor_plane_state: CursorPlaneState::Ready,
+            cursor_animation_delay_msec: None,
             allow_in_fence_fd: true,
             allow_fb_damage_clips: true,
             next_submission_id: 1,
@@ -2037,6 +2261,20 @@ pub enum DrmAction {
     Stop,
 }
 
+enum DrmCursorAnimationTimerAction {
+    Start,
+    Arm { delay_msec: Option<u32> },
+    Fired,
+    Failed { error: std::io::Error },
+    Stop,
+}
+
+struct DrmCursorAnimationTimer {
+    drm_id: DrmId,
+    timer_fd: TimerFd,
+    read_op_id: Option<RingId>,
+}
+
 pub fn sync_output_nodes_for_backend(state: &mut State, drm_id: DrmId) {
     state.refresh_outputs_for_backend(BackendOutputRef::new(drm_id));
 }
@@ -2058,6 +2296,11 @@ pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
     };
 
     schedule_output(state, output_id, dispatcher);
+}
+
+fn arm_cursor_animation_timer(dispatcher: &mut Dispatcher, drm_id: DrmId, delay_msec: Option<u32>) {
+    dispatcher
+        .dispatch_to(usize::from(drm_id) as u64, DrmCursorAnimationTimerAction::Arm { delay_msec });
 }
 
 pub fn discard_backend_presentation_feedbacks(
@@ -2125,6 +2368,104 @@ fn select_presentation_output_for_scene(
     })
 }
 
+impl Model for DrmCursorAnimationTimer {
+    type Action = DrmCursorAnimationTimerAction;
+    const START: Option<Self::Action> = Some(DrmCursorAnimationTimerAction::Start);
+    const STOP: Option<Self::Action> = Some(DrmCursorAnimationTimerAction::Stop);
+
+    fn process(
+        &mut self,
+        state: &mut crate::state::State,
+        action: Self::Action,
+        dispatcher: &mut crate::runner::Dispatcher,
+    ) -> Result<(), ()> {
+        match action {
+            DrmCursorAnimationTimerAction::Start => {
+                self.dispatch_read(dispatcher);
+            }
+            DrmCursorAnimationTimerAction::Arm { delay_msec } => {
+                let expiration = delay_msec.map(|delay| {
+                    Expiration::OneShot(Duration::from_millis(u64::from(delay)).into())
+                });
+                if let Err(error) = self.set_expiration(expiration) {
+                    log::warn!("failed to arm cursor animation timer: {:?}", error);
+                }
+            }
+            DrmCursorAnimationTimerAction::Fired => {
+                if state
+                    .drm
+                    .get(self.drm_id)
+                    .output
+                    .cursor_animation_delay_msec
+                    .is_some()
+                {
+                    dispatcher
+                        .dispatch_to(usize::from(self.drm_id) as u64, DrmAction::ScheduleFrame);
+                }
+                self.dispatch_read(dispatcher);
+            }
+            DrmCursorAnimationTimerAction::Failed { error } => {
+                log::warn!("cursor animation timer read failed: {:?}", error);
+                self.dispatch_read(dispatcher);
+            }
+            DrmCursorAnimationTimerAction::Stop => {
+                let _ = self.set_expiration(None);
+                if let Some(read_op_id) = self.read_op_id.take() {
+                    dispatcher.dispatch(crate::io_uring::model::IoUringAction::Cancel {
+                        target: read_op_id,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl DrmCursorAnimationTimer {
+    fn new(drm_id: DrmId) -> Self {
+        let timer_fd = TimerFd::new(
+            timerfd::ClockId::CLOCK_MONOTONIC,
+            TimerFlags::TFD_CLOEXEC | TimerFlags::TFD_NONBLOCK,
+        )
+        .expect("failed to create cursor animation timerfd");
+        Self { drm_id, timer_fd, read_op_id: None }
+    }
+
+    fn dispatch_read(&mut self, dispatcher: &mut Dispatcher) {
+        if self.read_op_id.is_some() {
+            return;
+        }
+        let read_op_id = RingId::fresh();
+        self.read_op_id = Some(read_op_id);
+        dispatcher.dispatch(crate::io_uring::model::IoUringAction::Read {
+            id: Some(read_op_id),
+            fd: self.timer_fd.as_fd().as_raw_fd(),
+            offset: 0,
+            length: std::mem::size_of::<u64>(),
+            dispatch_to: crate::runner::Redispatcher::id(
+                usize::from(self.drm_id) as u64,
+                Self::on_read_ready,
+            ),
+        });
+    }
+
+    fn set_expiration(&mut self, expiration: Option<Expiration>) -> std::io::Result<()> {
+        self.timer_fd
+            .set(
+                expiration.unwrap_or_else(|| Expiration::OneShot(Duration::ZERO.into())),
+                TimerSetTimeFlags::empty(),
+            )
+            .map_err(std::io::Error::other)
+    }
+
+    fn on_read_ready(result: std::io::Result<ReadWriteCompleted>) -> AnyAction {
+        match result {
+            Ok(_) => AnyAction::from(DrmCursorAnimationTimerAction::Fired),
+            Err(error) => AnyAction::from(DrmCursorAnimationTimerAction::Failed { error }),
+        }
+    }
+}
+
 impl Model for DrmModel {
     type Action = DrmAction;
     const START: Option<Self::Action> = Some(DrmAction::Start);
@@ -2141,6 +2482,7 @@ impl Model for DrmModel {
                 sync_output_nodes_for_backend(state, self.drm_id);
                 let fd = state.drm.get(self.drm_id).fd.as_raw_fd();
                 dispatcher.start_model(self.model_id(), DrmReader::new(self.drm_id, fd));
+                dispatcher.start_model(self.model_id(), DrmCursorAnimationTimer::new(self.drm_id));
             }
             DrmAction::ScheduleFrame => {
                 sync_output_nodes_for_backend(state, self.drm_id);
@@ -2155,6 +2497,7 @@ impl Model for DrmModel {
             }
             DrmAction::Stop => {
                 dispatcher.stop_model::<_, DrmReader>(self.model_id());
+                dispatcher.stop_model::<_, DrmCursorAnimationTimer>(self.model_id());
             }
         };
         Ok(())
@@ -2184,25 +2527,35 @@ impl DrmModel {
                 log::warn!("DrmModel::render_frame skipped: output not ready");
                 return;
             }
-            let (scene_items, deferred_releases) = collect_render_items(state, self.drm_id);
+            let (scene_items, deferred_releases, cursor_plane, cursor_animation_delay_msec) =
+                collect_render_items(state, self.drm_id, frame_time_msec);
             let (plan, output_id) = {
                 let drm = state.drm.get(self.drm_id);
-                let plan = build_frame_plan(&drm.output, scene_items);
+                let plan = build_frame_plan(&drm.output, scene_items, cursor_plane);
                 let output_id =
                     select_presentation_output_for_scene(state, self.drm_id, &plan.scene);
                 (plan, output_id)
             };
             let FramePlan {
-                items,
-                scene,
-                frame_callback_surfaces,
-                presentation_feedbacks,
-                damage,
+                mut items,
+                mut scene,
+                mut frame_callback_surfaces,
+                mut presentation_feedbacks,
+                mut damage,
                 direct_scanout,
-                preserve_contents,
+                mut cursor_plane,
+                mut preserve_contents,
             } = plan;
+            let mut software_cursor_item = if cursor_plane.is_some() {
+                let output_bounds = state.drm.get(self.drm_id).output.output_bounds();
+                collect_named_cursor_render_item(state, output_bounds, frame_time_msec)
+                    .map(|(item, _)| item)
+            } else {
+                None
+            };
             let drm = state.drm.get_mut(self.drm_id);
             drm.output.in_flight_releases = deferred_releases;
+            drm.output.cursor_animation_delay_msec = cursor_animation_delay_msec;
 
             if let Some(candidate) = direct_scanout {
                 if drm
@@ -2212,9 +2565,11 @@ impl DrmModel {
                         scene.clone(),
                         frame_callback_surfaces.clone(),
                         presentation_feedbacks.clone(),
+                        cursor_plane.take(),
                     )
                     .is_ok()
                 {
+                    drm.output.note_cursor_plane_success();
                     dispatch_submission_frame_callbacks(
                         &frame_callback_surfaces,
                         frame_time_msec,
@@ -2223,9 +2578,23 @@ impl DrmModel {
                     drm.output.force_full_redraw = true;
                     return;
                 }
+                if let Some(cursor_item) = software_cursor_item.take() {
+                    items.push(cursor_item);
+                    let fallback_plan = build_frame_plan(&drm.output, items, None);
+                    items = fallback_plan.items;
+                    scene = fallback_plan.scene;
+                    frame_callback_surfaces = fallback_plan.frame_callback_surfaces;
+                    presentation_feedbacks = fallback_plan.presentation_feedbacks;
+                    damage = fallback_plan.damage;
+                    preserve_contents = fallback_plan.preserve_contents;
+                    cursor_plane = None;
+                }
             }
 
-            if damage.is_empty() {
+            if damage.is_empty()
+                && cursor_plane.is_none()
+                && drm.output.displayed_cursor_buffer.is_none()
+            {
                 drm.output.mark_frame_idle();
                 let releases = std::mem::take(&mut drm.output.in_flight_releases);
                 dispatch_submission_frame_callbacks(
@@ -2251,32 +2620,142 @@ impl DrmModel {
                 let render_completion =
                     drm.render_output(&render_items, &damage, preserve_contents);
                 let callback_surfaces = frame_callback_surfaces.clone();
-                if let Err(error) = drm.submit_render_buffer(
+                let submit_had_cursor_plane = cursor_plane.is_some();
+                let submit_result = drm.submit_render_buffer(
                     &render_completion,
                     &damage,
                     output_id,
                     scene,
                     frame_callback_surfaces,
                     presentation_feedbacks.clone(),
-                ) {
-                    drm.output.mark_render_failed();
-                    let failed_releases = std::mem::take(&mut drm.output.in_flight_releases);
-                    dispatch_presentation_feedback_discarded(dispatcher, &presentation_feedbacks);
-                    if !render_completion.used_blocking_fallback {
-                        if let Some(in_fence_fd) = render_completion.in_fence_fd {
-                            if let Err(wait_error) =
-                                drm.egl_context.wait_on_native_fence(in_fence_fd)
-                            {
-                                log::warn!(
+                    cursor_plane,
+                );
+                if let Err(error) = submit_result {
+                    if submit_had_cursor_plane {
+                        if let Some(cursor_item) = software_cursor_item.take() {
+                            log::warn!(
+                                "DRM cursor plane submission failed, retrying with software cursor: {:?}",
+                                error
+                            );
+                            items.push(cursor_item);
+                            let fallback_plan = build_frame_plan(&drm.output, items, None);
+                            let fallback_render_items: Vec<RenderItem> = fallback_plan
+                                .items
+                                .iter()
+                                .map(|item| RenderItem {
+                                    texture: item.texture,
+                                    x: item.state.bounds.x,
+                                    y: item.state.bounds.y,
+                                    width: item.state.bounds.width,
+                                    height: item.state.bounds.height,
+                                    tex_transform: item.state.tex_transform,
+                                    damage: item.damage.clone(),
+                                    blend: item.state_has_alpha,
+                                })
+                                .collect();
+                            let fallback_render_completion = drm.render_output(
+                                &fallback_render_items,
+                                &fallback_plan.damage,
+                                fallback_plan.preserve_contents,
+                            );
+                            let fallback_callbacks = fallback_plan.frame_callback_surfaces.clone();
+                            match drm.submit_render_buffer(
+                                &fallback_render_completion,
+                                &fallback_plan.damage,
+                                output_id,
+                                fallback_plan.scene,
+                                fallback_plan.frame_callback_surfaces,
+                                fallback_plan.presentation_feedbacks.clone(),
+                                None,
+                            ) {
+                                Ok(_) => {
+                                    drm.output.note_cursor_plane_failure();
+                                    dispatch_submission_frame_callbacks(
+                                        &fallback_callbacks,
+                                        frame_time_msec,
+                                        dispatcher,
+                                    );
+                                    None
+                                }
+                                Err(fallback_error) => {
+                                    drm.output.mark_render_failed();
+                                    let failed_releases =
+                                        std::mem::take(&mut drm.output.in_flight_releases);
+                                    dispatch_presentation_feedback_discarded(
+                                        dispatcher,
+                                        &fallback_plan.presentation_feedbacks,
+                                    );
+                                    if !fallback_render_completion.used_blocking_fallback {
+                                        if let Some(in_fence_fd) =
+                                            fallback_render_completion.in_fence_fd
+                                        {
+                                            if let Err(wait_error) =
+                                                drm.egl_context.wait_on_native_fence(in_fence_fd)
+                                            {
+                                                log::warn!(
+                                                    "failed to wait on compositor render fence after fallback submit failure: {:?}",
+                                                    wait_error
+                                                );
+                                            }
+                                        }
+                                    }
+                                    log::error!(
+                                        "Could not submit DRM frame after software cursor fallback: {:?}",
+                                        fallback_error
+                                    );
+                                    Some(failed_releases)
+                                }
+                            }
+                        } else {
+                            drm.output.note_cursor_plane_failure();
+                            drm.output.mark_render_failed();
+                            let failed_releases =
+                                std::mem::take(&mut drm.output.in_flight_releases);
+                            dispatch_presentation_feedback_discarded(
+                                dispatcher,
+                                &presentation_feedbacks,
+                            );
+                            if !render_completion.used_blocking_fallback {
+                                if let Some(in_fence_fd) = render_completion.in_fence_fd {
+                                    if let Err(wait_error) =
+                                        drm.egl_context.wait_on_native_fence(in_fence_fd)
+                                    {
+                                        log::warn!(
+                                            "failed to wait on compositor render fence after submit failure: {:?}",
+                                            wait_error
+                                        );
+                                    }
+                                }
+                            }
+                            log::error!("Could not submit DRM frame: {:?}", error);
+                            Some(failed_releases)
+                        }
+                    } else {
+                        drm.output.mark_render_failed();
+                        let failed_releases = std::mem::take(&mut drm.output.in_flight_releases);
+                        dispatch_presentation_feedback_discarded(
+                            dispatcher,
+                            &presentation_feedbacks,
+                        );
+                        if !render_completion.used_blocking_fallback {
+                            if let Some(in_fence_fd) = render_completion.in_fence_fd {
+                                if let Err(wait_error) =
+                                    drm.egl_context.wait_on_native_fence(in_fence_fd)
+                                {
+                                    log::warn!(
                                     "failed to wait on compositor render fence after submit failure: {:?}",
                                     wait_error
                                 );
+                                }
                             }
                         }
+                        log::error!("Could not submit DRM frame: {:?}", error);
+                        Some(failed_releases)
                     }
-                    log::error!("Could not submit DRM frame: {:?}", error);
-                    Some(failed_releases)
                 } else {
+                    if submit_had_cursor_plane {
+                        drm.output.note_cursor_plane_success();
+                    }
                     dispatch_submission_frame_callbacks(
                         &callback_surfaces,
                         frame_time_msec,
@@ -2303,11 +2782,12 @@ impl DrmModel {
         tv_usec: u32,
         _crtc_id: u32,
     ) {
-        let (releases, should_render, completed_submission) = {
+        let (releases, should_render, completed_submission, cursor_animation_delay_msec) = {
             let drm = state.drm.get_mut(self.drm_id);
             let releases = std::mem::take(&mut drm.output.in_flight_releases);
             let (should_render, completed_submission) = drm.output.finish_page_flip();
-            (releases, should_render, completed_submission)
+            let cursor_animation_delay_msec = drm.output.cursor_animation_delay_msec;
+            (releases, should_render, completed_submission, cursor_animation_delay_msec)
         };
 
         for release in releases {
@@ -2331,6 +2811,7 @@ impl DrmModel {
             }
         }
         sync_output_nodes_for_backend(state, self.drm_id);
+        arm_cursor_animation_timer(dispatcher, self.drm_id, cursor_animation_delay_msec);
         if should_render {
             dispatcher.dispatch_to(self.model_id(), DrmAction::RenderFrame);
         }
@@ -2393,6 +2874,54 @@ fn monotonic_time_msec() -> u32 {
         .saturating_mul(1000)
         .saturating_add((ts.tv_nsec as u64) / 1_000_000);
     millis.min(u64::from(u32::MAX)) as u32
+}
+
+fn classify_cursor_output_visibility(
+    bounds: RectI,
+    output_bounds: RectI,
+) -> CursorOutputVisibility {
+    if !bounds.intersects(output_bounds) {
+        return CursorOutputVisibility::Hidden;
+    }
+    if bounds.x >= output_bounds.x
+        && bounds.y >= output_bounds.y
+        && bounds.x2() <= output_bounds.x2()
+        && bounds.y2() <= output_bounds.y2()
+    {
+        CursorOutputVisibility::FullyVisible
+    } else {
+        CursorOutputVisibility::PartiallyVisible
+    }
+}
+
+fn advance_cursor_plane_state(state: CursorPlaneState) -> (CursorPlaneState, bool) {
+    match state {
+        CursorPlaneState::Ready => (CursorPlaneState::Ready, true),
+        CursorPlaneState::Backoff { remaining_frames, consecutive_failures }
+            if remaining_frames > 0 =>
+        {
+            (
+                CursorPlaneState::Backoff {
+                    remaining_frames: remaining_frames - 1,
+                    consecutive_failures,
+                },
+                false,
+            )
+        }
+        CursorPlaneState::Backoff { .. } => (CursorPlaneState::Ready, true),
+    }
+}
+
+fn next_cursor_plane_backoff_state(state: CursorPlaneState) -> CursorPlaneState {
+    let consecutive_failures = match state {
+        CursorPlaneState::Ready => 1,
+        CursorPlaneState::Backoff { consecutive_failures, .. } => {
+            consecutive_failures.saturating_add(1)
+        }
+    };
+    let shift = u32::from(consecutive_failures.saturating_sub(1).min(5));
+    let remaining_frames = 1u8.checked_shl(shift).unwrap_or(32).min(32);
+    CursorPlaneState::Backoff { remaining_frames, consecutive_failures }
 }
 
 fn dispatch_submission_frame_callbacks(
@@ -2538,7 +3067,11 @@ fn dispatch_presentation_feedback_presented(
     }
 }
 
-fn build_frame_plan(output: &DrmOutput, mut items: Vec<SceneItem>) -> FramePlan {
+fn build_frame_plan(
+    output: &DrmOutput,
+    mut items: Vec<SceneItem>,
+    cursor_plane: Option<CursorPlaneCandidate>,
+) -> FramePlan {
     let output_bounds = output.output_bounds();
     let mut base_damage = DamageRegion::new();
     let scene = items
@@ -2646,90 +3179,85 @@ fn build_frame_plan(output: &DrmOutput, mut items: Vec<SceneItem>) -> FramePlan 
         presentation_feedbacks,
         damage: base_damage,
         direct_scanout,
+        cursor_plane,
         preserve_contents: ENABLE_DAMAGE
             && output.preserve_render_buffer_contents()
             && !output.force_full_redraw,
     }
 }
 
-fn collect_cursor_render_item(
-    state: &crate::state::State,
-    _drm_id: DrmId,
+fn collect_named_cursor_render_item(
+    state: &mut crate::state::State,
     output_bounds: RectI,
-) -> Option<SceneItem> {
-    let image = state.seat.visible_cursor_image()?;
+    now_msec: u32,
+) -> Option<(SceneItem, Option<u32>)> {
     let (pointer_x, pointer_y) = state.seat.pointer_position();
-    let x = pointer_x.round() as i32 - image.hotspot_x;
-    let y = pointer_y.round() as i32 - image.hotspot_y;
-    let bounds = RectI::new(x, y, image.width, image.height)?;
-    if !bounds.intersects(output_bounds) {
-        return None;
-    }
+    match state.seat.visible_cursor_source_at(now_msec)? {
+        CursorSourceRef::Named { image, next_frame_in_msec, .. } => {
+            let x = pointer_x.round() as i32 - image.hotspot_x;
+            let y = pointer_y.round() as i32 - image.hotspot_y;
+            let bounds = RectI::new(x, y, image.width, image.height)?;
+            if classify_cursor_output_visibility(bounds, output_bounds)
+                == CursorOutputVisibility::Hidden
+            {
+                return None;
+            }
 
-    let texture = GlTexture::from_rgba(&image.pixels_rgba, image.width, image.height).ok()?;
-    let texture_id = texture.texture_id();
-    Some(SceneItem {
-        state: SceneItemState {
-            key: SceneItemKey::Cursor,
-            surface_key: None,
-            buffer_object_id: ObjectId::from(u32::MAX as usize),
-            bounds,
-            tex_transform: transform::Mat3::identity(),
-        },
-        texture: texture_id,
-        owned_texture: Some(texture),
-        damage: DamageRegion::from_rect(bounds),
-        sample_damage_padding: 0,
-        state_has_alpha: true,
-        opaque_region: DamageRegion::new(),
-        opaque: false,
-        sync: crate::sync::SurfaceSyncState::default(),
-        direct_scanout: None,
-        presentation_feedbacks: Vec::new(),
-    })
+            let texture =
+                GlTexture::from_rgba(&image.pixels_rgba, image.width, image.height).ok()?;
+            let texture_id = texture.texture_id();
+            Some((
+                SceneItem {
+                    state: SceneItemState {
+                        key: SceneItemKey::Cursor,
+                        surface_key: None,
+                        buffer_object_id: ObjectId::from(u32::MAX as usize),
+                        bounds,
+                        tex_transform: transform::Mat3::identity(),
+                    },
+                    texture: texture_id,
+                    owned_texture: Some(texture),
+                    damage: DamageRegion::from_rect(bounds),
+                    sample_damage_padding: 0,
+                    state_has_alpha: true,
+                    opaque_region: DamageRegion::new(),
+                    opaque: false,
+                    sync: crate::sync::SurfaceSyncState::default(),
+                    direct_scanout: None,
+                    presentation_feedbacks: Vec::new(),
+                },
+                next_frame_in_msec,
+            ))
+        }
+        CursorSourceRef::Surface { .. } => None,
+    }
 }
 
-fn collect_render_items(
-    state: &mut crate::state::State,
-    drm_id: DrmId,
-) -> (Vec<SceneItem>, Vec<DeferredRelease>) {
-    let mut items = Vec::new();
-    let mut deferred_releases = Vec::new();
-    let mut retired_candidates = Vec::new();
-    let root_surface_oids: Vec<_> = state
-        .root_surface_ids()
-        .into_iter()
-        .filter(|object_id| {
-            let Some(surface) = state.objects.try_ref_object::<WlSurface>(*object_id) else {
-                return false;
-            };
-            surface.is_root()
-        })
-        .collect();
-    let snapshots = {
-        let mut snapshots = Vec::new();
-        for object_id in root_surface_oids {
-            collect_surface_snapshots(
-                state,
-                object_id,
-                0,
-                0,
-                &mut retired_candidates,
-                &mut snapshots,
-            );
+fn rgba_to_drm_argb8888(src: &[u8], width: usize, height: usize, pitch: usize) -> Vec<u8> {
+    let mut dst = vec![0; pitch.saturating_mul(height)];
+    let src_stride = width.saturating_mul(4);
+    for row in 0..height {
+        let src_row = &src[row * src_stride..(row + 1) * src_stride];
+        let dst_row = &mut dst[row * pitch..row * pitch + src_stride];
+        for (src_px, dst_px) in src_row.chunks_exact(4).zip(dst_row.chunks_exact_mut(4)) {
+            dst_px[0] = src_px[2];
+            dst_px[1] = src_px[1];
+            dst_px[2] = src_px[0];
+            dst_px[3] = src_px[3];
         }
-        snapshots
-    };
-
-    for retired in retired_candidates {
-        deferred_releases.push(DeferredRelease::from_candidate(state, retired));
     }
+    dst
+}
 
-    let (objects, drm_map) = (&mut state.objects, &state.drm);
-    let drm = drm_map.get(drm_id);
-    let output_bounds = drm.output.output_bounds();
-    let drm_fd = drm.fd();
-
+fn push_scene_items_from_snapshots(
+    items: &mut Vec<SceneItem>,
+    objects: &mut Box<crate::state::IndexMap<ObjectId, Box<dyn crate::object::Object>>>,
+    drm: &Drm,
+    drm_fd: &DrmFd,
+    output_bounds: RectI,
+    snapshots: Vec<crate::wayland_objects::wl_surface::SurfaceRenderState>,
+    allow_direct_scanout: bool,
+) {
     for surface_state in snapshots {
         let buffer_oid = surface_state.buffer_object_id;
         if !objects.contains(buffer_oid) {
@@ -2750,6 +3278,9 @@ fn collect_render_items(
         else {
             continue;
         };
+        if !bounds.intersects(output_bounds) {
+            continue;
+        }
         let mut damage = surface_state.damage.clone();
         damage.intersect_rect(bounds);
         damage.intersect_rect(output_bounds);
@@ -2783,7 +3314,8 @@ fn collect_render_items(
                 crate::sync::AcquireSync::None | crate::sync::AcquireSync::SyncFile(_)
             ) && (!matches!(surface_state.sync.acquire, crate::sync::AcquireSync::SyncFile(_))
                 || drm.output.in_use.primary_plane().0.in_fence_fd.is_some());
-        let direct_scanout = if buffer.dmabuf().is_some()
+        let direct_scanout = if allow_direct_scanout
+            && buffer.dmabuf().is_some()
             && !buffer.y_inverted()
             && !buffer.format().has_alpha
             && bounds == output_bounds
@@ -2800,21 +3332,19 @@ fn collect_render_items(
                 {
                     return None;
                 }
-                Drm::add_framebuffer(&drm_fd, dmabuf).ok()
+                Drm::add_framebuffer(drm_fd, dmabuf).ok()
             })
         } else {
             None
         };
+        let surface_key = SurfaceKey {
+            client_id: surface_state.surface_client_id,
+            surface_id: surface_state.surface_id,
+        };
         items.push(SceneItem {
             state: SceneItemState {
-                key: SceneItemKey::Surface(SurfaceKey {
-                    client_id: surface_state.surface_client_id,
-                    surface_id: surface_state.surface_id,
-                }),
-                surface_key: Some(SurfaceKey {
-                    client_id: surface_state.surface_client_id,
-                    surface_id: surface_state.surface_id,
-                }),
+                key: SceneItemKey::Surface(surface_key),
+                surface_key: Some(surface_key),
                 buffer_object_id: surface_state.buffer_object_id,
                 bounds,
                 tex_transform,
@@ -2831,12 +3361,136 @@ fn collect_render_items(
             presentation_feedbacks: surface_state.presentation_feedbacks,
         });
     }
+}
 
-    if let Some(cursor_item) = collect_cursor_render_item(state, drm_id, output_bounds) {
-        items.push(cursor_item);
+fn collect_cursor_surface_snapshots(
+    state: &mut crate::state::State,
+    retired_candidates: &mut Vec<RetiredBufferCandidate>,
+) -> Vec<crate::wayland_objects::wl_surface::SurfaceRenderState> {
+    let (pointer_x, pointer_y) = state.seat.pointer_position();
+    let Some(CursorSourceRef::Surface { cursor, .. }) = state.seat.visible_cursor_source() else {
+        return Vec::new();
+    };
+    let Some(surface) = state.objects.try_ref_object::<WlSurface>(cursor.object_id) else {
+        return Vec::new();
+    };
+    let (root_x, root_y) = surface.root_position();
+    let base_x = pointer_x.round() as i32 - cursor.hotspot_x - root_x;
+    let base_y = pointer_y.round() as i32 - cursor.hotspot_y - root_y;
+    let mut snapshots = Vec::new();
+    collect_surface_snapshots(
+        state,
+        cursor.object_id,
+        base_x,
+        base_y,
+        retired_candidates,
+        &mut snapshots,
+    );
+    snapshots
+}
+
+fn collect_render_items(
+    state: &mut crate::state::State,
+    drm_id: DrmId,
+    frame_time_msec: u32,
+) -> (Vec<SceneItem>, Vec<DeferredRelease>, Option<CursorPlaneCandidate>, Option<u32>) {
+    let mut items = Vec::new();
+    let mut deferred_releases = Vec::new();
+    let mut retired_candidates = Vec::new();
+    let mut cursor_animation_delay_msec = None;
+    let root_surface_oids: Vec<_> = state
+        .root_surface_ids()
+        .into_iter()
+        .filter(|object_id| {
+            let Some(surface) = state.objects.try_ref_object::<WlSurface>(*object_id) else {
+                return false;
+            };
+            surface.is_root() && !surface.has_cursor_role()
+        })
+        .collect();
+    let snapshots = {
+        let mut snapshots = Vec::new();
+        for object_id in root_surface_oids {
+            collect_surface_snapshots(
+                state,
+                object_id,
+                0,
+                0,
+                &mut retired_candidates,
+                &mut snapshots,
+            );
+        }
+        snapshots
+    };
+
+    let named_cursor_visible = matches!(
+        state.seat.visible_cursor_source_at(frame_time_msec),
+        Some(CursorSourceRef::Named { .. })
+    );
+    let (output_bounds, allow_cursor_plane) = {
+        let drm = state.drm.get_mut(drm_id);
+        let output_bounds = drm.output.output_bounds();
+        let allow_cursor_plane = named_cursor_visible && drm.output.cursor_plane_available();
+        (output_bounds, allow_cursor_plane)
+    };
+    let cursor_plane = if allow_cursor_plane {
+        let cursor_plane = state.drm.get(drm_id).collect_cursor_plane_candidate(
+            state,
+            output_bounds,
+            frame_time_msec,
+        );
+        if cursor_plane.is_some() {
+            cursor_animation_delay_msec = match state.seat.visible_cursor_source_at(frame_time_msec)
+            {
+                Some(CursorSourceRef::Named { next_frame_in_msec, .. }) => next_frame_in_msec,
+                _ => None,
+            };
+        }
+        cursor_plane
+    } else {
+        None
+    };
+    let cursor_snapshots = if cursor_plane.is_none() {
+        collect_cursor_surface_snapshots(state, &mut retired_candidates)
+    } else {
+        Vec::new()
+    };
+    let (objects, drm_map) = (&mut state.objects, &state.drm);
+    let drm = drm_map.get(drm_id);
+    let drm_fd = drm.fd();
+    push_scene_items_from_snapshots(
+        &mut items,
+        objects,
+        drm,
+        &drm_fd,
+        output_bounds,
+        snapshots,
+        true,
+    );
+
+    if cursor_plane.is_none() {
+        push_scene_items_from_snapshots(
+            &mut items,
+            objects,
+            drm,
+            &drm_fd,
+            output_bounds,
+            cursor_snapshots,
+            false,
+        );
+        if let Some((cursor_item, next_frame_in_msec)) =
+            collect_named_cursor_render_item(state, output_bounds, frame_time_msec)
+        {
+            cursor_animation_delay_msec = next_frame_in_msec;
+            items.push(cursor_item);
+        }
     }
 
-    (items, deferred_releases)
+    for retired in retired_candidates {
+        deferred_releases.push(DeferredRelease::from_candidate(state, retired));
+    }
+
+    (items, deferred_releases, cursor_plane, cursor_animation_delay_msec)
 }
 
 #[cfg(test)]
@@ -2859,10 +3513,69 @@ mod drm_event_tests {
 }
 
 #[cfg(test)]
+mod cursor_policy_tests {
+    use {
+        super::{
+            advance_cursor_plane_state, classify_cursor_output_visibility,
+            next_cursor_plane_backoff_state, CursorOutputVisibility, CursorPlaneState,
+        },
+        crate::region::RectI,
+    };
+
+    #[test]
+    fn cursor_output_visibility_distinguishes_hidden_partial_and_full() {
+        let output_bounds = RectI::new(10, 20, 100, 80).unwrap();
+
+        assert_eq!(
+            classify_cursor_output_visibility(RectI::new(0, 0, 5, 5).unwrap(), output_bounds),
+            CursorOutputVisibility::Hidden
+        );
+        assert_eq!(
+            classify_cursor_output_visibility(RectI::new(5, 20, 20, 10).unwrap(), output_bounds),
+            CursorOutputVisibility::PartiallyVisible
+        );
+        assert_eq!(
+            classify_cursor_output_visibility(RectI::new(20, 30, 10, 10).unwrap(), output_bounds),
+            CursorOutputVisibility::FullyVisible
+        );
+    }
+
+    #[test]
+    fn cursor_plane_backoff_skips_frames_then_recovers() {
+        let state = next_cursor_plane_backoff_state(CursorPlaneState::Ready);
+        assert_eq!(
+            state,
+            CursorPlaneState::Backoff { remaining_frames: 1, consecutive_failures: 1 }
+        );
+
+        let (state, available) = advance_cursor_plane_state(state);
+        assert!(!available);
+        assert_eq!(
+            state,
+            CursorPlaneState::Backoff { remaining_frames: 0, consecutive_failures: 1 }
+        );
+
+        let (state, available) = advance_cursor_plane_state(state);
+        assert!(available);
+        assert_eq!(state, CursorPlaneState::Ready);
+    }
+
+    #[test]
+    fn cursor_plane_backoff_grows_with_repeated_failures() {
+        let state = next_cursor_plane_backoff_state(CursorPlaneState::Ready);
+        let state = next_cursor_plane_backoff_state(state);
+        assert_eq!(
+            state,
+            CursorPlaneState::Backoff { remaining_frames: 2, consecutive_failures: 2 }
+        );
+    }
+}
+
+#[cfg(test)]
 mod presentation_timing_tests {
     use {
         super::{
-            presentation_feedback_flags, presentation_refresh_interval_ns,
+            presentation_feedback_flags, presentation_refresh_interval_ns, rgba_to_drm_argb8888,
             sanitize_present_timestamp, select_presentation_output_for_scene,
             submitted_frame_feedbacks_for_discard, OutputSubmission, SceneItemKey, SceneItemState,
             SubmissionPresentationFeedback, SubmittedFrame, SurfaceKey,
@@ -2964,12 +3677,33 @@ mod presentation_timing_tests {
                 zero_copy: false,
             },
             damage_blob: None,
+            cursor_buffer: None,
         };
 
         let (feedbacks, blob) = submitted_frame_feedbacks_for_discard(frame);
 
         assert_eq!(feedbacks, vec![submission_feedback(4, 2)]);
         assert!(blob.is_none());
+    }
+
+    #[test]
+    fn rgba_to_drm_argb8888_swaps_channels_and_preserves_pitch_padding() {
+        let converted = rgba_to_drm_argb8888(
+            &[
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+                0xff, 0x10,
+            ],
+            2,
+            2,
+            12,
+        );
+        assert_eq!(
+            converted,
+            vec![
+                0x33, 0x22, 0x11, 0x44, 0x77, 0x66, 0x55, 0x88, 0x00, 0x00, 0x00, 0x00, 0xbb, 0xaa,
+                0x99, 0xcc, 0xff, 0xee, 0xdd, 0x10, 0x00, 0x00, 0x00, 0x00,
+            ]
+        );
     }
 
     #[test]
@@ -3010,7 +3744,7 @@ mod presentation_timing_tests {
 #[cfg(test)]
 mod surface_tree_render_tests {
     use {
-        super::collect_surface_snapshots,
+        super::{collect_cursor_surface_snapshots, collect_surface_snapshots},
         crate::{
             clients::ClientId,
             egl::EGL,
@@ -3209,5 +3943,48 @@ mod surface_tree_render_tests {
             .map(|snapshot| (snapshot.x, snapshot.y))
             .collect();
         assert_eq!(positions, vec![(120, 226), (106, 209), (100, 200)]);
+    }
+
+    #[test]
+    fn collect_cursor_surface_snapshots_walks_cursor_subsurface_tree() {
+        let mut state = make_state();
+        let root = insert_surface(&mut state, 1);
+        let child = insert_surface(&mut state, 2);
+
+        {
+            let root_surface = state
+                .objects
+                .get_mut(root)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            root_surface.test_map(ObjectId::from(130usize), 10, 15, 20, 20);
+            root_surface.add_pending_child(child);
+            assert!(root_surface.restack_child_relative(child, None, true));
+        }
+        {
+            let child_surface = state
+                .objects
+                .get_mut(child)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            child_surface.assign_subsurface(WlSubsurfaceId::from(81), root);
+            child_surface.set_subsurface_position(4, 5);
+            child_surface.test_map(ObjectId::from(131usize), 0, 0, 8, 9);
+        }
+        {
+            let mut root_surface = state.objects.grab_object::<WlSurface>(root);
+            assert!(root_surface.apply_pending_tree_state(&mut state));
+        }
+
+        state
+            .seat
+            .set_cursor_surface(ClientId::from_raw(1), WlSurfaceId::from(1), root, 3, 4);
+        let snapshots = collect_cursor_surface_snapshots(&mut state, &mut Vec::new());
+
+        let ids: Vec<_> = snapshots
+            .iter()
+            .map(|snapshot| snapshot.surface_id)
+            .collect();
+        assert_eq!(ids, vec![WlSurfaceId::from(1), WlSurfaceId::from(2)]);
     }
 }

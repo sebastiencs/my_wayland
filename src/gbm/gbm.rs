@@ -92,13 +92,28 @@ impl GbmDevice {
     pub fn create_bo(
         &self,
         mode: &drm::control::Mode,
+        flags: UseFlags,
+        modifiers: &[Modifier],
+    ) -> BufferObject {
+        let (width, height) = mode.size();
+        self.create_bo_with_size(
+            width as u32,
+            height as u32,
+            drm::buffer::DrmFourcc::Xrgb8888,
+            flags,
+            modifiers,
+        )
+    }
+
+    pub fn create_bo_with_size(
+        &self,
+        width: u32,
+        height: u32,
+        format: drm::buffer::DrmFourcc,
         mut flags: UseFlags,
         mut modifiers: &[Modifier],
     ) -> BufferObject {
-        let (width, height) = mode.size();
-        let (width, height) = (width as u32, height as u32);
-
-        let format = drm::buffer::DrmFourcc::Xrgb8888 as u32;
+        let format = format as u32;
         let use_plain_create = modifiers.is_empty()
             || modifiers == [Modifier::INVALID]
             || modifiers

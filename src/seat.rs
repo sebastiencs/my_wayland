@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     clients::{ClientAction, ClientId},
-    cursor::CursorState,
+    cursor::{CursorSourceRef, CursorState},
     drm::{schedule_active_output, Drm},
     object::Object,
     protocol_generated::{
@@ -272,19 +272,54 @@ impl SeatState {
     }
 
     pub fn pointer_cursor_request_allowed(&self, client_id: ClientId, serial: u32) -> bool {
-        self.pointer_focus
+        if !self
+            .pointer_focus
             .is_some_and(|focus| focus.target.client_id == client_id)
-            && self
-                .last_pointer_enter
-                .is_some_and(|enter| enter.client_id == client_id && enter.serial == serial)
+        {
+            return false;
+        }
+        self.last_pointer_enter
+            .is_some_and(|enter| enter.client_id == client_id && enter.serial == serial)
+            || (self.pointer_button_count > 0
+                && self.last_pointer_press.is_some_and(|press| {
+                    press.focus.client_id == client_id && press.serial == serial
+                }))
     }
 
     pub fn set_named_cursor(&mut self, client_id: ClientId, icon_names: &[&'static str]) -> bool {
         self.cursor.set_named_cursor(client_id, icon_names)
     }
 
-    pub fn visible_cursor_image(&self) -> Option<&crate::cursor::CursorImage> {
-        self.cursor.image()
+    pub fn set_cursor_surface(
+        &mut self,
+        client_id: ClientId,
+        surface_id: WlSurfaceId,
+        object_id: ObjectId,
+        hotspot_x: i32,
+        hotspot_y: i32,
+    ) -> bool {
+        self.cursor
+            .set_surface_cursor(client_id, surface_id, object_id, hotspot_x, hotspot_y)
+    }
+
+    pub fn clear_cursor_for_client(&mut self, client_id: ClientId) -> bool {
+        self.cursor.clear_for_client(client_id)
+    }
+
+    pub fn clear_cursor_surface(&mut self, object_id: ObjectId) -> bool {
+        self.cursor.clear_surface(object_id)
+    }
+
+    pub fn apply_cursor_surface_offset(&mut self, object_id: ObjectId, dx: i32, dy: i32) -> bool {
+        self.cursor.apply_surface_offset(object_id, dx, dy)
+    }
+
+    pub fn visible_cursor_source_at(&self, now_msec: u32) -> Option<CursorSourceRef<'_>> {
+        self.cursor.source_at(now_msec)
+    }
+
+    pub fn visible_cursor_source(&self) -> Option<CursorSourceRef<'_>> {
+        self.cursor.source()
     }
 
     pub fn cursor_is_visible(&self) -> bool {
@@ -446,6 +481,7 @@ pub fn handle_pointer_motion(
         return;
     }
     refresh_pointer_focus(state, dispatcher, time, true);
+    refresh_visible_cursor_surface_outputs(state, dispatcher);
     if state.seat.cursor_is_visible() {
         schedule_active_output(state, dispatcher);
     }
@@ -526,6 +562,7 @@ pub fn handle_pointer_motion_absolute(
         return;
     }
     refresh_pointer_focus(state, dispatcher, time, true);
+    refresh_visible_cursor_surface_outputs(state, dispatcher);
     if state.seat.cursor_is_visible() {
         schedule_active_output(state, dispatcher);
     }
@@ -849,7 +886,7 @@ fn hit_test_surface(
         let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
             continue;
         };
-        if !surface.is_root() {
+        if !surface.is_root() || surface.has_cursor_role() {
             continue;
         }
         if let Some(root_hit) = hit_test_subtree(&state.objects, object_id, 0, 0, x, y) {
@@ -934,10 +971,14 @@ fn refresh_pointer_focus(
         }
 
         state.seat.pointer_focus = new_focus;
+        let cleared_cursor_owner = visible_cursor_owner_client(state);
         if state
             .seat
             .clear_cursor_for_focus(new_focus.map(|focus| focus.target.client_id))
         {
+            if let Some(client_id) = cleared_cursor_owner {
+                dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
+            }
             schedule_active_output(state, dispatcher);
         }
         return;
@@ -1005,6 +1046,21 @@ fn dispatch_client_event(dispatcher: &mut Dispatcher, client_id: ClientId, event
 
 fn dispatch_client_action(dispatcher: &mut Dispatcher, client_id: ClientId, action: ClientAction) {
     dispatcher.dispatch_to(client_id, action);
+}
+
+fn visible_cursor_owner_client(state: &State) -> Option<ClientId> {
+    match state.seat.visible_cursor_source()? {
+        CursorSourceRef::Named { owner_client_id, .. }
+        | CursorSourceRef::Surface { owner_client_id, .. } => Some(owner_client_id),
+    }
+}
+
+fn refresh_visible_cursor_surface_outputs(state: &State, dispatcher: &mut Dispatcher) {
+    if let Some(CursorSourceRef::Surface { owner_client_id, .. }) =
+        state.seat.visible_cursor_source()
+    {
+        dispatch_client_action(dispatcher, owner_client_id, ClientAction::RefreshSurfaceOutputs);
+    }
 }
 
 pub fn begin_popup_grab(
@@ -1327,6 +1383,7 @@ mod xdg_seat_tests {
         super::{begin_popup_grab, remove_popup_grab, SeatState, SurfaceFocus},
         crate::{
             clients::{Client, ClientId, RawEvent},
+            cursor::CursorSourceRef,
             egl::EGL,
             globals::Globals,
             object::Object,
@@ -1913,5 +1970,77 @@ mod xdg_seat_tests {
         }
 
         assert!(client.contains_object(XdgToplevelId::from(170), &state));
+    }
+
+    #[test]
+    fn focus_change_clears_surface_cursor_owned_by_previous_client() {
+        let mut seat = SeatState::default();
+        assert!(seat.set_cursor_surface(
+            ClientId::from_raw(7),
+            WlSurfaceId::from(50),
+            ObjectId::from(80usize),
+            4,
+            5,
+        ));
+
+        assert!(!seat.clear_cursor_for_focus(Some(ClientId::from_raw(7))));
+        assert!(matches!(
+            seat.visible_cursor_source(),
+            Some(CursorSourceRef::Surface { owner_client_id, cursor })
+                if owner_client_id == ClientId::from_raw(7)
+                    && cursor.object_id == ObjectId::from(80usize)
+        ));
+
+        assert!(seat.clear_cursor_for_focus(Some(ClientId::from_raw(8))));
+        assert!(seat.visible_cursor_source().is_none());
+    }
+
+    #[test]
+    fn pointer_cursor_request_accepts_exact_enter_serial() {
+        let mut seat = SeatState::default();
+        seat.pointer_focus = Some(super::PointerFocus {
+            target: SurfaceFocus {
+                client_id: ClientId::from_raw(7),
+                surface_id: WlSurfaceId::from(50),
+            },
+            rect: super::SurfaceRect { x: 0, y: 0, width: 100, height: 100 },
+        });
+        seat.record_pointer_enter(ClientId::from_raw(7), 100);
+
+        assert!(seat.pointer_cursor_request_allowed(ClientId::from_raw(7), 100));
+        assert!(!seat.pointer_cursor_request_allowed(ClientId::from_raw(7), 99));
+    }
+
+    #[test]
+    fn pointer_cursor_request_rejects_wrong_enter_serial() {
+        let mut seat = SeatState::default();
+        seat.pointer_focus = Some(super::PointerFocus {
+            target: SurfaceFocus {
+                client_id: ClientId::from_raw(7),
+                surface_id: WlSurfaceId::from(50),
+            },
+            rect: super::SurfaceRect { x: 0, y: 0, width: 100, height: 100 },
+        });
+        seat.record_pointer_enter(ClientId::from_raw(7), 100);
+
+        assert!(!seat.pointer_cursor_request_allowed(ClientId::from_raw(7), 200));
+    }
+
+    #[test]
+    fn pointer_cursor_request_accepts_active_grab_serial_for_focused_client() {
+        let mut seat = SeatState::default();
+        let focus = SurfaceFocus {
+            client_id: ClientId::from_raw(7),
+            surface_id: WlSurfaceId::from(50),
+        };
+        seat.pointer_focus = Some(super::PointerFocus {
+            target: focus,
+            rect: super::SurfaceRect { x: 0, y: 0, width: 100, height: 100 },
+        });
+        seat.record_pointer_enter(ClientId::from_raw(7), 10);
+        seat.record_pointer_button(1, 20, Some(focus));
+
+        assert!(seat.pointer_cursor_request_allowed(ClientId::from_raw(7), 20));
+        assert!(!seat.pointer_cursor_request_allowed(ClientId::from_raw(7), 19));
     }
 }

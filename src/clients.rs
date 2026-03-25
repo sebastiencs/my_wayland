@@ -957,6 +957,8 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
     ) {
         let root_surface_ids = state.root_surface_ids();
+        let active_cursor_surface = active_cursor_surface_refresh_params(state, self.id)
+            .map(|(object_id, base_x, base_y)| (object_id, base_x, base_y));
         log::debug!("refresh_surface_outputs client={:?} roots={:?}", self.id, root_surface_ids);
         for surface_object_id in root_surface_ids {
             let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
@@ -969,6 +971,25 @@ impl Client {
                 surface.is_root()
             );
             if surface.client_id() != self.id || !surface.is_root() {
+                continue;
+            }
+            if surface.has_cursor_role() {
+                if let Some((active_surface_object_id, base_x, base_y)) = active_cursor_surface {
+                    if active_surface_object_id == surface_object_id {
+                        refresh_surface_tree_outputs(
+                            self,
+                            state,
+                            dispatcher,
+                            surface_object_id,
+                            base_x,
+                            base_y,
+                        );
+                    } else {
+                        clear_surface_tree_outputs(self, state, dispatcher, surface_object_id);
+                    }
+                } else {
+                    clear_surface_tree_outputs(self, state, dispatcher, surface_object_id);
+                }
                 continue;
             }
             refresh_surface_tree_outputs(self, state, dispatcher, surface_object_id, 0, 0);
@@ -1170,6 +1191,64 @@ fn refresh_surface_tree_outputs(
             );
         }
     }
+}
+
+fn clear_surface_tree_outputs(
+    client: &mut Client,
+    state: &mut State,
+    dispatcher: &mut ClientDispatcher,
+    surface_object_id: ObjectId,
+) {
+    let (stack, delta) = {
+        let Some(mut surface) = state
+            .objects
+            .try_grab_object::<WlSurface>(surface_object_id)
+        else {
+            return;
+        };
+        let delta = surface.update_output_membership(Vec::new());
+        (surface.current_stack().to_vec(), delta)
+    };
+
+    for output_id in delta.left {
+        client.send_surface_output_membership_event(
+            state,
+            dispatcher,
+            surface_object_id,
+            output_id,
+            false,
+        );
+    }
+
+    for entry in stack {
+        if let crate::wayland_objects::wl_surface::StackEntry::Child(child_surface_object_id) =
+            entry
+        {
+            clear_surface_tree_outputs(client, state, dispatcher, child_surface_object_id);
+        }
+    }
+}
+
+fn active_cursor_surface_refresh_params(
+    state: &State,
+    client_id: ClientId,
+) -> Option<(ObjectId, i32, i32)> {
+    let (pointer_x, pointer_y) = state.seat.pointer_position();
+    let crate::cursor::CursorSourceRef::Surface { owner_client_id, cursor } =
+        state.seat.visible_cursor_source()?
+    else {
+        return None;
+    };
+    if owner_client_id != client_id {
+        return None;
+    }
+    let surface = state
+        .objects
+        .try_ref_object::<WlSurface>(cursor.object_id)?;
+    let (root_x, root_y) = surface.root_position();
+    let base_x = pointer_x.round() as i32 - cursor.hotspot_x - root_x;
+    let base_y = pointer_y.round() as i32 - cursor.hotspot_y - root_y;
+    Some((cursor.object_id, base_x, base_y))
 }
 
 /// A specialized `Dispatcher`

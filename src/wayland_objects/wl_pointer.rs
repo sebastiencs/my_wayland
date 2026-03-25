@@ -1,5 +1,6 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    drm::schedule_active_output,
     object::{Object, Parser},
     protocol_generated::{wl_pointer, WaylandId, WlPointerId, WlSurfaceId},
     state::State,
@@ -74,8 +75,48 @@ impl Object for WlPointer {
         use wl_pointer::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
-            SetCursor { serial: _, surface: _, hotspot_x: _, hotspot_y: _ } => {
-                // Cursor surfaces come later with proper serial validation and role handling.
+            SetCursor { serial, surface, hotspot_x, hotspot_y } => {
+                let surface_raw: u32 = surface.into();
+                if surface_raw != 0 && !client.object_is(surface, state) {
+                    client.protocol_violation_disconnect(
+                        dispatcher,
+                        surface.into(),
+                        crate::protocol_generated::wl_display::Error::InvalidObject as u32,
+                        "invalid wl_surface for cursor",
+                    );
+                    return;
+                }
+                if !state
+                    .seat
+                    .pointer_cursor_request_allowed(client.client_id(), serial)
+                {
+                    return;
+                }
+                let cursor_changed = if surface_raw == 0 {
+                    state.seat.clear_cursor_for_client(client.client_id())
+                } else {
+                    let object_id = client.object_id(surface);
+                    {
+                        let mut surface_object = client.grab_object(surface, state);
+                        if surface_object.set_cursor_role(dispatcher).is_err() {
+                            return;
+                        }
+                    }
+                    state.seat.set_cursor_surface(
+                        client.client_id(),
+                        surface,
+                        object_id,
+                        hotspot_x,
+                        hotspot_y,
+                    )
+                };
+                if cursor_changed {
+                    dispatcher.dispatch_to(
+                        client.client_id(),
+                        crate::clients::ClientAction::RefreshSurfaceOutputs,
+                    );
+                    schedule_active_output(state, dispatcher);
+                }
             }
             Release => {
                 state.seat.unregister_pointer(client.client_id(), self.id);
