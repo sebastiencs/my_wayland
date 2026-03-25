@@ -362,11 +362,10 @@ impl Model for AcquireReadyWaiter {
             AcquireReadyWaiterAction::Ready => {
                 self.read_op_id = None;
                 let became_active = {
-                    let Some(mut obj) = state.objects.try_grab(self.surface_object_id) else {
-                        dispatcher.stop_model::<_, Self>(self.waiter_id);
-                        return Ok(());
-                    };
-                    let Some(surface) = obj.downcast_mut::<WlSurface>() else {
+                    let Some(mut surface) = state
+                        .objects
+                        .try_grab_object::<WlSurface>(self.surface_object_id)
+                    else {
                         dispatcher.stop_model::<_, Self>(self.waiter_id);
                         return Ok(());
                     };

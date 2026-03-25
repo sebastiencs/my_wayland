@@ -682,11 +682,10 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
         } => {
             let dx = (state.seat.pointer_pos.0 - initial_pointer_pos.0).round() as i32;
             let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
-            let Some(mut surface_object) = state.objects.try_grab(root_surface_object_id) else {
-                state.seat.clear_pointer_interactive_grab();
-                return true;
-            };
-            let Some(surface) = surface_object.downcast_mut::<WlSurface>() else {
+            let Some(mut surface) = state
+                .objects
+                .try_grab_object::<WlSurface>(root_surface_object_id)
+            else {
                 state.seat.clear_pointer_interactive_grab();
                 return true;
             };
@@ -724,13 +723,14 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
                 height = (initial_size.1 + dy).max(1);
             }
 
-            let Some(mut surface_object) = state.objects.try_grab(root_surface_object_id) else {
+            let Some(mut surface) = state
+                .objects
+                .try_grab_object::<WlSurface>(root_surface_object_id)
+            else {
                 state.seat.clear_pointer_interactive_grab();
                 return true;
             };
-            if let Some(surface) = surface_object.downcast_mut::<WlSurface>() {
-                surface.set_root_position(x, y);
-            }
+            surface.set_root_position(x, y);
             dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
             schedule_active_output(state, dispatcher);
 
@@ -1228,8 +1228,7 @@ mod surface_tree_hit_test_tests {
             above_surface.test_map(ObjectId::from(202usize), 0, 0, 20, 20);
         }
         {
-            let mut root_object = state.objects.grab(root);
-            let root_surface = root_object.downcast_mut::<WlSurface>().unwrap();
+            let mut root_surface = state.objects.grab_object::<WlSurface>(root);
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
 
@@ -1277,13 +1276,11 @@ mod surface_tree_hit_test_tests {
             grandchild_surface.test_set_input_region(crate::region::RegionValue::empty());
         }
         {
-            let mut root_object = state.objects.grab(root);
-            let root_surface = root_object.downcast_mut::<WlSurface>().unwrap();
+            let mut root_surface = state.objects.grab_object::<WlSurface>(root);
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
         {
-            let mut child_object = state.objects.grab(child);
-            let child_surface = child_object.downcast_mut::<WlSurface>().unwrap();
+            let mut child_surface = state.objects.grab_object::<WlSurface>(child);
             assert!(child_surface.apply_pending_tree_state(&mut state));
         }
 
@@ -1486,15 +1483,16 @@ mod xdg_seat_tests {
         xdg_surface_id: XdgSurfaceId,
         toplevel_id: XdgToplevelId,
     ) -> ObjectId {
-        let mut xdg_surface_object = state.objects.grab(xdg_surface_object_id);
-        let xdg_surface = xdg_surface_object.downcast_mut::<XdgSurface>().unwrap();
+        let mut xdg_surface = state
+            .objects
+            .grab_object::<XdgSurface>(xdg_surface_object_id);
         xdg_surface.on(
             client,
             state,
             get_toplevel_request(xdg_surface_id, toplevel_id),
             dispatcher,
         );
-        drop(xdg_surface_object);
+        drop(xdg_surface);
         client.object_id(toplevel_id)
     }
 
@@ -1540,8 +1538,7 @@ mod xdg_seat_tests {
         );
 
         {
-            let mut popup_object = state.objects.grab(popup_object_id);
-            let popup = popup_object.downcast_mut::<XdgPopup>().unwrap();
+            let mut popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
             popup.on(
                 &mut client,
                 &mut state,
@@ -1605,8 +1602,7 @@ mod xdg_seat_tests {
         state.seat.record_keyboard_trigger(serial, parent_focus);
 
         {
-            let mut popup_object = state.objects.grab(popup_object_id);
-            let popup = popup_object.downcast_mut::<XdgPopup>().unwrap();
+            let mut popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
             popup.on(
                 &mut client,
                 &mut state,
@@ -1748,8 +1744,7 @@ mod xdg_seat_tests {
         state.seat.record_pointer_button(1, serial, Some(focus));
 
         {
-            let mut toplevel_object = state.objects.grab(toplevel_object_id);
-            let toplevel = toplevel_object.downcast_mut::<XdgToplevel>().unwrap();
+            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
             toplevel.on(
                 &mut client,
                 &mut state,
@@ -1766,8 +1761,7 @@ mod xdg_seat_tests {
         assert!(state.seat.pointer_interactive_grab.is_none());
 
         {
-            let mut toplevel_object = state.objects.grab(toplevel_object_id);
-            let toplevel = toplevel_object.downcast_mut::<XdgToplevel>().unwrap();
+            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
             toplevel.on(
                 &mut client,
                 &mut state,
@@ -1829,8 +1823,7 @@ mod xdg_seat_tests {
         state.seat.record_keyboard_trigger(serial, focus);
 
         {
-            let mut toplevel_object = state.objects.grab(toplevel_object_id);
-            let toplevel = toplevel_object.downcast_mut::<XdgToplevel>().unwrap();
+            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
             toplevel.on(
                 &mut client,
                 &mut state,
@@ -1868,8 +1861,9 @@ mod xdg_seat_tests {
             client.insert_object(&mut state, XdgPositioner::new(XdgPositionerId::from(150)));
 
         {
-            let mut positioner_object = state.objects.grab(positioner_object_id);
-            let positioner = positioner_object.downcast_mut::<XdgPositioner>().unwrap();
+            let mut positioner = state
+                .objects
+                .grab_object::<XdgPositioner>(positioner_object_id);
             positioner.on(
                 &mut client,
                 &mut state,
@@ -1885,8 +1879,9 @@ mod xdg_seat_tests {
         }
 
         {
-            let mut xdg_surface_object = state.objects.grab(xdg_surface_object_id);
-            let xdg_surface = xdg_surface_object.downcast_mut::<XdgSurface>().unwrap();
+            let mut xdg_surface = state
+                .objects
+                .grab_object::<XdgSurface>(xdg_surface_object_id);
             xdg_surface.on(
                 &mut client,
                 &mut state,
@@ -1903,8 +1898,9 @@ mod xdg_seat_tests {
         assert!(!client.contains_object(XdgPopupId::from(160), &state));
 
         {
-            let mut xdg_surface_object = state.objects.grab(xdg_surface_object_id);
-            let xdg_surface = xdg_surface_object.downcast_mut::<XdgSurface>().unwrap();
+            let mut xdg_surface = state
+                .objects
+                .grab_object::<XdgSurface>(xdg_surface_object_id);
             xdg_surface.on(
                 &mut client,
                 &mut state,

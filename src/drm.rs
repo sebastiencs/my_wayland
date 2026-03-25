@@ -2300,10 +2300,7 @@ fn collect_surface_snapshots(
     snapshots: &mut Vec<crate::wayland_objects::wl_surface::SurfaceRenderState>,
 ) {
     let (stack, surface_state) = {
-        let mut obj = state.objects.grab(surface_object_id);
-        let Some(surface) = obj.downcast_mut::<WlSurface>() else {
-            return;
-        };
+        let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
         retired_candidates.extend(surface.take_retired_buffers());
         let Some(surface_state) = surface.take_render_state_at(base_x, base_y) else {
             return;
@@ -3052,8 +3049,7 @@ mod surface_tree_render_tests {
             above_surface.test_map(ObjectId::from(102usize), 0, 0, 10, 10);
         }
         {
-            let mut root_object = state.objects.grab(root);
-            let root_surface = root_object.downcast_mut::<WlSurface>().unwrap();
+            let mut root_surface = state.objects.grab_object::<WlSurface>(root);
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
 
@@ -3102,8 +3098,7 @@ mod surface_tree_render_tests {
             child_surface.test_map(ObjectId::from(121usize), 0, 0, 10, 10);
         }
         {
-            let mut root_object = state.objects.grab(root);
-            let root_surface = root_object.downcast_mut::<WlSurface>().unwrap();
+            let mut root_surface = state.objects.grab_object::<WlSurface>(root);
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
 
@@ -3155,13 +3150,11 @@ mod surface_tree_render_tests {
             grandchild_surface.test_map(ObjectId::from(112usize), 3, 4, 8, 6);
         }
         {
-            let mut root_object = state.objects.grab(root);
-            let root_surface = root_object.downcast_mut::<WlSurface>().unwrap();
+            let mut root_surface = state.objects.grab_object::<WlSurface>(root);
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
         {
-            let mut child_object = state.objects.grab(child);
-            let child_surface = child_object.downcast_mut::<WlSurface>().unwrap();
+            let mut child_surface = state.objects.grab_object::<WlSurface>(child);
             assert!(child_surface.apply_pending_tree_state(&mut state));
         }
 

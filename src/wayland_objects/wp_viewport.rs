@@ -33,21 +33,15 @@ impl Object for WpViewport {
     ) {
         use wp_viewport::Request::*;
 
-        let Some(mut surface_obj) = state.objects.try_grab(self.surface_object_id) else {
+        let Some(mut surface) = state
+            .objects
+            .try_grab_object::<WlSurface>(self.surface_object_id)
+        else {
             client.send_protocol_error(
                 dispatcher,
                 self.id.into(),
                 wp_viewport::Error::NoSurface as u32,
                 "wp_viewport surface no longer exists",
-            );
-            return;
-        };
-        let Some(surface) = surface_obj.downcast_mut::<WlSurface>() else {
-            client.send_protocol_error(
-                dispatcher,
-                self.id.into(),
-                wp_viewport::Error::NoSurface as u32,
-                "wp_viewport associated object is not a wl_surface",
             );
             return;
         };

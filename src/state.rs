@@ -154,6 +154,20 @@ impl<O: Object> GrabbedObject<O> {
         let value: Box<O> = value.downcast().ok().unwrap();
         Self { value: Some(value), grabbed, _phantom: PhantomData }
     }
+
+    pub fn try_new(
+        mut grabbed: Grab<ObjectId, Box<dyn Object>>,
+    ) -> Result<Self, Grab<ObjectId, Box<dyn Object>>> {
+        let value: Box<dyn Object> = grabbed.value.take().unwrap();
+        let value = match value.downcast() {
+            Ok(value) => value,
+            Err(value) => {
+                grabbed.value = Some(value);
+                return Err(grabbed);
+            }
+        };
+        Ok(Self { value: Some(value), grabbed, _phantom: PhantomData })
+    }
 }
 impl<O: Object> std::ops::Deref for GrabbedObject<O> {
     type Target = O;
@@ -388,13 +402,22 @@ where
     }
 }
 
-impl<K> IndexMap<K, Box<dyn Object>>
-where
-    K: Into<usize> + Copy,
-{
-    pub fn try_get_ref_of<T: Object>(&self, key: K) -> Option<&T> {
+impl IndexMap<ObjectId, Box<dyn Object>> {
+    pub fn try_get_ref_of<T: Object>(&self, key: ObjectId) -> Option<&T> {
         self.try_get(key)
             .and_then(|object| object.downcast_ref::<T>())
+    }
+
+    pub fn try_grab_object<T: Object>(
+        self: &mut Box<Self>,
+        key: ObjectId,
+    ) -> Option<GrabbedObject<T>> {
+        let grabbed = self.try_grab(key)?;
+        GrabbedObject::try_new(grabbed).ok()
+    }
+
+    pub fn grab_object<T: Object>(self: &mut Box<Self>, key: ObjectId) -> GrabbedObject<T> {
+        GrabbedObject::new(self.grab(key))
     }
 }
 
@@ -648,7 +671,53 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {
+        super::*,
+        crate::{
+            clients::{Client, ClientDispatcher, RawRequest},
+            protocol_generated::WaylandId,
+        },
+    };
+
+    #[derive(Debug)]
+    struct TestObject {
+        id: WaylandId,
+    }
+
+    impl Object for TestObject {
+        fn id(&self) -> WaylandId {
+            self.id
+        }
+
+        fn on(
+            &mut self,
+            _client: &mut Client,
+            _state: &mut State,
+            _request: RawRequest,
+            _dispatcher: &mut ClientDispatcher,
+        ) {
+        }
+    }
+
+    #[derive(Debug)]
+    struct OtherTestObject {
+        id: WaylandId,
+    }
+
+    impl Object for OtherTestObject {
+        fn id(&self) -> WaylandId {
+            self.id
+        }
+
+        fn on(
+            &mut self,
+            _client: &mut Client,
+            _state: &mut State,
+            _request: RawRequest,
+            _dispatcher: &mut ClientDispatcher,
+        ) {
+        }
+    }
 
     #[ignore]
     #[test]
@@ -676,6 +745,25 @@ mod tests {
             assert_eq!(*g, 99);
         }
         assert_eq!(*map.get(k), 99);
+    }
+
+    #[test]
+    fn indexmap_try_grab_object_roundtrip() {
+        let mut map = Box::new(IndexMap::<ObjectId, Box<dyn Object>>::default());
+        let key = map.insert(Box::new(TestObject { id: WaylandId::from(1u32) }));
+        {
+            let object = map.try_grab_object::<TestObject>(key).unwrap();
+            assert_eq!(object.id(), WaylandId::from(1u32));
+        }
+        assert!(map.try_get_ref_of::<TestObject>(key).is_some());
+    }
+
+    #[test]
+    fn indexmap_try_grab_object_wrong_type_restores_slot() {
+        let mut map = Box::new(IndexMap::<ObjectId, Box<dyn Object>>::default());
+        let key = map.insert(Box::new(TestObject { id: WaylandId::from(1u32) }));
+        assert!(map.try_grab_object::<OtherTestObject>(key).is_none());
+        assert!(map.try_get_ref_of::<TestObject>(key).is_some());
     }
 
     #[test]

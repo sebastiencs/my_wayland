@@ -37,21 +37,15 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
     ) {
         use wp_linux_drm_syncobj_surface_v1::Request::*;
 
-        let Some(mut surface_obj) = state.objects.try_grab(self.surface_object_id) else {
+        let Some(mut surface) = state
+            .objects
+            .try_grab_object::<WlSurface>(self.surface_object_id)
+        else {
             client.send_protocol_error(
                 dispatcher,
                 self.id.into(),
                 wp_linux_drm_syncobj_surface_v1::Error::NoSurface as u32,
                 "associated wl_surface no longer exists",
-            );
-            return;
-        };
-        let Some(surface) = surface_obj.downcast_mut::<WlSurface>() else {
-            client.send_protocol_error(
-                dispatcher,
-                self.id.into(),
-                wp_linux_drm_syncobj_surface_v1::Error::NoSurface as u32,
-                "associated object is not a wl_surface",
             );
             return;
         };

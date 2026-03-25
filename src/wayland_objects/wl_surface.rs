@@ -1124,10 +1124,10 @@ impl WlSurface {
 
         let mut position_changed = false;
         for child_surface_object_id in child_ids {
-            let Some(mut child_object) = state.objects.try_grab(child_surface_object_id) else {
-                continue;
-            };
-            let Some(child_surface) = child_object.downcast_mut::<WlSurface>() else {
+            let Some(mut child_surface) = state
+                .objects
+                .try_grab_object::<WlSurface>(child_surface_object_id)
+            else {
                 continue;
             };
             let old_position = child_surface.current_subsurface_position();
@@ -1356,10 +1356,10 @@ impl WlSurface {
             if !child_behaves_synchronized {
                 continue;
             }
-            let Some(mut child_object) = state.objects.try_grab(child_surface_object_id) else {
-                continue;
-            };
-            let Some(child_surface) = child_object.downcast_mut::<WlSurface>() else {
+            let Some(mut child_surface) = state
+                .objects
+                .try_grab_object::<WlSurface>(child_surface_object_id)
+            else {
                 continue;
             };
             changed |= child_surface.apply_cached_commit(
@@ -1992,10 +1992,10 @@ impl WlSurface {
         }
 
         {
-            let Some(mut child_object) = state.objects.try_grab(child_surface_object_id) else {
-                return;
-            };
-            let Some(child_surface) = child_object.downcast_mut::<WlSurface>() else {
+            let Some(mut child_surface) = state
+                .objects
+                .try_grab_object::<WlSurface>(child_surface_object_id)
+            else {
                 return;
             };
             child_surface.unmap_due_to_parent_loss(client, state, dispatcher);
@@ -2028,10 +2028,11 @@ impl WlSurface {
             Self::detach_subsurface_tree(child_surface_object_id, client, state, dispatcher);
         }
         if let Some(parent_surface_object_id) = self.parent_surface_object_id() {
-            if let Some(mut parent_object) = state.objects.try_grab(parent_surface_object_id) {
-                if let Some(parent_surface) = parent_object.downcast_mut::<WlSurface>() {
-                    parent_surface.remove_child_from_tree(client.object_id(self.id));
-                }
+            if let Some(mut parent_surface) = state
+                .objects
+                .try_grab_object::<WlSurface>(parent_surface_object_id)
+            {
+                parent_surface.remove_child_from_tree(client.object_id(self.id));
             }
         }
         state.unregister_root_surface(client.object_id(self.id));
@@ -2319,8 +2320,7 @@ mod tests {
             assert!(parent.restack_child_relative(child_a_object_id, None, false));
         }
         {
-            let mut parent_object = state.objects.grab(parent_object_id);
-            let parent = parent_object.downcast_mut::<WlSurface>().unwrap();
+            let mut parent = state.objects.grab_object::<WlSurface>(parent_object_id);
             assert!(parent.apply_pending_tree_state(&mut state));
             assert_eq!(
                 parent.current_stack(),
@@ -2497,8 +2497,7 @@ mod tests {
             );
         }
         {
-            let mut parent_object = state.objects.grab(parent_object_id);
-            let parent = parent_object.downcast_mut::<WlSurface>().unwrap();
+            let mut parent = state.objects.grab_object::<WlSurface>(parent_object_id);
             assert!(parent.apply_pending_tree_state(&mut state));
             assert_eq!(
                 parent.current_stack(),
@@ -2545,13 +2544,11 @@ mod tests {
             child.set_subsurface_position(12, 34);
         }
         {
-            let mut parent_object = state.objects.grab(parent_object_id);
-            let parent = parent_object.downcast_mut::<WlSurface>().unwrap();
+            let mut parent = state.objects.grab_object::<WlSurface>(parent_object_id);
             assert!(parent.apply_pending_tree_state(&mut state));
         }
         {
-            let mut parent_object = state.objects.grab(parent_object_id);
-            let parent = parent_object.downcast_mut::<WlSurface>().unwrap();
+            let mut parent = state.objects.grab_object::<WlSurface>(parent_object_id);
             assert!(!parent.apply_pending_tree_state(&mut state));
         }
     }
@@ -2712,13 +2709,11 @@ mod tests {
             grandchild.test_map(ObjectId::from(302usize), 0, 0, 10, 10);
         }
         {
-            let mut parent_object = state.objects.grab(parent_object_id);
-            let parent = parent_object.downcast_mut::<WlSurface>().unwrap();
+            let mut parent = state.objects.grab_object::<WlSurface>(parent_object_id);
             assert!(parent.apply_pending_tree_state(&mut state));
         }
         {
-            let mut child_object = state.objects.grab(child_object_id);
-            let child = child_object.downcast_mut::<WlSurface>().unwrap();
+            let mut child = state.objects.grab_object::<WlSurface>(child_object_id);
             assert!(child.apply_pending_tree_state(&mut state));
         }
 

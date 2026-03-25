@@ -176,18 +176,17 @@ impl XdgSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        if let Some(mut wl_surface_object) =
-            state.objects.try_grab(client.object_id(self.wl_surface))
+        if let Some(mut wl_surface) = state
+            .objects
+            .try_grab_object::<WlSurface>(client.object_id(self.wl_surface))
         {
-            if let Some(wl_surface) = wl_surface_object.downcast_mut::<WlSurface>() {
-                wl_surface.clear_xdg_surface_role(self.id);
-            }
+            wl_surface.clear_xdg_surface_role(self.id);
         }
-        if let Some(mut wm_base_object) = state.objects.try_grab(client.object_id(self.wm_base_id))
+        if let Some(mut wm_base) = state
+            .objects
+            .try_grab_object::<XdgWmBase>(client.object_id(self.wm_base_id))
         {
-            if let Some(wm_base) = wm_base_object.downcast_mut::<XdgWmBase>() {
-                wm_base.unregister_surface(self.id);
-            }
+            wm_base.unregister_surface(self.id);
         }
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
     }

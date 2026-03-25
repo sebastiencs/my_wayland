@@ -74,18 +74,18 @@ impl Object for WlSubsurface {
 
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
-                if let Some(mut surface_object) = state.objects.try_grab(self.surface_object_id) {
-                    if let Some(surface) = surface_object.downcast_mut::<WlSurface>() {
-                        surface.unmap_due_to_parent_loss(client, state, dispatcher);
-                        surface.destroy_subsurface_role();
-                    }
-                }
-                if let Some(mut parent_object) =
-                    state.objects.try_grab(self.parent_surface_object_id)
+                if let Some(mut surface) = state
+                    .objects
+                    .try_grab_object::<WlSurface>(self.surface_object_id)
                 {
-                    if let Some(parent_surface) = parent_object.downcast_mut::<WlSurface>() {
-                        parent_surface.remove_child_from_tree(self.surface_object_id);
-                    }
+                    surface.unmap_due_to_parent_loss(client, state, dispatcher);
+                    surface.destroy_subsurface_role();
+                }
+                if let Some(mut parent_surface) = state
+                    .objects
+                    .try_grab_object::<WlSurface>(self.parent_surface_object_id)
+                {
+                    parent_surface.remove_child_from_tree(self.surface_object_id);
                 }
                 state.register_root_surface(self.surface_object_id);
                 use crate::wayland_objects::wl_display::WlDisplay;
@@ -93,11 +93,10 @@ impl Object for WlSubsurface {
                 schedule_active_output(state, dispatcher);
             }
             SetPosition { x, y } => {
-                let Some(mut surface_object) = state.objects.try_grab(self.surface_object_id)
+                let Some(mut surface) = state
+                    .objects
+                    .try_grab_object::<WlSurface>(self.surface_object_id)
                 else {
-                    return;
-                };
-                let Some(surface) = surface_object.downcast_mut::<WlSurface>() else {
                     return;
                 };
                 surface.set_subsurface_position(x, y);
@@ -111,11 +110,10 @@ impl Object for WlSubsurface {
                     );
                     return;
                 };
-                let Some(mut parent_object) = state.objects.try_grab(self.parent_surface_object_id)
+                let Some(mut parent_surface) = state
+                    .objects
+                    .try_grab_object::<WlSurface>(self.parent_surface_object_id)
                 else {
-                    return;
-                };
-                let Some(parent_surface) = parent_object.downcast_mut::<WlSurface>() else {
                     return;
                 };
                 if !parent_surface.restack_child_relative(
@@ -139,11 +137,10 @@ impl Object for WlSubsurface {
                     );
                     return;
                 };
-                let Some(mut parent_object) = state.objects.try_grab(self.parent_surface_object_id)
+                let Some(mut parent_surface) = state
+                    .objects
+                    .try_grab_object::<WlSurface>(self.parent_surface_object_id)
                 else {
-                    return;
-                };
-                let Some(parent_surface) = parent_object.downcast_mut::<WlSurface>() else {
                     return;
                 };
                 if !parent_surface.restack_child_relative(
@@ -159,21 +156,19 @@ impl Object for WlSubsurface {
                 }
             }
             SetSync => {
-                let Some(mut surface_object) = state.objects.try_grab(self.surface_object_id)
+                let Some(mut surface) = state
+                    .objects
+                    .try_grab_object::<WlSurface>(self.surface_object_id)
                 else {
-                    return;
-                };
-                let Some(surface) = surface_object.downcast_mut::<WlSurface>() else {
                     return;
                 };
                 surface.set_subsurface_sync_mode(true);
             }
             SetDesync => {
-                let Some(mut surface_object) = state.objects.try_grab(self.surface_object_id)
+                let Some(mut surface) = state
+                    .objects
+                    .try_grab_object::<WlSurface>(self.surface_object_id)
                 else {
-                    return;
-                };
-                let Some(surface) = surface_object.downcast_mut::<WlSurface>() else {
                     return;
                 };
                 surface.set_subsurface_sync_mode(false);
@@ -274,18 +269,18 @@ mod tests {
             child.assign_subsurface(WlSubsurfaceId::from(30), parent_object_id);
         }
 
-        let mut subsurface_object = state.objects.grab(subsurface_object_id);
-        let subsurface = subsurface_object.downcast_mut::<WlSubsurface>().unwrap();
+        let mut subsurface = state
+            .objects
+            .grab_object::<WlSubsurface>(subsurface_object_id);
         subsurface.on(
             &mut client,
             &mut state,
             place_above_request(WlSubsurfaceId::from(30), WlSurfaceId::from(12)),
             &mut client_dispatcher,
         );
-        drop(subsurface_object);
+        drop(subsurface);
 
-        let mut parent_object = state.objects.grab(parent_object_id);
-        let parent = parent_object.downcast_mut::<WlSurface>().unwrap();
+        let mut parent = state.objects.grab_object::<WlSurface>(parent_object_id);
         assert!(parent.apply_pending_tree_state(&mut state));
         assert_eq!(
             parent.current_stack(),

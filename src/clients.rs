@@ -422,8 +422,7 @@ impl Client {
     {
         let id: WaylandId = id.into();
         let obj_id = self.objects[&id];
-        let grabbed = state.objects.grab(obj_id);
-        GrabbedObject::new(grabbed)
+        state.objects.grab_object(obj_id)
     }
 
     pub fn object_id<K>(&self, id: K) -> ObjectId
@@ -623,10 +622,8 @@ impl Client {
                 continue;
             };
             let callbacks = {
-                let Some(mut surface_obj) = state.objects.try_grab(object_id) else {
-                    continue;
-                };
-                let Some(surface) = surface_obj.downcast_mut::<WlSurface>() else {
+                let Some(mut surface) = state.objects.try_grab_object::<WlSurface>(object_id)
+                else {
                     continue;
                 };
                 surface.take_frame_callbacks()
@@ -855,10 +852,7 @@ impl Client {
         let mut output_object_ids = Vec::new();
         let object_ids = self.objects.values().copied().collect::<Vec<_>>();
         for object_id in object_ids {
-            let Some(mut object) = state.objects.try_grab(object_id) else {
-                continue;
-            };
-            let Some(wl_output) = object.downcast_mut::<WlOutput>() else {
+            let Some(wl_output) = state.objects.try_grab_object::<WlOutput>(object_id) else {
                 continue;
             };
             if wl_output.matches_output(output_id) {
@@ -880,10 +874,10 @@ impl Client {
         if output_object_ids.is_empty() {
             return;
         }
-        let Some(mut surface_object) = state.objects.try_grab(surface_object_id) else {
-            return;
-        };
-        let Some(surface) = surface_object.downcast_mut::<WlSurface>() else {
+        let Some(surface) = state
+            .objects
+            .try_grab_object::<WlSurface>(surface_object_id)
+        else {
             return;
         };
         for output_object_id in output_object_ids {
@@ -904,10 +898,7 @@ impl Client {
         let object_ids = self.objects.values().copied().collect::<Vec<_>>();
         let mut surface_object_ids = Vec::new();
         for object_id in object_ids {
-            let Some(mut object) = state.objects.try_grab(object_id) else {
-                continue;
-            };
-            let Some(surface) = object.downcast_mut::<WlSurface>() else {
+            let Some(surface) = state.objects.try_grab_object::<WlSurface>(object_id) else {
                 continue;
             };
             if surface.contains_output(output_id) {
@@ -932,10 +923,10 @@ impl Client {
     ) {
         let root_surface_ids = state.root_surface_ids();
         for surface_object_id in root_surface_ids {
-            let Some(mut object) = state.objects.try_grab(surface_object_id) else {
-                continue;
-            };
-            let Some(surface) = object.downcast_mut::<WlSurface>() else {
+            let Some(surface) = state
+                .objects
+                .try_grab_object::<WlSurface>(surface_object_id)
+            else {
                 continue;
             };
             if surface.client_id() != self.id || !surface.is_root() {
@@ -1055,10 +1046,10 @@ fn refresh_surface_tree_outputs(
     base_y: i32,
 ) {
     let (stack, child_base, delta) = {
-        let Some(mut surface_object) = state.objects.try_grab(surface_object_id) else {
-            return;
-        };
-        let Some(surface) = surface_object.downcast_mut::<WlSurface>() else {
+        let Some(mut surface) = state
+            .objects
+            .try_grab_object::<WlSurface>(surface_object_id)
+        else {
             return;
         };
         let render_state = surface.render_state_at(base_x, base_y);
@@ -1288,10 +1279,10 @@ impl Model for Client {
                 );
             }
             CancelBlockedSurface { surface_object_id, waiter_id } => {
-                let Some(mut surface_obj) = state.objects.try_grab(surface_object_id) else {
-                    return Ok(());
-                };
-                let Some(surface) = surface_obj.downcast_mut::<WlSurface>() else {
+                let Some(mut surface) = state
+                    .objects
+                    .try_grab_object::<WlSurface>(surface_object_id)
+                else {
                     return Ok(());
                 };
                 surface.cancel_blocked_if_waiter_matches(waiter_id, self, state, &mut dispatcher);

@@ -104,8 +104,7 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                     }
                 }
                 {
-                    let mut surface_obj = state.objects.grab(surface_oid);
-                    let surface = surface_obj.downcast_mut::<WlSurface>().unwrap();
+                    let mut surface = state.objects.grab_object::<WlSurface>(surface_oid);
                     if surface.has_syncobj_surface_object() {
                         client.send_protocol_error(
                             dispatcher,
