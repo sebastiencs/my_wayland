@@ -1,5 +1,6 @@
 use std::{
     any::{Any, TypeId},
+    cmp::Ordering,
     collections::{BTreeMap, VecDeque},
 };
 
@@ -192,7 +193,6 @@ impl<R> Redispatcher<R> {
 
 // pub type Redispatcher<R> = fn(R) -> AnyAction;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ActionId {
     type_id: TypeId,
     /// This is an additional information about the action's model.
@@ -200,6 +200,43 @@ struct ActionId {
     /// having different instances alive.
     /// So the action go straight to the model instance.
     specifier: Option<u64>,
+    /// `std::any::type_name` of the action type `T` (for logs / `Debug`).
+    /// Not used for [`PartialEq`] / [`Ord`]; identity is only `type_id` + `specifier`.
+    type_name: &'static str,
+}
+
+impl PartialEq for ActionId {
+    fn eq(&self, other: &Self) -> bool {
+        let &ActionId { type_id, specifier, type_name: _ } = self;
+        type_id == other.type_id && specifier == other.specifier
+    }
+}
+
+impl Eq for ActionId {}
+
+impl PartialOrd for ActionId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ActionId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let &ActionId { type_id, specifier, type_name: _ } = self;
+        type_id
+            .cmp(&other.type_id)
+            .then_with(|| specifier.cmp(&other.specifier))
+    }
+}
+
+impl std::fmt::Debug for ActionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let &ActionId { type_name, specifier, type_id: _ } = self;
+        f.debug_struct("ActionId")
+            .field("type_name", &strip_type_name(type_name))
+            .field("specifier", &specifier)
+            .finish()
+    }
 }
 
 impl ActionId {
@@ -207,7 +244,11 @@ impl ActionId {
     where
         T: 'static,
     {
-        Self { type_id: TypeId::of::<T>(), specifier: None }
+        Self {
+            type_id: TypeId::of::<T>(),
+            specifier: None,
+            type_name: std::any::type_name::<T>(),
+        }
     }
 
     pub fn of_with<T, S>(spec: S) -> Self
@@ -215,7 +256,11 @@ impl ActionId {
         T: 'static,
         S: Into<u64>,
     {
-        Self { type_id: TypeId::of::<T>(), specifier: Some(spec.into()) }
+        Self {
+            type_id: TypeId::of::<T>(),
+            specifier: Some(spec.into()),
+            type_name: std::any::type_name::<T>(),
+        }
     }
 }
 
@@ -277,7 +322,13 @@ impl Runner {
         // We use an index here because `try_stop` might add new ids to `dispatcher.pending_remove`
         let mut index = 0;
         while let Some(id) = dispatcher.pending_remove.get(index) {
-            let AnyModel { model, vtable } = self.models.get_mut(id).unwrap();
+            let Some(AnyModel { model, vtable }) = self.models.get_mut(id) else {
+                log::warn!(
+                    "dropping stop action for removed model {}",
+                    strip_type_name(id.type_name)
+                );
+                continue;
+            };
             (vtable.try_stop)(model, &mut self.state, dispatcher).unwrap();
             index += 1;
         }
