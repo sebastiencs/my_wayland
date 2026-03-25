@@ -981,10 +981,15 @@ impl Client {
             if surface_ref.logical_size().is_none() {
                 continue;
             }
+            let configure_bounds = surface_ref
+                .active_output_id()
+                .or_else(|| state.active_output_id())
+                .and_then(|output_id| state.outputs.try_get(output_id))
+                .map(|output| output.logical_size());
 
             let mut xdg_surface = self.grab_object(xdg_surface_id, state);
             let mut toplevel = self.grab_object(toplevel_id, state);
-            toplevel.schedule_configure(self, state, &mut xdg_surface, dispatcher);
+            toplevel.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
         }
     }
 
@@ -1356,11 +1361,30 @@ impl Model for Client {
                 if !self.contains_object(xdg_surface_id, state) {
                     return Ok(());
                 }
+                let configure_bounds = {
+                    let xdg_surface_object_id = self.object_id(xdg_surface_id);
+                    state
+                        .objects
+                        .try_get_ref_of::<XdgSurface>(xdg_surface_object_id)
+                        .and_then(|xdg_surface| {
+                            let wl_surface_object_id =
+                                self.object_id_for_wayland(xdg_surface.wl_surface_id().into())?;
+                            let surface = state
+                                .objects
+                                .try_get_ref_of::<WlSurface>(wl_surface_object_id)?;
+                            let output_id = surface
+                                .active_output_id()
+                                .or_else(|| state.active_output_id())?;
+                            state
+                                .outputs
+                                .try_get(output_id)
+                                .map(|output| output.logical_size())
+                        })
+                };
                 let mut xdg_surface = self.grab_object(xdg_surface_id, state);
                 let mut toplevel = self.grab_object(xdg_toplevel_id, state);
                 toplevel.send_interactive_resize_configure(
-                    self,
-                    state,
+                    configure_bounds,
                     &mut xdg_surface,
                     width,
                     height,

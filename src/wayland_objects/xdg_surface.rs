@@ -278,6 +278,7 @@ impl XdgSurface {
         dispatcher: &mut ClientDispatcher,
         has_pending_buffer_attach: bool,
         is_null_buffer_commit: bool,
+        configure_bounds: Option<(i32, i32)>,
     ) -> bool {
         if self.pending_window_geometry.is_some() {
             self.current_window_geometry = self.pending_window_geometry.take();
@@ -309,7 +310,7 @@ impl XdgSurface {
                         return false;
                     }
                     let mut xdg_toplevel = client.grab_object(id, state);
-                    xdg_toplevel.send_initial_configure(client, state, self, dispatcher);
+                    xdg_toplevel.send_initial_configure(configure_bounds, self, dispatcher);
                     self.initial_commit_complete = true;
                     return true;
                 }
@@ -670,8 +671,12 @@ pub mod xdg_toplevel {
             );
         }
 
-        fn configure_bounds(&self, client: &Client, state: &State) -> Option<(i32, i32)> {
-            let xdg_surface_object_id = client.object_id_for_wayland(self.xdg_surface_id.into())?;
+        pub(crate) fn configure_bounds_for_xdg_surface(
+            client: &Client,
+            state: &State,
+            xdg_surface_id: super::XdgSurfaceId,
+        ) -> Option<(i32, i32)> {
+            let xdg_surface_object_id = client.object_id_for_wayland(xdg_surface_id.into())?;
             let xdg_surface = state
                 .objects
                 .try_get_ref_of::<XdgSurface>(xdg_surface_object_id)?;
@@ -688,14 +693,13 @@ pub mod xdg_toplevel {
 
         fn send_configure_bounds(
             &self,
-            client: &Client,
-            state: &State,
+            configure_bounds: Option<(i32, i32)>,
             dispatcher: &mut ClientDispatcher,
         ) {
             if self.wm_base_version < 4 {
                 return;
             }
-            let Some((width, height)) = self.configure_bounds(client, state) else {
+            let Some((width, height)) = configure_bounds else {
                 return;
             };
             self.send_event(
@@ -706,12 +710,11 @@ pub mod xdg_toplevel {
 
         pub(crate) fn schedule_configure(
             &mut self,
-            client: &Client,
-            state: &State,
+            configure_bounds: Option<(i32, i32)>,
             xdg_surface: &mut XdgSurface,
             dispatcher: &mut ClientDispatcher,
         ) {
-            self.send_configure_bounds(client, state, dispatcher);
+            self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_configure(dispatcher);
             xdg_surface.queue_toplevel_configure(
                 self.current_width,
@@ -723,12 +726,11 @@ pub mod xdg_toplevel {
 
         pub fn send_initial_configure(
             &mut self,
-            client: &Client,
-            state: &State,
+            configure_bounds: Option<(i32, i32)>,
             xdg_surface: &mut XdgSurface,
             dispatcher: &mut ClientDispatcher,
         ) {
-            self.schedule_configure(client, state, xdg_surface, dispatcher);
+            self.schedule_configure(configure_bounds, xdg_surface, dispatcher);
         }
 
         pub fn apply_acked_configure(&mut self, width: i32, height: i32, states: Vec<u32>) {
@@ -747,8 +749,7 @@ pub mod xdg_toplevel {
 
         pub fn send_interactive_resize_configure(
             &mut self,
-            client: &Client,
-            state: &State,
+            configure_bounds: Option<(i32, i32)>,
             xdg_surface: &mut XdgSurface,
             width: i32,
             height: i32,
@@ -764,7 +765,7 @@ pub mod xdg_toplevel {
             } else {
                 states.retain(|state| *state != proto_xdg_toplevel::State::Resizing as u32);
             }
-            self.send_configure_bounds(client, state, dispatcher);
+            self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_event(
                 proto_xdg_toplevel::Event::Configure {
                     width,
@@ -1075,22 +1076,30 @@ pub mod xdg_toplevel {
                 SetMaximized => {
                     self.requested_maximized = true;
                     let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
-                    self.schedule_configure(client, state, &mut xdg_surface, dispatcher);
+                    let configure_bounds =
+                        Self::configure_bounds_for_xdg_surface(client, state, self.xdg_surface_id);
+                    self.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
                 }
                 UnsetMaximized => {
                     self.requested_maximized = false;
                     let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
-                    self.schedule_configure(client, state, &mut xdg_surface, dispatcher);
+                    let configure_bounds =
+                        Self::configure_bounds_for_xdg_surface(client, state, self.xdg_surface_id);
+                    self.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
                 }
                 SetFullscreen { output: _ } => {
                     self.requested_fullscreen = true;
                     let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
-                    self.schedule_configure(client, state, &mut xdg_surface, dispatcher);
+                    let configure_bounds =
+                        Self::configure_bounds_for_xdg_surface(client, state, self.xdg_surface_id);
+                    self.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
                 }
                 UnsetFullscreen => {
                     self.requested_fullscreen = false;
                     let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
-                    self.schedule_configure(client, state, &mut xdg_surface, dispatcher);
+                    let configure_bounds =
+                        Self::configure_bounds_for_xdg_surface(client, state, self.xdg_surface_id);
+                    self.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
                 }
                 SetMinimized => {
                     log::debug!("xdg_toplevel.set_minimized has no compositor integration yet");

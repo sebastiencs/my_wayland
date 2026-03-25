@@ -1405,6 +1405,11 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         if let Some(xdg_surface_id) = self.impl_id {
+            let configure_bounds = self
+                .active_output_id()
+                .or_else(|| state.active_output_id())
+                .and_then(|output_id| state.outputs.try_get(output_id))
+                .map(|output| output.logical_size());
             let mut xdg_surface = client.grab_object(xdg_surface_id, state);
             if !xdg_surface.on_commit(
                 client,
@@ -1412,6 +1417,7 @@ impl WlSurface {
                 dispatcher,
                 self.has_pending_buffer_attach(),
                 matches!(self.pending.buffer, Some(None)),
+                configure_bounds,
             ) {
                 self.clear_failed_surface_commit();
                 return;
