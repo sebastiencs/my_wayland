@@ -322,19 +322,19 @@ impl Runner {
         // We use an index here because `try_stop` might add new ids to `dispatcher.pending_remove`
         let mut index = 0;
         while let Some(id) = dispatcher.pending_remove.get(index) {
-            let Some(AnyModel { model, vtable }) = self.models.get_mut(id) else {
+            if let Some(AnyModel { model, vtable }) = self.models.get_mut(id) {
+                (vtable.try_stop)(model, &mut self.state, dispatcher).unwrap();
+            } else {
                 log::warn!(
                     "dropping stop action for removed model {}",
                     strip_type_name(id.type_name)
                 );
-                continue;
-            };
-            (vtable.try_stop)(model, &mut self.state, dispatcher).unwrap();
+            }
             index += 1;
         }
         // Remove them in reverse order
         while let Some(id) = dispatcher.pending_remove.pop_back() {
-            self.models.remove(&id).unwrap();
+            self.models.remove(&id);
         }
     }
 }
