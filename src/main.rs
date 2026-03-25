@@ -101,6 +101,7 @@ use crate::{
 };
 
 mod clients;
+mod cursor;
 mod dbus;
 mod dmabuf;
 mod drm;

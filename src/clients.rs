@@ -12,6 +12,7 @@ use libc::getsockopt;
 
 use crate::{
     dbus::Dbus,
+    drm::schedule_active_output,
     io_uring::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted, RingId},
@@ -1141,12 +1142,15 @@ impl Model for Client {
             }
             Close => {
                 log::info!("client_id={:?} closed", self.id);
-                state.seat.remove_client(self.id);
+                let cursor_changed = state.seat.remove_client(self.id);
                 let wayland_ids: Vec<WaylandId> = self.objects.keys().copied().collect();
                 for wid in wayland_ids {
                     if let Some(oid) = self.objects.remove(&wid) {
                         let _ = state.remove_object(oid);
                     }
+                }
+                if cursor_changed {
+                    schedule_active_output(state, &mut dispatcher);
                 }
                 if let Some(id) = self.reader_id {
                     dispatcher.stop_model::<_, ClientReader>(id)

@@ -635,6 +635,50 @@ impl GlTexture {
         Ok(Self { image: None, texture })
     }
 
+    pub fn from_rgba(pixels: &[u8], width: i32, height: i32) -> Result<GlTexture, ()> {
+        if width <= 0 || height <= 0 {
+            return Err(());
+        }
+        let expected_len = usize::try_from(width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(height)
+                    .ok()
+                    .map(|height| width * height * 4)
+            })
+            .ok_or(())?;
+        if pixels.len() != expected_len {
+            return Err(());
+        }
+
+        let target = gl::TEXTURE_2D as gl::Enum;
+        let texture = unsafe {
+            let mut texture = 0;
+            gl::GenTextures(1, &mut texture);
+            gl::BindTexture(target, texture);
+            gl::TexParameteri(target, gl::TEXTURE_WRAP_S as _, gl::CLAMP_TO_EDGE);
+            gl::TexParameteri(target, gl::TEXTURE_WRAP_T as _, gl::CLAMP_TO_EDGE);
+            gl::TexParameteri(target, gl::TEXTURE_MIN_FILTER as _, gl::LINEAR as _);
+            gl::TexParameteri(target, gl::TEXTURE_MAG_FILTER as _, gl::LINEAR as _);
+            gl::PixelStorei(gl::UNPACK_ALIGNMENT as _, 1);
+            gl::TexImage2D(
+                target,
+                0,
+                gl::RGBA as _,
+                width,
+                height,
+                0,
+                gl::RGBA as _,
+                gl::UNSIGNED_BYTE as _,
+                pixels.as_ptr().cast(),
+            );
+            gl::PixelStorei(gl::UNPACK_ALIGNMENT as _, 4);
+            gl::BindTexture(target, 0);
+            texture
+        };
+        Ok(Self { image: None, texture })
+    }
+
     pub fn texture_id(&self) -> gl::Uint {
         self.texture
     }

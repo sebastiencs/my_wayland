@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     clients::{ClientAction, ClientId},
+    cursor::CursorState,
     drm::{schedule_active_output, Drm},
     object::Object,
     protocol_generated::{
@@ -94,6 +95,12 @@ struct PointerPressState {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct PointerEnterState {
+    serial: u32,
+    client_id: ClientId,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct KeyboardTriggerState {
     serial: u32,
     focus: SurfaceFocus,
@@ -123,10 +130,12 @@ pub struct SeatState {
     current_serial: u32,
     pointer_pos: (f64, f64),
     pointer_focus: Option<PointerFocus>,
+    last_pointer_enter: Option<PointerEnterState>,
     keyboard_focus: Option<SurfaceFocus>,
     pointer_button_count: u32,
     last_pointer_press: Option<PointerPressState>,
     last_keyboard_trigger: Option<KeyboardTriggerState>,
+    cursor: CursorState,
     popup_grab: Option<PopupGrabState>,
     pointer_interactive_grab: Option<PointerInteractiveGrab>,
     pointer_resources: BTreeMap<ClientId, Vec<WlPointerId>>,
@@ -139,10 +148,12 @@ impl Default for SeatState {
             current_serial: 1,
             pointer_pos: (0.0, 0.0),
             pointer_focus: None,
+            last_pointer_enter: None,
             keyboard_focus: None,
             pointer_button_count: 0,
             last_pointer_press: None,
             last_keyboard_trigger: None,
+            cursor: CursorState::default(),
             popup_grab: None,
             pointer_interactive_grab: None,
             pointer_resources: BTreeMap::default(),
@@ -188,7 +199,7 @@ impl SeatState {
             .unwrap_or_default()
     }
 
-    pub fn remove_client(&mut self, client_id: ClientId) {
+    pub fn remove_client(&mut self, client_id: ClientId) -> bool {
         self.pointer_resources.remove(&client_id);
         self.keyboard_resources.remove(&client_id);
         if self
@@ -196,6 +207,12 @@ impl SeatState {
             .is_some_and(|focus| focus.target.client_id == client_id)
         {
             self.pointer_focus = None;
+        }
+        if self
+            .last_pointer_enter
+            .is_some_and(|enter| enter.client_id == client_id)
+        {
+            self.last_pointer_enter = None;
         }
         if self
             .keyboard_focus
@@ -221,6 +238,7 @@ impl SeatState {
         {
             self.pointer_interactive_grab = None;
         }
+        self.cursor.clear_for_client(client_id)
     }
 
     fn next_serial(&mut self) -> u32 {
@@ -243,6 +261,42 @@ impl SeatState {
 
     fn record_keyboard_trigger(&mut self, serial: u32, focus: SurfaceFocus) {
         self.last_keyboard_trigger = Some(KeyboardTriggerState { serial, focus });
+    }
+
+    fn record_pointer_enter(&mut self, client_id: ClientId, serial: u32) {
+        self.last_pointer_enter = Some(PointerEnterState { client_id, serial });
+    }
+
+    fn clear_pointer_enter(&mut self) {
+        self.last_pointer_enter = None;
+    }
+
+    pub fn pointer_cursor_request_allowed(&self, client_id: ClientId, serial: u32) -> bool {
+        self.pointer_focus
+            .is_some_and(|focus| focus.target.client_id == client_id)
+            && self
+                .last_pointer_enter
+                .is_some_and(|enter| enter.client_id == client_id && enter.serial == serial)
+    }
+
+    pub fn set_named_cursor(&mut self, client_id: ClientId, icon_names: &[&'static str]) -> bool {
+        self.cursor.set_named_cursor(client_id, icon_names)
+    }
+
+    pub fn visible_cursor_image(&self) -> Option<&crate::cursor::CursorImage> {
+        self.cursor.image()
+    }
+
+    pub fn cursor_is_visible(&self) -> bool {
+        self.cursor.is_visible()
+    }
+
+    pub fn pointer_position(&self) -> (f64, f64) {
+        self.pointer_pos
+    }
+
+    fn clear_cursor_for_focus(&mut self, focus_client_id: Option<ClientId>) -> bool {
+        self.cursor.clear_for_focus(focus_client_id)
     }
 
     fn validate_implicit_grab_serial(
@@ -392,6 +446,9 @@ pub fn handle_pointer_motion(
         return;
     }
     refresh_pointer_focus(state, dispatcher, time, true);
+    if state.seat.cursor_is_visible() {
+        schedule_active_output(state, dispatcher);
+    }
 }
 
 pub fn handle_pointer_button(
@@ -469,6 +526,9 @@ pub fn handle_pointer_motion_absolute(
         return;
     }
     refresh_pointer_focus(state, dispatcher, time, true);
+    if state.seat.cursor_is_visible() {
+        schedule_active_output(state, dispatcher);
+    }
 }
 
 pub fn handle_keyboard_key(
@@ -841,6 +901,9 @@ fn refresh_pointer_focus(
 
         if let Some(new_focus) = new_focus {
             let (x, y) = local_coords(new_focus.rect, state.seat.pointer_pos);
+            state
+                .seat
+                .record_pointer_enter(new_focus.target.client_id, serial);
             dispatch_client_event(
                 dispatcher,
                 new_focus.target.client_id,
@@ -863,9 +926,17 @@ fn refresh_pointer_focus(
                 new_focus.target.client_id,
                 SeatClientEvent::PointerFrame,
             );
+        } else {
+            state.seat.clear_pointer_enter();
         }
 
         state.seat.pointer_focus = new_focus;
+        if state
+            .seat
+            .clear_cursor_for_focus(new_focus.map(|focus| focus.target.client_id))
+        {
+            schedule_active_output(state, dispatcher);
+        }
         return;
     }
 

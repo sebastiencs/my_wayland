@@ -173,9 +173,16 @@ struct SurfaceKey {
     surface_id: WlSurfaceId,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum SceneItemKey {
+    Surface(SurfaceKey),
+    Cursor,
+}
+
 #[derive(Clone, Debug)]
 struct SceneItemState {
-    key: SurfaceKey,
+    key: SceneItemKey,
+    surface_key: Option<SurfaceKey>,
     buffer_object_id: ObjectId,
     bounds: RectI,
     tex_transform: transform::Mat3,
@@ -185,6 +192,7 @@ struct SceneItemState {
 struct SceneItem {
     state: SceneItemState,
     texture: gl::Uint,
+    owned_texture: Option<GlTexture>,
     damage: DamageRegion,
     sample_damage_padding: i32,
     state_has_alpha: bool,
@@ -2329,7 +2337,7 @@ fn collect_surface_snapshots(
     }
 }
 
-fn scene_order(scene: &[SceneItemState]) -> Vec<SurfaceKey> {
+fn scene_order(scene: &[SceneItemState]) -> Vec<SceneItemKey> {
     scene.iter().map(|item| item.key).collect()
 }
 
@@ -2492,22 +2500,26 @@ fn build_frame_plan(output: &DrmOutput, mut items: Vec<SceneItem>) -> FramePlan 
     let mut frame_callback_surfaces = Vec::new();
     let mut seen_callbacks = BTreeSet::new();
     for item in &items {
-        if seen_callbacks.insert(item.state.key) {
-            frame_callback_surfaces.push(item.state.key);
+        let Some(surface_key) = item.state.surface_key else {
+            continue;
+        };
+        if seen_callbacks.insert(surface_key) {
+            frame_callback_surfaces.push(surface_key);
         }
     }
-    let presentation_feedbacks = items
-        .iter()
-        .flat_map(|item| {
-            item.presentation_feedbacks.iter().copied().map(|feedback| {
-                SubmissionPresentationFeedback {
-                    client_id: item.state.key.client_id,
-                    feedback_id: feedback.id,
-                    version: feedback.version,
-                }
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut presentation_feedbacks = Vec::new();
+    for item in &items {
+        let Some(surface_key) = item.state.surface_key else {
+            continue;
+        };
+        presentation_feedbacks.extend(item.presentation_feedbacks.iter().copied().map(
+            |feedback| SubmissionPresentationFeedback {
+                client_id: surface_key.client_id,
+                feedback_id: feedback.id,
+                version: feedback.version,
+            },
+        ));
+    }
     let last_scene = &output.last_scene;
     let order_changed = scene_order(last_scene) != scene_order(&scene);
 
@@ -2590,6 +2602,43 @@ fn build_frame_plan(output: &DrmOutput, mut items: Vec<SceneItem>) -> FramePlan 
             && output.preserve_render_buffer_contents()
             && !output.force_full_redraw,
     }
+}
+
+fn collect_cursor_render_item(
+    state: &crate::state::State,
+    _drm_id: DrmId,
+    output_bounds: RectI,
+) -> Option<SceneItem> {
+    let image = state.seat.visible_cursor_image()?;
+    let (pointer_x, pointer_y) = state.seat.pointer_position();
+    let x = pointer_x.round() as i32 - image.hotspot_x;
+    let y = pointer_y.round() as i32 - image.hotspot_y;
+    let bounds = RectI::new(x, y, image.width, image.height)?;
+    if !bounds.intersects(output_bounds) {
+        return None;
+    }
+
+    let texture = GlTexture::from_rgba(&image.pixels_rgba, image.width, image.height).ok()?;
+    let texture_id = texture.texture_id();
+    Some(SceneItem {
+        state: SceneItemState {
+            key: SceneItemKey::Cursor,
+            surface_key: None,
+            buffer_object_id: ObjectId::from(u32::MAX as usize),
+            bounds,
+            tex_transform: transform::Mat3::identity(),
+        },
+        texture: texture_id,
+        owned_texture: Some(texture),
+        damage: DamageRegion::from_rect(bounds),
+        sample_damage_padding: 0,
+        state_has_alpha: true,
+        opaque_region: DamageRegion::new(),
+        opaque: false,
+        sync: crate::sync::SurfaceSyncState::default(),
+        direct_scanout: None,
+        presentation_feedbacks: Vec::new(),
+    })
 }
 
 fn collect_render_items(
@@ -2719,15 +2768,20 @@ fn collect_render_items(
         };
         items.push(SceneItem {
             state: SceneItemState {
-                key: SurfaceKey {
+                key: SceneItemKey::Surface(SurfaceKey {
                     client_id: surface_state.surface_client_id,
                     surface_id: surface_state.surface_id,
-                },
+                }),
+                surface_key: Some(SurfaceKey {
+                    client_id: surface_state.surface_client_id,
+                    surface_id: surface_state.surface_id,
+                }),
                 buffer_object_id: surface_state.buffer_object_id,
                 bounds,
                 tex_transform,
             },
             texture,
+            owned_texture: None,
             damage,
             sample_damage_padding,
             state_has_alpha: buffer.format().has_alpha,
@@ -2737,6 +2791,10 @@ fn collect_render_items(
             direct_scanout,
             presentation_feedbacks: surface_state.presentation_feedbacks,
         });
+    }
+
+    if let Some(cursor_item) = collect_cursor_render_item(state, drm_id, output_bounds) {
+        items.push(cursor_item);
     }
 
     (items, deferred_releases)
@@ -2767,7 +2825,7 @@ mod presentation_timing_tests {
         super::{
             presentation_feedback_flags, presentation_refresh_interval_ns,
             sanitize_present_timestamp, select_presentation_output_for_scene,
-            submitted_frame_feedbacks_for_discard, OutputSubmission, SceneItemState,
+            submitted_frame_feedbacks_for_discard, OutputSubmission, SceneItemKey, SceneItemState,
             SubmissionPresentationFeedback, SubmittedFrame, SurfaceKey,
         },
         crate::{
@@ -2883,10 +2941,14 @@ mod presentation_timing_tests {
         let left = state.insert_output(make_output(backend, 0, 0, 100, 100));
         let right = state.insert_output(make_output(backend, 100, 0, 100, 100));
         let scene = vec![SceneItemState {
-            key: SurfaceKey {
+            key: SceneItemKey::Surface(SurfaceKey {
                 client_id: ClientId::from_raw(1),
                 surface_id: crate::protocol_generated::WlSurfaceId::from(1),
-            },
+            }),
+            surface_key: Some(SurfaceKey {
+                client_id: ClientId::from_raw(1),
+                surface_id: crate::protocol_generated::WlSurfaceId::from(1),
+            }),
             buffer_object_id: crate::state::ObjectId::from(1usize),
             bounds: RectI::new(80, 0, 80, 100).unwrap(),
             tex_transform: transform::Mat3::identity(),

@@ -3,9 +3,11 @@ use crate::{
     globals::Global,
     object::{Object, Parser},
     protocol_generated::{
-        wp_cursor_shape_manager_v1, Constants, NewId, WaylandId, WpCursorShapeManagerV1Id,
+        wl_display, wp_cursor_shape_manager_v1, Constants, NewId, WaylandId, WlPointerId,
+        WpCursorShapeDeviceV1Id, WpCursorShapeManagerV1Id,
     },
     state::State,
+    wayland_objects::{wl_display::WlDisplay, wp_cursor_shape_device_v1::WpCursorShapeDeviceV1},
 };
 
 #[derive(Debug)]
@@ -26,22 +28,23 @@ impl Global for WpCursorShapeManagerV1Global {
         client: &mut Client,
         state: &mut State,
         id: NewId,
-        _version: u32,
+        version: u32,
         dispatcher: &mut ClientDispatcher,
     ) {
         let id = WpCursorShapeManagerV1Id::from(id);
-        client.insert_object(state, WpCursorShapeManagerV1 { id });
+        client.insert_object(state, WpCursorShapeManagerV1 { id, version });
     }
 }
 
 #[derive(Debug)]
 pub struct WpCursorShapeManagerV1 {
     id: WpCursorShapeManagerV1Id,
+    version: u32,
 }
 
 impl WpCursorShapeManagerV1 {
-    pub fn new(id: WpCursorShapeManagerV1Id) -> Self {
-        Self { id }
+    pub fn new(id: WpCursorShapeManagerV1Id, version: u32) -> Self {
+        Self { id, version }
     }
 }
 
@@ -53,16 +56,40 @@ impl Object for WpCursorShapeManagerV1 {
     fn on(
         &mut self,
         client: &mut Client,
-        _: &mut State,
+        state: &mut State,
         req: RawRequest,
-        _: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) {
         use wp_cursor_shape_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
-            Destroy => todo!(),
-            GetPointer { cursor_shape_device, pointer } => todo!(),
-            GetTabletToolV2 { cursor_shape_device, tablet_tool } => todo!(),
+            Destroy => {
+                client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
+            }
+            GetPointer { cursor_shape_device, pointer } => {
+                let cursor_shape_device = WpCursorShapeDeviceV1Id::from(cursor_shape_device);
+                let pointer = WlPointerId::from(pointer);
+                if !client.object_is(pointer, state) {
+                    client.protocol_violation_disconnect(
+                        dispatcher,
+                        pointer.into(),
+                        wl_display::Error::InvalidObject as u32,
+                        "invalid wl_pointer for cursor shape device",
+                    );
+                    return;
+                }
+                client.insert_object(
+                    state,
+                    WpCursorShapeDeviceV1::new_pointer(cursor_shape_device, pointer, self.version),
+                );
+            }
+            GetTabletToolV2 { cursor_shape_device, tablet_tool: _ } => {
+                let cursor_shape_device = WpCursorShapeDeviceV1Id::from(cursor_shape_device);
+                client.insert_object(
+                    state,
+                    WpCursorShapeDeviceV1::new_inert(cursor_shape_device, self.version),
+                );
+            }
         }
     }
 }

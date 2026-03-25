@@ -31,6 +31,7 @@ edid-rs = { git = "https://gitlab.com/sebastiencs/edid-rs.git" }
 khronos-types = { git = "https://github.com/sebastiencs/khronos-types.git" }
 once_cell = "1.19.0"
 drm-fourcc = { version = "2.2.0", features = ["build_bindings"] }
+xcursor = "0.3.10"
 
 [dev-dependencies]
 rand = "0.8.5"
