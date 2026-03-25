@@ -3,7 +3,8 @@ use crate::{
     globals::Global,
     object::{Object, Parser},
     protocol_generated::{
-        wl_keyboard, wl_seat, Constants, NewId, WaylandId, WlPointerId, WlSeatId,
+        wl_keyboard, wl_seat, Constants as ProtocolConstants, NewId, WaylandId, WlPointerId,
+        WlSeatId,
     },
     state::State,
     wayland_objects::{wl_keyboard::WlKeyboard, wl_pointer::WlPointer},
@@ -31,7 +32,7 @@ impl Global for WlSeatGlobal {
         dispatcher: &mut ClientDispatcher,
     ) {
         let id = WlSeatId::from(id);
-        let wl_seat = WlSeat { id };
+        let wl_seat = WlSeat { id, version };
 
         wl_seat.send_capabilities(dispatcher);
         // `name` exists since wl_seat version 2; v1 clients (e.g. weston simple-egl) only
@@ -47,11 +48,13 @@ impl Global for WlSeatGlobal {
 #[derive(Debug)]
 pub struct WlSeat {
     id: WlSeatId,
+    /// Version the client bound on `wl_seat`. Child objects (`wl_keyboard`, etc.) inherit it.
+    version: u32,
 }
 
 impl WlSeat {
     pub fn new(id: WlSeatId) -> Self {
-        Self { id }
+        Self { id, version: <Self as ProtocolConstants>::INTERFACE_VERSION }
     }
 }
 
@@ -80,7 +83,11 @@ impl Object for WlSeat {
                 let wl_keyboard = WlKeyboard::new(id);
 
                 wl_keyboard.send_keymap(&state.xkb, dispatcher);
-                wl_keyboard.send_repeat_info(dispatcher);
+                // `repeat_info` exists since wl_keyboard version 4; v1–v3 clients (e.g. weston
+                // simple-egl with wl_seat v1) have no listener slot and libwayland aborts.
+                if self.version >= 4 {
+                    wl_keyboard.send_repeat_info(dispatcher);
+                }
 
                 state.seat.register_keyboard(client.client_id(), id);
                 client.insert_object(state, wl_keyboard);
