@@ -26,6 +26,8 @@ pub mod wp_presentation;
 pub mod wp_viewport;
 pub mod wp_viewporter;
 pub mod xdg_activation_v1;
+pub mod xdg_popup;
+pub mod xdg_positioner;
 pub mod xdg_surface;
 pub mod xdg_wm_base;
 pub mod zwp_linux_buffer_params_v1;
@@ -65,10 +67,10 @@ fake_obj! {
     // { wp_presentation, WpPresentation },
     { wp_presentation_feedback, WpPresentationFeedback },
     // { xdg_wm_base, XdgWmBase },
-    { xdg_positioner, XdgPositioner },
+    // { xdg_positioner, XdgPositioner },
     // { xdg_surface, XdgSurface },
     // { xdg_toplevel, XdgToplevel },
-    { xdg_popup, XdgPopup },
+    // { xdg_popup, XdgPopup },
     { wp_content_type_manager_v1, WpContentTypeManagerV1 },
     { wp_content_type_v1, WpContentTypeV1 },
     { wp_drm_lease_device_v1, WpDrmLeaseDeviceV1 },

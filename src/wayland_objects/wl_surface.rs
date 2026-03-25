@@ -284,6 +284,27 @@ impl WlSurface {
         self.role != Role::None
     }
 
+    pub fn has_pending_buffer_attach(&self) -> bool {
+        matches!(self.pending.buffer, Some(Some(_)))
+    }
+
+    pub fn has_committed_buffer(&self) -> bool {
+        self.on_screen.buffer_object_id.is_some()
+    }
+
+    pub fn has_attached_or_committed_buffer(&self) -> bool {
+        self.has_pending_buffer_attach() || self.has_committed_buffer()
+    }
+
+    pub fn clear_xdg_surface_role(&mut self, xdg_surface_id: XdgSurfaceId) {
+        if self.impl_id == Some(xdg_surface_id) {
+            self.impl_id = None;
+            if self.role == Role::XdgSurface {
+                self.role = Role::None;
+            }
+        }
+    }
+
     pub fn assign_subsurface(
         &mut self,
         object_id: WlSubsurfaceId,
@@ -1261,7 +1282,16 @@ impl WlSurface {
     ) {
         if let Some(xdg_surface_id) = self.impl_id {
             let mut xdg_surface = client.grab_object(xdg_surface_id, state);
-            xdg_surface.on_commit(client, state, dispatcher);
+            if !xdg_surface.on_commit(
+                client,
+                state,
+                dispatcher,
+                self.has_pending_buffer_attach(),
+                matches!(self.pending.buffer, Some(None)),
+            ) {
+                self.clear_failed_surface_commit();
+                return;
+            }
         }
 
         if !self.validate_pending_mapping(client, state, dispatcher) {
