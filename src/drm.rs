@@ -952,6 +952,11 @@ impl Drm {
         if !plane_format.modifiers.contains(&Modifier::INVALID)
             && !plane_format.modifiers.contains(&bo_modifier)
         {
+            log::debug!(
+                "Skipping DRM cursor plane candidate: plane modifiers {:?} do not accept cursor BO modifier {:?}",
+                plane_format.modifiers,
+                bo_modifier
+            );
             return None;
         }
         let pitch = drm::buffer::Buffer::pitch(&bo) as usize;
@@ -962,7 +967,29 @@ impl Drm {
             pitch,
         );
         bo.write(&bytes);
-        let framebuffer = Self::add_framebuffer_for_bo(&self.fd, &bo).ok()?;
+        let framebuffer = match Self::add_framebuffer_for_bo(&self.fd, &bo) {
+            Ok(framebuffer) => framebuffer,
+            Err(error) => {
+                log::debug!(
+                    "Skipping DRM cursor plane candidate: failed to create framebuffer for {}x{} cursor BO: {:?}",
+                    image.width,
+                    image.height,
+                    error
+                );
+                return None;
+            }
+        };
+        log::debug!(
+            "Prepared DRM cursor plane candidate: size={}x{} pos=({}, {}) hotspot=({}, {}) fb={:?} modifier={:?}",
+            image.width,
+            image.height,
+            x,
+            y,
+            image.hotspot_x,
+            image.hotspot_y,
+            framebuffer.id(),
+            bo_modifier
+        );
         Some(CursorPlaneCandidate {
             x,
             y,
@@ -1606,11 +1633,36 @@ impl Drm {
         };
 
         match drm.add_planar_framebuffer(bo, flags) {
-            Ok(handle) => Ok(DrmFrameBuffer { drm: drm.clone(), handle }),
+            Ok(handle) => {
+                log::debug!(
+                    "Created DRM framebuffer directly from GBM BO: handle={:?} size={:?} format={:?} flags={:?}",
+                    handle,
+                    drm::buffer::Buffer::size(bo),
+                    drm::buffer::Buffer::format(bo),
+                    flags
+                );
+                Ok(DrmFrameBuffer { drm: drm.clone(), handle })
+            }
             Err(source) => {
+                log::debug!(
+                    "Direct DRM framebuffer creation from GBM BO failed: size={:?} format={:?} planes={} modifier={:?} flags={:?} error={:?}",
+                    drm::buffer::Buffer::size(bo),
+                    drm::buffer::Buffer::format(bo),
+                    bo.plane_count(),
+                    bo.modifier(),
+                    flags,
+                    source
+                );
                 if bo.plane_count() == 1 && drm::buffer::Buffer::format(bo) == DrmFourcc::Argb8888 {
-                    drm.add_framebuffer(bo, 32, 32)
-                        .map(|handle| DrmFrameBuffer { drm: drm.clone(), handle })
+                    drm.add_framebuffer(bo, 32, 32).map(|handle| {
+                        log::debug!(
+                            "Created legacy DRM framebuffer from GBM BO: handle={:?} size={:?} format={:?}",
+                            handle,
+                            drm::buffer::Buffer::size(bo),
+                            drm::buffer::Buffer::format(bo)
+                        );
+                        DrmFrameBuffer { drm: drm.clone(), handle }
+                    })
                 } else {
                     Err(source)
                 }
@@ -2671,6 +2723,9 @@ impl DrmModel {
                     drm.render_output(&render_items, &damage, preserve_contents);
                 let callback_surfaces = frame_callback_surfaces.clone();
                 let submit_had_cursor_plane = cursor_plane.is_some();
+                if submit_had_cursor_plane {
+                    log::debug!("Submitting DRM frame with cursor plane enabled");
+                }
                 let submit_result = drm.submit_render_buffer(
                     &render_completion,
                     &damage,
