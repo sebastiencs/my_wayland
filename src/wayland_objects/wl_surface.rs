@@ -1467,7 +1467,10 @@ impl WlSurface {
         };
 
         if changed {
-            client.refresh_surface_outputs(state, dispatcher);
+            dispatcher.dispatch_to(
+                client.client_id(),
+                crate::clients::ClientAction::RefreshSurfaceOutputs,
+            );
         }
 
         if changed || needs_frame {
@@ -1785,7 +1788,8 @@ impl WlSurface {
         self.retire_current();
         self.on_screen.logical_size = None;
         self.on_screen.damage.clear();
-        client.refresh_surface_outputs(state, dispatcher);
+        dispatcher
+            .dispatch_to(client.client_id(), crate::clients::ClientAction::RefreshSurfaceOutputs);
     }
 
     pub fn take_retired_buffers(&mut self) -> Vec<RetiredBufferCandidate> {

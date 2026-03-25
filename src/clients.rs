@@ -847,10 +847,18 @@ impl Client {
         }
     }
 
-    fn output_object_ids_for_output(&self, state: &State, output_id: OutputId) -> Vec<WlOutputId> {
+    fn output_object_ids_for_output(
+        &self,
+        state: &mut State,
+        output_id: OutputId,
+    ) -> Vec<WlOutputId> {
         let mut output_object_ids = Vec::new();
-        for &object_id in self.objects.values() {
-            let Some(wl_output) = state.objects.try_get_ref_of::<WlOutput>(object_id) else {
+        let object_ids = self.objects.values().copied().collect::<Vec<_>>();
+        for object_id in object_ids {
+            let Some(mut object) = state.objects.try_grab(object_id) else {
+                continue;
+            };
+            let Some(wl_output) = object.downcast_mut::<WlOutput>() else {
                 continue;
             };
             if wl_output.matches_output(output_id) {
@@ -893,17 +901,19 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
         output_id: OutputId,
     ) {
-        let surface_object_ids = self
-            .objects
-            .values()
-            .copied()
-            .filter(|object_id| {
-                state
-                    .objects
-                    .try_get_ref_of::<WlSurface>(*object_id)
-                    .is_some_and(|surface| surface.contains_output(output_id))
-            })
-            .collect::<Vec<_>>();
+        let object_ids = self.objects.values().copied().collect::<Vec<_>>();
+        let mut surface_object_ids = Vec::new();
+        for object_id in object_ids {
+            let Some(mut object) = state.objects.try_grab(object_id) else {
+                continue;
+            };
+            let Some(surface) = object.downcast_mut::<WlSurface>() else {
+                continue;
+            };
+            if surface.contains_output(output_id) {
+                surface_object_ids.push(object_id);
+            }
+        }
         for surface_object_id in surface_object_ids {
             self.send_surface_output_membership_event(
                 state,
@@ -922,7 +932,10 @@ impl Client {
     ) {
         let root_surface_ids = state.root_surface_ids();
         for surface_object_id in root_surface_ids {
-            let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(surface_object_id) else {
+            let Some(mut object) = state.objects.try_grab(surface_object_id) else {
+                continue;
+            };
+            let Some(surface) = object.downcast_mut::<WlSurface>() else {
                 continue;
             };
             if surface.client_id() != self.id || !surface.is_root() {
@@ -1036,8 +1049,11 @@ fn refresh_surface_tree_outputs(
     base_x: i32,
     base_y: i32,
 ) {
-    let (stack, current_position, surface_origin, render_state) = {
-        let Some(surface) = state.objects.try_get_ref_of::<WlSurface>(surface_object_id) else {
+    let (stack, child_base, delta) = {
+        let Some(mut surface_object) = state.objects.try_grab(surface_object_id) else {
+            return;
+        };
+        let Some(surface) = surface_object.downcast_mut::<WlSurface>() else {
             return;
         };
         let render_state = surface.render_state_at(base_x, base_y);
@@ -1048,24 +1064,18 @@ fn refresh_surface_tree_outputs(
                 let (x, y) = surface.root_position();
                 (base_x + x, base_y + y)
             });
+        let current_position = surface.current_subsurface_position();
+        let next_outputs = render_state
+            .as_ref()
+            .map(|render_state| surface_intersecting_outputs(state, render_state))
+            .unwrap_or_default();
+        let child_base =
+            (surface_origin.0 + current_position.0, surface_origin.1 + current_position.1);
         (
             surface.current_stack().to_vec(),
-            surface.current_subsurface_position(),
-            surface_origin,
-            render_state,
+            child_base,
+            surface.update_output_membership(next_outputs),
         )
-    };
-
-    let next_outputs = render_state
-        .as_ref()
-        .map(|render_state| surface_intersecting_outputs(state, render_state))
-        .unwrap_or_default();
-    let delta = {
-        let mut surface_object = state.objects.grab(surface_object_id);
-        let Some(surface) = surface_object.downcast_mut::<WlSurface>() else {
-            return;
-        };
-        surface.update_output_membership(next_outputs)
     };
 
     for output_id in delta.left {
@@ -1087,7 +1097,6 @@ fn refresh_surface_tree_outputs(
         );
     }
 
-    let child_base = (surface_origin.0 + current_position.0, surface_origin.1 + current_position.1);
     for entry in stack {
         if let crate::wayland_objects::wl_surface::StackEntry::Child(child_surface_object_id) =
             entry
