@@ -48,6 +48,14 @@ impl XdgPopup {
         self.explicit_grab
     }
 
+    pub fn xdg_surface_id(&self) -> XdgSurfaceId {
+        self.xdg_surface_id
+    }
+
+    pub fn parent_surface_id(&self) -> Option<XdgSurfaceId> {
+        self.parent_surface_id
+    }
+
     pub fn mark_mapped(&mut self) {
         self.mapped = true;
     }
@@ -58,6 +66,10 @@ impl XdgPopup {
 
     pub fn apply_acked_configure(&mut self, geometry: RectI) {
         self.current_geometry = geometry;
+    }
+
+    pub fn send_popup_done(&self, dispatcher: &mut ClientDispatcher) {
+        self.send_event(xdg_popup::Event::PopupDone, dispatcher);
     }
 
     fn delete_self(
@@ -193,6 +205,7 @@ impl Object for XdgPopup {
                     }
                     parent_surface.remove_popup_child(self.id);
                 }
+                crate::seat::remove_popup_grab(state, dispatcher, self.id);
                 xdg_surface.destroy_popup_role(self.id);
                 self.delete_self(client, state, dispatcher);
             }
@@ -229,7 +242,17 @@ impl Object for XdgPopup {
                     }
                 }
                 self.explicit_grab = true;
-                log::debug!("xdg_popup.grab recorded; seat-specific popup grabs remain TODO");
+                let popup_surface_id = {
+                    let xdg_surface = client.get_object(self.xdg_surface_id, state);
+                    xdg_surface.wl_surface_id()
+                };
+                crate::seat::begin_popup_grab(
+                    state,
+                    dispatcher,
+                    client.client_id(),
+                    self.id,
+                    popup_surface_id,
+                );
             }
             Reposition { positioner, token } => {
                 if !client.object_is(positioner, state) {

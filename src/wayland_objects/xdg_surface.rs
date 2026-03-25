@@ -98,6 +98,10 @@ impl XdgSurface {
         self.wm_base_id
     }
 
+    pub(crate) fn wl_surface_id(&self) -> WlSurfaceId {
+        self.wl_surface
+    }
+
     pub(crate) fn popup_role_id(&self) -> Option<XdgPopupId> {
         match self.role_object {
             RoleObject::Popup(id) => Some(id),
@@ -567,7 +571,7 @@ pub mod xdg_toplevel {
             XdgToplevelId,
         },
         state::State,
-        wayland_objects::wl_display::WlDisplay,
+        wayland_objects::{wl_display::WlDisplay, wl_surface::WlSurface},
     };
 
     use super::XdgSurface;
@@ -691,6 +695,39 @@ pub mod xdg_toplevel {
             self.current_width = width;
             self.current_height = height;
             self.current_states = states.into_iter().filter_map(decode_state).collect();
+        }
+
+        pub fn xdg_surface_id(&self) -> super::XdgSurfaceId {
+            self.xdg_surface_id
+        }
+
+        pub fn send_interactive_resize_configure(
+            &mut self,
+            xdg_surface: &mut XdgSurface,
+            width: i32,
+            height: i32,
+            resizing: bool,
+            dispatcher: &mut ClientDispatcher,
+        ) {
+            let mut states = self.effective_states();
+            if resizing {
+                let resizing_flag = proto_xdg_toplevel::State::Resizing as u32;
+                if !states.contains(&resizing_flag) {
+                    states.push(resizing_flag);
+                }
+            } else {
+                states.retain(|state| *state != proto_xdg_toplevel::State::Resizing as u32);
+            }
+            self.send_configure_bounds(dispatcher);
+            self.send_event(
+                proto_xdg_toplevel::Event::Configure {
+                    width,
+                    height,
+                    states: Array(states.clone()),
+                },
+                dispatcher,
+            );
+            xdg_surface.queue_toplevel_configure(width, height, states, dispatcher);
         }
 
         pub fn reset_on_unmap(&mut self) {
@@ -889,10 +926,39 @@ pub mod xdg_toplevel {
                 ShowWindowMenu { seat: _, serial: _, x: _, y: _ } => {
                     log::debug!("xdg_toplevel.show_window_menu is not integrated yet");
                 }
-                Move { seat: _, serial: _ } => {
-                    log::debug!("xdg_toplevel.move requires seat integration");
+                Move { seat, serial } => {
+                    if !client.object_is(seat, state) {
+                        client.protocol_violation_disconnect(
+                            dispatcher,
+                            self.id.into(),
+                            crate::protocol_generated::wl_display::Error::InvalidObject as u32,
+                            "xdg_toplevel.move requires a live wl_seat",
+                        );
+                        return;
+                    }
+                    let xdg_surface = client.get_object(self.xdg_surface_id, state);
+                    let surface_id = xdg_surface.wl_surface_id();
+                    let surface_object_id = client.object_id(surface_id);
+                    let Some(surface) =
+                        state.objects.try_get_ref_of::<WlSurface>(surface_object_id)
+                    else {
+                        return;
+                    };
+                    if !crate::seat::request_toplevel_move(
+                        state,
+                        client.client_id(),
+                        surface_id,
+                        serial,
+                        surface_object_id,
+                        surface.root_position(),
+                    ) {
+                        log::debug!(
+                            "xdg_toplevel.move ignored due to invalid pointer grab serial {}",
+                            serial
+                        );
+                    }
                 }
-                Resize { seat: _, serial: _, edges } => {
+                Resize { seat, serial, edges } => {
                     if decode_resize_edge(edges).is_none() {
                         self.send_error(
                             client,
@@ -902,7 +968,44 @@ pub mod xdg_toplevel {
                         );
                         return;
                     }
-                    log::debug!("xdg_toplevel.resize requires seat integration");
+                    if !client.object_is(seat, state) {
+                        client.protocol_violation_disconnect(
+                            dispatcher,
+                            self.id.into(),
+                            crate::protocol_generated::wl_display::Error::InvalidObject as u32,
+                            "xdg_toplevel.resize requires a live wl_seat",
+                        );
+                        return;
+                    }
+                    let xdg_surface = client.get_object(self.xdg_surface_id, state);
+                    let surface_id = xdg_surface.wl_surface_id();
+                    let surface_object_id = client.object_id(surface_id);
+                    let Some(surface) =
+                        state.objects.try_get_ref_of::<WlSurface>(surface_object_id)
+                    else {
+                        return;
+                    };
+                    let initial_size = surface.logical_size().map(|size| (size.width, size.height));
+                    let Some(initial_size) = initial_size else {
+                        log::debug!("xdg_toplevel.resize ignored for unmapped surface");
+                        return;
+                    };
+                    if !crate::seat::request_toplevel_resize(
+                        state,
+                        client.client_id(),
+                        surface_id,
+                        serial,
+                        surface_object_id,
+                        self.id,
+                        edges,
+                        surface.root_position(),
+                        initial_size,
+                    ) {
+                        log::debug!(
+                            "xdg_toplevel.resize ignored due to invalid pointer grab serial {}",
+                            serial
+                        );
+                    }
                 }
                 SetMaxSize { width, height } => {
                     if !self.store_size_pair(client, dispatcher, width, height, false) {

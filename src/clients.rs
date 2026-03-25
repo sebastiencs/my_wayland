@@ -17,14 +17,23 @@ use crate::{
         ring::{AcceptCompleted, RecvmsgCompleted, RingId},
     },
     object::{IdToObject, Object, Parser, ParserError},
-    protocol_generated::{wl_display, Array, Constants, WaylandId, WlSurfaceId},
+    protocol_generated::{
+        wl_display, Array, Constants, WaylandId, WlSurfaceId, XdgPopupId, XdgToplevelId,
+    },
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     seat::SeatClientEvent,
     state::{GrabbedObject, ObjectId, OutputId, State},
     udev::Udev,
     wayland_objects::{
-        wl_display::WlDisplay, wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer,
-        wl_registry::WlRegistry, wl_surface::WlSurface, zxdg_output_v1::ZxdgOutputV1,
+        wl_display::WlDisplay,
+        wl_keyboard::WlKeyboard,
+        wl_output::WlOutput,
+        wl_pointer::WlPointer,
+        wl_registry::WlRegistry,
+        wl_surface::WlSurface,
+        xdg_popup::XdgPopup,
+        xdg_surface::{xdg_toplevel::XdgToplevel, XdgSurface},
+        zxdg_output_v1::ZxdgOutputV1,
     },
 };
 
@@ -219,16 +228,48 @@ pub struct Client {
 
 pub enum ClientAction {
     Start,
-    MsgReceived { request: RawRequest<'static> },
-    FdsReceived { fds: Box<[RawFd]> },
-    SeatEvent { event: SeatClientEvent },
-    RegistryGlobalAdded { name: u32, interface: String, version: u32 },
-    RegistryGlobalRemoved { name: u32 },
-    OutputStateChanged { output_id: OutputId },
-    OutputRemoved { output_id: OutputId },
-    ReleaseBuffer { buffer_id: crate::protocol_generated::WlBufferId },
-    CompleteSurfaceFrameCallbacks { surface_ids: Vec<WlSurfaceId> },
-    CancelBlockedSurface { surface_object_id: ObjectId, waiter_id: u64 },
+    MsgReceived {
+        request: RawRequest<'static>,
+    },
+    FdsReceived {
+        fds: Box<[RawFd]>,
+    },
+    SeatEvent {
+        event: SeatClientEvent,
+    },
+    RegistryGlobalAdded {
+        name: u32,
+        interface: String,
+        version: u32,
+    },
+    RegistryGlobalRemoved {
+        name: u32,
+    },
+    OutputStateChanged {
+        output_id: OutputId,
+    },
+    OutputRemoved {
+        output_id: OutputId,
+    },
+    ReleaseBuffer {
+        buffer_id: crate::protocol_generated::WlBufferId,
+    },
+    CompleteSurfaceFrameCallbacks {
+        surface_ids: Vec<WlSurfaceId>,
+    },
+    CancelBlockedSurface {
+        surface_object_id: ObjectId,
+        waiter_id: u64,
+    },
+    DismissPopupGrab {
+        popup_ids: Vec<XdgPopupId>,
+    },
+    InteractiveResizeConfigure {
+        xdg_toplevel_id: XdgToplevelId,
+        width: i32,
+        height: i32,
+        resizing: bool,
+    },
     Close,
 }
 
@@ -842,6 +883,81 @@ impl Model for Client {
                     return Ok(());
                 };
                 surface.cancel_blocked_if_waiter_matches(waiter_id, self, state, &mut dispatcher);
+            }
+            DismissPopupGrab { popup_ids } => {
+                for popup_id in popup_ids.into_iter().rev() {
+                    if !self.contains_object(popup_id, state) {
+                        continue;
+                    }
+
+                    let (xdg_surface_id, parent_surface_id) = {
+                        let popup_object_id = self.object_id(popup_id);
+                        let Some(popup) = state.objects.try_get_ref_of::<XdgPopup>(popup_object_id)
+                        else {
+                            continue;
+                        };
+                        (popup.xdg_surface_id(), popup.parent_surface_id())
+                    };
+
+                    if let Some(parent_surface_id) = parent_surface_id {
+                        if self.contains_object(parent_surface_id, state) {
+                            let mut parent_surface = self.grab_object(parent_surface_id, state);
+                            parent_surface.remove_popup_child(popup_id);
+                        }
+                    }
+
+                    if self.contains_object(xdg_surface_id, state) {
+                        let wl_surface_id = {
+                            let xdg_surface_object_id = self.object_id(xdg_surface_id);
+                            let Some(xdg_surface) = state
+                                .objects
+                                .try_get_ref_of::<XdgSurface>(xdg_surface_object_id)
+                            else {
+                                continue;
+                            };
+                            xdg_surface.wl_surface_id()
+                        };
+                        if self.contains_object(wl_surface_id, state) {
+                            let mut wl_surface = self.grab_object(wl_surface_id, state);
+                            wl_surface.force_unmap_for_role_dismissal(self, state, &mut dispatcher);
+                        }
+                        let mut xdg_surface = self.grab_object(xdg_surface_id, state);
+                        xdg_surface.destroy_popup_role(popup_id);
+                    }
+
+                    {
+                        let popup = self.grab_object(popup_id, state);
+                        popup.send_popup_done(&mut dispatcher);
+                    }
+                    self.delete_id(&WlDisplay::default(), state, &mut dispatcher, popup_id.into());
+                }
+            }
+            InteractiveResizeConfigure { xdg_toplevel_id, width, height, resizing } => {
+                if !self.contains_object(xdg_toplevel_id, state) {
+                    return Ok(());
+                }
+                let xdg_surface_id = {
+                    let toplevel_object_id = self.object_id(xdg_toplevel_id);
+                    let Some(toplevel) = state
+                        .objects
+                        .try_get_ref_of::<XdgToplevel>(toplevel_object_id)
+                    else {
+                        return Ok(());
+                    };
+                    toplevel.xdg_surface_id()
+                };
+                if !self.contains_object(xdg_surface_id, state) {
+                    return Ok(());
+                }
+                let mut xdg_surface = self.grab_object(xdg_surface_id, state);
+                let mut toplevel = self.grab_object(xdg_toplevel_id, state);
+                toplevel.send_interactive_resize_configure(
+                    &mut xdg_surface,
+                    width,
+                    height,
+                    resizing,
+                    &mut dispatcher,
+                );
             }
             MsgReceived { mut request } => {
                 let Some(&obj_id) = self.objects.get(&request.object_id()) else {

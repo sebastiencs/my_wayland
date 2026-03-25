@@ -2,9 +2,11 @@ use std::collections::BTreeMap;
 
 use crate::{
     clients::{ClientAction, ClientId},
-    drm::Drm,
+    drm::{schedule_active_output, Drm},
     object::Object,
-    protocol_generated::{Array, WlKeyboardId, WlPointerId, WlSurfaceId},
+    protocol_generated::{
+        Array, WlKeyboardId, WlPointerId, WlSurfaceId, XdgPopupId, XdgToplevelId,
+    },
     runner::Dispatcher,
     state::{DrmId, IndexMap, ObjectId, State},
     wayland_objects::wl_surface::{StackEntry, WlSurface},
@@ -79,11 +81,47 @@ pub enum SeatClientEvent {
     },
 }
 
+#[derive(Clone, Debug)]
+struct PopupGrabState {
+    client_id: ClientId,
+    popup_stack: Vec<(XdgPopupId, WlSurfaceId)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PointerPressState {
+    serial: u32,
+    focus: SurfaceFocus,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PointerInteractiveGrab {
+    Move {
+        client_id: ClientId,
+        root_surface_object_id: ObjectId,
+        initial_pointer_pos: (f64, f64),
+        initial_root_pos: (i32, i32),
+    },
+    Resize {
+        client_id: ClientId,
+        root_surface_object_id: ObjectId,
+        xdg_toplevel_id: XdgToplevelId,
+        edges: u32,
+        initial_pointer_pos: (f64, f64),
+        initial_root_pos: (i32, i32),
+        initial_size: (i32, i32),
+        last_size: (i32, i32),
+    },
+}
+
 pub struct SeatState {
     current_serial: u32,
     pointer_pos: (f64, f64),
     pointer_focus: Option<PointerFocus>,
     keyboard_focus: Option<SurfaceFocus>,
+    pointer_button_count: u32,
+    last_pointer_press: Option<PointerPressState>,
+    popup_grab: Option<PopupGrabState>,
+    pointer_interactive_grab: Option<PointerInteractiveGrab>,
     pointer_resources: BTreeMap<ClientId, Vec<WlPointerId>>,
     keyboard_resources: BTreeMap<ClientId, Vec<WlKeyboardId>>,
 }
@@ -95,6 +133,10 @@ impl Default for SeatState {
             pointer_pos: (0.0, 0.0),
             pointer_focus: None,
             keyboard_focus: None,
+            pointer_button_count: 0,
+            last_pointer_press: None,
+            popup_grab: None,
+            pointer_interactive_grab: None,
             pointer_resources: BTreeMap::default(),
             keyboard_resources: BTreeMap::default(),
         }
@@ -153,12 +195,145 @@ impl SeatState {
         {
             self.keyboard_focus = None;
         }
+        if self
+            .popup_grab
+            .as_ref()
+            .is_some_and(|grab| grab.client_id == client_id)
+        {
+            self.popup_grab = None;
+        }
+        if self
+            .pointer_interactive_grab
+            .is_some_and(|grab| match grab {
+                PointerInteractiveGrab::Move { client_id: grab_client_id, .. }
+                | PointerInteractiveGrab::Resize { client_id: grab_client_id, .. } => {
+                    grab_client_id == client_id
+                }
+            })
+        {
+            self.pointer_interactive_grab = None;
+        }
     }
 
     fn next_serial(&mut self) -> u32 {
         let serial = self.current_serial;
         self.current_serial = self.current_serial.wrapping_add(1).max(1);
         serial
+    }
+
+    fn record_pointer_button(&mut self, state: u32, serial: u32, focus: Option<SurfaceFocus>) {
+        if state == 1 {
+            self.pointer_button_count = self.pointer_button_count.saturating_add(1);
+            self.last_pointer_press = focus.map(|focus| PointerPressState { serial, focus });
+        } else {
+            self.pointer_button_count = self.pointer_button_count.saturating_sub(1);
+            if self.pointer_button_count == 0 {
+                self.last_pointer_press = None;
+            }
+        }
+    }
+
+    fn validate_pointer_grab_serial(
+        &self,
+        client_id: ClientId,
+        surface_id: WlSurfaceId,
+        serial: u32,
+    ) -> bool {
+        self.pointer_button_count > 0
+            && self.last_pointer_press.is_some_and(|press| {
+                press.serial == serial
+                    && press.focus.client_id == client_id
+                    && press.focus.surface_id == surface_id
+            })
+    }
+
+    fn popup_grab_client(&self) -> Option<ClientId> {
+        self.popup_grab.as_ref().map(|grab| grab.client_id)
+    }
+
+    fn popup_keyboard_surface(&self) -> Option<WlSurfaceId> {
+        self.popup_grab
+            .as_ref()
+            .and_then(|grab| grab.popup_stack.last())
+            .map(|(_, surface_id)| *surface_id)
+    }
+
+    fn start_popup_grab(
+        &mut self,
+        client_id: ClientId,
+        popup_id: XdgPopupId,
+        popup_surface_id: WlSurfaceId,
+    ) {
+        let grab = self
+            .popup_grab
+            .get_or_insert_with(|| PopupGrabState { client_id, popup_stack: Vec::new() });
+        if grab.client_id != client_id {
+            *grab = PopupGrabState { client_id, popup_stack: Vec::new() };
+        }
+        grab.popup_stack
+            .retain(|(candidate, _)| *candidate != popup_id);
+        grab.popup_stack.push((popup_id, popup_surface_id));
+    }
+
+    fn remove_popup_grab(&mut self, popup_id: XdgPopupId) {
+        let Some(grab) = self.popup_grab.as_mut() else {
+            return;
+        };
+        grab.popup_stack
+            .retain(|(candidate, _)| *candidate != popup_id);
+        if grab.popup_stack.is_empty() {
+            self.popup_grab = None;
+        }
+    }
+
+    fn dismiss_popup_grab(&mut self) -> Option<(ClientId, Vec<XdgPopupId>)> {
+        let grab = self.popup_grab.take()?;
+        Some((
+            grab.client_id,
+            grab.popup_stack
+                .into_iter()
+                .map(|(popup_id, _)| popup_id)
+                .collect(),
+        ))
+    }
+
+    fn start_toplevel_move(
+        &mut self,
+        client_id: ClientId,
+        root_surface_object_id: ObjectId,
+        initial_root_pos: (i32, i32),
+    ) {
+        self.pointer_interactive_grab = Some(PointerInteractiveGrab::Move {
+            client_id,
+            root_surface_object_id,
+            initial_pointer_pos: self.pointer_pos,
+            initial_root_pos,
+        });
+    }
+
+    fn start_toplevel_resize(
+        &mut self,
+        client_id: ClientId,
+        root_surface_object_id: ObjectId,
+        xdg_toplevel_id: XdgToplevelId,
+        edges: u32,
+        initial_root_pos: (i32, i32),
+        initial_size: (i32, i32),
+    ) {
+        self.pointer_interactive_grab = Some(PointerInteractiveGrab::Resize {
+            client_id,
+            root_surface_object_id,
+            xdg_toplevel_id,
+            edges,
+            initial_pointer_pos: self.pointer_pos,
+            initial_root_pos,
+            initial_size,
+            last_size: initial_size,
+        });
+    }
+
+    fn clear_pointer_interactive_grab(&mut self) {
+        self.pointer_interactive_grab = None;
     }
 }
 
@@ -179,6 +354,9 @@ pub fn handle_pointer_motion(
         state.seat.pointer_pos.1,
         time
     );
+    if apply_pointer_interactive_grab(state, dispatcher) {
+        return;
+    }
     refresh_pointer_focus(state, dispatcher, time, true);
 }
 
@@ -189,6 +367,9 @@ pub fn handle_pointer_button(
     button_state: u32,
     time: u32,
 ) {
+    if let Some(focus) = popup_keyboard_focus(state) {
+        set_keyboard_focus(state, dispatcher, Some(focus));
+    }
     refresh_pointer_focus(state, dispatcher, time, false);
     let pointer_focus = state.seat.pointer_focus;
     log::debug!(
@@ -198,15 +379,27 @@ pub fn handle_pointer_button(
         time,
         pointer_focus.map(|focus| focus.target)
     );
+
+    let serial = state.seat.next_serial();
+    state
+        .seat
+        .record_pointer_button(button_state, serial, pointer_focus.map(|focus| focus.target));
+
+    if maybe_dismiss_popup_grab_on_button(state, dispatcher, button_state) {
+        return;
+    }
+
     if button_state == 1 {
         set_keyboard_focus(state, dispatcher, pointer_focus.map(|focus| focus.target));
     }
 
     let Some(pointer_focus) = state.seat.pointer_focus else {
+        if button_state != 1 {
+            finish_pointer_interactive_grab(state, dispatcher);
+        }
         return;
     };
 
-    let serial = state.seat.next_serial();
     dispatch_client_event(
         dispatcher,
         pointer_focus.target.client_id,
@@ -217,6 +410,10 @@ pub fn handle_pointer_button(
         pointer_focus.target.client_id,
         SeatClientEvent::PointerFrame,
     );
+
+    if button_state != 1 {
+        finish_pointer_interactive_grab(state, dispatcher);
+    }
 }
 
 pub fn handle_pointer_motion_absolute(
@@ -234,6 +431,9 @@ pub fn handle_pointer_motion_absolute(
         state.seat.pointer_pos.1,
         time
     );
+    if apply_pointer_interactive_grab(state, dispatcher) {
+        return;
+    }
     refresh_pointer_focus(state, dispatcher, time, true);
 }
 
@@ -327,6 +527,160 @@ fn set_keyboard_focus(
     state.seat.keyboard_focus = new_focus;
 }
 
+fn surface_focus_for_wayland_id(state: &State, surface_id: WlSurfaceId) -> Option<SurfaceFocus> {
+    for (_, object) in state.objects.iter() {
+        let Some(surface) = object.downcast_ref::<WlSurface>() else {
+            continue;
+        };
+        if surface.surface_id() == surface_id {
+            return Some(SurfaceFocus { client_id: surface.client_id(), surface_id });
+        }
+    }
+    None
+}
+
+fn popup_keyboard_focus(state: &State) -> Option<SurfaceFocus> {
+    let surface_id = state.seat.popup_keyboard_surface()?;
+    surface_focus_for_wayland_id(state, surface_id)
+}
+
+fn maybe_dismiss_popup_grab_on_button(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    button_state: u32,
+) -> bool {
+    if button_state != 1 {
+        return false;
+    }
+    let Some(grab_client_id) = state.seat.popup_grab_client() else {
+        return false;
+    };
+    let inside_grabbed_client = state
+        .seat
+        .pointer_focus
+        .is_some_and(|focus| focus.target.client_id == grab_client_id);
+    if inside_grabbed_client {
+        return false;
+    }
+    let Some((client_id, popup_ids)) = state.seat.dismiss_popup_grab() else {
+        return false;
+    };
+    dispatch_client_action(dispatcher, client_id, ClientAction::DismissPopupGrab { popup_ids });
+    set_keyboard_focus(state, dispatcher, None);
+    true
+}
+
+fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher) -> bool {
+    let Some(grab) = state.seat.pointer_interactive_grab else {
+        return false;
+    };
+    match grab {
+        PointerInteractiveGrab::Move {
+            root_surface_object_id,
+            initial_pointer_pos,
+            initial_root_pos,
+            ..
+        } => {
+            let dx = (state.seat.pointer_pos.0 - initial_pointer_pos.0).round() as i32;
+            let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
+            let Some(mut surface_object) = state.objects.try_grab(root_surface_object_id) else {
+                state.seat.clear_pointer_interactive_grab();
+                return true;
+            };
+            let Some(surface) = surface_object.downcast_mut::<WlSurface>() else {
+                state.seat.clear_pointer_interactive_grab();
+                return true;
+            };
+            surface.set_root_position(initial_root_pos.0 + dx, initial_root_pos.1 + dy);
+            schedule_active_output(state, dispatcher);
+        }
+        PointerInteractiveGrab::Resize {
+            client_id,
+            root_surface_object_id,
+            xdg_toplevel_id,
+            edges,
+            initial_pointer_pos,
+            initial_root_pos,
+            initial_size,
+            mut last_size,
+        } => {
+            let dx = (state.seat.pointer_pos.0 - initial_pointer_pos.0).round() as i32;
+            let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
+            let (mut width, mut height) = initial_size;
+            let (mut x, mut y) = initial_root_pos;
+
+            if edges & 4 != 0 {
+                width = (initial_size.0 - dx).max(1);
+                x = initial_root_pos.0 + (initial_size.0 - width);
+            }
+            if edges & 8 != 0 {
+                width = (initial_size.0 + dx).max(1);
+            }
+            if edges & 1 != 0 {
+                height = (initial_size.1 - dy).max(1);
+                y = initial_root_pos.1 + (initial_size.1 - height);
+            }
+            if edges & 2 != 0 {
+                height = (initial_size.1 + dy).max(1);
+            }
+
+            let Some(mut surface_object) = state.objects.try_grab(root_surface_object_id) else {
+                state.seat.clear_pointer_interactive_grab();
+                return true;
+            };
+            if let Some(surface) = surface_object.downcast_mut::<WlSurface>() {
+                surface.set_root_position(x, y);
+            }
+            schedule_active_output(state, dispatcher);
+
+            if last_size != (width, height) {
+                dispatch_client_action(
+                    dispatcher,
+                    client_id,
+                    ClientAction::InteractiveResizeConfigure {
+                        xdg_toplevel_id,
+                        width,
+                        height,
+                        resizing: true,
+                    },
+                );
+                last_size = (width, height);
+            }
+
+            state.seat.pointer_interactive_grab = Some(PointerInteractiveGrab::Resize {
+                client_id,
+                root_surface_object_id,
+                xdg_toplevel_id,
+                edges,
+                initial_pointer_pos,
+                initial_root_pos,
+                initial_size,
+                last_size,
+            });
+        }
+    }
+    true
+}
+
+fn finish_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher) {
+    let Some(grab) = state.seat.pointer_interactive_grab else {
+        return;
+    };
+    if let PointerInteractiveGrab::Resize { client_id, xdg_toplevel_id, last_size, .. } = grab {
+        dispatch_client_action(
+            dispatcher,
+            client_id,
+            ClientAction::InteractiveResizeConfigure {
+                xdg_toplevel_id,
+                width: last_size.0,
+                height: last_size.1,
+                resizing: false,
+            },
+        );
+    }
+    state.seat.clear_pointer_interactive_grab();
+}
+
 fn hit_test_subtree(
     objects: &IndexMap<ObjectId, Box<dyn Object>>,
     surface_object_id: ObjectId,
@@ -399,6 +753,12 @@ fn hit_test_surface(
         }
         if let Some(root_hit) = hit_test_subtree(&state.objects, object_id, 0, 0, x, y) {
             hit = Some(root_hit);
+        }
+    }
+
+    if let Some(grab_client_id) = state.seat.popup_grab_client() {
+        if hit.is_some_and(|focus| focus.target.client_id != grab_client_id) {
+            hit = None;
         }
     }
 
@@ -529,6 +889,82 @@ fn local_coords(rect: SurfaceRect, pointer_pos: (f64, f64)) -> (f32, f32) {
 
 fn dispatch_client_event(dispatcher: &mut Dispatcher, client_id: ClientId, event: SeatClientEvent) {
     dispatcher.dispatch_to(client_id, ClientAction::SeatEvent { event });
+}
+
+fn dispatch_client_action(dispatcher: &mut Dispatcher, client_id: ClientId, action: ClientAction) {
+    dispatcher.dispatch_to(client_id, action);
+}
+
+pub fn begin_popup_grab(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    client_id: ClientId,
+    popup_id: XdgPopupId,
+    popup_surface_id: WlSurfaceId,
+) {
+    state
+        .seat
+        .start_popup_grab(client_id, popup_id, popup_surface_id);
+    if let Some(focus) = popup_keyboard_focus(state) {
+        set_keyboard_focus(state, dispatcher, Some(focus));
+    }
+}
+
+pub fn remove_popup_grab(state: &mut State, dispatcher: &mut Dispatcher, popup_id: XdgPopupId) {
+    state.seat.remove_popup_grab(popup_id);
+    if let Some(focus) = popup_keyboard_focus(state) {
+        set_keyboard_focus(state, dispatcher, Some(focus));
+    } else if state.seat.popup_grab.is_none() {
+        set_keyboard_focus(state, dispatcher, None);
+    }
+}
+
+pub fn request_toplevel_move(
+    state: &mut State,
+    client_id: ClientId,
+    surface_id: WlSurfaceId,
+    serial: u32,
+    root_surface_object_id: ObjectId,
+    initial_root_pos: (i32, i32),
+) -> bool {
+    if !state
+        .seat
+        .validate_pointer_grab_serial(client_id, surface_id, serial)
+    {
+        return false;
+    }
+    state
+        .seat
+        .start_toplevel_move(client_id, root_surface_object_id, initial_root_pos);
+    true
+}
+
+pub fn request_toplevel_resize(
+    state: &mut State,
+    client_id: ClientId,
+    surface_id: WlSurfaceId,
+    serial: u32,
+    root_surface_object_id: ObjectId,
+    xdg_toplevel_id: XdgToplevelId,
+    edges: u32,
+    initial_root_pos: (i32, i32),
+    initial_size: (i32, i32),
+) -> bool {
+    if !state
+        .seat
+        .validate_pointer_grab_serial(client_id, surface_id, serial)
+    {
+        return false;
+    }
+    state.seat.start_toplevel_resize(
+        client_id,
+        root_surface_object_id,
+        xdg_toplevel_id,
+        edges,
+        initial_root_pos,
+        initial_size,
+    );
+    true
 }
 
 fn remove_resource<K, V>(map: &mut BTreeMap<K, Vec<V>>, key: K, value: V)

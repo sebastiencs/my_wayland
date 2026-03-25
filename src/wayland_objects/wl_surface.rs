@@ -296,6 +296,10 @@ impl WlSurface {
         self.has_pending_buffer_attach() || self.has_committed_buffer()
     }
 
+    pub fn xdg_surface_id(&self) -> Option<XdgSurfaceId> {
+        self.impl_id
+    }
+
     pub fn clear_xdg_surface_role(&mut self, xdg_surface_id: XdgSurfaceId) {
         if self.impl_id == Some(xdg_surface_id) {
             self.impl_id = None;
@@ -345,6 +349,19 @@ impl WlSurface {
             .as_ref()
             .map(|subsurface| subsurface.current_position)
             .unwrap_or((0, 0))
+    }
+
+    pub fn root_position(&self) -> (i32, i32) {
+        (self.on_screen.x, self.on_screen.y)
+    }
+
+    pub fn set_root_position(&mut self, x: i32, y: i32) {
+        self.on_screen.x = x;
+        self.on_screen.y = y;
+        if let Some(blocked) = self.blocked.as_mut() {
+            blocked.x = x;
+            blocked.y = y;
+        }
     }
 
     fn pending_subsurface_position(&self) -> (i32, i32) {
@@ -1520,6 +1537,18 @@ impl WlSurface {
 
     pub fn logical_size(&self) -> Option<SizeI> {
         self.on_screen.logical_size
+    }
+
+    pub fn force_unmap_for_role_dismissal(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.cancel_blocked(client, state, dispatcher);
+        self.retire_current();
+        self.on_screen.logical_size = None;
+        self.on_screen.damage.clear();
     }
 
     pub fn take_retired_buffers(&mut self) -> Vec<RetiredBufferCandidate> {
