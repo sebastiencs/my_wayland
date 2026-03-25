@@ -158,6 +158,7 @@ impl GbmDevice {
 
 fn make_dmabuf(bo: *mut libc::c_void) -> DmaBuf {
     unsafe {
+        let nplanes = sys::gbm_bo_get_plane_count(bo);
         DmaBuf {
             id: DmaBufId::next(),
             width: sys::gbm_bo_get_width(bo) as i32,
@@ -169,12 +170,19 @@ fn make_dmabuf(bo: *mut libc::c_void) -> DmaBuf {
             },
             modifier: Modifier(sys::gbm_bo_get_modifier(bo)),
             planes: {
-                let nplanes = sys::gbm_bo_get_plane_count(bo);
                 (0..nplanes)
                     .map(|index| {
                         let offset = sys::gbm_bo_get_offset(bo, index);
                         let stride = sys::gbm_bo_get_stride_for_plane(bo, index);
-                        let fd = sys::gbm_bo_get_fd_for_plane(bo, index);
+                        let mut fd = sys::gbm_bo_get_fd_for_plane(bo, index);
+                        if fd < 0 && nplanes == 1 {
+                            fd = sys::gbm_bo_get_fd(bo);
+                            if fd >= 0 {
+                                log::debug!(
+                                    "gbm_bo_get_fd_for_plane failed for single-plane BO, falling back to gbm_bo_get_fd"
+                                );
+                            }
+                        }
                         assert!(fd >= 0);
                         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
                         DmaBufPlane { offset, stride, fd }
