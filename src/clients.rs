@@ -1558,6 +1558,7 @@ impl Model for Client {
                 if let Some(id) = self.reader_id.take() {
                     dispatcher.stop_model::<_, ClientReader>(id);
                 };
+                state.activation_tokens.remove_client(self.id);
                 let cursor_changed = state.seat.remove_client(self.id);
                 let client_objects: Vec<(WaylandId, ObjectId)> = self
                     .objects

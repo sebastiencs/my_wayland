@@ -6,7 +6,7 @@ use crate::{
     drm::{schedule_active_output, Drm},
     object::Object,
     protocol_generated::{
-        Array, WlKeyboardId, WlPointerId, WlSurfaceId, XdgPopupId, XdgToplevelId,
+        Array, WlKeyboardId, WlPointerId, WlSeatId, WlSurfaceId, XdgPopupId, XdgToplevelId,
     },
     runner::Dispatcher,
     state::{DrmId, IndexMap, ObjectId, State},
@@ -334,6 +334,15 @@ impl SeatState {
 
     pub fn pointer_position(&self) -> (f64, f64) {
         self.pointer_pos
+    }
+
+    pub fn keyboard_focus(&self) -> Option<SurfaceFocus> {
+        self.keyboard_focus
+    }
+
+    #[cfg(test)]
+    pub fn last_keyboard_trigger_serial(&self) -> Option<u32> {
+        self.last_keyboard_trigger.map(|trigger| trigger.serial)
     }
 
     #[cfg(test)]
@@ -666,16 +675,80 @@ fn set_keyboard_focus(
     state.seat.keyboard_focus = new_focus;
 }
 
-fn surface_focus_for_wayland_id(state: &State, surface_id: WlSurfaceId) -> Option<SurfaceFocus> {
-    for (_, object) in state.objects.iter() {
+fn surface_object_id_for_wayland_id(state: &State, surface_id: WlSurfaceId) -> Option<ObjectId> {
+    for (object_id, object) in state.objects.iter() {
         let Some(surface) = object.downcast_ref::<WlSurface>() else {
             continue;
         };
         if surface.surface_id() == surface_id {
-            return Some(SurfaceFocus { client_id: surface.client_id(), surface_id });
+            return Some(object_id);
         }
     }
     None
+}
+
+pub fn surface_focus_for_wayland_id(
+    state: &State,
+    surface_id: WlSurfaceId,
+) -> Option<SurfaceFocus> {
+    let object_id = surface_object_id_for_wayland_id(state, surface_id)?;
+    let surface = state.objects.try_ref_object::<WlSurface>(object_id)?;
+    Some(SurfaceFocus {
+        client_id: surface.client_id(),
+        surface_id: surface.surface_id(),
+    })
+}
+
+pub fn resolve_activation_target(
+    state: &State,
+    surface_id: WlSurfaceId,
+) -> Option<(ObjectId, SurfaceFocus)> {
+    let mut current_object_id = surface_object_id_for_wayland_id(state, surface_id)?;
+    loop {
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(current_object_id)?;
+        match surface.parent_surface_object_id() {
+            Some(parent_object_id) => current_object_id = parent_object_id,
+            None => {
+                if !surface.has_committed_buffer() {
+                    return None;
+                }
+                return Some((
+                    current_object_id,
+                    SurfaceFocus {
+                        client_id: surface.client_id(),
+                        surface_id: surface.surface_id(),
+                    },
+                ));
+            }
+        }
+    }
+}
+
+pub fn validate_activation_serial(
+    state: &State,
+    client_id: ClientId,
+    seat_id: WlSeatId,
+    surface_id: WlSurfaceId,
+    serial: u32,
+) -> bool {
+    state.objects.iter().any(|(_, object)| {
+        let Some(seat) = object.downcast_ref::<crate::wayland_objects::wl_seat::WlSeat>() else {
+            return false;
+        };
+        seat.id() == seat_id.into()
+    }) && state
+        .seat
+        .validate_implicit_grab_serial(client_id, surface_id, serial)
+}
+
+pub fn set_surface_focus(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    new_focus: Option<SurfaceFocus>,
+) {
+    set_keyboard_focus(state, dispatcher, new_focus);
 }
 
 fn popup_keyboard_focus(state: &State) -> Option<SurfaceFocus> {
@@ -1249,6 +1322,7 @@ mod surface_tree_hit_test_tests {
             active_output: None,
             backend_syncobj_globals: Default::default(),
             globals,
+            activation_tokens: Default::default(),
             egl: EGL::new(),
             seat: Default::default(),
             keyboard,
@@ -1439,6 +1513,7 @@ mod xdg_seat_tests {
             active_output: None,
             backend_syncobj_globals: Default::default(),
             globals,
+            activation_tokens: Default::default(),
             egl: EGL::new(),
             seat: SeatState::default(),
             keyboard,

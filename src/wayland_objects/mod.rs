@@ -27,6 +27,7 @@ pub mod wp_presentation;
 pub mod wp_presentation_feedback;
 pub mod wp_viewport;
 pub mod wp_viewporter;
+pub mod xdg_activation_token_v1;
 pub mod xdg_activation_v1;
 pub mod xdg_popup;
 pub mod xdg_positioner;
@@ -89,7 +90,6 @@ fake_obj! {
     { wp_tearing_control_manager_v1, WpTearingControlManagerV1 },
     { wp_tearing_control_v1, WpTearingControlV1 },
     // { xdg_activation_v1, XdgActivationV1 },
-    { xdg_activation_token_v1, XdgActivationTokenV1 },
     { xwayland_shell_v1, XwaylandShellV1 },
     { ext_session_lock_surface_v1, ExtSessionLockSurfaceV1 },
     { xwayland_surface_v1, XwaylandSurfaceV1 },

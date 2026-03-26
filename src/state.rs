@@ -1,16 +1,20 @@
 use crate::{
+    clients::ClientId,
     drm::Drm,
     egl::EGL,
     globals::{Global, GlobalName, Globals},
     input::Input,
     object::Object,
-    protocol_generated::WaylandId,
+    protocol_generated::{WaylandId, WlSeatId, WlSurfaceId},
     region::RectI,
     seat::SeatState,
     xkb::{KeyboardState, Xkb},
 };
 
-use std::{collections::BTreeMap, marker::PhantomData, ptr::NonNull, rc::Rc};
+use {
+    rand::{rngs::OsRng, RngCore},
+    std::{collections::BTreeMap, marker::PhantomData, ptr::NonNull, rc::Rc},
+};
 
 #[derive(Debug)]
 enum ValueOrEmpty<V> {
@@ -553,6 +557,128 @@ impl Output {
     }
 }
 
+const ACTIVATION_TOKEN_TTL_MSEC: u64 = 30_000;
+
+#[derive(Clone, Debug)]
+pub struct ActivationTokenData {
+    pub client_id: ClientId,
+    pub seat_id: Option<WlSeatId>,
+    pub serial: Option<u32>,
+    pub surface_id: Option<WlSurfaceId>,
+    pub app_id: Option<String>,
+    pub committed_at_msec: u64,
+    pub expires_at_msec: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct ActivationTokenStore {
+    tokens: BTreeMap<String, ActivationTokenData>,
+}
+
+impl ActivationTokenStore {
+    fn monotonic_time_msec() -> u64 {
+        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+            return 0;
+        }
+        (ts.tv_sec as u64)
+            .saturating_mul(1000)
+            .saturating_add((ts.tv_nsec as u64) / 1_000_000)
+    }
+
+    fn format_16_bytes_hex(bytes: &[u8; 16]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut s = String::with_capacity(32);
+        for byte in bytes {
+            s.push(HEX[(byte >> 4) as usize] as char);
+            s.push(HEX[(byte & 0xf) as usize] as char);
+        }
+        s
+    }
+
+    /// 128 bits from the OS RNG, encoded as 32 lowercase hex digits (same shape as wlroots).
+    fn random_hex_token() -> String {
+        let mut buf = [0u8; 16];
+        OsRng.fill_bytes(&mut buf);
+        Self::format_16_bytes_hex(&buf)
+    }
+
+    fn random_activation_token(&mut self) -> String {
+        loop {
+            let s = Self::random_hex_token();
+            if !self.tokens.contains_key(&s) {
+                return s;
+            }
+        }
+    }
+
+    pub fn issue_tracked(
+        &mut self,
+        client_id: ClientId,
+        seat_id: Option<WlSeatId>,
+        serial: Option<u32>,
+        surface_id: Option<WlSurfaceId>,
+        app_id: Option<String>,
+    ) -> String {
+        self.purge_expired();
+        let committed_at_msec = Self::monotonic_time_msec();
+        let expires_at_msec = committed_at_msec.saturating_add(ACTIVATION_TOKEN_TTL_MSEC);
+        let token = self.random_activation_token();
+        self.tokens.insert(
+            token.clone(),
+            ActivationTokenData {
+                client_id,
+                seat_id,
+                serial,
+                surface_id,
+                app_id,
+                committed_at_msec,
+                expires_at_msec,
+            },
+        );
+        token
+    }
+
+    pub fn issue_untracked(&mut self) -> String {
+        self.purge_expired();
+        Self::random_hex_token()
+    }
+
+    pub fn consume(&mut self, token: &str) -> Option<ActivationTokenData> {
+        self.purge_expired();
+        self.tokens.remove(token)
+    }
+
+    pub fn purge_expired(&mut self) {
+        let now = Self::monotonic_time_msec();
+        self.tokens.retain(|_, data| data.expires_at_msec > now);
+    }
+
+    pub fn remove_client(&mut self, client_id: ClientId) {
+        self.tokens.retain(|_, data| data.client_id != client_id);
+    }
+
+    #[cfg(test)]
+    pub fn expire_now(&mut self, token: &str) -> bool {
+        let now = Self::monotonic_time_msec();
+        let Some(data) = self.tokens.get_mut(token) else {
+            return false;
+        };
+        data.expires_at_msec = now;
+        true
+    }
+
+    #[cfg(test)]
+    pub fn first_token(&self) -> Option<String> {
+        self.tokens.keys().next().cloned()
+    }
+
+    #[cfg(test)]
+    pub fn tracked_count(&self) -> usize {
+        self.tokens.len()
+    }
+}
+
 pub struct State {
     pub objects: Box<IndexMap<ObjectId, Box<dyn Object>>>,
     pub root_surfaces: Vec<ObjectId>,
@@ -562,6 +688,7 @@ pub struct State {
     pub active_output: Option<OutputId>,
     pub backend_syncobj_globals: BTreeMap<DrmId, GlobalName>,
     pub globals: Globals,
+    pub activation_tokens: ActivationTokenStore,
     pub egl: EGL,
     pub seat: SeatState,
     pub keyboard: KeyboardState,
@@ -589,6 +716,14 @@ impl State {
     pub fn unregister_root_surface(&mut self, object_id: ObjectId) {
         self.root_surfaces
             .retain(|candidate| *candidate != object_id);
+    }
+
+    pub fn raise_root_surface(&mut self, object_id: ObjectId) -> bool {
+        if !self.objects.contains(object_id) {
+            return false;
+        }
+        self.register_root_surface(object_id);
+        true
     }
 
     pub fn root_surface_ids(&self) -> Vec<ObjectId> {

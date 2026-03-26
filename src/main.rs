@@ -210,6 +210,7 @@ fn main() {
         active_output: None,
         backend_syncobj_globals: Default::default(),
         globals,
+        activation_tokens: Default::default(),
         egl,
         seat: Default::default(),
         keyboard,

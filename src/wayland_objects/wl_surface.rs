@@ -2289,6 +2289,7 @@ mod tests {
             active_output: None,
             backend_syncobj_globals: Default::default(),
             globals,
+            activation_tokens: Default::default(),
             egl: EGL::new(),
             seat: Default::default(),
             keyboard,
