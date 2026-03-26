@@ -7,7 +7,7 @@ use crate::{
         WlSeatId,
     },
     state::State,
-    wayland_objects::{wl_keyboard::WlKeyboard, wl_pointer::WlPointer},
+    wayland_objects::{wl_display::WlDisplay, wl_keyboard::WlKeyboard, wl_pointer::WlPointer},
 };
 
 #[derive(Debug)]
@@ -93,7 +93,9 @@ impl Object for WlSeat {
                 client.insert_object(state, wl_keyboard);
             }
             GetTouch { id } => todo!(),
-            Release => todo!(),
+            Release => {
+                client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
+            }
         }
     }
 }

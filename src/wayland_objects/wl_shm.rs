@@ -5,7 +5,7 @@ use crate::{
     object::{Object, Parser},
     protocol_generated::{wl_shm, Constants, NewId, WaylandId, WlShmId},
     state::State,
-    wayland_objects::wl_shm_pool::WlShmPool,
+    wayland_objects::{wl_display::WlDisplay, wl_shm_pool::WlShmPool},
 };
 
 #[derive(Debug)]
@@ -62,7 +62,7 @@ impl Object for WlShm {
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
-        _: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) {
         use crate::protocol_generated::wl_shm::Request::*;
 
@@ -71,7 +71,9 @@ impl Object for WlShm {
                 let pool = WlShmPool::new(id, fd, size as usize);
                 client.insert_object(state, pool);
             }
-            Release => todo!(),
+            Release => {
+                client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
+            }
         }
     }
 }
