@@ -161,6 +161,7 @@ struct SurfaceCommitPayload {
 #[derive(Clone, Debug)]
 struct OnScreen {
     buffer_object_id: Option<ObjectId>,
+    content_revision: u64,
     x: i32,
     y: i32,
     sync: SurfaceSyncState,
@@ -180,6 +181,7 @@ impl Default for OnScreen {
     fn default() -> Self {
         Self {
             buffer_object_id: None,
+            content_revision: 0,
             x: 0,
             y: 0,
             sync: SurfaceSyncState::default(),
@@ -397,6 +399,10 @@ impl WlSurface {
 
     pub fn root_position(&self) -> (i32, i32) {
         (self.on_screen.x, self.on_screen.y)
+    }
+
+    pub fn content_revision(&self) -> u64 {
+        self.on_screen.content_revision
     }
 
     pub fn active_output_id(&self) -> Option<OutputId> {
@@ -790,6 +796,7 @@ impl WlSurface {
         self.retire_current();
         self.on_screen = OnScreen {
             buffer_object_id: None,
+            content_revision: self.next_content_revision(),
             x: self.on_screen.x,
             y: self.on_screen.y,
             sync: SurfaceSyncState::default(),
@@ -1200,6 +1207,7 @@ impl WlSurface {
                 self.retire_current();
                 self.on_screen = OnScreen {
                     buffer_object_id: None,
+                    content_revision: self.next_content_revision(),
                     x: self.on_screen.x,
                     y: self.on_screen.y,
                     sync: SurfaceSyncState::default(),
@@ -1297,6 +1305,9 @@ impl WlSurface {
                 changes.mapping_changed,
             );
             self.on_screen.damage.add_region(&committed_damage);
+            if changes.buffer_changed || changes.mapping_changed || !committed_damage.is_empty() {
+                self.on_screen.content_revision = self.next_content_revision();
+            }
         }
 
         let SurfaceChanges { buffer_changed, mapping_changed } = changes;
@@ -1843,6 +1854,7 @@ impl WlSurface {
     ) {
         self.on_screen = OnScreen {
             buffer_object_id: Some(buffer_object_id),
+            content_revision: 1,
             x,
             y,
             sync: SurfaceSyncState::default(),
@@ -1909,6 +1921,7 @@ impl WlSurface {
         self.retire_current();
         self.on_screen = OnScreen {
             buffer_object_id: Some(next.buffer_object_id),
+            content_revision: self.next_content_revision(),
             x: next.x,
             y: next.y,
             sync: next.sync,
@@ -1939,6 +1952,10 @@ impl WlSurface {
         self.on_screen.logical_size = None;
         self.on_screen.sample_transform = transform::Mat3::identity();
         self.on_screen.damage.clear();
+    }
+
+    fn next_content_revision(&self) -> u64 {
+        self.on_screen.content_revision.saturating_add(1).max(1)
     }
 
     fn cancel_blocked(
@@ -2240,6 +2257,7 @@ mod tests {
         let mut surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(7), 6);
         surface.on_screen = OnScreen {
             buffer_object_id: Some(ObjectId::from(1usize)),
+            content_revision: 1,
             x: 10,
             y: 20,
             sync: SurfaceSyncState::default(),

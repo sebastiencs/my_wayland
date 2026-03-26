@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::{
     clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest},
     dmabuf::DmaBuf,
-    drm::Format,
+    drm::{Format, ARGB8888},
     egl::{EglContext, GlTexture},
     object::{Object, Parser},
     protocol_generated::{wl_buffer, WaylandId, WlBufferId},
@@ -38,6 +38,15 @@ pub struct WlBuffer {
     owner_client_id: ClientId,
     destroyed: bool,
     backing: BufferBacking,
+}
+
+#[derive(Clone, Debug)]
+pub struct CursorShmBuffer {
+    mem: Rc<SharedMemory>,
+    offset: usize,
+    width: usize,
+    height: usize,
+    stride: usize,
 }
 
 pub struct NewWlBufferParams {
@@ -219,6 +228,81 @@ impl WlBuffer {
                 Some(texture.as_ref()?.texture_id())
             }
         }
+    }
+
+    pub fn shm_cursor_argb8888(&self) -> Option<CursorShmBuffer> {
+        let BufferBacking::Shm { offset, width, height, stride, format, mem, .. } = &self.backing
+        else {
+            return None;
+        };
+        if format.drm != ARGB8888.drm {
+            return None;
+        }
+        Some(CursorShmBuffer {
+            mem: mem.clone(),
+            offset: *offset,
+            width: *width,
+            height: *height,
+            stride: *stride,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_argb8888_shm(
+        id: WlBufferId,
+        owner_client_id: ClientId,
+        width: i32,
+        height: i32,
+        pixels: Vec<u8>,
+    ) -> Self {
+        let stride = (width as usize).saturating_mul(ARGB8888.bpp as usize);
+        let mem = super::wl_shm_pool::shared_memory_from_bytes(&pixels);
+        Self {
+            id,
+            owner_client_id,
+            destroyed: false,
+            backing: BufferBacking::Shm {
+                offset: 0,
+                width: width as usize,
+                height: height as usize,
+                stride,
+                format: ARGB8888,
+                mem,
+                texture: None,
+            },
+        }
+    }
+}
+
+impl CursorShmBuffer {
+    pub fn width(&self) -> i32 {
+        self.width as i32
+    }
+
+    pub fn height(&self) -> i32 {
+        self.height as i32
+    }
+
+    pub fn copy_to_drm_argb8888_cursor_bytes(
+        &self,
+        output_pitch: usize,
+        output_height: usize,
+    ) -> Vec<u8> {
+        let mut dst = vec![0; output_pitch.saturating_mul(output_height)];
+        let row_bytes = self.width.saturating_mul(4);
+        let src = self
+            .mem
+            .clone()
+            .slice_at(self.offset, self.stride.saturating_mul(self.height));
+        let src = src.as_slice();
+        for row in 0..self.height {
+            let src_start = row.saturating_mul(self.stride);
+            let dst_start = row.saturating_mul(output_pitch);
+            let src_row = &src[src_start..src_start + row_bytes];
+            let dst_row = &mut dst[dst_start..dst_start + row_bytes];
+            dst_row.copy_from_slice(src_row);
+        }
+        dst
     }
 }
 

@@ -211,6 +211,20 @@ impl SharedMemory {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn shared_memory_from_bytes(bytes: &[u8]) -> Rc<SharedMemory> {
+    let size = bytes.len().max(1);
+    let name = std::ffi::CString::new("cursor-test-shm").unwrap();
+    let raw_fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    assert!(raw_fd >= 0, "memfd_create failed: {:?}", std::io::Error::last_os_error());
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let truncate_result = unsafe { libc::ftruncate(fd.as_raw_fd(), size as libc::off_t) };
+    assert_eq!(truncate_result, 0, "ftruncate failed: {:?}", std::io::Error::last_os_error());
+    let write_result = unsafe { libc::write(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+    assert!(write_result >= 0, "write failed: {:?}", std::io::Error::last_os_error());
+    SharedMemory::try_mmap(fd.as_raw_fd(), size).unwrap()
+}
+
 #[derive(Debug)]
 pub struct SliceSharedMemory {
     mem: Rc<SharedMemory>,
@@ -227,7 +241,7 @@ impl SliceSharedMemory {
         unsafe { self.mem.ptr.byte_add(self.offset) }
     }
 
-    fn as_slice(&self) -> &[u8] {
+    pub(crate) fn as_slice(&self) -> &[u8] {
         unsafe { NonNull::slice_from_raw_parts(self.ptr(), self.length).as_ref() }
     }
 }
