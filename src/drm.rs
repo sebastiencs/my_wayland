@@ -23,7 +23,7 @@ use {
 };
 
 use crate::{
-    cursor::CursorSourceRef,
+    cursor::{CursorImage, CursorImageContentKey, CursorSourceRef},
     dmabuf::DmaBuf,
     egl::{EglContext, EglFrameBuffer, GlTexture, RenderItem, EGL},
     gbm::{BufferObject, UseFlags},
@@ -165,8 +165,9 @@ pub struct DrmOutput {
     in_flight_frame: Option<SubmittedFrame>,
     displayed_external_fb: Option<DrmFrameBuffer>,
     retiring_external_fb: Option<DrmFrameBuffer>,
-    displayed_cursor_buffer: Option<CursorPlaneBuffer>,
-    retiring_cursor_buffer: Option<CursorPlaneBuffer>,
+    displayed_cursor_slot: Option<usize>,
+    retiring_cursor_slot: Option<usize>,
+    cursor_slots: [Option<CachedCursorPlaneSlot>; 2],
     cursor_plane_state: CursorPlaneState,
     cursor_animation_delay_msec: Option<u32>,
     allow_in_fence_fd: bool,
@@ -229,7 +230,49 @@ struct CursorPlaneCandidate {
     y: i32,
     width: i32,
     height: i32,
+    slot: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CursorPlaneRequest<'a> {
+    image: &'a CursorImage,
+    x: i32,
+    y: i32,
+    next_frame_in_msec: Option<u32>,
+}
+
+#[derive(Debug)]
+struct CachedCursorPlaneSlot {
+    content_key: Option<CursorImageContentKey>,
     buffer: CursorPlaneBuffer,
+}
+
+fn find_cursor_slot_index_for_key(
+    slot_keys: [Option<CursorImageContentKey>; 2],
+    key: CursorImageContentKey,
+) -> Option<usize> {
+    slot_keys
+        .into_iter()
+        .enumerate()
+        .find_map(|(index, slot_key)| (slot_key == Some(key)).then_some(index))
+}
+
+fn select_cursor_upload_slot(
+    displayed_slot: Option<usize>,
+    available_slots: [bool; 2],
+) -> Option<usize> {
+    available_slots
+        .into_iter()
+        .enumerate()
+        .find_map(|(index, available)| {
+            (available && Some(index) != displayed_slot).then_some(index)
+        })
+        .or_else(|| {
+            available_slots
+                .into_iter()
+                .enumerate()
+                .find_map(|(index, available)| available.then_some(index))
+        })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -281,12 +324,12 @@ enum SubmittedFrame {
         damage: DamageRegion,
         submission: OutputSubmission,
         damage_blob: Option<u64>,
-        cursor_buffer: Option<CursorPlaneBuffer>,
+        cursor_slot: Option<usize>,
     },
     DirectScanout {
         submission: OutputSubmission,
         framebuffer: DrmFrameBuffer,
-        cursor_buffer: Option<CursorPlaneBuffer>,
+        cursor_slot: Option<usize>,
     },
 }
 
@@ -369,7 +412,7 @@ impl DrmOutput {
         self.needs_frame = false;
         self.in_flight_frame = Some(frame);
         self.retiring_external_fb = self.displayed_external_fb.take();
-        self.retiring_cursor_buffer = self.displayed_cursor_buffer.take();
+        self.retiring_cursor_slot = self.displayed_cursor_slot.take();
     }
 
     fn take_in_flight_presentation_feedbacks_for_discard(
@@ -396,7 +439,7 @@ impl DrmOutput {
                 damage,
                 submission,
                 damage_blob,
-                cursor_buffer,
+                cursor_slot,
             }) => {
                 self.displayed_buffer_index = buffer_index;
                 self.render_buffer_index = if buffer_index == 0 { 1 } else { 0 };
@@ -407,15 +450,15 @@ impl DrmOutput {
                 }
                 self.last_scene = submission.scene.clone();
                 self.displayed_external_fb = None;
-                self.displayed_cursor_buffer = cursor_buffer;
+                self.displayed_cursor_slot = cursor_slot;
                 self.force_full_redraw = false;
                 completed_submission = Some(CompletedSubmission { submission, damage_blob });
             }
-            Some(SubmittedFrame::DirectScanout { submission, framebuffer, cursor_buffer }) => {
+            Some(SubmittedFrame::DirectScanout { submission, framebuffer, cursor_slot }) => {
                 self.force_full_redraw = true;
                 self.last_scene = submission.scene.clone();
                 self.displayed_external_fb = Some(framebuffer);
-                self.displayed_cursor_buffer = cursor_buffer;
+                self.displayed_cursor_slot = cursor_slot;
                 self.rendered_buffer_present_id = [None, None];
                 self.damage_history.clear();
                 completed_submission = Some(CompletedSubmission { submission, damage_blob: None });
@@ -423,7 +466,7 @@ impl DrmOutput {
             None => {}
         }
         self.retiring_external_fb = None;
-        self.retiring_cursor_buffer = None;
+        self.retiring_cursor_slot = None;
 
         if self.needs_frame && !self.frame_scheduled {
             self.frame_scheduled = true;
@@ -467,6 +510,31 @@ impl DrmOutput {
 
     fn note_cursor_plane_success(&mut self) {
         self.cursor_plane_state = CursorPlaneState::Ready;
+    }
+
+    fn cursor_slot(&self, index: usize) -> Option<&CachedCursorPlaneSlot> {
+        self.cursor_slots.get(index)?.as_ref()
+    }
+
+    fn cursor_slot_index_for_content_key(
+        &self,
+        content_key: CursorImageContentKey,
+    ) -> Option<usize> {
+        find_cursor_slot_index_for_key(
+            std::array::from_fn(|index| self.cursor_slot(index).and_then(|slot| slot.content_key)),
+            content_key,
+        )
+    }
+
+    fn preferred_upload_cursor_slot(&self) -> Option<usize> {
+        select_cursor_upload_slot(
+            self.displayed_cursor_slot,
+            std::array::from_fn(|index| self.cursor_slot(index).is_some()),
+        )
+    }
+
+    fn has_displayed_cursor_slot(&self) -> bool {
+        self.displayed_cursor_slot.is_some()
     }
 
     fn preserve_render_buffer_contents(&self) -> bool {
@@ -850,7 +918,7 @@ impl Drm {
         let supports_syncobj_eventfd =
             supports_syncobj_timeline && probe_syncobj_eventfd_support(&drm);
 
-        Self {
+        let mut drm_backend = Self {
             fd: drm,
             device,
             resources,
@@ -859,7 +927,9 @@ impl Drm {
             output,
             supports_syncobj_timeline,
             supports_syncobj_eventfd,
-        }
+        };
+        drm_backend.initialize_cursor_plane_slots();
+        drm_backend
     }
 
     pub fn make_model(&self, drm_id: DrmId) -> DrmModel {
@@ -908,16 +978,11 @@ impl Drm {
     }
 
     fn collect_cursor_plane_candidate(
-        &self,
-        state: &State,
+        &mut self,
+        request: &CursorPlaneRequest<'_>,
         output_bounds: RectI,
-        now_msec: u32,
     ) -> Option<CursorPlaneCandidate> {
-        let plane = self.output.in_use.cursor_plane()?;
-        let CursorSourceRef::Named { image, .. } = state.seat.visible_cursor_source_at(now_msec)?
-        else {
-            return None;
-        };
+        let image = request.image;
         if image.width <= 0
             || image.height <= 0
             || image.width as u64 > self.resources.cursor_width
@@ -925,85 +990,52 @@ impl Drm {
         {
             return None;
         }
-        let x = state.seat.pointer_position().0.round() as i32 - image.hotspot_x;
-        let y = state.seat.pointer_position().1.round() as i32 - image.hotspot_y;
+        let x = request.x;
+        let y = request.y;
         let bounds = RectI::new(x, y, image.width, image.height)?;
         if classify_cursor_output_visibility(bounds, output_bounds)
             != CursorOutputVisibility::FullyVisible
         {
             return None;
         }
-        let plane_format = plane.formats.get(&DrmFourcc::Argb8888)?;
-        if !plane_format.modifiers.contains(&Modifier::INVALID)
-            && !plane_format.modifiers.contains(&Modifier::LINEAR)
-            && !plane_format.modifiers.contains(&Modifier::ZERO)
-        {
-            return None;
-        }
-
-        // virtio rejects AddFB2 framebuffers smaller than 32x32 even for cursor planes.
-        let min_cursor_fb_size = if self.driver.name == "virtio_gpu" { 32 } else { 1 };
-        let fb_width = (image.width as u32).max(min_cursor_fb_size);
-        let fb_height = (image.height as u32).max(min_cursor_fb_size);
-        let bo = self.egl_context.gbm.create_bo_with_size_no_export(
-            fb_width,
-            fb_height,
-            DrmFourcc::Argb8888,
-            UseFlags::CURSOR | UseFlags::WRITE,
-            &[],
-        );
-        let bo_modifier = bo.modifier();
-        if !plane_format.modifiers.contains(&Modifier::INVALID)
-            && !plane_format.modifiers.contains(&bo_modifier)
-        {
+        let content_key = image.content_key();
+        let (fb_width, fb_height) = self.fixed_cursor_plane_size();
+        let slot = if let Some(slot) = self.output.cursor_slot_index_for_content_key(content_key) {
+            let cached = self.output.cursor_slot(slot).unwrap();
             log::debug!(
-                "Skipping DRM cursor plane candidate: plane modifiers {:?} do not accept cursor BO modifier {:?}",
-                plane_format.modifiers,
-                bo_modifier
+                "Reusing cached DRM cursor plane buffer: slot={} visible_size={}x{} fb_size={}x{} pos=({}, {}) hotspot=({}, {}) fb={:?}",
+                slot,
+                image.width,
+                image.height,
+                fb_width,
+                fb_height,
+                x,
+                y,
+                image.hotspot_x,
+                image.hotspot_y,
+                cached.buffer.framebuffer.id()
             );
-            return None;
-        }
-        let pitch = drm::buffer::Buffer::pitch(&bo) as usize;
-        let bytes = rgba_to_drm_argb8888(
-            &image.pixels_rgba,
-            image.width as usize,
-            image.height as usize,
-            pitch,
-            fb_height as usize,
-        );
-        bo.write(&bytes);
-        let framebuffer = match Self::add_framebuffer_for_bo(&self.fd, &bo) {
-            Ok(framebuffer) => framebuffer,
-            Err(error) => {
-                log::debug!(
-                    "Skipping DRM cursor plane candidate: failed to create framebuffer for {}x{} cursor BO: {:?}",
-                    image.width,
-                    image.height,
-                    error
-                );
-                return None;
-            }
+            slot
+        } else {
+            let slot = self.output.preferred_upload_cursor_slot()?;
+            self.upload_cursor_plane_slot(slot, image, content_key)?;
+            let cached = self.output.cursor_slot(slot).unwrap();
+            log::debug!(
+                "Prepared DRM cursor plane candidate: slot={} visible_size={}x{} fb_size={}x{} pos=({}, {}) hotspot=({}, {}) fb={:?}",
+                slot,
+                image.width,
+                image.height,
+                fb_width,
+                fb_height,
+                x,
+                y,
+                image.hotspot_x,
+                image.hotspot_y,
+                cached.buffer.framebuffer.id()
+            );
+            slot
         };
-        log::debug!(
-            "Prepared DRM cursor plane candidate: visible_size={}x{} fb_size={}x{} pos=({}, {}) hotspot=({}, {}) fb={:?} modifier={:?}",
-            image.width,
-            image.height,
-            fb_width,
-            fb_height,
-            x,
-            y,
-            image.hotspot_x,
-            image.hotspot_y,
-            framebuffer.id(),
-            bo_modifier
-        );
-        Some(CursorPlaneCandidate {
-            x,
-            y,
-            width: image.width,
-            height: image.height,
-            buffer: CursorPlaneBuffer { bo, framebuffer },
-        })
+        Some(CursorPlaneCandidate { x, y, width: image.width, height: image.height, slot })
     }
 
     fn append_cursor_plane_changes(
@@ -1017,7 +1049,15 @@ impl Drm {
         let crtc = self.output.in_use.crtc.handle;
         let (fb, crtc_value, x, y, width, height, src_width, src_height) = match cursor {
             Some(cursor) => (
-                control::property::Value::Object(Some(cursor.buffer.framebuffer.id().into())),
+                control::property::Value::Object(Some(
+                    self.output
+                        .cursor_slot(cursor.slot)
+                        .expect("cursor plane slot missing during atomic commit")
+                        .buffer
+                        .framebuffer
+                        .id()
+                        .into(),
+                )),
                 control::property::Value::CRTC(Some(crtc)),
                 cursor.x as u64,
                 cursor.y as u64,
@@ -1214,7 +1254,7 @@ impl Drm {
                             damage: damage.clone(),
                             submission,
                             damage_blob,
-                            cursor_buffer: cursor_plane.map(|cursor| cursor.buffer),
+                            cursor_slot: cursor_plane.map(|cursor| cursor.slot),
                         });
                     return Ok(callback_surfaces);
                 }
@@ -1364,9 +1404,135 @@ impl Drm {
             .mark_frame_submitted(SubmittedFrame::DirectScanout {
                 submission,
                 framebuffer: candidate.framebuffer,
-                cursor_buffer: cursor_plane.map(|cursor| cursor.buffer),
+                cursor_slot: cursor_plane.map(|cursor| cursor.slot),
             });
         Ok(callback_surfaces)
+    }
+
+    fn initialize_cursor_plane_slots(&mut self) {
+        let Some(plane_format) = self.cursor_plane_format() else {
+            return;
+        };
+        let (fb_width, fb_height) = self.fixed_cursor_plane_size();
+        for slot in 0..self.output.cursor_slots.len() {
+            let Some(buffer) = self.allocate_cursor_plane_buffer(&plane_format) else {
+                log::warn!(
+                    "Failed to preallocate DRM cursor plane slot {} at {}x{}, falling back to software cursor composition",
+                    slot,
+                    fb_width,
+                    fb_height
+                );
+                self.output.cursor_slots = [None, None];
+                return;
+            };
+            log::debug!(
+                "Preallocated DRM cursor plane slot: slot={} fb_size={}x{} fb={:?}",
+                slot,
+                fb_width,
+                fb_height,
+                buffer.framebuffer.id()
+            );
+            self.output.cursor_slots[slot] =
+                Some(CachedCursorPlaneSlot { content_key: None, buffer });
+        }
+    }
+
+    fn cursor_plane_format(&self) -> Option<PlaneFormat> {
+        let plane = self.output.in_use.cursor_plane()?;
+        let plane_format = plane.formats.get(&DrmFourcc::Argb8888)?.clone();
+        if !plane_format.modifiers.contains(&Modifier::INVALID)
+            && !plane_format.modifiers.contains(&Modifier::LINEAR)
+            && !plane_format.modifiers.contains(&Modifier::ZERO)
+        {
+            log::debug!(
+                "Skipping DRM cursor plane initialization: plane modifiers {:?} do not accept linear ARGB8888 cursor buffers",
+                plane_format.modifiers
+            );
+            return None;
+        }
+        Some(plane_format)
+    }
+
+    fn fixed_cursor_plane_size(&self) -> (u32, u32) {
+        // virtio rejects AddFB2 framebuffers smaller than 32x32 even for cursor planes.
+        let min_cursor_fb_size = if self.driver.name == "virtio_gpu" { 32 } else { 1 };
+        let cursor_width = u32::try_from(self.resources.cursor_width).unwrap_or(u32::MAX);
+        let cursor_height = u32::try_from(self.resources.cursor_height).unwrap_or(u32::MAX);
+        (cursor_width.max(min_cursor_fb_size), cursor_height.max(min_cursor_fb_size))
+    }
+
+    fn upload_cursor_plane_slot(
+        &mut self,
+        slot: usize,
+        image: &CursorImage,
+        content_key: CursorImageContentKey,
+    ) -> Option<()> {
+        let (_, fb_height) = self.fixed_cursor_plane_size();
+        let cached = self.output.cursor_slots[slot].as_mut().unwrap();
+        if cached.content_key != Some(content_key) {
+            let pitch = drm::buffer::Buffer::pitch(&cached.buffer.bo) as usize;
+            let bytes = rgba_to_drm_argb8888(
+                &image.pixels_rgba,
+                image.width as usize,
+                image.height as usize,
+                pitch,
+                fb_height as usize,
+            );
+            cached.buffer.bo.write(&bytes);
+            cached.content_key = Some(content_key);
+            log::debug!(
+                "Updated cached DRM cursor plane slot pixels: slot={} fb={:?}",
+                slot,
+                cached.buffer.framebuffer.id()
+            );
+        } else {
+            log::debug!(
+                "Reused cached DRM cursor plane slot without pixel upload: slot={} fb={:?}",
+                slot,
+                cached.buffer.framebuffer.id()
+            );
+        }
+        Some(())
+    }
+
+    fn allocate_cursor_plane_buffer(
+        &self,
+        plane_format: &PlaneFormat,
+    ) -> Option<CursorPlaneBuffer> {
+        let (fb_width, fb_height) = self.fixed_cursor_plane_size();
+        let bo = self.egl_context.gbm.create_bo_with_size_no_export(
+            fb_width,
+            fb_height,
+            DrmFourcc::Argb8888,
+            UseFlags::CURSOR | UseFlags::WRITE,
+            &[],
+        );
+        let bo_modifier = bo.modifier();
+        if !plane_format.modifiers.contains(&Modifier::INVALID)
+            && !plane_format.modifiers.contains(&bo_modifier)
+        {
+            log::debug!(
+                "Skipping DRM cursor plane candidate: plane modifiers {:?} do not accept cursor BO modifier {:?}",
+                plane_format.modifiers,
+                bo_modifier
+            );
+            return None;
+        }
+        let pitch = drm::buffer::Buffer::pitch(&bo) as usize;
+        bo.write(&vec![0; pitch.saturating_mul(fb_height as usize)]);
+        let framebuffer = match Self::add_framebuffer_for_bo(&self.fd, &bo) {
+            Ok(framebuffer) => framebuffer,
+            Err(error) => {
+                log::debug!(
+                    "Skipping DRM cursor plane candidate: failed to create framebuffer for {}x{} cursor BO: {:?}",
+                    fb_width,
+                    fb_height,
+                    error
+                );
+                return None;
+            }
+        };
+        Some(CursorPlaneBuffer { bo, framebuffer })
     }
 
     fn list_resources(drm: &DrmFd) -> DrmResources {
@@ -1574,8 +1740,9 @@ impl Drm {
             in_flight_frame: None,
             displayed_external_fb: None,
             retiring_external_fb: None,
-            displayed_cursor_buffer: None,
-            retiring_cursor_buffer: None,
+            displayed_cursor_slot: None,
+            retiring_cursor_slot: None,
+            cursor_slots: [None, None],
             cursor_plane_state: CursorPlaneState::Ready,
             cursor_animation_delay_msec: None,
             allow_in_fence_fd: true,
@@ -2702,7 +2869,7 @@ impl DrmModel {
 
             if damage.is_empty()
                 && cursor_plane.is_none()
-                && drm.output.displayed_cursor_buffer.is_none()
+                && !drm.output.has_displayed_cursor_slot()
             {
                 drm.output.mark_frame_idle();
                 let releases = std::mem::take(&mut drm.output.in_flight_releases);
@@ -3541,32 +3708,39 @@ fn collect_render_items(
         snapshots
     };
 
-    let named_cursor_visible = matches!(
-        state.seat.visible_cursor_source_at(frame_time_msec),
-        Some(CursorSourceRef::Named { .. })
-    );
-    let (output_bounds, allow_cursor_plane) = {
+    let output_bounds = {
         let drm = state.drm.get_mut(drm_id);
-        let output_bounds = drm.output.output_bounds();
-        let allow_cursor_plane = named_cursor_visible && drm.output.cursor_plane_available();
-        (output_bounds, allow_cursor_plane)
+        drm.output.output_bounds()
     };
-    let cursor_plane = if allow_cursor_plane {
-        let cursor_plane = state.drm.get(drm_id).collect_cursor_plane_candidate(
-            state,
-            output_bounds,
-            frame_time_msec,
-        );
-        if cursor_plane.is_some() {
-            cursor_animation_delay_msec = match state.seat.visible_cursor_source_at(frame_time_msec)
-            {
-                Some(CursorSourceRef::Named { next_frame_in_msec, .. }) => next_frame_in_msec,
-                _ => None,
-            };
+    let cursor_plane = {
+        let named_cursor_request = match state.seat.visible_cursor_source_at(frame_time_msec) {
+            Some(CursorSourceRef::Named { image, next_frame_in_msec, .. }) => {
+                Some(CursorPlaneRequest {
+                    x: state.seat.pointer_position().0.round() as i32 - image.hotspot_x,
+                    y: state.seat.pointer_position().1.round() as i32 - image.hotspot_y,
+                    image,
+                    next_frame_in_msec,
+                })
+            }
+            _ => None,
+        };
+        let allow_cursor_plane = {
+            let drm = state.drm.get_mut(drm_id);
+            named_cursor_request.is_some() && drm.output.cursor_plane_available()
+        };
+        if allow_cursor_plane {
+            let request = named_cursor_request.as_ref().unwrap();
+            let cursor_plane = state
+                .drm
+                .get_mut(drm_id)
+                .collect_cursor_plane_candidate(request, output_bounds);
+            if cursor_plane.is_some() {
+                cursor_animation_delay_msec = request.next_frame_in_msec;
+            }
+            cursor_plane
+        } else {
+            None
         }
-        cursor_plane
-    } else {
-        None
     };
     let cursor_snapshots = if cursor_plane.is_none() {
         collect_cursor_surface_snapshots(state, &mut retired_candidates)
@@ -3693,13 +3867,15 @@ mod cursor_policy_tests {
 mod presentation_timing_tests {
     use {
         super::{
-            presentation_feedback_flags, presentation_refresh_interval_ns, rgba_to_drm_argb8888,
-            sanitize_present_timestamp, select_presentation_output_for_scene,
+            find_cursor_slot_index_for_key, presentation_feedback_flags,
+            presentation_refresh_interval_ns, rgba_to_drm_argb8888, sanitize_present_timestamp,
+            select_cursor_upload_slot, select_presentation_output_for_scene,
             submitted_frame_feedbacks_for_discard, OutputSubmission, SceneItemKey, SceneItemState,
             SubmissionPresentationFeedback, SubmittedFrame, SurfaceKey,
         },
         crate::{
             clients::ClientId,
+            cursor::CursorImageContentKey,
             egl::EGL,
             globals::Globals,
             protocol_generated::WpPresentationFeedbackId,
@@ -3795,13 +3971,27 @@ mod presentation_timing_tests {
                 zero_copy: false,
             },
             damage_blob: None,
-            cursor_buffer: None,
+            cursor_slot: None,
         };
 
         let (feedbacks, blob) = submitted_frame_feedbacks_for_discard(frame);
 
         assert_eq!(feedbacks, vec![submission_feedback(4, 2)]);
         assert!(blob.is_none());
+    }
+
+    #[test]
+    fn cursor_slot_lookup_reuses_matching_content_key() {
+        let key = CursorImageContentKey { width: 24, height: 24, fingerprint: 7 };
+        assert_eq!(find_cursor_slot_index_for_key([Some(key), None], key), Some(0));
+        assert_eq!(find_cursor_slot_index_for_key([None, Some(key)], key), Some(1));
+    }
+
+    #[test]
+    fn cursor_upload_slot_avoids_displayed_slot_when_possible() {
+        assert_eq!(select_cursor_upload_slot(Some(0), [true, true]), Some(1));
+        assert_eq!(select_cursor_upload_slot(Some(1), [true, true]), Some(0));
+        assert_eq!(select_cursor_upload_slot(None, [true, true]), Some(0));
     }
 
     #[test]

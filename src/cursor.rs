@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, env, fs};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    hash::{DefaultHasher, Hash, Hasher},
+};
 
 use xcursor::{parser, CursorTheme};
 
@@ -14,7 +18,15 @@ pub struct CursorImage {
     pub hotspot_x: i32,
     pub hotspot_y: i32,
     pub delay_msec: u32,
+    content_fingerprint: u64,
     pub pixels_rgba: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CursorImageContentKey {
+    pub width: i32,
+    pub height: i32,
+    pub fingerprint: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -266,20 +278,59 @@ impl CursorState {
     }
 }
 
+impl CursorImage {
+    pub fn new(
+        name: String,
+        width: i32,
+        height: i32,
+        hotspot_x: i32,
+        hotspot_y: i32,
+        delay_msec: u32,
+        pixels_rgba: Vec<u8>,
+    ) -> Self {
+        Self {
+            name,
+            width,
+            height,
+            hotspot_x,
+            hotspot_y,
+            delay_msec,
+            content_fingerprint: fingerprint_cursor_content(width, height, &pixels_rgba),
+            pixels_rgba,
+        }
+    }
+
+    pub fn content_key(&self) -> CursorImageContentKey {
+        CursorImageContentKey {
+            width: self.width,
+            height: self.height,
+            fingerprint: self.content_fingerprint,
+        }
+    }
+}
+
 fn convert_cursor_image(icon_name: &str, image: parser::Image) -> Option<CursorImage> {
     let width = i32::try_from(image.width).ok()?;
     let height = i32::try_from(image.height).ok()?;
     let hotspot_x = i32::try_from(image.xhot).ok()?;
     let hotspot_y = i32::try_from(image.yhot).ok()?;
-    Some(CursorImage {
-        name: icon_name.to_string(),
+    Some(CursorImage::new(
+        icon_name.to_string(),
         width,
         height,
         hotspot_x,
         hotspot_y,
-        delay_msec: image.delay.max(1),
-        pixels_rgba: image.pixels_rgba,
-    })
+        image.delay.max(1),
+        image.pixels_rgba,
+    ))
+}
+
+fn fingerprint_cursor_content(width: i32, height: i32, pixels_rgba: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    width.hash(&mut hasher);
+    height.hash(&mut hasher);
+    pixels_rgba.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn select_animation_frame(
@@ -451,24 +502,8 @@ mod tests {
     fn select_animation_frame_respects_frame_delays() {
         let animation = NamedCursorAnimation {
             frames: vec![
-                CursorImage {
-                    name: "wait".to_string(),
-                    width: 24,
-                    height: 24,
-                    hotspot_x: 1,
-                    hotspot_y: 2,
-                    delay_msec: 40,
-                    pixels_rgba: vec![0; 4],
-                },
-                CursorImage {
-                    name: "wait".to_string(),
-                    width: 24,
-                    height: 24,
-                    hotspot_x: 3,
-                    hotspot_y: 4,
-                    delay_msec: 60,
-                    pixels_rgba: vec![1; 4],
-                },
+                CursorImage::new("wait".to_string(), 24, 24, 1, 2, 40, vec![0; 4]),
+                CursorImage::new("wait".to_string(), 24, 24, 3, 4, 60, vec![1; 4]),
             ],
             total_duration_msec: 100,
         };
@@ -483,5 +518,13 @@ mod tests {
 
         let (image_loop, _) = select_animation_frame(&animation, 10, 120).unwrap();
         assert_eq!(image_loop.hotspot_x, 1);
+    }
+
+    #[test]
+    fn cursor_content_key_ignores_hotspot_and_delay() {
+        let image_a = CursorImage::new("wait".to_string(), 24, 24, 1, 2, 40, vec![7; 24 * 24 * 4]);
+        let image_b = CursorImage::new("wait".to_string(), 24, 24, 9, 8, 90, vec![7; 24 * 24 * 4]);
+
+        assert_eq!(image_a.content_key(), image_b.content_key());
     }
 }
