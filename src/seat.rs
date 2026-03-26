@@ -144,6 +144,8 @@ pub struct SeatState {
 
 impl Default for SeatState {
     fn default() -> Self {
+        let mut cursor = CursorState::default();
+        let _ = cursor.ensure_default_named_cursor();
         Self {
             current_serial: 1,
             pointer_pos: (0.0, 0.0),
@@ -153,7 +155,7 @@ impl Default for SeatState {
             pointer_button_count: 0,
             last_pointer_press: None,
             last_keyboard_trigger: None,
-            cursor: CursorState::default(),
+            cursor,
             popup_grab: None,
             pointer_interactive_grab: None,
             pointer_resources: BTreeMap::default(),
@@ -290,6 +292,10 @@ impl SeatState {
         self.cursor.set_named_cursor(client_id, icon_names)
     }
 
+    pub fn set_default_cursor(&mut self) -> bool {
+        self.cursor.ensure_default_named_cursor()
+    }
+
     pub fn set_cursor_surface(
         &mut self,
         client_id: ClientId,
@@ -330,8 +336,9 @@ impl SeatState {
         self.pointer_pos
     }
 
-    fn clear_cursor_for_focus(&mut self, focus_client_id: Option<ClientId>) -> bool {
-        self.cursor.clear_for_focus(focus_client_id)
+    #[cfg(test)]
+    fn test_install_default_cursor(&mut self) -> bool {
+        self.cursor.test_install_default_cursor()
     }
 
     fn validate_implicit_grab_serial(
@@ -971,20 +978,33 @@ fn refresh_pointer_focus(
         }
 
         state.seat.pointer_focus = new_focus;
-        let cleared_cursor_owner = visible_cursor_owner_client(state);
-        if state
-            .seat
-            .clear_cursor_for_focus(new_focus.map(|focus| focus.target.client_id))
-        {
-            if let Some(client_id) = cleared_cursor_owner {
-                dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
+        if state.seat.pointer_focus.is_none() {
+            let previous_cursor_owner = visible_cursor_owner_client(state);
+            if state.seat.set_default_cursor() {
+                if let Some(client_id) = previous_cursor_owner {
+                    dispatch_client_action(
+                        dispatcher,
+                        client_id,
+                        ClientAction::RefreshSurfaceOutputs,
+                    );
+                }
+                schedule_active_output(state, dispatcher);
             }
-            schedule_active_output(state, dispatcher);
         }
         return;
     }
 
     state.seat.pointer_focus = new_focus;
+
+    if state.seat.pointer_focus.is_none() {
+        let previous_cursor_owner = visible_cursor_owner_client(state);
+        if state.seat.set_default_cursor() {
+            if let Some(client_id) = previous_cursor_owner {
+                dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
+            }
+            schedule_active_output(state, dispatcher);
+        }
+    }
 
     if send_motion {
         if let Some(focus) = new_focus {
@@ -1050,8 +1070,8 @@ fn dispatch_client_action(dispatcher: &mut Dispatcher, client_id: ClientId, acti
 
 fn visible_cursor_owner_client(state: &State) -> Option<ClientId> {
     match state.seat.visible_cursor_source()? {
-        CursorSourceRef::Named { owner_client_id, .. }
-        | CursorSourceRef::Surface { owner_client_id, .. } => Some(owner_client_id),
+        CursorSourceRef::Named { owner_client_id, .. } => owner_client_id,
+        CursorSourceRef::Surface { owner_client_id, .. } => Some(owner_client_id),
     }
 }
 
@@ -1973,7 +1993,7 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn focus_change_clears_surface_cursor_owned_by_previous_client() {
+    fn no_focus_fallback_installs_default_cursor() {
         let mut seat = SeatState::default();
         assert!(seat.set_cursor_surface(
             ClientId::from_raw(7),
@@ -1983,7 +2003,6 @@ mod xdg_seat_tests {
             5,
         ));
 
-        assert!(!seat.clear_cursor_for_focus(Some(ClientId::from_raw(7))));
         assert!(matches!(
             seat.visible_cursor_source(),
             Some(CursorSourceRef::Surface { owner_client_id, cursor })
@@ -1991,8 +2010,52 @@ mod xdg_seat_tests {
                     && cursor.object_id == ObjectId::from(80usize)
         ));
 
-        assert!(seat.clear_cursor_for_focus(Some(ClientId::from_raw(8))));
+        assert!(seat.test_install_default_cursor());
+        assert!(matches!(
+            seat.visible_cursor_source(),
+            Some(CursorSourceRef::Named { owner_client_id: None, .. })
+        ));
+    }
+
+    #[test]
+    fn explicit_client_cursor_clear_can_be_followed_by_default_fallback() {
+        let mut seat = SeatState::default();
+        seat.test_install_default_cursor();
+        assert!(seat.set_cursor_surface(
+            ClientId::from_raw(7),
+            WlSurfaceId::from(50),
+            ObjectId::from(80usize),
+            4,
+            5,
+        ));
+
+        assert!(seat.clear_cursor_for_client(ClientId::from_raw(7)));
         assert!(seat.visible_cursor_source().is_none());
+
+        assert!(seat.test_install_default_cursor());
+        assert!(matches!(
+            seat.visible_cursor_source(),
+            Some(CursorSourceRef::Named { owner_client_id: None, .. })
+        ));
+    }
+
+    #[test]
+    fn client_cursor_stays_visible_without_default_fallback() {
+        let mut seat = SeatState::default();
+        assert!(seat.set_cursor_surface(
+            ClientId::from_raw(7),
+            WlSurfaceId::from(50),
+            ObjectId::from(80usize),
+            4,
+            5,
+        ));
+
+        assert!(matches!(
+            seat.visible_cursor_source(),
+            Some(CursorSourceRef::Surface { owner_client_id, cursor })
+                if owner_client_id == ClientId::from_raw(7)
+                    && cursor.object_id == ObjectId::from(80usize)
+        ));
     }
 
     #[test]

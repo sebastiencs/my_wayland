@@ -37,9 +37,15 @@ pub struct CursorSurface {
     pub hotspot_y: i32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CursorOwner {
+    Client(ClientId),
+    Compositor,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct NamedCursor {
-    owner_client_id: ClientId,
+    owner: CursorOwner,
     name: String,
     animation: NamedCursorAnimation,
     started_at_msec: u32,
@@ -60,7 +66,7 @@ enum CursorSource {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CursorSourceRef<'a> {
     Named {
-        owner_client_id: ClientId,
+        owner_client_id: Option<ClientId>,
         name: &'a str,
         image: &'a CursorImage,
         next_frame_in_msec: Option<u32>,
@@ -103,7 +109,7 @@ impl CursorState {
                 let (image, next_frame_in_msec) =
                     select_animation_frame(&cursor.animation, cursor.started_at_msec, now_msec)?;
                 Some(CursorSourceRef::Named {
-                    owner_client_id: cursor.owner_client_id,
+                    owner_client_id: cursor.owner.client_id(),
                     name: &cursor.name,
                     image,
                     next_frame_in_msec,
@@ -138,19 +144,31 @@ impl CursorState {
         self.clear()
     }
 
-    pub fn clear_for_focus(&mut self, focus_client_id: Option<ClientId>) -> bool {
-        let Some(owner_client_id) = self.owner_client_id() else {
-            return false;
-        };
-        if Some(owner_client_id) == focus_client_id {
+    pub fn set_default_named_cursor(&mut self) -> bool {
+        self.set_named_cursor_internal(CursorOwner::Compositor, DEFAULT_ICON_NAMES)
+    }
+
+    pub fn ensure_default_named_cursor(&mut self) -> bool {
+        if matches!(
+            self.source.as_ref(),
+            Some(CursorSource::Named(NamedCursor { owner: CursorOwner::Compositor, .. }))
+        ) {
             return false;
         }
-        self.clear()
+        self.set_default_named_cursor()
     }
 
     pub fn set_named_cursor(
         &mut self,
         owner_client_id: ClientId,
+        icon_names: &[&'static str],
+    ) -> bool {
+        self.set_named_cursor_internal(CursorOwner::Client(owner_client_id), icon_names)
+    }
+
+    fn set_named_cursor_internal(
+        &mut self,
+        owner: CursorOwner,
         icon_names: &[&'static str],
     ) -> bool {
         let fallback = if icon_names == DEFAULT_ICON_NAMES {
@@ -162,22 +180,7 @@ impl CursorState {
             return self.clear();
         };
 
-        let changed = !matches!(
-            self.source.as_ref(),
-            Some(CursorSource::Named(cursor))
-                if cursor.owner_client_id == owner_client_id
-                    && cursor.name == resolved_name
-                    && cursor.animation == animation
-        );
-        if changed {
-            self.source = Some(CursorSource::Named(NamedCursor {
-                owner_client_id,
-                name: resolved_name.to_string(),
-                animation,
-                started_at_msec: monotonic_time_msec(),
-            }));
-        }
-        changed
+        self.install_named_cursor(owner, resolved_name, animation)
     }
 
     pub fn set_surface_cursor(
@@ -270,10 +273,63 @@ impl CursorState {
         Some(NamedCursorAnimation { frames, total_duration_msec })
     }
 
+    fn install_named_cursor(
+        &mut self,
+        owner: CursorOwner,
+        resolved_name: &'static str,
+        animation: NamedCursorAnimation,
+    ) -> bool {
+        let changed = !matches!(
+            self.source.as_ref(),
+            Some(CursorSource::Named(cursor))
+                if cursor.owner == owner
+                    && cursor.name == resolved_name
+                    && cursor.animation == animation
+        );
+        if changed {
+            self.source = Some(CursorSource::Named(NamedCursor {
+                owner,
+                name: resolved_name.to_string(),
+                animation,
+                started_at_msec: monotonic_time_msec(),
+            }));
+        }
+        changed
+    }
+
     fn owner_client_id(&self) -> Option<ClientId> {
         match self.source.as_ref()? {
-            CursorSource::Named(cursor) => Some(cursor.owner_client_id),
+            CursorSource::Named(cursor) => cursor.owner.client_id(),
             CursorSource::Surface { owner_client_id, .. } => Some(*owner_client_id),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_install_default_cursor(&mut self) -> bool {
+        self.install_named_cursor(
+            CursorOwner::Compositor,
+            DEFAULT_ICON_NAMES[0],
+            NamedCursorAnimation {
+                frames: vec![CursorImage::new(
+                    DEFAULT_ICON_NAMES[0].to_string(),
+                    16,
+                    16,
+                    1,
+                    1,
+                    16,
+                    vec![0xff; 16 * 16 * 4],
+                )],
+                total_duration_msec: 16,
+            },
+        )
+    }
+}
+
+impl CursorOwner {
+    fn client_id(self) -> Option<ClientId> {
+        match self {
+            CursorOwner::Client(client_id) => Some(client_id),
+            CursorOwner::Compositor => None,
         }
     }
 }
@@ -376,7 +432,7 @@ mod tests {
     use {
         super::{
             clamp_i64_to_i32, select_animation_frame, CursorImage, CursorSourceRef, CursorState,
-            NamedCursorAnimation,
+            NamedCursorAnimation, DEFAULT_ICON_NAMES,
         },
         crate::{clients::ClientId, protocol_generated::WlSurfaceId, state::ObjectId},
         xcursor::parser,
@@ -526,5 +582,47 @@ mod tests {
         let image_b = CursorImage::new("wait".to_string(), 24, 24, 9, 8, 90, vec![7; 24 * 24 * 4]);
 
         assert_eq!(image_a.content_key(), image_b.content_key());
+    }
+
+    #[test]
+    fn test_default_cursor_is_compositor_owned() {
+        let mut cursor = CursorState::default();
+
+        assert!(cursor.test_install_default_cursor());
+        assert!(matches!(
+            cursor.source().unwrap(),
+            CursorSourceRef::Named { owner_client_id: None, name, .. }
+                if name == DEFAULT_ICON_NAMES[0]
+        ));
+    }
+
+    #[test]
+    fn compositor_default_replaces_client_owned_cursor() {
+        let mut cursor = CursorState::default();
+        assert!(cursor.set_surface_cursor(
+            ClientId::from_raw(4),
+            WlSurfaceId::from(12),
+            ObjectId::from(18usize),
+            2,
+            3,
+        ));
+
+        assert!(cursor.test_install_default_cursor());
+        assert!(matches!(
+            cursor.source().unwrap(),
+            CursorSourceRef::Named { owner_client_id: None, .. }
+        ));
+    }
+
+    #[test]
+    fn clear_for_client_does_not_clear_compositor_default() {
+        let mut cursor = CursorState::default();
+        cursor.test_install_default_cursor();
+
+        assert!(!cursor.clear_for_client(ClientId::from_raw(9)));
+        assert!(matches!(
+            cursor.source().unwrap(),
+            CursorSourceRef::Named { owner_client_id: None, .. }
+        ));
     }
 }
