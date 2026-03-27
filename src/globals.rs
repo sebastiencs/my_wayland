@@ -8,7 +8,7 @@ use crate::{
         wp_cursor_shape_manager_v1::WpCursorShapeManagerV1Global,
         wp_presentation::WpPresentationGlobal, wp_viewporter::WpViewporterGlobal,
         xdg_activation_v1::XdgActivationV1Global, xdg_wm_base::XdgWmBaseGlobal,
-        zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1Global,
+        zwlr_layer_shell_v1::ZwlrLayerShellV1Global,
         zxdg_output_manager_v1::ZxdgOutputManagerV1Global,
     },
 };
@@ -57,6 +57,7 @@ impl Globals {
             WpCursorShapeManagerV1Global::new,
             XdgActivationV1Global::new,
             XdgWmBaseGlobal::new,
+            ZwlrLayerShellV1Global::new,
             ZxdgOutputManagerV1Global::new,
         ] {
             self.map.insert(fun());

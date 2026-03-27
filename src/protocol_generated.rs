@@ -104,6 +104,8 @@ wayland_id! {
   ZwpTabletPadV2Id,
   ZxdgOutputManagerV1Id,
   ZxdgOutputV1Id,
+  ZwlrLayerShellV1Id,
+  ZwlrLayerSurfaceV1Id,
 }
 
 pub trait Constants {
@@ -12680,5 +12682,470 @@ pub mod zxdg_output_v1 {
                 }
             }
         }
+    }
+}
+
+/// Create surfaces that are layers of the desktop
+///
+/// Clients can use this interface to assign the surface_layer role to
+/// wl_surfaces. Such surfaces are assigned to a "layer" of the output and
+/// rendered with a defined z-depth respective to each other. They may also be
+/// anchored to the edges and corners of a screen and specify input handling
+/// semantics. This interface should be suitable for the implementation of
+/// many desktop shell components, and a broad number of other applications
+/// that interact with the desktop.
+pub mod zwlr_layer_shell_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwlr_layer_shell_v1::ZwlrLayerShellV1 {
+        const INTERFACE_NAME: &'static str = "zwlr_layer_shell_v1";
+        const INTERFACE_VERSION: u32 = 5;
+    }
+    impl crate::object::IdToObject for ZwlrLayerShellV1Id {
+        type Object = crate::wayland_objects::zwlr_layer_shell_v1::ZwlrLayerShellV1;
+    }
+    /// Minimum interface version for the `get_layer_surface` message (XML `since`).
+    pub const GET_LAYER_SURFACE_SINCE: u32 = 1;
+    /// Minimum interface version for the `destroy` message (XML `since`).
+    pub const DESTROY_SINCE: u32 = 3;
+    #[derive(Debug)]
+    pub enum Request {
+        /// Create a layer_surface from a surface
+        ///
+        /// Create a layer surface for an existing surface. This assigns the role of
+        /// layer_surface, or raises a protocol error if another role is already
+        /// assigned.
+        ///
+        /// Creating a layer surface from a wl_surface which has a buffer attached
+        /// or committed is a client error, and any attempts by a client to attach
+        /// or manipulate a buffer prior to the first layer_surface.configure call
+        /// must also be treated as errors.
+        ///
+        /// After creating a layer_surface object and setting it up, the client
+        /// must perform an initial commit without any buffer attached.
+        /// The compositor will reply with a layer_surface.configure event.
+        /// The client must acknowledge it and is then allowed to attach a buffer
+        /// to map the surface.
+        ///
+        /// You may pass NULL for output to allow the compositor to decide which
+        /// output to use. Generally this will be the one that the user most
+        /// recently interacted with.
+        ///
+        /// Clients can specify a namespace that defines the purpose of the layer
+        /// surface.
+        GetLayerSurface {
+            id: ZwlrLayerSurfaceV1Id,
+            surface: WlSurfaceId,
+            output: WlOutputId,
+            /// Layer to add this surface to,
+            layer: u32,
+            /// Namespace for the layer surface,
+            namespace: String,
+        },
+        /// Destroy the layer_shell object
+        ///
+        /// This request indicates that the client will not use the layer_shell
+        /// object any more. Objects that have been created through this instance
+        /// are not affected.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwlr_layer_shell_v1::ZwlrLayerShellV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => GetLayerSurface {
+                    id: req.id()?,
+                    surface: req.id()?,
+                    output: req.id()?,
+                    layer: req.uint()?,
+                    namespace: req.string()?,
+                },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Wl_surface has another role,
+        Role = 0,
+        /// Layer value is invalid,
+        InvalidLayer = 1,
+        /// Wl_surface has a buffer attached or committed,
+        AlreadyConstructed = 2,
+    }
+    /// Available layers for surfaces
+    ///
+    /// These values indicate which layers a surface can be rendered in. They
+    /// are ordered by z depth, bottom-most first. Traditional shell surfaces
+    /// will typically be rendered between the bottom and top layers.
+    /// Fullscreen shell surfaces are typically rendered at the top layer.
+    /// Multiple surfaces can share a single layer, and ordering within a
+    /// single layer is undefined.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Layer {
+        Background = 0,
+        Bottom = 1,
+        Top = 2,
+        Overlay = 3,
+    }
+}
+
+/// Layer metadata interface
+///
+/// An interface that may be implemented by a wl_surface, for surfaces that
+/// are designed to be rendered as a layer of a stacked desktop-like
+/// environment.
+///
+/// Layer surface state (layer, size, anchor, exclusive zone,
+/// margin, interactivity) is double-buffered, and will be applied at the
+/// time wl_surface.commit of the corresponding wl_surface is called.
+///
+/// Attaching a null buffer to a layer surface unmaps it.
+///
+/// Unmapping a layer_surface means that the surface cannot be shown by the
+/// compositor until it is explicitly mapped again. The layer_surface
+/// returns to the state it had right after layer_shell.get_layer_surface.
+/// The client can re-map the surface by performing a commit without any
+/// buffer attached, waiting for a configure event and handling it as usual.
+pub mod zwlr_layer_surface_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1 {
+        const INTERFACE_NAME: &'static str = "zwlr_layer_surface_v1";
+        const INTERFACE_VERSION: u32 = 5;
+    }
+    impl crate::object::IdToObject for ZwlrLayerSurfaceV1Id {
+        type Object = crate::wayland_objects::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
+    }
+    /// Minimum interface version for the `set_size` message (XML `since`).
+    pub const SET_SIZE_SINCE: u32 = 1;
+    /// Minimum interface version for the `set_anchor` message (XML `since`).
+    pub const SET_ANCHOR_SINCE: u32 = 1;
+    /// Minimum interface version for the `set_exclusive_zone` message (XML `since`).
+    pub const SET_EXCLUSIVE_ZONE_SINCE: u32 = 1;
+    /// Minimum interface version for the `set_margin` message (XML `since`).
+    pub const SET_MARGIN_SINCE: u32 = 1;
+    /// Minimum interface version for the `set_keyboard_interactivity` message (XML `since`).
+    pub const SET_KEYBOARD_INTERACTIVITY_SINCE: u32 = 1;
+    /// Minimum interface version for the `get_popup` message (XML `since`).
+    pub const GET_POPUP_SINCE: u32 = 1;
+    /// Minimum interface version for the `ack_configure` message (XML `since`).
+    pub const ACK_CONFIGURE_SINCE: u32 = 1;
+    /// Minimum interface version for the `destroy` message (XML `since`).
+    pub const DESTROY_SINCE: u32 = 1;
+    /// Minimum interface version for the `set_layer` message (XML `since`).
+    pub const SET_LAYER_SINCE: u32 = 2;
+    /// Minimum interface version for the `set_exclusive_edge` message (XML `since`).
+    pub const SET_EXCLUSIVE_EDGE_SINCE: u32 = 5;
+    #[derive(Debug)]
+    pub enum Request {
+        /// Sets the size of the surface
+        ///
+        /// Sets the size of the surface in surface-local coordinates. The
+        /// compositor will display the surface centered with respect to its
+        /// anchors.
+        ///
+        /// If you pass 0 for either value, the compositor will assign it and
+        /// inform you of the assignment in the configure event. You must set your
+        /// anchor to opposite edges in the dimensions you omit; not doing so is a
+        /// protocol error. Both values are 0 by default.
+        ///
+        /// Size is double-buffered, see wl_surface.commit.
+        SetSize { width: u32, height: u32 },
+        /// Configures the anchor point of the surface
+        ///
+        /// Requests that the compositor anchor the surface to the specified edges
+        /// and corners. If two orthogonal edges are specified (e.g. 'top' and
+        /// 'left'), then the anchor point will be the intersection of the edges
+        /// (e.g. the top left corner of the output); otherwise the anchor point
+        /// will be centered on that edge, or in the center if none is specified.
+        ///
+        /// Anchor is double-buffered, see wl_surface.commit.
+        SetAnchor { anchor: u32 },
+        /// Configures the exclusive geometry of this surface
+        ///
+        /// Requests that the compositor avoids occluding an area with other
+        /// surfaces. The compositor's use of this information is
+        /// implementation-dependent - do not assume that this region will not
+        /// actually be occluded.
+        ///
+        /// A positive value is only meaningful if the surface is anchored to one
+        /// edge or an edge and both perpendicular edges. If the surface is not
+        /// anchored, anchored to only two perpendicular edges (a corner), anchored
+        /// to only two parallel edges or anchored to all edges, a positive value
+        /// will be treated the same as zero.
+        ///
+        /// A positive zone is the distance from the edge in surface-local
+        /// coordinates to consider exclusive.
+        ///
+        /// Surfaces that do not wish to have an exclusive zone may instead specify
+        /// how they should interact with surfaces that do. If set to zero, the
+        /// surface indicates that it would like to be moved to avoid occluding
+        /// surfaces with a positive exclusive zone. If set to -1, the surface
+        /// indicates that it would not like to be moved to accommodate for other
+        /// surfaces, and the compositor should extend it all the way to the edges
+        /// it is anchored to.
+        ///
+        /// For example, a panel might set its exclusive zone to 10, so that
+        /// maximized shell surfaces are not shown on top of it. A notification
+        /// might set its exclusive zone to 0, so that it is moved to avoid
+        /// occluding the panel, but shell surfaces are shown underneath it. A
+        /// wallpaper or lock screen might set their exclusive zone to -1, so that
+        /// they stretch below or over the panel.
+        ///
+        /// The default value is 0.
+        ///
+        /// Exclusive zone is double-buffered, see wl_surface.commit.
+        SetExclusiveZone { zone: i32 },
+        /// Sets a margin from the anchor point
+        ///
+        /// Requests that the surface be placed some distance away from the anchor
+        /// point on the output, in surface-local coordinates. Setting this value
+        /// for edges you are not anchored to has no effect.
+        ///
+        /// The exclusive zone includes the margin.
+        ///
+        /// Margin is double-buffered, see wl_surface.commit.
+        SetMargin { top: i32, right: i32, bottom: i32, left: i32 },
+        /// Requests keyboard events
+        ///
+        /// Set how keyboard events are delivered to this surface. By default,
+        /// layer shell surfaces do not receive keyboard events; this request can
+        /// be used to change this.
+        ///
+        /// This setting is inherited by child surfaces set by the get_popup
+        /// request.
+        ///
+        /// Layer surfaces receive pointer, touch, and tablet events normally. If
+        /// you do not want to receive them, set the input region on your surface
+        /// to an empty region.
+        ///
+        /// Keyboard interactivity is double-buffered, see wl_surface.commit.
+        SetKeyboardInteractivity { keyboard_interactivity: u32 },
+        /// Assign this layer_surface as an xdg_popup parent
+        ///
+        /// This assigns an xdg_popup's parent to this layer_surface.  This popup
+        /// should have been created via xdg_surface::get_popup with the parent set
+        /// to NULL, and this request must be invoked before committing the popup's
+        /// initial state.
+        ///
+        /// See the documentation of xdg_popup for more details about what an
+        /// xdg_popup is and how it is used.
+        GetPopup { popup: XdgPopupId },
+        /// Ack a configure event
+        ///
+        /// When a configure event is received, if a client commits the
+        /// surface in response to the configure event, then the client
+        /// must make an ack_configure request sometime before the commit
+        /// request, passing along the serial of the configure event.
+        ///
+        /// If the client receives multiple configure events before it
+        /// can respond to one, it only has to ack the last configure event.
+        ///
+        /// A client is not required to commit immediately after sending
+        /// an ack_configure request - it may even ack_configure several times
+        /// before its next surface commit.
+        ///
+        /// A client may send multiple ack_configure requests before committing, but
+        /// only the last request sent before a commit indicates which configure
+        /// event the client really is responding to.
+        AckConfigure {
+            /// The serial from the configure event,
+            serial: u32,
+        },
+        /// Destroy the layer_surface
+        ///
+        /// This request destroys the layer surface.
+        Destroy,
+        /// Change the layer of the surface
+        ///
+        /// Change the layer that the surface is rendered on.
+        ///
+        /// Layer is double-buffered, see wl_surface.commit.
+        SetLayer {
+            /// Layer to move this surface to,
+            layer: u32,
+        },
+        /// Set the edge the exclusive zone will be applied to
+        ///
+        /// Requests an edge for the exclusive zone to apply. The exclusive
+        /// edge will be automatically deduced from anchor points when possible,
+        /// but when the surface is anchored to a corner, it will be necessary
+        /// to set it explicitly to disambiguate, as it is not possible to deduce
+        /// which one of the two corner edges should be used.
+        ///
+        /// The edge must be one the surface is anchored to, otherwise the
+        /// invalid_exclusive_edge protocol error will be raised.
+        SetExclusiveEdge { edge: u32 },
+    }
+    impl Parser for crate::wayland_objects::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetSize { width: req.uint()?, height: req.uint()? },
+                1 => SetAnchor { anchor: req.uint()? },
+                2 => SetExclusiveZone { zone: req.int()? },
+                3 => SetMargin {
+                    top: req.int()?,
+                    right: req.int()?,
+                    bottom: req.int()?,
+                    left: req.int()?,
+                },
+                4 => SetKeyboardInteractivity { keyboard_interactivity: req.uint()? },
+                5 => GetPopup { popup: req.id()? },
+                6 => AckConfigure { serial: req.uint()? },
+                7 => Destroy,
+                8 => SetLayer { layer: req.uint()? },
+                9 => SetExclusiveEdge { edge: req.uint()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    /// Minimum interface version for the `configure` message (XML `since`).
+    pub const CONFIGURE_SINCE: u32 = 1;
+    /// Minimum interface version for the `closed` message (XML `since`).
+    pub const CLOSED_SINCE: u32 = 1;
+    #[derive(Debug)]
+    pub enum Event {
+        /// Suggest a surface change
+        ///
+        /// The configure event asks the client to resize its surface.
+        ///
+        /// Clients should arrange their surface for the new states, and then send
+        /// an ack_configure request with the serial sent in this configure event at
+        /// some point before committing the new surface.
+        ///
+        /// The client is free to dismiss all but the last configure event it
+        /// received.
+        ///
+        /// The width and height arguments specify the size of the window in
+        /// surface-local coordinates.
+        ///
+        /// The size is a hint, in the sense that the client is free to ignore it if
+        /// it doesn't resize, pick a smaller size (to satisfy aspect ratio or
+        /// resize in steps of NxM pixels). If the client picks a smaller size and
+        /// is anchored to two opposite anchors (e.g. 'top' and 'bottom'), the
+        /// surface will be centered on this axis.
+        ///
+        /// If the width or height arguments are zero, it means the client should
+        /// decide its own window dimension.
+        Configure { serial: u32, width: u32, height: u32 },
+        /// Surface should be closed
+        ///
+        /// The closed event is sent by the compositor when the surface will no
+        /// longer be shown. The output may have been destroyed or the user may
+        /// have asked for it to be removed. Further changes to the surface will be
+        /// ignored. The client should destroy the resource after receiving this
+        /// event, and create a new surface if they so choose.
+        Closed,
+    }
+    impl EventWriter for crate::wayland_objects::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Configure { serial, width, height } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 3);
+                    raw.uint(serial);
+                    raw.uint(width);
+                    raw.uint(height);
+                    raw
+                }
+                Closed {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+    /// Types of keyboard interaction possible for a layer shell surface
+    ///
+    /// Types of keyboard interaction possible for layer shell surfaces. The
+    /// rationale for this is twofold: (1) some applications are not interested
+    /// in keyboard events and not allowing them to be focused can improve the
+    /// desktop experience; (2) some applications will want to take exclusive
+    /// keyboard focus.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum KeyboardInteractivity {
+        /// No keyboard focus is possible
+        ///
+        /// This value indicates that this surface is not interested in keyboard
+        /// events and the compositor should never assign it the keyboard focus.
+        ///
+        /// This is the default value, set for newly created layer shell surfaces.
+        ///
+        /// This is useful for e.g. desktop widgets that display information or
+        /// only have interaction with non-keyboard input devices.
+        None = 0,
+        /// Request exclusive keyboard focus
+        ///
+        /// Request exclusive keyboard focus if this surface is above the shell surface layer.
+        ///
+        /// For the top and overlay layers, the seat will always give
+        /// exclusive keyboard focus to the top-most layer which has keyboard
+        /// interactivity set to exclusive. If this layer contains multiple
+        /// surfaces with keyboard interactivity set to exclusive, the compositor
+        /// determines the one receiving keyboard events in an implementation-
+        /// defined manner. In this case, no guarantee is made when this surface
+        /// will receive keyboard focus (if ever).
+        ///
+        /// For the bottom and background layers, the compositor is allowed to use
+        /// normal focus semantics.
+        ///
+        /// This setting is mainly intended for applications that need to ensure
+        /// they receive all keyboard events, such as a lock screen or a password
+        /// prompt.
+        Exclusive = 1,
+        /// Request regular keyboard focus semantics
+        ///
+        /// This requests the compositor to allow this surface to be focused and
+        /// unfocused by the user in an implementation-defined manner. The user
+        /// should be able to unfocus this surface even regardless of the layer
+        /// it is on.
+        ///
+        /// Typically, the compositor will want to use its normal mechanism to
+        /// manage keyboard focus between layer shell surfaces with this setting
+        /// and regular toplevels on the desktop layer (e.g. click to focus).
+        /// Nevertheless, it is possible for a compositor to require a special
+        /// interaction to focus or unfocus layer shell surfaces (e.g. requiring
+        /// a click even if focus follows the mouse normally, or providing a
+        /// keybinding to switch focus between layers).
+        ///
+        /// This setting is mainly intended for desktop shell components (e.g.
+        /// panels) that allow keyboard interaction. Using this option can allow
+        /// implementing a desktop shell that can be fully usable without the
+        /// mouse.
+        OnDemand = 2,
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Provided surface state is invalid,
+        InvalidSurfaceState = 0,
+        /// Size is invalid,
+        InvalidSize = 1,
+        /// Anchor bitfield is invalid,
+        InvalidAnchor = 2,
+        /// Keyboard interactivity is invalid,
+        InvalidKeyboardInteractivity = 3,
+        /// Exclusive edge is invalid given the surface anchors,
+        InvalidExclusiveEdge = 4,
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Anchor {
+        /// The top edge of the anchor rectangle,
+        Top = 1,
+        /// The bottom edge of the anchor rectangle,
+        Bottom = 2,
+        /// The left edge of the anchor rectangle,
+        Left = 4,
+        /// The right edge of the anchor rectangle,
+        Right = 8,
     }
 }

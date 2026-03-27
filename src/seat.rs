@@ -14,7 +14,13 @@ use crate::{
         DragNegotiationState, DragPhase, DragState, DragTargetState, DrmId, IndexMap, ObjectId,
         SelectionSourceState, State,
     },
-    wayland_objects::wl_surface::{StackEntry, WlSurface},
+    wayland_objects::{
+        wl_surface::{StackEntry, WlSurface},
+        zwlr_layer_surface_v1::{
+            layer_surface_keyboard_focus, ordered_scene_root_surface_ids, LayerKeyboardFocus,
+            LayerShellLayer,
+        },
+    },
     xkb::KeyboardModifiers,
 };
 
@@ -1026,6 +1032,7 @@ fn set_keyboard_focus(
     dispatcher: &mut Dispatcher,
     new_focus: Option<SurfaceFocus>,
 ) {
+    let new_focus = normalize_keyboard_focus(state, new_focus);
     if state.seat.keyboard_focus == new_focus {
         return;
     }
@@ -1059,6 +1066,49 @@ fn set_keyboard_focus(
     let old_focus = state.seat.keyboard_focus;
     state.seat.keyboard_focus = new_focus;
     refresh_selection_focus_clients(dispatcher, old_focus, new_focus);
+}
+
+fn normalize_keyboard_focus(
+    state: &State,
+    requested_focus: Option<SurfaceFocus>,
+) -> Option<SurfaceFocus> {
+    let requested_focus = requested_focus.and_then(|focus| {
+        let surface_object_id = surface_object_id_for_wayland_id(state, focus.surface_id)?;
+        match layer_surface_keyboard_focus(state, surface_object_id) {
+            Some(LayerKeyboardFocus::None) => None,
+            _ => Some(focus),
+        }
+    });
+
+    if let Some(popup_surface_id) = state.seat.popup_keyboard_surface() {
+        if requested_focus.is_some_and(|focus| focus.surface_id == popup_surface_id) {
+            return requested_focus;
+        }
+    }
+
+    topmost_exclusive_layer_focus(state).or(requested_focus)
+}
+
+fn topmost_exclusive_layer_focus(state: &State) -> Option<SurfaceFocus> {
+    for object_id in ordered_scene_root_surface_ids(state).into_iter().rev() {
+        let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
+            continue;
+        };
+        let Some(LayerKeyboardFocus::Exclusive { layer }) =
+            layer_surface_keyboard_focus(state, object_id)
+        else {
+            continue;
+        };
+        if !matches!(layer, LayerShellLayer::Top | LayerShellLayer::Overlay) {
+            continue;
+        }
+        return Some(SurfaceFocus {
+            client_id: surface.client_id(),
+            surface_id: surface.surface_id(),
+        });
+    }
+
+    None
 }
 
 fn surface_object_id_for_wayland_id(state: &State, surface_id: WlSurfaceId) -> Option<ObjectId> {
@@ -1135,6 +1185,12 @@ pub fn set_surface_focus(
     new_focus: Option<SurfaceFocus>,
 ) {
     set_keyboard_focus(state, dispatcher, new_focus);
+}
+
+pub fn refresh_keyboard_focus(state: &mut State, dispatcher: &mut Dispatcher) {
+    let preferred_focus =
+        popup_keyboard_focus(state).or_else(|| state.seat.pointer_focus.map(|focus| focus.target));
+    set_keyboard_focus(state, dispatcher, preferred_focus);
 }
 
 pub fn refresh_active_drag_focus(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {
@@ -1417,7 +1473,7 @@ fn hit_test_surface(
 ) -> Option<PointerFocus> {
     let mut hit = None;
 
-    for object_id in state.root_surface_ids() {
+    for object_id in ordered_scene_root_surface_ids(state) {
         let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
             continue;
         };
@@ -1890,6 +1946,7 @@ mod surface_tree_hit_test_tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
             outputs: Default::default(),
@@ -2084,6 +2141,7 @@ mod xdg_seat_tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
             outputs: Default::default(),
@@ -2124,7 +2182,7 @@ mod xdg_seat_tests {
                 .downcast_mut::<WlSurface>()
                 .unwrap();
             assert!(wl_surface.set_role(Role::XdgSurface, dispatcher).is_ok());
-            wl_surface.set_impl(xdg_surface_id);
+            wl_surface.set_xdg_surface_impl(xdg_surface_id);
         }
         let ((_, xdg_surface_object_id), _) = client.insert_object(
             state,
@@ -2408,7 +2466,7 @@ mod xdg_seat_tests {
     #[test]
     fn removing_last_popup_grab_restores_parent_focus() {
         let mut state = make_state();
-        let (_client, mut dispatcher) = make_client();
+        let (mut client, mut dispatcher) = make_client();
 
         let parent_focus = SurfaceFocus {
             client_id: ClientId::from_raw(7),
@@ -2418,6 +2476,8 @@ mod xdg_seat_tests {
             client_id: ClientId::from_raw(7),
             surface_id: WlSurfaceId::from(51),
         };
+        insert_surface(&mut state, &mut client, parent_focus.surface_id);
+        insert_surface(&mut state, &mut client, popup_focus.surface_id);
 
         state.seat.keyboard_focus = Some(parent_focus);
         begin_popup_grab(
@@ -2577,7 +2637,7 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn get_popup_rejects_null_parent_without_poisoning_surface_role() {
+    fn get_popup_allows_null_parent_for_layer_shell_workflows() {
         let mut state = make_state();
         let (mut client, mut dispatcher) = make_client();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -2627,7 +2687,7 @@ mod xdg_seat_tests {
             );
         }
 
-        assert!(!client.contains_object(XdgPopupId::from(160), &state));
+        assert!(client.contains_object(XdgPopupId::from(160), &state));
 
         {
             let mut xdg_surface = state
@@ -2641,7 +2701,7 @@ mod xdg_seat_tests {
             );
         }
 
-        assert!(client.contains_object(XdgToplevelId::from(170), &state));
+        assert!(!client.contains_object(XdgToplevelId::from(170), &state));
     }
 
     #[test]

@@ -7,13 +7,18 @@ use crate::{
     protocol_generated::{
         wl_pointer, wl_surface, wp_linux_drm_syncobj_surface_v1, wp_viewport, xdg_wm_base,
         WaylandId, WlBufferId, WlCallbackId, WlOutputId, WlRegionId, WlSubsurfaceId, WlSurfaceId,
-        WpPresentationFeedbackId, XdgSurfaceId,
+        WpPresentationFeedbackId, XdgSurfaceId, ZwlrLayerSurfaceV1Id,
     },
     region::{DamageRegion, RectI, RegionValue},
     state::{ObjectId, OutputId, State},
     sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
     transform::{self, BufferTransform, SizeI, SurfaceViewport},
-    wayland_objects::{wl_callback::WlCallback, wl_region::WlRegion, xdg_surface::XdgSurface},
+    wayland_objects::{
+        wl_callback::WlCallback,
+        wl_region::WlRegion,
+        xdg_surface::XdgSurface,
+        zwlr_layer_surface_v1::{output_usable_bounds, ZwlrLayerSurfaceV1},
+    },
     ENABLE_DAMAGE,
 };
 
@@ -43,7 +48,14 @@ pub enum Role {
     Cursor,
     DndIcon,
     XdgSurface,
+    LayerSurface,
     Subsurface,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShellSurfaceObject {
+    XdgSurface(XdgSurfaceId),
+    LayerSurface(ZwlrLayerSurfaceV1Id),
 }
 
 #[derive(Clone, Debug)]
@@ -92,7 +104,8 @@ pub struct WlSurface {
     id: WlSurfaceId,
     client_id: ClientId,
     role: Role,
-    impl_id: Option<XdgSurfaceId>,
+    shell_surface: Option<ShellSurfaceObject>,
+    popup_parent_layer_surface: Option<ZwlrLayerSurfaceV1Id>,
     version: u32,
     /// back buffer
     pending: Pending,
@@ -268,7 +281,8 @@ impl WlSurface {
             id,
             client_id,
             role: Role::None,
-            impl_id: None,
+            shell_surface: None,
+            popup_parent_layer_surface: None,
             version,
             pending: Pending::default(),
             on_screen: OnScreen::default(),
@@ -343,6 +357,10 @@ impl WlSurface {
         matches!(self.pending.buffer, Some(Some(_)))
     }
 
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
     pub fn has_committed_buffer(&self) -> bool {
         self.on_screen.buffer_object_id.is_some()
     }
@@ -352,16 +370,47 @@ impl WlSurface {
     }
 
     pub fn xdg_surface_id(&self) -> Option<XdgSurfaceId> {
-        self.impl_id
+        match self.shell_surface {
+            Some(ShellSurfaceObject::XdgSurface(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    pub fn layer_surface_id(&self) -> Option<ZwlrLayerSurfaceV1Id> {
+        match self.shell_surface {
+            Some(ShellSurfaceObject::LayerSurface(id)) => Some(id),
+            _ => None,
+        }
     }
 
     pub fn clear_xdg_surface_role(&mut self, xdg_surface_id: XdgSurfaceId) {
-        if self.impl_id == Some(xdg_surface_id) {
-            self.impl_id = None;
+        if self.shell_surface == Some(ShellSurfaceObject::XdgSurface(xdg_surface_id)) {
+            self.shell_surface = None;
+            self.popup_parent_layer_surface = None;
             if self.role == Role::XdgSurface {
                 self.role = Role::None;
             }
         }
+    }
+
+    pub fn clear_layer_surface_role(&mut self, layer_surface_id: ZwlrLayerSurfaceV1Id) {
+        if self.shell_surface == Some(ShellSurfaceObject::LayerSurface(layer_surface_id)) {
+            self.shell_surface = None;
+            if self.role == Role::LayerSurface {
+                self.role = Role::None;
+            }
+        }
+    }
+
+    pub fn set_popup_parent_layer_surface(
+        &mut self,
+        layer_surface_id: Option<ZwlrLayerSurfaceV1Id>,
+    ) {
+        self.popup_parent_layer_surface = layer_surface_id;
+    }
+
+    pub fn popup_parent_layer_surface_id(&self) -> Option<ZwlrLayerSurfaceV1Id> {
+        self.popup_parent_layer_surface
     }
 
     pub fn assign_subsurface(
@@ -471,8 +520,8 @@ impl WlSurface {
 
     pub fn configure_bounds(&self, state: &State) -> Option<(i32, i32)> {
         self.preferred_output_id(state)
-            .and_then(|output_id| state.outputs.try_get(output_id))
-            .map(|output| output.logical_size())
+            .and_then(|output_id| output_usable_bounds(state, output_id))
+            .map(|bounds| (bounds.width, bounds.height))
     }
 
     pub fn send_preferred_buffer_state(
@@ -718,8 +767,12 @@ impl WlSurface {
         Ok(())
     }
 
-    pub fn set_impl(&mut self, id: XdgSurfaceId) {
-        self.impl_id = Some(id);
+    pub fn set_xdg_surface_impl(&mut self, id: XdgSurfaceId) {
+        self.shell_surface = Some(ShellSurfaceObject::XdgSurface(id));
+    }
+
+    pub fn set_layer_surface_impl(&mut self, id: ZwlrLayerSurfaceV1Id) {
+        self.shell_surface = Some(ShellSurfaceObject::LayerSurface(id));
     }
 
     fn on_attach(
@@ -1515,20 +1568,38 @@ impl WlSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        if let Some(xdg_surface_id) = self.impl_id {
+        if let Some(shell_surface) = self.shell_surface {
             self.send_preferred_buffer_state(state, dispatcher);
-            let configure_bounds = self.configure_bounds(state);
-            let mut xdg_surface = client.grab_object(xdg_surface_id, state);
-            if !xdg_surface.on_commit(
-                client,
-                state,
-                dispatcher,
-                self.has_pending_buffer_attach(),
-                matches!(self.pending.buffer, Some(None)),
-                configure_bounds,
-            ) {
-                self.clear_failed_surface_commit();
-                return;
+            match shell_surface {
+                ShellSurfaceObject::XdgSurface(xdg_surface_id) => {
+                    let configure_bounds = self.configure_bounds(state);
+                    let mut xdg_surface = client.grab_object(xdg_surface_id, state);
+                    if !xdg_surface.on_commit(
+                        client,
+                        state,
+                        dispatcher,
+                        self.has_pending_buffer_attach(),
+                        matches!(self.pending.buffer, Some(None)),
+                        configure_bounds,
+                    ) {
+                        self.clear_failed_surface_commit();
+                        return;
+                    }
+                }
+                ShellSurfaceObject::LayerSurface(layer_surface_id) => {
+                    let mut layer_surface = client.grab_object(layer_surface_id, state);
+                    if !layer_surface.on_commit(
+                        client,
+                        state,
+                        dispatcher,
+                        client.object_id(self.id),
+                        self.has_pending_buffer_attach(),
+                        matches!(self.pending.buffer, Some(None)),
+                    ) {
+                        self.clear_failed_surface_commit();
+                        return;
+                    }
+                }
             }
         }
 
@@ -1601,6 +1672,10 @@ impl WlSurface {
                 schedule_outputs(state, self.output_membership_ids(), dispatcher);
                 schedule_active_output(state, dispatcher);
             }
+        }
+
+        if matches!(self.shell_surface, Some(ShellSurfaceObject::LayerSurface(_))) {
+            dispatcher.dispatch(crate::clients::ClientsAction::LayerShellLayoutChanged);
         }
     }
 
@@ -2384,6 +2459,7 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
             outputs: Default::default(),

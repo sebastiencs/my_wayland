@@ -39,6 +39,7 @@ use crate::{
     wayland_objects::{
         wl_buffer::{CursorShmBuffer, WlBuffer},
         wl_surface::{StackEntry, SurfacePresentationFeedback, WlSurface},
+        zwlr_layer_surface_v1::ordered_scene_root_surface_ids,
     },
     ENABLE_DAMAGE,
 };
@@ -4100,8 +4101,7 @@ fn collect_render_items(
     let mut deferred_releases = Vec::new();
     let mut retired_candidates = Vec::new();
     let mut cursor_animation_delay_msec = None;
-    let root_surface_oids: Vec<_> = state
-        .root_surface_ids()
+    let root_surface_oids: Vec<_> = ordered_scene_root_surface_ids(state)
         .into_iter()
         .filter(|object_id| {
             let Some(surface) = state.objects.try_ref_object::<WlSurface>(*object_id) else {
@@ -4339,6 +4339,7 @@ mod presentation_timing_tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
             outputs: Default::default(),
@@ -4741,6 +4742,7 @@ mod surface_tree_render_tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
             outputs: Default::default(),

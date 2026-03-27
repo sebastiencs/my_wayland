@@ -107,7 +107,9 @@ mod tests {
             runner::Dispatcher,
             seat::{set_surface_focus, SurfaceFocus},
             state::State,
-            wayland_objects::{wl_data_source::WlDataSource, wl_seat::WlSeat},
+            wayland_objects::{
+                wl_data_source::WlDataSource, wl_seat::WlSeat, wl_surface::WlSurface,
+            },
             xkb::Xkb,
         },
     };
@@ -120,6 +122,7 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
             outputs: Default::default(),
@@ -145,6 +148,10 @@ mod tests {
         (&*event.into_bytes()).try_into().unwrap()
     }
 
+    fn insert_surface(state: &mut State, client: &mut Client, surface_id: u32) {
+        client.insert_object(state, WlSurface::new(surface_id.into(), client.client_id(), 6));
+    }
+
     #[test]
     fn focused_client_get_data_device_queues_selection_refresh() {
         let mut state = make_state();
@@ -155,6 +162,7 @@ mod tests {
         let mut manager = WlDataDeviceManager { id: manager_id, version: 3 };
 
         client.insert_object(&mut state, WlSeat::new(seat_id));
+        insert_surface(&mut state, &mut client, 99);
         {
             let mut setup_dispatcher = client.test_dispatcher(&mut dispatcher);
             set_surface_focus(

@@ -447,6 +447,7 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
             outputs: Default::default(),

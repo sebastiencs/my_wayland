@@ -230,6 +230,7 @@ mod tests {
             runner::Dispatcher,
             seat::{set_surface_focus, SurfaceFocus},
             state::{DragPhase, DragState, DragTargetState, SelectionSourceState, State},
+            wayland_objects::wl_surface::WlSurface,
             xkb::Xkb,
         },
     };
@@ -242,6 +243,7 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
             outputs: Default::default(),
@@ -256,6 +258,10 @@ mod tests {
         }
     }
 
+    fn insert_surface(state: &mut State, client_id: ClientId, surface_id: u32) {
+        let _ = state.insert_object(WlSurface::new(surface_id.into(), client_id, 6));
+    }
+
     #[test]
     fn source_disconnect_clears_selection_and_refreshes_focused_client() {
         let mut state = make_state();
@@ -265,6 +271,7 @@ mod tests {
         let source_id = WlDataSourceId::from(10);
         let ((_, source_object_id), _) =
             owner.insert_object(&mut state, WlDataSource::new(source_id, owner_client_id, 3));
+        insert_surface(&mut state, focused_client_id, 55);
 
         {
             let mut setup_dispatcher = Dispatcher::default();

@@ -5,7 +5,9 @@ use crate::{
     globals::{Global, GlobalName, Globals},
     input::Input,
     object::Object,
-    protocol_generated::{WaylandId, WlDataOfferId, WlDataSourceId, WlSeatId, WlSurfaceId},
+    protocol_generated::{
+        WaylandId, WlDataOfferId, WlDataSourceId, WlSeatId, WlSurfaceId, ZwlrLayerSurfaceV1Id,
+    },
     region::RectI,
     seat::SeatState,
     wayland_objects::wl_surface::WlSurface,
@@ -885,6 +887,7 @@ pub struct DragState {
 pub struct State {
     pub objects: Box<IndexMap<ObjectId, Box<dyn Object>>>,
     pub root_surfaces: Vec<ObjectId>,
+    pub layer_surface_objects: BTreeMap<ZwlrLayerSurfaceV1Id, ObjectId>,
     pub inputs: IndexMap<InputId, Input>,
     pub drm: IndexMap<DrmId, Drm>,
     pub outputs: IndexMap<OutputId, Output>,
@@ -914,6 +917,29 @@ impl State {
     pub fn register_root_surface(&mut self, object_id: ObjectId) {
         self.unregister_root_surface(object_id);
         self.root_surfaces.push(object_id);
+    }
+
+    pub fn register_layer_surface_object(
+        &mut self,
+        layer_surface_id: ZwlrLayerSurfaceV1Id,
+        object_id: ObjectId,
+    ) {
+        self.layer_surface_objects
+            .insert(layer_surface_id, object_id);
+    }
+
+    pub fn unregister_layer_surface_object(&mut self, layer_surface_id: ZwlrLayerSurfaceV1Id) {
+        self.layer_surface_objects.remove(&layer_surface_id);
+    }
+
+    pub fn layer_surface_object_id(
+        &self,
+        layer_surface_id: ZwlrLayerSurfaceV1Id,
+    ) -> Option<ObjectId> {
+        self.layer_surface_objects
+            .get(&layer_surface_id)
+            .copied()
+            .filter(|object_id| self.objects.contains(*object_id))
     }
 
     pub fn unregister_root_surface(&mut self, object_id: ObjectId) {
@@ -1148,6 +1174,7 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
             outputs: Default::default(),

@@ -117,7 +117,7 @@ impl Object for XdgWmBase {
                 if wl_surface.set_role(Role::XdgSurface, dispatcher).is_err() {
                     return;
                 }
-                wl_surface.set_impl(id);
+                wl_surface.set_xdg_surface_impl(id);
 
                 let xdg_surface = XdgSurface::new(id, self.id, surface, self.version);
                 client.insert_object(state, xdg_surface);

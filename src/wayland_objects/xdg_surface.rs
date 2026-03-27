@@ -437,15 +437,7 @@ impl Object for XdgSurface {
                 }
 
                 let parent = match u32::from(parent) {
-                    0 => {
-                        self.send_wm_base_error(
-                            client,
-                            dispatcher,
-                            xdg_wm_base::Error::InvalidPopupParent,
-                            "popup parent must be provided for xdg_surface.get_popup",
-                        );
-                        return;
-                    }
+                    0 => None,
                     _ => {
                         if !client.object_is(parent, state) {
                             client.protocol_violation_disconnect(

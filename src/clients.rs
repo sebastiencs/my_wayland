@@ -21,7 +21,7 @@ use crate::{
     object::{IdToObject, Object, Parser, ParserError},
     protocol_generated::{
         wl_display, Array, Constants, WaylandId, WlDataOfferId, WlDataSourceId, WlOutputId,
-        WlSurfaceId, WpPresentationFeedbackId, XdgPopupId, XdgToplevelId,
+        WlSurfaceId, WpPresentationFeedbackId, XdgPopupId, XdgToplevelId, ZwlrLayerSurfaceV1Id,
     },
     region::RectI,
     runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
@@ -41,6 +41,7 @@ use crate::{
         wp_presentation_feedback::WpPresentationFeedback,
         xdg_popup::XdgPopup,
         xdg_surface::{xdg_toplevel::XdgToplevel, XdgSurface},
+        zwlr_layer_surface_v1::relayout_client_layer_surfaces,
         zxdg_output_v1::ZxdgOutputV1,
     },
 };
@@ -72,6 +73,7 @@ pub enum ClientsAction {
     RegistryGlobalRemoved { name: u32 },
     OutputStateChanged { output_id: OutputId },
     OutputRemoved { output_id: OutputId },
+    LayerShellLayoutChanged,
     Close { id: ClientId },
 }
 
@@ -195,6 +197,11 @@ impl Model for Clients {
                     dispatcher.dispatch_to(client_id, ClientAction::OutputRemoved { output_id });
                 }
             }
+            LayerShellLayoutChanged => {
+                for client_id in self.set.iter().copied() {
+                    dispatcher.dispatch_to(client_id, ClientAction::RefreshLayerSurfaces);
+                }
+            }
             Close { id } => {
                 log::trace!("client {:?} closed", id);
                 if self.set.remove(&id) {
@@ -286,6 +293,7 @@ pub enum ClientAction {
     OutputRemoved {
         output_id: OutputId,
     },
+    RefreshLayerSurfaces,
     RefreshSurfaceOutputs,
     ReleaseBuffer {
         buffer_id: crate::protocol_generated::WlBufferId,
@@ -556,6 +564,70 @@ impl Client {
         let object_id = self.objects.remove(&id).unwrap().object_id;
         state.remove_object(object_id);
         wl_display.send_event(wl_display::Event::DeleteId { id: id.into() }, dispatcher);
+    }
+
+    pub(crate) fn dismiss_popup_ids(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        popup_ids: Vec<XdgPopupId>,
+        detached_parent_layer_surface_id: Option<ZwlrLayerSurfaceV1Id>,
+    ) {
+        for popup_id in popup_ids.into_iter().rev() {
+            if !self.contains_object(popup_id, state) {
+                continue;
+            }
+
+            crate::seat::remove_popup_grab(state, dispatcher, popup_id, None);
+
+            let (xdg_surface_id, parent_surface_id, parent_layer_surface_id) = {
+                let popup_object_id = self.object_id(popup_id);
+                let Some(popup) = state.objects.try_ref_object::<XdgPopup>(popup_object_id) else {
+                    continue;
+                };
+                (popup.xdg_surface_id(), popup.parent_surface_id(), popup.parent_layer_surface_id())
+            };
+
+            if let Some(parent_surface_id) = parent_surface_id {
+                if self.contains_object(parent_surface_id, state) {
+                    let mut parent_surface = self.grab_object(parent_surface_id, state);
+                    parent_surface.remove_popup_child(popup_id);
+                }
+            }
+            if let Some(parent_layer_surface_id) = parent_layer_surface_id {
+                if Some(parent_layer_surface_id) != detached_parent_layer_surface_id
+                    && self.contains_object(parent_layer_surface_id, state)
+                {
+                    let mut parent_surface = self.grab_object(parent_layer_surface_id, state);
+                    parent_surface.remove_popup_child(popup_id);
+                }
+            }
+
+            if self.contains_object(xdg_surface_id, state) {
+                let wl_surface_id = {
+                    let xdg_surface_object_id = self.object_id(xdg_surface_id);
+                    let Some(xdg_surface) = state
+                        .objects
+                        .try_ref_object::<XdgSurface>(xdg_surface_object_id)
+                    else {
+                        continue;
+                    };
+                    xdg_surface.wl_surface_id()
+                };
+                if self.contains_object(wl_surface_id, state) {
+                    let mut wl_surface = self.grab_object(wl_surface_id, state);
+                    wl_surface.force_unmap_for_role_dismissal(self, state, dispatcher);
+                }
+                let mut xdg_surface = self.grab_object(xdg_surface_id, state);
+                xdg_surface.destroy_popup_role(popup_id);
+            }
+
+            {
+                let popup = self.ref_object(popup_id, state);
+                popup.send_popup_done(dispatcher);
+            }
+            self.delete_id(&WlDisplay::default(), state, dispatcher, popup_id.into());
+        }
     }
 
     fn handle_seat_event(
@@ -1480,6 +1552,7 @@ impl Client {
             }
         }
         self.reconfigure_mapped_toplevels(state, dispatcher);
+        relayout_client_layer_surfaces(self, state, dispatcher);
     }
 }
 
@@ -1818,9 +1891,14 @@ impl Model for Client {
                 self.handle_output_state_changed(state, &mut dispatcher, output_id);
                 self.refresh_surface_outputs(state, &mut dispatcher);
                 self.reconfigure_mapped_toplevels(state, &mut dispatcher);
+                relayout_client_layer_surfaces(self, state, &mut dispatcher);
             }
             OutputRemoved { output_id } => {
                 self.handle_output_removed(state, &mut dispatcher, output_id);
+            }
+            RefreshLayerSurfaces => {
+                relayout_client_layer_surfaces(self, state, &mut dispatcher);
+                self.reconfigure_mapped_toplevels(state, &mut dispatcher);
             }
             RefreshSurfaceOutputs => {
                 self.refresh_surface_outputs(state, &mut dispatcher);
@@ -1884,52 +1962,7 @@ impl Model for Client {
                 surface.cancel_blocked_if_waiter_matches(waiter_id, self, state, &mut dispatcher);
             }
             DismissPopupGrab { popup_ids } => {
-                for popup_id in popup_ids.into_iter().rev() {
-                    if !self.contains_object(popup_id, state) {
-                        continue;
-                    }
-
-                    let (xdg_surface_id, parent_surface_id) = {
-                        let popup_object_id = self.object_id(popup_id);
-                        let Some(popup) = state.objects.try_ref_object::<XdgPopup>(popup_object_id)
-                        else {
-                            continue;
-                        };
-                        (popup.xdg_surface_id(), popup.parent_surface_id())
-                    };
-
-                    if let Some(parent_surface_id) = parent_surface_id {
-                        if self.contains_object(parent_surface_id, state) {
-                            let mut parent_surface = self.grab_object(parent_surface_id, state);
-                            parent_surface.remove_popup_child(popup_id);
-                        }
-                    }
-
-                    if self.contains_object(xdg_surface_id, state) {
-                        let wl_surface_id = {
-                            let xdg_surface_object_id = self.object_id(xdg_surface_id);
-                            let Some(xdg_surface) = state
-                                .objects
-                                .try_ref_object::<XdgSurface>(xdg_surface_object_id)
-                            else {
-                                continue;
-                            };
-                            xdg_surface.wl_surface_id()
-                        };
-                        if self.contains_object(wl_surface_id, state) {
-                            let mut wl_surface = self.grab_object(wl_surface_id, state);
-                            wl_surface.force_unmap_for_role_dismissal(self, state, &mut dispatcher);
-                        }
-                        let mut xdg_surface = self.grab_object(xdg_surface_id, state);
-                        xdg_surface.destroy_popup_role(popup_id);
-                    }
-
-                    {
-                        let popup = self.ref_object(popup_id, state);
-                        popup.send_popup_done(&mut dispatcher);
-                    }
-                    self.delete_id(&WlDisplay::default(), state, &mut dispatcher, popup_id.into());
-                }
+                self.dismiss_popup_ids(state, &mut dispatcher, popup_ids, None);
             }
             InteractiveResizeConfigure { xdg_toplevel_id, width, height, resizing } => {
                 if !self.contains_object(xdg_toplevel_id, state) {
