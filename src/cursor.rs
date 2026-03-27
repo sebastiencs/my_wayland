@@ -80,6 +80,7 @@ pub enum CursorSourceRef<'a> {
 #[derive(Debug)]
 pub struct CursorState {
     source: Option<CursorSource>,
+    theme_name: String,
     theme: CursorTheme,
     theme_size: u32,
     cache: BTreeMap<String, Option<NamedCursorAnimation>>,
@@ -93,16 +94,21 @@ impl Default for CursorState {
             .and_then(|value| value.parse::<u32>().ok())
             .filter(|size| *size > 0)
             .unwrap_or(24);
+        Self::new(theme_name, theme_size)
+    }
+}
+
+impl CursorState {
+    pub fn new(theme_name: String, theme_size: u32) -> Self {
         Self {
             source: None,
+            theme_name: theme_name.clone(),
             theme: CursorTheme::load(&theme_name),
             theme_size,
             cache: BTreeMap::new(),
         }
     }
-}
 
-impl CursorState {
     pub fn source_at(&self, now_msec: u32) -> Option<CursorSourceRef<'_>> {
         match self.source.as_ref()? {
             CursorSource::Named(cursor) => {
@@ -156,6 +162,32 @@ impl CursorState {
             return false;
         }
         self.set_default_named_cursor()
+    }
+
+    pub fn set_theme(&mut self, theme_name: String, theme_size: u32) -> bool {
+        let theme_size = theme_size.max(1);
+        if self.theme_name == theme_name && self.theme_size == theme_size {
+            return false;
+        }
+
+        let restore_name = match self.source.as_ref() {
+            Some(CursorSource::Named(cursor)) => Some((cursor.owner, cursor.name.clone())),
+            _ => None,
+        };
+
+        self.theme_name = theme_name.clone();
+        self.theme = CursorTheme::load(&theme_name);
+        self.theme_size = theme_size;
+        self.cache.clear();
+
+        if let Some((owner, name)) = restore_name {
+            if let Some(animation) = self.load_icon(&name) {
+                let leaked_name: &'static str = Box::leak(name.into_boxed_str());
+                let _ = self.install_named_cursor(owner, leaked_name, animation);
+            }
+        }
+
+        true
     }
 
     pub fn set_named_cursor(

@@ -116,6 +116,7 @@ use crate::{
 };
 
 mod clients;
+mod config;
 mod cursor;
 mod dbus;
 mod dmabuf;
@@ -212,11 +213,12 @@ fn main() {
 
     let xkb = xkb::Xkb::new();
     let keyboard = xkb.create_keyboard_state();
+    let config = config::RuntimeConfig::load_initial(&xkb);
 
     let mut globals = Globals::new();
     globals.initialize();
 
-    let state = State {
+    let mut state = State {
         objects: Default::default(),
         root_surfaces: Default::default(),
         layer_surface_objects: Default::default(),
@@ -228,10 +230,13 @@ fn main() {
         globals,
         activation_tokens: Default::default(),
         egl,
+        config,
         seat: Default::default(),
         keyboard,
         xkb,
     };
+    let mut startup_dispatcher = Dispatcher::default();
+    config::apply_general_settings(&mut state, &mut startup_dispatcher);
 
     let dbus = dbus::Dbus::new().unwrap();
 
@@ -243,6 +248,7 @@ fn main() {
 
     let uring = Box::<IoUringState>::default();
     let clients = Clients::new();
+    let config_watcher = Box::new(config::ConfigWatcher::new(&state.config));
 
     let mut runner = Runner::with_state(state);
     runner.add_model(uring);
@@ -250,10 +256,12 @@ fn main() {
     runner.add_model(udev);
     runner.add_model(libinput);
     runner.add_model(clients);
+    runner.add_model(config_watcher);
 
     let mut dispatcher = Dispatcher::default();
     dispatcher.start::<Clients>();
     dispatcher.start::<input::Libinput>();
+    dispatcher.start::<config::ConfigWatcher>();
 
     let timer = make_timer(Duration::from_secs(10));
 

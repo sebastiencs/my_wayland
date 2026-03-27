@@ -104,8 +104,11 @@ wayland_id! {
   ZwpTabletPadV2Id,
   ZxdgOutputManagerV1Id,
   ZxdgOutputV1Id,
+  ZwlrGammaControlManagerV1Id,
+  ZwlrGammaControlV1Id,
   ZwlrLayerShellV1Id,
   ZwlrLayerSurfaceV1Id,
+  HyprlandCtmControlManagerV1Id,
 }
 
 pub trait Constants {
@@ -12685,6 +12688,166 @@ pub mod zxdg_output_v1 {
     }
 }
 
+/// Manager to create per-output gamma controls
+///
+/// This interface is a manager that allows creating per-output gamma
+/// controls.
+pub mod zwlr_gamma_control_manager_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::zwlr_gamma_control_manager_v1::ZwlrGammaControlManagerV1
+    {
+        const INTERFACE_NAME: &'static str = "zwlr_gamma_control_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwlrGammaControlManagerV1Id {
+        type Object =
+            crate::wayland_objects::zwlr_gamma_control_manager_v1::ZwlrGammaControlManagerV1;
+    }
+    /// Minimum interface version for the `get_gamma_control` message (XML `since`).
+    pub const GET_GAMMA_CONTROL_SINCE: u32 = 1;
+    /// Minimum interface version for the `destroy` message (XML `since`).
+    pub const DESTROY_SINCE: u32 = 1;
+    #[derive(Debug)]
+    pub enum Request {
+        /// Get a gamma control for an output
+        ///
+        /// Create a gamma control that can be used to adjust gamma tables for the
+        /// provided output.
+        GetGammaControl { id: ZwlrGammaControlV1Id, output: WlOutputId },
+        /// Destroy the manager
+        ///
+        /// All objects created by the manager will still remain valid, until their
+        /// appropriate destroy request has been called.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwlr_gamma_control_manager_v1::ZwlrGammaControlManagerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => GetGammaControl { id: req.id()?, output: req.id()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
+/// Adjust gamma tables for an output
+///
+/// This interface allows a client to adjust gamma tables for a particular
+/// output.
+///
+/// The client will receive the gamma size, and will then be able to set gamma
+/// tables. At any time the compositor can send a failed event indicating that
+/// this object is no longer valid.
+///
+/// There can only be at most one gamma control object per output, which
+/// has exclusive access to this particular output. When the gamma control
+/// object is destroyed, the gamma table is restored to its original value.
+pub mod zwlr_gamma_control_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwlr_gamma_control_v1::ZwlrGammaControlV1 {
+        const INTERFACE_NAME: &'static str = "zwlr_gamma_control_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwlrGammaControlV1Id {
+        type Object = crate::wayland_objects::zwlr_gamma_control_v1::ZwlrGammaControlV1;
+    }
+    /// Minimum interface version for the `set_gamma` message (XML `since`).
+    pub const SET_GAMMA_SINCE: u32 = 1;
+    /// Minimum interface version for the `destroy` message (XML `since`).
+    pub const DESTROY_SINCE: u32 = 1;
+    #[derive(Debug)]
+    pub enum Request {
+        /// Set the gamma table
+        ///
+        /// Set the gamma table. The file descriptor can be memory-mapped to provide
+        /// the raw gamma table, which contains successive gamma ramps for the red,
+        /// green and blue channels. Each gamma ramp is an array of 16-byte unsigned
+        /// integers which has the same length as the gamma size.
+        ///
+        /// The file descriptor data must have the same length as three times the
+        /// gamma size.
+        SetGamma {
+            /// Gamma table file descriptor,
+            fd: RawFd,
+        },
+        /// Destroy this control
+        ///
+        /// Destroys the gamma control object. If the object is still valid, this
+        /// restores the original gamma tables.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwlr_gamma_control_v1::ZwlrGammaControlV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetGamma { fd: req.fd()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    /// Minimum interface version for the `gamma_size` message (XML `since`).
+    pub const GAMMA_SIZE_SINCE: u32 = 1;
+    /// Minimum interface version for the `failed` message (XML `since`).
+    pub const FAILED_SINCE: u32 = 1;
+    #[derive(Debug)]
+    pub enum Event {
+        /// Size of gamma ramps
+        ///
+        /// Advertise the size of each gamma ramp.
+        ///
+        /// This event is sent immediately when the gamma control object is created.
+        GammaSize {
+            /// Number of elements in a ramp,
+            size: u32,
+        },
+        /// Object no longer valid
+        ///
+        /// This event indicates that the gamma control is no longer valid. This
+        /// can happen for a number of reasons, including:
+        /// - The output doesn't support gamma tables
+        /// - Setting the gamma tables failed
+        /// - Another client already has exclusive gamma control for this output
+        /// - The compositor has transferred gamma control to another client
+        ///
+        /// Upon receiving this event, the client should destroy this object.
+        Failed,
+    }
+    impl EventWriter for crate::wayland_objects::zwlr_gamma_control_v1::ZwlrGammaControlV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                GammaSize { size } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(size);
+                    raw
+                }
+                Failed {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Invalid gamma tables,
+        InvalidGamma = 1,
+    }
+}
+
 /// Create surfaces that are layers of the desktop
 ///
 /// Clients can use this interface to assign the surface_layer role to
@@ -13147,5 +13310,103 @@ pub mod zwlr_layer_surface_v1 {
         Left = 4,
         /// The right edge of the anchor rectangle,
         Right = 8,
+    }
+}
+
+/// Manager to control CTMs
+///
+/// This object is a manager which offers requests to control CTMs.
+///
+/// If any changes are done, once this object is destroyed, CTMs are reset back to
+/// an identity matrix.
+pub mod hyprland_ctm_control_manager_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1
+    {
+        const INTERFACE_NAME: &'static str = "hyprland_ctm_control_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for HyprlandCtmControlManagerV1Id {
+        type Object =
+            crate::wayland_objects::hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1;
+    }
+    /// Minimum interface version for the `set_ctm_for_output` message (XML `since`).
+    pub const SET_CTM_FOR_OUTPUT_SINCE: u32 = 1;
+    /// Minimum interface version for the `commit` message (XML `since`).
+    pub const COMMIT_SINCE: u32 = 1;
+    /// Minimum interface version for the `destroy` message (XML `since`).
+    pub const DESTROY_SINCE: u32 = 1;
+    #[derive(Debug)]
+    pub enum Request {
+        /// Set the CTM of an output
+        ///
+        /// Set a CTM for a wl_output.
+        ///
+        /// This state is not applied immediately; clients must call .commit to
+        /// apply any pending changes.
+        ///
+        /// The provided values describe a 3x3 Row-Major CTM with values in the range of [0, ∞)
+        ///
+        /// Passing values outside of the range will raise an invalid_matrix error.
+        ///
+        /// The default value of the CTM is an identity matrix.
+        ///
+        /// If an output doesn't get a CTM set with set_ctm_for_output and commit is called,
+        /// that output will get its CTM reset to an identity matrix.
+        SetCtmForOutput {
+            output: WlOutputId,
+            mat0: f32,
+            mat1: f32,
+            mat2: f32,
+            mat3: f32,
+            mat4: f32,
+            mat5: f32,
+            mat6: f32,
+            mat7: f32,
+            mat8: f32,
+        },
+        /// Commit the pending state
+        ///
+        /// Commits the pending state(s) set by set_ctm_for_output.
+        Commit,
+        /// Destroy the manager
+        ///
+        /// All objects created by the manager will still remain valid, until their
+        /// appropriate destroy request has been called.
+        ///
+        /// The CTMs of all outputs will be reset to an identity matrix.
+        Destroy,
+    }
+    impl Parser
+        for crate::wayland_objects::hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetCtmForOutput {
+                    output: req.id()?,
+                    mat0: req.fixed()?,
+                    mat1: req.fixed()?,
+                    mat2: req.fixed()?,
+                    mat3: req.fixed()?,
+                    mat4: req.fixed()?,
+                    mat5: req.fixed()?,
+                    mat6: req.fixed()?,
+                    mat7: req.fixed()?,
+                    mat8: req.fixed()?,
+                },
+                1 => Commit,
+                2 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// The matrix values are invalid.,
+        InvalidMatrix = 0,
     }
 }

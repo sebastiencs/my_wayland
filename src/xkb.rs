@@ -48,6 +48,10 @@ impl Xkb {
         &self.keymap_fd
     }
 
+    pub fn keymap(&self) -> &xkb::Keymap {
+        &self.keymap
+    }
+
     pub fn create_keyboard_state(&self) -> KeyboardState {
         KeyboardState::new(&self.keymap)
     }
@@ -66,6 +70,14 @@ impl KeyboardState {
 
     pub fn modifiers(&self) -> KeyboardModifiers {
         self.modifiers
+    }
+
+    pub fn effective_modifiers(&self) -> u32 {
+        self.state.serialize_mods(xkb::STATE_MODS_EFFECTIVE)
+    }
+
+    pub fn key_get_one_sym(&self, key: u32) -> xkb::Keysym {
+        self.state.key_get_one_sym((key + 8).into())
     }
 
     pub fn update_key(&mut self, key: u32, is_pressed: bool) -> Option<KeyboardModifiers> {

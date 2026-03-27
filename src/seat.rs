@@ -1,7 +1,8 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
     clients::{ClientAction, ClientId},
+    config,
     cursor::{CursorSourceRef, CursorState},
     drm::{schedule_active_output, schedule_outputs_for_points, schedule_outputs_for_rects, Drm},
     object::Object,
@@ -163,6 +164,7 @@ pub struct SeatState {
     active_drag: Option<DragState>,
     pointer_resources: BTreeMap<ClientId, Vec<WlPointerId>>,
     keyboard_resources: BTreeMap<ClientId, Vec<WlKeyboardId>>,
+    intercepted_keyboard_keys: BTreeSet<u32>,
 }
 
 impl Default for SeatState {
@@ -188,6 +190,7 @@ impl Default for SeatState {
             active_drag: None,
             pointer_resources: BTreeMap::default(),
             keyboard_resources: BTreeMap::default(),
+            intercepted_keyboard_keys: BTreeSet::default(),
         }
     }
 }
@@ -690,6 +693,10 @@ impl SeatState {
         self.cursor.is_visible()
     }
 
+    pub fn set_cursor_theme(&mut self, theme_name: String, theme_size: u32) -> bool {
+        self.cursor.set_theme(theme_name, theme_size)
+    }
+
     pub fn pointer_position(&self) -> (f64, f64) {
         self.pointer_pos
     }
@@ -706,6 +713,14 @@ impl SeatState {
     #[cfg(test)]
     fn test_install_default_cursor(&mut self) -> bool {
         self.cursor.test_install_default_cursor()
+    }
+
+    fn intercept_keyboard_key(&mut self, key: u32) {
+        self.intercepted_keyboard_keys.insert(key);
+    }
+
+    fn take_intercepted_keyboard_key(&mut self, key: u32) -> bool {
+        self.intercepted_keyboard_keys.remove(&key)
     }
 
     fn validate_implicit_grab_serial(
@@ -989,6 +1004,20 @@ pub fn handle_keyboard_key(
         time,
         state.seat.keyboard_focus
     );
+
+    if key_state == 0 && state.seat.take_intercepted_keyboard_key(key) {
+        log::debug!("seat swallowed intercepted key release key={} time={}", key, time);
+        return;
+    }
+
+    if key_state == 1 {
+        if let Some(action) = state.config.binding_for_key(&state.keyboard, key) {
+            log::info!("seat executing compositor binding key={} action={:?}", key, action);
+            state.seat.intercept_keyboard_key(key);
+            config::execute_action(state, dispatcher, action);
+            return;
+        }
+    }
 
     if state.seat.keyboard_focus.is_none() {
         set_keyboard_focus(state, dispatcher, state.seat.pointer_focus.map(|focus| focus.target));
@@ -1955,6 +1984,7 @@ mod surface_tree_hit_test_tests {
             globals,
             activation_tokens: Default::default(),
             egl: EGL::new(),
+            config: Default::default(),
             seat: Default::default(),
             keyboard,
             xkb,
@@ -2106,11 +2136,12 @@ mod surface_tree_hit_test_tests {
 mod xdg_seat_tests {
     use {
         super::{
-            begin_popup_grab, cancel_active_drag, complete_drag_drop, remove_popup_grab, SeatState,
-            SurfaceFocus,
+            begin_popup_grab, cancel_active_drag, complete_drag_drop, handle_keyboard_key,
+            remove_popup_grab, SeatClientEvent, SeatState, SurfaceFocus,
         },
         crate::{
             clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent},
+            config::RuntimeConfig,
             cursor::CursorSourceRef,
             egl::EGL,
             globals::Globals,
@@ -2150,6 +2181,7 @@ mod xdg_seat_tests {
             globals,
             activation_tokens: Default::default(),
             egl: EGL::new(),
+            config: Default::default(),
             seat: SeatState::default(),
             keyboard,
             xkb,
@@ -2461,6 +2493,41 @@ mod xdg_seat_tests {
 
         assert!(super::maybe_dismiss_popup_grab_on_button(&mut state, &mut dispatcher, 1, 1000));
         assert!(state.seat.popup_grab.is_none());
+    }
+
+    #[test]
+    fn compositor_binding_swallows_key_press_and_release() {
+        let mut state = make_state();
+        let (_client, mut dispatcher) = make_client();
+
+        state.config = RuntimeConfig::parse_for_test(
+            r#"
+            [bindings]
+            "Super+Return" = { action = "spawn", command = ":" }
+            "#,
+            &state.xkb,
+        )
+        .unwrap();
+        state.seat.keyboard_focus = Some(SurfaceFocus {
+            client_id: ClientId::from_raw(7),
+            surface_id: WlSurfaceId::from(10),
+        });
+
+        handle_keyboard_key(&mut state, &mut dispatcher, 125, 1, 10);
+        handle_keyboard_key(&mut state, &mut dispatcher, 28, 1, 20);
+        handle_keyboard_key(&mut state, &mut dispatcher, 28, 0, 30);
+
+        assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            ClientId::from_raw(7),
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::SeatEvent {
+                        event: SeatClientEvent::KeyboardKey { key, .. },
+                    } if *key == 28
+                )
+            }
+        ));
     }
 
     #[test]

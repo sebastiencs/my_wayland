@@ -1,5 +1,6 @@
 use crate::{
     clients::ClientId,
+    config::RuntimeConfig,
     drm::Drm,
     egl::EGL,
     globals::{Global, GlobalName, Globals},
@@ -896,6 +897,7 @@ pub struct State {
     pub globals: Globals,
     pub activation_tokens: ActivationTokenStore,
     pub egl: EGL,
+    pub config: RuntimeConfig,
     pub seat: SeatState,
     pub keyboard: KeyboardState,
     pub xkb: Xkb,
@@ -1183,6 +1185,7 @@ mod tests {
             globals,
             activation_tokens: Default::default(),
             egl: EGL::new(),
+            config: Default::default(),
             seat: Default::default(),
             keyboard,
             xkb,

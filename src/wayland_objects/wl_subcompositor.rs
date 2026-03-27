@@ -200,6 +200,7 @@ mod tests {
             globals,
             activation_tokens: Default::default(),
             egl: EGL::new(),
+            config: Default::default(),
             seat: Default::default(),
             keyboard,
             xkb,

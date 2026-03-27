@@ -1341,6 +1341,7 @@ mod tests {
             activation_tokens: Default::default(),
             egl: EGL::new(),
             seat: Default::default(),
+            config: Default::default(),
             keyboard,
             xkb,
         }

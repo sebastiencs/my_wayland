@@ -14,9 +14,10 @@ input = { version = "0.9", features = ["log"] }
 libc = "0.2"
 log = { version = "0.4", features = ["std"] }
 rand = "0.8"
+serde = { version = "1", features = ["derive"] }
 static_assertions = "1.1"
 thiserror = "1.0"
-toml = { version = "0.8", default-features = false }
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 udev = "0.8"
 xkbcommon = { version = "0.7", default-features = false }
 
@@ -33,6 +34,7 @@ khronos-types = { git = "https://github.com/sebastiencs/khronos-types.git" }
 once_cell = "1.19.0"
 drm-fourcc = { version = "2.2.0", features = ["build_bindings"] }
 xcursor = "0.3.10"
+inotify = { version = "0.11.1", default-features = false }
 
 [dev-dependencies]
 mktemp = "0.5.0"

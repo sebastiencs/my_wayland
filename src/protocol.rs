@@ -329,6 +329,7 @@ fn write_constants(f: &mut impl Write, interface: &Interface) -> std::io::Result
 }
 
 pub fn gen() -> std::io::Result<()> {
+    // dnf install wayland-protocols-devel wlr-protocols-devel hyprland-protocols-devel
     let paths = [
         "/usr/share/wayland/wayland.xml",
         "/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml",
@@ -374,10 +375,15 @@ pub fn gen() -> std::io::Result<()> {
         // "/usr/share/wlr-protocols/unstable/wlr-output-management-unstable-v1.xml",
         // "/usr/share/wlr-protocols/unstable/wlr-screencopy-unstable-v1.xml",
         // "/usr/share/wlr-protocols/unstable/wlr-export-dmabuf-unstable-v1.xml",
-        // "/usr/share/wlr-protocols/unstable/wlr-gamma-control-unstable-v1.xml",
+        "/usr/share/wlr-protocols/unstable/wlr-gamma-control-unstable-v1.xml",
         "/usr/share/wlr-protocols/unstable/wlr-layer-shell-unstable-v1.xml",
         // "/usr/share/wlr-protocols/unstable/wlr-output-power-management-unstable-v1.xml",
         // "/usr/share/wlr-protocols/unstable/wlr-virtual-pointer-unstable-v1.xml",
+
+        "/usr/share/hyprland-protocols/protocols/hyprland-ctm-control-v1.xml",
+        // "/usr/share/hyprland-protocols/protocols/hyprland-focus-grab-v1.xml",
+        // "/usr/share/hyprland-protocols/protocols/hyprland-global-shortcuts-v1.xml",
+        // "/usr/share/hyprland-protocols/protocols/hyprland-toplevel-export-v1.xml",
     ];
 
     let out_path =
