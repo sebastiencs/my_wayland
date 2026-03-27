@@ -52,23 +52,156 @@ impl Object for WlDataDeviceManager {
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
-        _dispatcher: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) {
         use wl_data_device_manager::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
             CreateDataSource { id } => {
-                client.insert_object(state, WlDataSource::new(id, self.version));
+                client
+                    .insert_object(state, WlDataSource::new(id, client.client_id(), self.version));
             }
             GetDataDevice { id, seat } => {
-                if !client.contains_object(seat, state) {
+                if !client.object_is::<crate::protocol_generated::WlSeatId>(seat, state) {
+                    client.protocol_violation_disconnect(
+                        dispatcher,
+                        self.id.into(),
+                        crate::protocol_generated::wl_display::Error::InvalidObject as u32,
+                        "wl_data_device_manager.get_data_device requires a wl_seat object",
+                    );
                     return;
                 }
-                client.insert_object(
+                let _ = client.insert_object(
                     state,
-                    WlDataDevice::new(WlDataDeviceId::from(id), self.version),
+                    WlDataDevice::new(WlDataDeviceId::from(id), seat, self.version),
                 );
+                let data_device_id = WlDataDeviceId::from(id);
+                state
+                    .seat
+                    .register_data_device(client.client_id(), data_device_id);
+                if state
+                    .seat
+                    .keyboard_focus()
+                    .is_some_and(|focus| focus.client_id == client.client_id())
+                {
+                    dispatcher.dispatch_to(
+                        client.client_id(),
+                        crate::clients::ClientAction::RefreshDataDeviceSelection,
+                    );
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::WlDataDeviceManager,
+        crate::{
+            clients::{Client, ClientAction, ClientId, ClientsAction, RawEvent},
+            egl::EGL,
+            globals::Globals,
+            object::Object,
+            protocol_generated::{WlDataDeviceId, WlDataDeviceManagerId, WlDataSourceId, WlSeatId},
+            runner::Dispatcher,
+            seat::{set_surface_focus, SurfaceFocus},
+            state::State,
+            wayland_objects::{wl_data_source::WlDataSource, wl_seat::WlSeat},
+            xkb::Xkb,
+        },
+    };
+
+    fn make_state() -> State {
+        let xkb = Xkb::new();
+        let keyboard = xkb.create_keyboard_state();
+        let mut globals = Globals::new();
+        globals.initialize();
+        State {
+            objects: Default::default(),
+            root_surfaces: Default::default(),
+            inputs: Default::default(),
+            drm: Default::default(),
+            outputs: Default::default(),
+            active_output: None,
+            backend_syncobj_globals: Default::default(),
+            globals,
+            activation_tokens: Default::default(),
+            egl: EGL::new(),
+            seat: Default::default(),
+            keyboard,
+            xkb,
+        }
+    }
+
+    fn get_data_device_request(
+        manager_id: WlDataDeviceManagerId,
+        data_device_id: WlDataDeviceId,
+        seat_id: WlSeatId,
+    ) -> crate::clients::RawRequest<'static> {
+        let mut event = RawEvent::new(manager_id.into(), 1, 2);
+        event.id(data_device_id);
+        event.id(seat_id);
+        (&*event.into_bytes()).try_into().unwrap()
+    }
+
+    #[test]
+    fn focused_client_get_data_device_queues_selection_refresh() {
+        let mut state = make_state();
+        let mut client = Client::new_for_tests(ClientId::from_raw(7));
+        let mut dispatcher = Dispatcher::default();
+        let seat_id = WlSeatId::from(2);
+        let manager_id = WlDataDeviceManagerId::from(3);
+        let mut manager = WlDataDeviceManager { id: manager_id, version: 3 };
+
+        client.insert_object(&mut state, WlSeat::new(seat_id));
+        {
+            let mut setup_dispatcher = client.test_dispatcher(&mut dispatcher);
+            set_surface_focus(
+                &mut state,
+                &mut setup_dispatcher,
+                Some(SurfaceFocus { client_id: client.client_id(), surface_id: 99u32.into() }),
+            );
+        }
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        manager.on(
+            &mut client,
+            &mut state,
+            get_data_device_request(manager_id, WlDataDeviceId::from(4), seat_id),
+            &mut client_dispatcher,
+        );
+
+        assert!(dispatcher
+            .test_has_queued_action_for::<ClientAction>(client.client_id(), |action| {
+                matches!(action, ClientAction::RefreshDataDeviceSelection)
+            }));
+    }
+
+    #[test]
+    fn get_data_device_rejects_non_seat_object() {
+        let mut state = make_state();
+        let mut client = Client::new_for_tests(ClientId::from_raw(7));
+        let mut dispatcher = Dispatcher::default();
+        let manager_id = WlDataDeviceManagerId::from(3);
+        let mut manager = WlDataDeviceManager { id: manager_id, version: 3 };
+
+        client.insert_object(
+            &mut state,
+            WlDataSource::new(WlDataSourceId::from(2), client.client_id(), 3),
+        );
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        manager.on(
+            &mut client,
+            &mut state,
+            get_data_device_request(manager_id, WlDataDeviceId::from(4), WlSeatId::from(2)),
+            &mut client_dispatcher,
+        );
+
+        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
+            matches!(action, ClientsAction::Close { id } if *id == client.client_id())
+        }));
     }
 }

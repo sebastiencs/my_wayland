@@ -5,7 +5,7 @@ use crate::{
     globals::{Global, GlobalName, Globals},
     input::Input,
     object::Object,
-    protocol_generated::{WaylandId, WlSeatId, WlSurfaceId},
+    protocol_generated::{WaylandId, WlDataOfferId, WlDataSourceId, WlSeatId, WlSurfaceId},
     region::RectI,
     seat::SeatState,
     xkb::{KeyboardState, Xkb},
@@ -677,6 +677,58 @@ impl ActivationTokenStore {
     pub fn tracked_count(&self) -> usize {
         self.tokens.len()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataOfferRole {
+    Selection,
+    Drag,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionSourceState {
+    pub source_object_id: ObjectId,
+    pub source_id: WlDataSourceId,
+    pub owner_client_id: ClientId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DragTargetState {
+    pub client_id: ClientId,
+    pub surface_id: WlSurfaceId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragPhase {
+    Dragging,
+    DropSent,
+    Finished,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct DragNegotiationState {
+    pub offer_ids: Vec<WlDataOfferId>,
+    pub accepted_mime: Option<String>,
+    pub destination_actions: u32,
+    pub preferred_action: u32,
+    pub compositor_action: u32,
+    pub chosen_action: u32,
+    pub finished: bool,
+    pub has_finish_capable_offer: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DragState {
+    pub source_object_id: Option<ObjectId>,
+    pub source_id: Option<WlDataSourceId>,
+    pub source_client_id: ClientId,
+    pub origin_surface_id: WlSurfaceId,
+    pub icon_surface_object_id: Option<ObjectId>,
+    pub icon_surface_id: Option<WlSurfaceId>,
+    pub target: Option<DragTargetState>,
+    pub negotiation: DragNegotiationState,
+    pub phase: DragPhase,
 }
 
 pub struct State {

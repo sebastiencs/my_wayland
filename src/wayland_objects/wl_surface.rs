@@ -41,6 +41,7 @@ pub struct SurfacePresentationFeedback {
 pub enum Role {
     None,
     Cursor,
+    DndIcon,
     XdgSurface,
     Subsurface,
 }
@@ -328,6 +329,10 @@ impl WlSurface {
 
     pub fn has_cursor_role(&self) -> bool {
         self.role == Role::Cursor
+    }
+
+    pub fn has_dnd_icon_role(&self) -> bool {
+        self.role == Role::DndIcon
     }
 
     pub fn has_pending_buffer_attach(&self) -> bool {
@@ -639,6 +644,14 @@ impl WlSurface {
             return Err(wl_pointer::Error::Role);
         }
         self.role = Role::Cursor;
+        Ok(())
+    }
+
+    pub fn set_dnd_icon_role(&mut self) -> Result<(), ()> {
+        if self.role != Role::None && self.role != Role::DndIcon {
+            return Err(());
+        }
+        self.role = Role::DndIcon;
         Ok(())
     }
 

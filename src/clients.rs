@@ -20,14 +20,16 @@ use crate::{
     },
     object::{IdToObject, Object, Parser, ParserError},
     protocol_generated::{
-        wl_display, Array, Constants, WaylandId, WlOutputId, WlSurfaceId, WpPresentationFeedbackId,
-        XdgPopupId, XdgToplevelId,
+        wl_display, Array, Constants, WaylandId, WlDataOfferId, WlDataSourceId, WlOutputId,
+        WlSurfaceId, WpPresentationFeedbackId, XdgPopupId, XdgToplevelId,
     },
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     seat::SeatClientEvent,
-    state::{GrabbedObject, ObjectId, OutputId, State},
+    state::{DataOfferRole, GrabbedObject, ObjectId, OutputId, State},
     udev::Udev,
     wayland_objects::{
+        wl_data_offer::WlDataOffer,
+        wl_data_source::WlDataSource,
         wl_display::WlDisplay,
         wl_keyboard::WlKeyboard,
         wl_output::WlOutput,
@@ -245,6 +247,25 @@ pub enum ClientAction {
     SeatEvent {
         event: SeatClientEvent,
     },
+    RefreshDataDeviceSelection,
+    DataDeviceDragEnter {
+        serial: u32,
+        surface: WlSurfaceId,
+        x: f32,
+        y: f32,
+        source_object_id: Option<ObjectId>,
+    },
+    DataDeviceDragLeave,
+    DataDeviceDragMotion {
+        time: u32,
+        x: f32,
+        y: f32,
+    },
+    DataDeviceDragDrop,
+    DataSourceEvent {
+        source_id: WlDataSourceId,
+        event: DataSourceClientEvent,
+    },
     RegistryGlobalAdded {
         name: u32,
         interface: String,
@@ -298,6 +319,16 @@ pub enum ClientAction {
         resizing: bool,
     },
     Close,
+}
+
+#[derive(Debug)]
+pub enum DataSourceClientEvent {
+    Target(Option<String>),
+    Send { mime_type: String, fd: RawFd },
+    Cancelled,
+    DndDropPerformed,
+    DndFinished,
+    Action { dnd_action: u32 },
 }
 
 impl Client {
@@ -535,6 +566,7 @@ impl Client {
                     if !self.contains_object(pointer_id, state) {
                         continue;
                     }
+                    state.seat.record_client_serial(self.id, serial);
                     let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
                     pointer.send_enter(serial, surface, x, y, dispatcher);
                 }
@@ -545,6 +577,7 @@ impl Client {
                     if !self.contains_object(pointer_id, state) {
                         continue;
                     }
+                    state.seat.record_client_serial(self.id, serial);
                     let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
                     pointer.send_leave(serial, surface, dispatcher);
                 }
@@ -565,6 +598,7 @@ impl Client {
                     if !self.contains_object(pointer_id, state) {
                         continue;
                     }
+                    state.seat.record_client_serial(self.id, serial);
                     let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
                     pointer.send_button(serial, time, button, button_state, dispatcher);
                 }
@@ -585,6 +619,7 @@ impl Client {
                     if !self.contains_object(keyboard_id, state) {
                         continue;
                     }
+                    state.seat.record_client_serial(self.id, serial);
                     let keyboard: &mut WlKeyboard = self.ref_object_mut(keyboard_id, state);
                     keyboard.send_enter(serial, surface, keys.clone(), dispatcher);
                 }
@@ -595,6 +630,7 @@ impl Client {
                     if !self.contains_object(keyboard_id, state) {
                         continue;
                     }
+                    state.seat.record_client_serial(self.id, serial);
                     let keyboard: &mut WlKeyboard = self.ref_object_mut(keyboard_id, state);
                     keyboard.send_leave(serial, surface, dispatcher);
                 }
@@ -605,6 +641,7 @@ impl Client {
                     if !self.contains_object(keyboard_id, state) {
                         continue;
                     }
+                    state.seat.record_client_serial(self.id, serial);
                     let keyboard: &mut WlKeyboard = self.ref_object_mut(keyboard_id, state);
                     keyboard.send_key(serial, time, key, key_state, dispatcher);
                 }
@@ -621,6 +658,7 @@ impl Client {
                     if !self.contains_object(keyboard_id, state) {
                         continue;
                     }
+                    state.seat.record_client_serial(self.id, serial);
                     let keyboard: &mut WlKeyboard = self.ref_object_mut(keyboard_id, state);
                     keyboard.send_modifiers(
                         serial,
@@ -631,6 +669,345 @@ impl Client {
                         dispatcher,
                     );
                 }
+            }
+        }
+    }
+
+    pub(crate) fn destroy_data_offer(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        offer_id: WlDataOfferId,
+    ) {
+        if !self.contains_object(offer_id, state) {
+            return;
+        }
+        let Some(object_id) = self.object_id_for_wayland(offer_id.into()) else {
+            return;
+        };
+        if let Some(mut offer) = state.objects.try_grab_object::<WlDataOffer>(object_id) {
+            offer.before_destroy(self.id, state, dispatcher);
+        }
+        self.delete_id(&WlDisplay::default(), state, dispatcher, offer_id.into());
+    }
+
+    fn create_data_offer_for_device(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        device_id: crate::protocol_generated::WlDataDeviceId,
+        source_object_id: ObjectId,
+        role: DataOfferRole,
+    ) -> Option<WlDataOfferId> {
+        if !self.contains_object(device_id, state) {
+            return None;
+        }
+        let (device_version, previous_chosen_action) = {
+            let device = self.ref_object(device_id, state);
+            (
+                device.version(),
+                state
+                    .seat
+                    .active_drag()
+                    .map(|drag| drag.negotiation.chosen_action)
+                    .unwrap_or(0),
+            )
+        };
+        let (source_id, source_client_id, mime_types, source_actions) = {
+            let source = state
+                .objects
+                .try_ref_object::<WlDataSource>(source_object_id)?;
+            (
+                source.wl_data_source_id(),
+                source.owner_client_id(),
+                source.mime_types().to_vec(),
+                source.effective_dnd_actions(),
+            )
+        };
+        let chosen_action = if role == DataOfferRole::Drag
+            && device_version < crate::protocol_generated::wl_data_offer::SOURCE_ACTIONS_SINCE
+        {
+            if previous_chosen_action != 0 {
+                previous_chosen_action
+            } else if source_actions
+                & crate::protocol_generated::wl_data_device_manager::DndAction::Copy as u32
+                != 0
+            {
+                crate::protocol_generated::wl_data_device_manager::DndAction::Copy as u32
+            } else {
+                0
+            }
+        } else {
+            previous_chosen_action
+        };
+
+        let offer_id = self.allocate_server_object_id::<WlDataOfferId>();
+        let offer = WlDataOffer::new(
+            offer_id,
+            device_version,
+            role,
+            Some(source_object_id),
+            Some(source_id),
+            Some(source_client_id),
+        );
+        let _ = self.insert_object(state, offer);
+        {
+            let device = self.ref_object(device_id, state);
+            device.send_data_offer(offer_id, dispatcher);
+        }
+        for mime_type in mime_types {
+            let offer = self.ref_object(offer_id, state);
+            offer.send_offer(mime_type, dispatcher);
+        }
+        if role == DataOfferRole::Drag
+            && device_version >= crate::protocol_generated::wl_data_offer::SOURCE_ACTIONS_SINCE
+        {
+            let offer = self.ref_object_mut(offer_id, state);
+            offer.send_source_actions(source_actions, dispatcher);
+            if chosen_action != 0 {
+                offer.send_action(chosen_action, dispatcher);
+            }
+        }
+        Some(offer_id)
+    }
+
+    fn refresh_data_device_selection(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let has_keyboard_focus = state
+            .seat
+            .keyboard_focus()
+            .is_some_and(|focus| focus.client_id == self.id);
+        let selection_source = has_keyboard_focus
+            .then(|| state.seat.selection_source())
+            .flatten();
+
+        for data_device_id in state.seat.data_device_resources(self.id) {
+            if !self.contains_object(data_device_id, state) {
+                continue;
+            }
+
+            let previous_offer = {
+                let data_device = self.ref_object_mut(data_device_id, state);
+                data_device.take_selection_offer()
+            };
+            if let Some(previous_offer) = previous_offer {
+                self.destroy_data_offer(state, dispatcher, previous_offer);
+            }
+
+            let next_offer = selection_source.and_then(|selection| {
+                self.create_data_offer_for_device(
+                    state,
+                    dispatcher,
+                    data_device_id,
+                    selection.source_object_id,
+                    DataOfferRole::Selection,
+                )
+            });
+
+            let data_device = self.ref_object_mut(data_device_id, state);
+            data_device.set_selection_offer(next_offer);
+            data_device.send_selection(
+                next_offer.unwrap_or_else(|| WlDataOfferId::from(0u32)),
+                dispatcher,
+            );
+        }
+    }
+
+    fn handle_data_device_drag_enter(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        serial: u32,
+        surface: WlSurfaceId,
+        x: f32,
+        y: f32,
+        source_object_id: Option<ObjectId>,
+    ) {
+        let has_legacy_device = state
+            .seat
+            .data_device_resources(self.id)
+            .into_iter()
+            .filter(|data_device_id| self.contains_object(*data_device_id, state))
+            .any(|data_device_id| {
+                self.ref_object(data_device_id, state).version()
+                    < crate::protocol_generated::wl_data_offer::SOURCE_ACTIONS_SINCE
+            });
+        if has_legacy_device
+            && state
+                .seat
+                .active_drag()
+                .is_some_and(|drag| drag.negotiation.chosen_action == 0)
+        {
+            let source_actions = source_object_id
+                .and_then(|source_object_id| {
+                    state
+                        .objects
+                        .try_ref_object::<WlDataSource>(source_object_id)
+                        .map(|source| source.effective_dnd_actions())
+                })
+                .unwrap_or(0);
+            if source_actions
+                & crate::protocol_generated::wl_data_device_manager::DndAction::Copy as u32
+                != 0
+            {
+                let _ = state.seat.set_active_drag_chosen_action(
+                    self.id,
+                    crate::protocol_generated::wl_data_device_manager::DndAction::Copy as u32,
+                );
+            }
+        }
+        for data_device_id in state.seat.data_device_resources(self.id) {
+            if !self.contains_object(data_device_id, state) {
+                continue;
+            }
+            let device_version = self.ref_object(data_device_id, state).version();
+
+            let previous_offer = {
+                let data_device = self.ref_object_mut(data_device_id, state);
+                data_device.take_drag_offer()
+            };
+            if let Some(previous_offer) = previous_offer {
+                self.destroy_data_offer(state, dispatcher, previous_offer);
+            }
+
+            let offer_id = source_object_id.and_then(|source_object_id| {
+                self.create_data_offer_for_device(
+                    state,
+                    dispatcher,
+                    data_device_id,
+                    source_object_id,
+                    DataOfferRole::Drag,
+                )
+            });
+            if let Some(offer_id) = offer_id {
+                let _ = state.seat.register_active_drag_offer(
+                    self.id,
+                    offer_id,
+                    device_version >= crate::protocol_generated::wl_data_offer::ACTION_SINCE,
+                );
+            }
+
+            let data_device = self.ref_object_mut(data_device_id, state);
+            data_device.set_drag_offer(offer_id);
+            data_device.send_enter(
+                serial,
+                surface,
+                x,
+                y,
+                offer_id.unwrap_or_else(|| WlDataOfferId::from(0u32)),
+                dispatcher,
+            );
+        }
+    }
+
+    fn handle_data_device_drag_leave(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        for data_device_id in state.seat.data_device_resources(self.id) {
+            if !self.contains_object(data_device_id, state) {
+                continue;
+            }
+            let previous_offer = {
+                let data_device = self.ref_object_mut(data_device_id, state);
+                data_device.send_leave(dispatcher);
+                data_device.take_drag_offer()
+            };
+            if let Some(previous_offer) = previous_offer {
+                self.destroy_data_offer(state, dispatcher, previous_offer);
+            }
+        }
+    }
+
+    fn handle_data_device_drag_motion(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        time: u32,
+        x: f32,
+        y: f32,
+    ) {
+        for data_device_id in state.seat.data_device_resources(self.id) {
+            if !self.contains_object(data_device_id, state) {
+                continue;
+            }
+            let data_device = self.ref_object(data_device_id, state);
+            data_device.send_motion(time, x, y, dispatcher);
+        }
+    }
+
+    fn handle_data_device_drag_drop(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        for data_device_id in state.seat.data_device_resources(self.id) {
+            if !self.contains_object(data_device_id, state) {
+                continue;
+            }
+            let data_device = self.ref_object(data_device_id, state);
+            data_device.send_drop(dispatcher);
+        }
+
+        if let Some(drag) = state.seat.active_drag() {
+            if drag
+                .target
+                .is_some_and(|target| target.client_id == self.id)
+            {
+                if let Some(source_id) = drag.source_id {
+                    if drag.negotiation.chosen_action == 0 {
+                        return;
+                    }
+                    dispatcher.dispatch_to(
+                        drag.source_client_id,
+                        ClientAction::DataSourceEvent {
+                            source_id,
+                            event: DataSourceClientEvent::Action {
+                                dnd_action: drag.negotiation.chosen_action,
+                            },
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn handle_data_source_event(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        source_id: WlDataSourceId,
+        event: DataSourceClientEvent,
+    ) {
+        if !self.contains_object(source_id, state) {
+            if let DataSourceClientEvent::Send { fd, .. } = event {
+                let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+            }
+            return;
+        }
+        let source = self.ref_object_mut(source_id, state);
+        match event {
+            DataSourceClientEvent::Target(mime_type) => {
+                source.send_target(mime_type, dispatcher);
+            }
+            DataSourceClientEvent::Send { mime_type, fd } => {
+                source.send_send(mime_type, fd, dispatcher);
+            }
+            DataSourceClientEvent::Cancelled => {
+                source.send_cancelled(dispatcher);
+            }
+            DataSourceClientEvent::DndDropPerformed => {
+                source.send_dnd_drop_performed(dispatcher);
+            }
+            DataSourceClientEvent::DndFinished => {
+                source.send_dnd_finished(dispatcher);
+            }
+            DataSourceClientEvent::Action { dnd_action } => {
+                source.send_action(dnd_action, dispatcher);
             }
         }
     }
@@ -959,6 +1336,8 @@ impl Client {
         let root_surface_ids = state.root_surface_ids();
         let active_cursor_surface = active_cursor_surface_refresh_params(state, self.id)
             .map(|(object_id, base_x, base_y)| (object_id, base_x, base_y));
+        let active_dnd_icon_surface = active_dnd_icon_surface_refresh_params(state, self.id)
+            .map(|(object_id, base_x, base_y)| (object_id, base_x, base_y));
         log::debug!("refresh_surface_outputs client={:?} roots={:?}", self.id, root_surface_ids);
         for surface_object_id in root_surface_ids {
             let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
@@ -975,6 +1354,25 @@ impl Client {
             }
             if surface.has_cursor_role() {
                 if let Some((active_surface_object_id, base_x, base_y)) = active_cursor_surface {
+                    if active_surface_object_id == surface_object_id {
+                        refresh_surface_tree_outputs(
+                            self,
+                            state,
+                            dispatcher,
+                            surface_object_id,
+                            base_x,
+                            base_y,
+                        );
+                    } else {
+                        clear_surface_tree_outputs(self, state, dispatcher, surface_object_id);
+                    }
+                } else {
+                    clear_surface_tree_outputs(self, state, dispatcher, surface_object_id);
+                }
+                continue;
+            }
+            if surface.has_dnd_icon_role() {
+                if let Some((active_surface_object_id, base_x, base_y)) = active_dnd_icon_surface {
                     if active_surface_object_id == surface_object_id {
                         refresh_surface_tree_outputs(
                             self,
@@ -1251,6 +1649,23 @@ fn active_cursor_surface_refresh_params(
     Some((cursor.object_id, base_x, base_y))
 }
 
+fn active_dnd_icon_surface_refresh_params(
+    state: &State,
+    client_id: ClientId,
+) -> Option<(ObjectId, i32, i32)> {
+    let drag = state.seat.active_drag()?;
+    if drag.source_client_id != client_id {
+        return None;
+    }
+    let surface_object_id = drag.icon_surface_object_id?;
+    let surface = state
+        .objects
+        .try_ref_object::<WlSurface>(surface_object_id)?;
+    let (pointer_x, pointer_y) = state.seat.pointer_position();
+    let (root_x, root_y) = surface.root_position();
+    Some((surface_object_id, pointer_x.round() as i32 - root_x, pointer_y.round() as i32 - root_y))
+}
+
 /// A specialized `Dispatcher`
 ///
 /// Difference is that this one contains the client fd, so we can send events
@@ -1353,6 +1768,32 @@ impl Model for Client {
             }
             SeatEvent { event } => {
                 self.handle_seat_event(state, &mut dispatcher, event);
+            }
+            RefreshDataDeviceSelection => {
+                self.refresh_data_device_selection(state, &mut dispatcher);
+            }
+            DataDeviceDragEnter { serial, surface, x, y, source_object_id } => {
+                self.handle_data_device_drag_enter(
+                    state,
+                    &mut dispatcher,
+                    serial,
+                    surface,
+                    x,
+                    y,
+                    source_object_id,
+                );
+            }
+            DataDeviceDragLeave => {
+                self.handle_data_device_drag_leave(state, &mut dispatcher);
+            }
+            DataDeviceDragMotion { time, x, y } => {
+                self.handle_data_device_drag_motion(state, &mut dispatcher, time, x, y);
+            }
+            DataDeviceDragDrop => {
+                self.handle_data_device_drag_drop(state, &mut dispatcher);
+            }
+            DataSourceEvent { source_id, event } => {
+                self.handle_data_source_event(state, &mut dispatcher, source_id, event);
             }
             RegistryGlobalAdded { name, interface, version } => {
                 self.handle_registry_global_added(state, &mut dispatcher, name, interface, version);
@@ -1559,7 +2000,6 @@ impl Model for Client {
                     dispatcher.stop_model::<_, ClientReader>(id);
                 };
                 state.activation_tokens.remove_client(self.id);
-                let cursor_changed = state.seat.remove_client(self.id);
                 let client_objects: Vec<(WaylandId, ObjectId)> = self
                     .objects
                     .iter()
@@ -1574,6 +2014,14 @@ impl Model for Client {
                 for (wid, object_id) in client_objects {
                     self.objects.remove(&wid);
                     let _ = state.remove_object(object_id);
+                }
+                let cursor_changed = state.seat.remove_client(self.id);
+                if state
+                    .seat
+                    .active_drag()
+                    .is_some_and(|drag| drag.phase == crate::state::DragPhase::Cancelled)
+                {
+                    crate::seat::cancel_active_drag(state, &mut dispatcher, None);
                 }
                 self.pending_fds.clear();
                 if cursor_changed || had_client_objects {

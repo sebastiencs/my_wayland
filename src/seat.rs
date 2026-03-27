@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::{
     clients::{ClientAction, ClientId},
@@ -6,10 +6,14 @@ use crate::{
     drm::{schedule_active_output, Drm},
     object::Object,
     protocol_generated::{
-        Array, WlKeyboardId, WlPointerId, WlSeatId, WlSurfaceId, XdgPopupId, XdgToplevelId,
+        Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlKeyboardId, WlPointerId, WlSeatId,
+        WlSurfaceId, XdgPopupId, XdgToplevelId,
     },
     runner::Dispatcher,
-    state::{DrmId, IndexMap, ObjectId, State},
+    state::{
+        DragNegotiationState, DragPhase, DragState, DragTargetState, DrmId, IndexMap, ObjectId,
+        SelectionSourceState, State,
+    },
     wayland_objects::wl_surface::{StackEntry, WlSurface},
     xkb::KeyboardModifiers,
 };
@@ -107,6 +111,14 @@ struct KeyboardTriggerState {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct SerialRange {
+    lo: u32,
+    hi: u32,
+}
+
+const MAX_TRACKED_SERIAL_RANGES: usize = 32;
+
+#[derive(Clone, Copy, Debug)]
 enum PointerInteractiveGrab {
     Move {
         client_id: ClientId,
@@ -138,6 +150,11 @@ pub struct SeatState {
     cursor: CursorState,
     popup_grab: Option<PopupGrabState>,
     pointer_interactive_grab: Option<PointerInteractiveGrab>,
+    client_serials: BTreeMap<ClientId, VecDeque<SerialRange>>,
+    data_device_resources: BTreeMap<ClientId, Vec<WlDataDeviceId>>,
+    selection_source: Option<SelectionSourceState>,
+    selection_serial: u32,
+    active_drag: Option<DragState>,
     pointer_resources: BTreeMap<ClientId, Vec<WlPointerId>>,
     keyboard_resources: BTreeMap<ClientId, Vec<WlKeyboardId>>,
 }
@@ -158,6 +175,11 @@ impl Default for SeatState {
             cursor,
             popup_grab: None,
             pointer_interactive_grab: None,
+            client_serials: BTreeMap::default(),
+            data_device_resources: BTreeMap::default(),
+            selection_source: None,
+            selection_serial: 0,
+            active_drag: None,
             pointer_resources: BTreeMap::default(),
             keyboard_resources: BTreeMap::default(),
         }
@@ -187,6 +209,17 @@ impl SeatState {
         remove_resource(&mut self.keyboard_resources, client_id, keyboard_id);
     }
 
+    pub fn register_data_device(&mut self, client_id: ClientId, data_device_id: WlDataDeviceId) {
+        let resources = self.data_device_resources.entry(client_id).or_default();
+        if !resources.contains(&data_device_id) {
+            resources.push(data_device_id);
+        }
+    }
+
+    pub fn unregister_data_device(&mut self, client_id: ClientId, data_device_id: WlDataDeviceId) {
+        remove_resource(&mut self.data_device_resources, client_id, data_device_id);
+    }
+
     pub fn pointer_resources(&self, client_id: ClientId) -> Vec<WlPointerId> {
         self.pointer_resources
             .get(&client_id)
@@ -201,9 +234,295 @@ impl SeatState {
             .unwrap_or_default()
     }
 
+    pub fn data_device_resources(&self, client_id: ClientId) -> Vec<WlDataDeviceId> {
+        self.data_device_resources
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn selection_source(&self) -> Option<SelectionSourceState> {
+        self.selection_source
+    }
+
+    pub fn selection_serial(&self) -> u32 {
+        self.selection_serial
+    }
+
+    pub fn replace_selection_source(
+        &mut self,
+        source: Option<SelectionSourceState>,
+        serial: u32,
+    ) -> Option<SelectionSourceState> {
+        self.selection_serial = serial;
+        std::mem::replace(&mut self.selection_source, source)
+    }
+
+    pub fn validate_selection_serial(&self, serial: u32) -> bool {
+        let current = self.selection_serial;
+        current == 0 || current.wrapping_sub(serial) >= (u32::MAX / 2)
+    }
+
+    pub fn validate_data_transfer_serial(
+        &self,
+        client_id: ClientId,
+        surface_id: WlSurfaceId,
+        serial: u32,
+    ) -> bool {
+        self.pointer_button_count > 0
+            && self.last_pointer_press.is_some_and(|press| {
+                press.serial == serial
+                    && press.focus.client_id == client_id
+                    && press.focus.surface_id == surface_id
+            })
+    }
+
+    pub fn validate_client_serial(&self, client_id: ClientId, serial: u32) -> bool {
+        let Some(serials) = self.client_serials.get(&client_id) else {
+            return false;
+        };
+        for range in serials.iter().rev() {
+            if serial.wrapping_sub(range.hi) as i32 > 0 {
+                return false;
+            }
+            if serial.wrapping_sub(range.lo) as i32 >= 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn active_drag(&self) -> Option<DragState> {
+        self.active_drag.clone()
+    }
+
+    pub fn active_drag_mut(&mut self) -> Option<&mut DragState> {
+        self.active_drag.as_mut()
+    }
+
+    pub fn set_active_drag(&mut self, drag: DragState) -> Option<DragState> {
+        std::mem::replace(&mut self.active_drag, Some(drag))
+    }
+
+    pub fn replace_active_drag(&mut self, drag: Option<DragState>) -> Option<DragState> {
+        std::mem::replace(&mut self.active_drag, drag)
+    }
+
+    pub fn clear_active_drag(&mut self) -> Option<DragState> {
+        self.replace_active_drag(None)
+    }
+
+    pub fn set_active_drag_target(&mut self, target: Option<DragTargetState>) -> bool {
+        let Some(drag) = self.active_drag.as_mut() else {
+            return false;
+        };
+        if drag.target == target {
+            return false;
+        }
+        drag.target = target;
+        drag.negotiation = DragNegotiationState::default();
+        drag.phase = DragPhase::Dragging;
+        true
+    }
+
+    pub fn register_active_drag_offer(
+        &mut self,
+        target_client_id: ClientId,
+        offer_id: WlDataOfferId,
+        has_finish_capable_offer: bool,
+    ) -> bool {
+        let Some(drag) = self.active_drag.as_mut() else {
+            return false;
+        };
+        if drag
+            .target
+            .is_none_or(|target| target.client_id != target_client_id)
+        {
+            return false;
+        }
+        if drag.negotiation.offer_ids.contains(&offer_id) {
+            return false;
+        }
+        drag.negotiation.offer_ids.push(offer_id);
+        drag.negotiation.has_finish_capable_offer |= has_finish_capable_offer;
+        true
+    }
+
+    pub fn unregister_active_drag_offer(
+        &mut self,
+        target_client_id: ClientId,
+        offer_id: WlDataOfferId,
+    ) -> bool {
+        let Some(drag) = self.active_drag.as_mut() else {
+            return false;
+        };
+        if drag
+            .target
+            .is_none_or(|target| target.client_id != target_client_id)
+        {
+            return false;
+        }
+        let len_before = drag.negotiation.offer_ids.len();
+        drag.negotiation
+            .offer_ids
+            .retain(|candidate| *candidate != offer_id);
+        len_before != drag.negotiation.offer_ids.len()
+    }
+
+    pub fn active_drag_contains_offer(
+        &self,
+        target_client_id: ClientId,
+        offer_id: WlDataOfferId,
+    ) -> bool {
+        self.active_drag.as_ref().is_some_and(|drag| {
+            drag.target
+                .is_some_and(|target| target.client_id == target_client_id)
+                && drag.negotiation.offer_ids.contains(&offer_id)
+        })
+    }
+
+    pub fn active_drag_offer_ids(&self, target_client_id: ClientId) -> Vec<WlDataOfferId> {
+        self.active_drag
+            .as_ref()
+            .and_then(|drag| {
+                drag.target
+                    .is_some_and(|target| target.client_id == target_client_id)
+                    .then(|| drag.negotiation.offer_ids.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn set_active_drag_accepted_mime(
+        &mut self,
+        target_client_id: ClientId,
+        offer_id: WlDataOfferId,
+        accepted_mime: Option<String>,
+    ) -> bool {
+        let Some(drag) = self.active_drag.as_mut() else {
+            return false;
+        };
+        if drag
+            .target
+            .is_none_or(|target| target.client_id != target_client_id)
+            || !drag.negotiation.offer_ids.contains(&offer_id)
+        {
+            return false;
+        }
+        if drag.negotiation.accepted_mime == accepted_mime {
+            return false;
+        }
+        drag.negotiation.accepted_mime = accepted_mime;
+        true
+    }
+
+    pub fn set_active_drag_negotiation_actions(
+        &mut self,
+        target_client_id: ClientId,
+        offer_id: WlDataOfferId,
+        destination_actions: u32,
+        preferred_action: u32,
+        chosen_action: u32,
+    ) -> bool {
+        let Some(drag) = self.active_drag.as_mut() else {
+            return false;
+        };
+        if drag
+            .target
+            .is_none_or(|target| target.client_id != target_client_id)
+            || !drag.negotiation.offer_ids.contains(&offer_id)
+        {
+            return false;
+        }
+        if drag.negotiation.destination_actions == destination_actions
+            && drag.negotiation.preferred_action == preferred_action
+            && drag.negotiation.chosen_action == chosen_action
+        {
+            return false;
+        }
+        drag.negotiation.destination_actions = destination_actions;
+        drag.negotiation.preferred_action = preferred_action;
+        drag.negotiation.chosen_action = chosen_action;
+        true
+    }
+
+    pub fn set_active_drag_chosen_action(
+        &mut self,
+        target_client_id: ClientId,
+        chosen_action: u32,
+    ) -> bool {
+        let Some(drag) = self.active_drag.as_mut() else {
+            return false;
+        };
+        if drag
+            .target
+            .is_none_or(|target| target.client_id != target_client_id)
+        {
+            return false;
+        }
+        if drag.negotiation.chosen_action == chosen_action {
+            return false;
+        }
+        drag.negotiation.chosen_action = chosen_action;
+        true
+    }
+
+    pub fn set_active_drag_finished(
+        &mut self,
+        target_client_id: ClientId,
+        offer_id: WlDataOfferId,
+        finished: bool,
+    ) -> bool {
+        let Some(drag) = self.active_drag.as_mut() else {
+            return false;
+        };
+        if drag
+            .target
+            .is_none_or(|target| target.client_id != target_client_id)
+            || !drag.negotiation.offer_ids.contains(&offer_id)
+        {
+            return false;
+        }
+        if drag.negotiation.finished == finished {
+            return false;
+        }
+        drag.negotiation.finished = finished;
+        true
+    }
+
+    pub fn set_active_drag_phase(&mut self, phase: DragPhase) -> bool {
+        let Some(drag) = self.active_drag.as_mut() else {
+            return false;
+        };
+        if drag.phase == phase {
+            return false;
+        }
+        drag.phase = phase;
+        true
+    }
+
+    pub fn active_drag_can_drop(&self) -> bool {
+        self.active_drag.as_ref().is_some_and(|drag| {
+            if drag.phase != DragPhase::Dragging || drag.target.is_none() {
+                return false;
+            }
+            if drag.source_id.is_none() {
+                return true;
+            }
+            drag.negotiation.accepted_mime.is_some() && drag.negotiation.chosen_action != 0
+        })
+    }
+
     pub fn remove_client(&mut self, client_id: ClientId) -> bool {
+        self.client_serials.remove(&client_id);
+        self.data_device_resources.remove(&client_id);
         self.pointer_resources.remove(&client_id);
         self.keyboard_resources.remove(&client_id);
+        if self
+            .selection_source
+            .is_some_and(|selection| selection.owner_client_id == client_id)
+        {
+            self.selection_source = None;
+        }
         if self
             .pointer_focus
             .is_some_and(|focus| focus.target.client_id == client_id)
@@ -240,6 +559,22 @@ impl SeatState {
         {
             self.pointer_interactive_grab = None;
         }
+        if self
+            .active_drag
+            .as_ref()
+            .is_some_and(|drag| drag.source_client_id == client_id)
+        {
+            self.active_drag = None;
+        } else if let Some(drag) = self.active_drag.as_mut() {
+            if drag
+                .target
+                .is_some_and(|target| target.client_id == client_id)
+            {
+                drag.target = None;
+                drag.negotiation = DragNegotiationState::default();
+                drag.phase = DragPhase::Cancelled;
+            }
+        }
         self.cursor.clear_for_client(client_id)
     }
 
@@ -263,6 +598,23 @@ impl SeatState {
 
     fn record_keyboard_trigger(&mut self, serial: u32, focus: SurfaceFocus) {
         self.last_keyboard_trigger = Some(KeyboardTriggerState { serial, focus });
+    }
+
+    pub(crate) fn record_client_serial(&mut self, client_id: ClientId, serial: u32) {
+        let serials = self.client_serials.entry(client_id).or_default();
+        if let Some(back) = serials.back_mut() {
+            if serial == back.hi {
+                return;
+            }
+            if back.hi.wrapping_add(1) == serial {
+                back.hi = serial;
+                return;
+            }
+        }
+        if serials.len() == MAX_TRACKED_SERIAL_RANGES {
+            serials.pop_front();
+        }
+        serials.push_back(SerialRange { lo: serial, hi: serial });
     }
 
     fn record_pointer_enter(&mut self, client_id: ClientId, serial: u32) {
@@ -493,12 +845,21 @@ pub fn handle_pointer_motion(
         state.seat.pointer_pos.1,
         time
     );
+    if refresh_drag_focus(state, dispatcher, time, true) {
+        refresh_visible_cursor_surface_outputs(state, dispatcher);
+        refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
+        if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
+            schedule_active_output(state, dispatcher);
+        }
+        return;
+    }
     if apply_pointer_interactive_grab(state, dispatcher) {
         return;
     }
     refresh_pointer_focus(state, dispatcher, time, true);
     refresh_visible_cursor_surface_outputs(state, dispatcher);
-    if state.seat.cursor_is_visible() {
+    refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
+    if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
         schedule_active_output(state, dispatcher);
     }
 }
@@ -527,6 +888,16 @@ pub fn handle_pointer_button(
     state
         .seat
         .record_pointer_button(button_state, serial, pointer_focus.map(|focus| focus.target));
+
+    if let Some(drag) = state.seat.active_drag() {
+        if drag.phase == DragPhase::Dragging
+            && button_state != 1
+            && state.seat.pointer_button_count == 0
+        {
+            complete_drag_drop(state, dispatcher);
+        }
+        return;
+    }
 
     if maybe_dismiss_popup_grab_on_button(state, dispatcher, button_state, time) {
         return;
@@ -574,12 +945,21 @@ pub fn handle_pointer_motion_absolute(
     //     state.seat.pointer_pos.1,
     //     time
     // );
+    if refresh_drag_focus(state, dispatcher, time, true) {
+        refresh_visible_cursor_surface_outputs(state, dispatcher);
+        refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
+        if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
+            schedule_active_output(state, dispatcher);
+        }
+        return;
+    }
     if apply_pointer_interactive_grab(state, dispatcher) {
         return;
     }
     refresh_pointer_focus(state, dispatcher, time, true);
     refresh_visible_cursor_surface_outputs(state, dispatcher);
-    if state.seat.cursor_is_visible() {
+    refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
+    if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
         schedule_active_output(state, dispatcher);
     }
 }
@@ -672,7 +1052,9 @@ fn set_keyboard_focus(
         dispatch_modifiers(dispatcher, new_focus.client_id, serial, state.keyboard.modifiers());
     }
 
+    let old_focus = state.seat.keyboard_focus;
     state.seat.keyboard_focus = new_focus;
+    refresh_selection_focus_clients(dispatcher, old_focus, new_focus);
 }
 
 fn surface_object_id_for_wayland_id(state: &State, surface_id: WlSurfaceId) -> Option<ObjectId> {
@@ -749,6 +1131,61 @@ pub fn set_surface_focus(
     new_focus: Option<SurfaceFocus>,
 ) {
     set_keyboard_focus(state, dispatcher, new_focus);
+}
+
+pub fn refresh_active_drag_focus(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {
+    let _ = refresh_drag_focus(state, dispatcher, time, true);
+}
+
+pub fn finish_active_drag(state: &mut State, dispatcher: &mut Dispatcher) {
+    let Some(drag) = state.seat.clear_active_drag() else {
+        return;
+    };
+    if drag.icon_surface_object_id.is_some() {
+        dispatch_client_action(
+            dispatcher,
+            drag.source_client_id,
+            ClientAction::RefreshSurfaceOutputs,
+        );
+        schedule_active_output(state, dispatcher);
+    }
+    if let Some(target) = drag.target {
+        dispatcher.dispatch_to(target.client_id, ClientAction::DataDeviceDragLeave);
+    }
+}
+
+pub fn cancel_active_drag(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    source: Option<(ClientId, WlDataSourceId)>,
+) {
+    let Some(drag) = state.seat.clear_active_drag() else {
+        return;
+    };
+    if drag.icon_surface_object_id.is_some() {
+        dispatch_client_action(
+            dispatcher,
+            drag.source_client_id,
+            ClientAction::RefreshSurfaceOutputs,
+        );
+        schedule_active_output(state, dispatcher);
+    }
+    if let Some(target) = drag.target {
+        dispatcher.dispatch_to(target.client_id, ClientAction::DataDeviceDragLeave);
+    }
+    let source = source.or_else(|| {
+        drag.source_id
+            .map(|source_id| (drag.source_client_id, source_id))
+    });
+    if let Some((source_client_id, source_id)) = source {
+        dispatcher.dispatch_to(
+            source_client_id,
+            ClientAction::DataSourceEvent {
+                source_id,
+                event: crate::clients::DataSourceClientEvent::Cancelled,
+            },
+        );
+    }
 }
 
 fn popup_keyboard_focus(state: &State) -> Option<SurfaceFocus> {
@@ -966,7 +1403,7 @@ fn hit_test_surface(
         let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
             continue;
         };
-        if !surface.is_root() || surface.has_cursor_role() {
+        if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
             continue;
         }
         if let Some(root_hit) = hit_test_subtree(&state.objects, object_id, 0, 0, x, y) {
@@ -1133,6 +1570,131 @@ fn local_coords(rect: SurfaceRect, pointer_pos: (f64, f64)) -> (f32, f32) {
     ((pointer_pos.0 - rect.x as f64) as f32, (pointer_pos.1 - rect.y as f64) as f32)
 }
 
+fn refresh_selection_focus_clients(
+    dispatcher: &mut Dispatcher,
+    old_focus: Option<SurfaceFocus>,
+    new_focus: Option<SurfaceFocus>,
+) {
+    let old_client = old_focus.map(|focus| focus.client_id);
+    let new_client = new_focus.map(|focus| focus.client_id);
+    if old_client == new_client {
+        return;
+    }
+    if let Some(client_id) = old_client {
+        dispatcher.dispatch_to(client_id, ClientAction::RefreshDataDeviceSelection);
+    }
+    if let Some(client_id) = new_client {
+        dispatcher.dispatch_to(client_id, ClientAction::RefreshDataDeviceSelection);
+    }
+}
+
+fn refresh_drag_focus(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    time: u32,
+    send_motion: bool,
+) -> bool {
+    let Some(active_drag) = state.seat.active_drag() else {
+        return false;
+    };
+    if active_drag.phase != DragPhase::Dragging {
+        return true;
+    }
+
+    let hit =
+        hit_test_surface(state, &state.drm, state.seat.pointer_pos.0, state.seat.pointer_pos.1);
+    let mut new_target = hit.map(|focus| DragTargetState {
+        client_id: focus.target.client_id,
+        surface_id: focus.target.surface_id,
+    });
+    if active_drag.source_object_id.is_none()
+        && new_target.is_some_and(|target| target.client_id != active_drag.source_client_id)
+    {
+        new_target = None;
+    }
+
+    let old_target = active_drag.target;
+    if old_target != new_target {
+        if let Some(old_target) = old_target {
+            dispatcher.dispatch_to(old_target.client_id, ClientAction::DataDeviceDragLeave);
+        }
+        if let Some(source_id) = active_drag.source_id {
+            dispatcher.dispatch_to(
+                active_drag.source_client_id,
+                ClientAction::DataSourceEvent {
+                    source_id,
+                    event: crate::clients::DataSourceClientEvent::Target(None),
+                },
+            );
+            dispatcher.dispatch_to(
+                active_drag.source_client_id,
+                ClientAction::DataSourceEvent {
+                    source_id,
+                    event: crate::clients::DataSourceClientEvent::Action { dnd_action: 0 },
+                },
+            );
+        }
+
+        if let (Some(hit), Some(new_target)) = (hit, new_target) {
+            let serial = state.seat.next_serial();
+            let (x, y) = local_coords(hit.rect, state.seat.pointer_pos);
+            dispatcher.dispatch_to(
+                new_target.client_id,
+                ClientAction::DataDeviceDragEnter {
+                    serial,
+                    surface: new_target.surface_id,
+                    x,
+                    y,
+                    source_object_id: active_drag.source_object_id,
+                },
+            );
+            if send_motion {
+                dispatcher.dispatch_to(
+                    new_target.client_id,
+                    ClientAction::DataDeviceDragMotion { time, x, y },
+                );
+            }
+        }
+
+        state.seat.set_active_drag_target(new_target);
+        return true;
+    }
+
+    if send_motion {
+        if let (Some(hit), Some(target)) = (hit, new_target) {
+            let (x, y) = local_coords(hit.rect, state.seat.pointer_pos);
+            dispatcher
+                .dispatch_to(target.client_id, ClientAction::DataDeviceDragMotion { time, x, y });
+        }
+    }
+
+    true
+}
+
+fn complete_drag_drop(state: &mut State, dispatcher: &mut Dispatcher) {
+    let Some(drag) = state.seat.active_drag() else {
+        return;
+    };
+    if state.seat.active_drag_can_drop() {
+        let target = drag.target.expect("validated active drag target");
+        state.seat.set_active_drag_phase(DragPhase::DropSent);
+        dispatcher.dispatch_to(target.client_id, ClientAction::DataDeviceDragDrop);
+        if let Some(source_id) = drag.source_id {
+            dispatcher.dispatch_to(
+                drag.source_client_id,
+                ClientAction::DataSourceEvent {
+                    source_id,
+                    event: crate::clients::DataSourceClientEvent::DndDropPerformed,
+                },
+            );
+        } else {
+            finish_active_drag(state, dispatcher);
+        }
+    } else {
+        cancel_active_drag(state, dispatcher, None);
+    }
+}
+
 fn dispatch_client_event(dispatcher: &mut Dispatcher, client_id: ClientId, event: SeatClientEvent) {
     dispatcher.dispatch_to(client_id, ClientAction::SeatEvent { event });
 }
@@ -1148,10 +1710,23 @@ fn visible_cursor_owner_client(state: &State) -> Option<ClientId> {
     }
 }
 
+fn visible_dnd_icon_owner_client(state: &State) -> Option<ClientId> {
+    state
+        .seat
+        .active_drag()
+        .and_then(|drag| drag.icon_surface_object_id.map(|_| drag.source_client_id))
+}
+
 fn refresh_visible_cursor_surface_outputs(state: &State, dispatcher: &mut Dispatcher) {
     if let Some(CursorSourceRef::Surface { owner_client_id, .. }) =
         state.seat.visible_cursor_source()
     {
+        dispatch_client_action(dispatcher, owner_client_id, ClientAction::RefreshSurfaceOutputs);
+    }
+}
+
+fn refresh_visible_dnd_icon_surface_outputs(state: &State, dispatcher: &mut Dispatcher) {
+    if let Some(owner_client_id) = visible_dnd_icon_owner_client(state) {
         dispatch_client_action(dispatcher, owner_client_id, ClientAction::RefreshSurfaceOutputs);
     }
 }
@@ -1474,9 +2049,12 @@ mod surface_tree_hit_test_tests {
 #[cfg(test)]
 mod xdg_seat_tests {
     use {
-        super::{begin_popup_grab, remove_popup_grab, SeatState, SurfaceFocus},
+        super::{
+            begin_popup_grab, cancel_active_drag, complete_drag_drop, remove_popup_grab, SeatState,
+            SurfaceFocus,
+        },
         crate::{
-            clients::{Client, ClientId, RawEvent},
+            clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent},
             cursor::CursorSourceRef,
             egl::EGL,
             globals::Globals,
@@ -1486,7 +2064,7 @@ mod xdg_seat_tests {
                 XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
             },
             runner::Dispatcher,
-            state::{ObjectId, State},
+            state::{DragPhase, DragState, DragTargetState, ObjectId, State},
             wayland_objects::{
                 wl_seat::WlSeat,
                 wl_surface::{Role, WlSurface},
@@ -2180,5 +2758,102 @@ mod xdg_seat_tests {
 
         assert!(seat.pointer_cursor_request_allowed(ClientId::from_raw(7), 20));
         assert!(!seat.pointer_cursor_request_allowed(ClientId::from_raw(7), 19));
+    }
+
+    #[test]
+    fn local_drag_drop_without_source_finishes_immediately() {
+        let mut state = make_state();
+        let (_client, mut dispatcher) = make_client();
+        let target_client_id = ClientId::from_raw(42);
+
+        state.seat.set_active_drag(DragState {
+            source_object_id: None,
+            source_id: None,
+            source_client_id: target_client_id,
+            origin_surface_id: WlSurfaceId::from(10),
+            icon_surface_object_id: None,
+            icon_surface_id: None,
+            target: Some(DragTargetState {
+                client_id: target_client_id,
+                surface_id: WlSurfaceId::from(11),
+            }),
+            negotiation: Default::default(),
+            phase: DragPhase::Dragging,
+        });
+
+        complete_drag_drop(&mut state, &mut dispatcher);
+
+        assert!(state.seat.active_drag().is_none());
+        assert!(dispatcher
+            .test_has_queued_action_for::<ClientAction>(target_client_id, |action| {
+                matches!(action, ClientAction::DataDeviceDragDrop)
+            }));
+    }
+
+    #[test]
+    fn invalid_drag_drop_cancels_source() {
+        let mut state = make_state();
+        let (_client, mut dispatcher) = make_client();
+        let source_client_id = ClientId::from_raw(50);
+        let target_client_id = ClientId::from_raw(51);
+        let source_id = crate::protocol_generated::WlDataSourceId::from(12);
+
+        state.seat.set_active_drag(DragState {
+            source_object_id: None,
+            source_id: Some(source_id),
+            source_client_id,
+            origin_surface_id: WlSurfaceId::from(20),
+            icon_surface_object_id: None,
+            icon_surface_id: None,
+            target: Some(DragTargetState {
+                client_id: target_client_id,
+                surface_id: WlSurfaceId::from(21),
+            }),
+            negotiation: Default::default(),
+            phase: DragPhase::Dragging,
+        });
+
+        complete_drag_drop(&mut state, &mut dispatcher);
+
+        assert!(state.seat.active_drag().is_none());
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction>(
+            source_client_id,
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::DataSourceEvent {
+                        source_id: queued_source_id,
+                        event: DataSourceClientEvent::Cancelled,
+                    } if *queued_source_id == source_id
+                )
+            }
+        ));
+    }
+
+    #[test]
+    fn cancelling_drag_with_icon_refreshes_source_outputs() {
+        let mut state = make_state();
+        let (_client, mut dispatcher) = make_client();
+        let source_client_id = ClientId::from_raw(60);
+
+        state.seat.set_active_drag(DragState {
+            source_object_id: None,
+            source_id: None,
+            source_client_id,
+            origin_surface_id: WlSurfaceId::from(30),
+            icon_surface_object_id: Some(ObjectId::from(123usize)),
+            icon_surface_id: Some(WlSurfaceId::from(31)),
+            target: None,
+            negotiation: Default::default(),
+            phase: DragPhase::Dragging,
+        });
+
+        cancel_active_drag(&mut state, &mut dispatcher, None);
+
+        assert!(state.seat.active_drag().is_none());
+        assert!(dispatcher
+            .test_has_queued_action_for::<ClientAction>(source_client_id, |action| {
+                matches!(action, ClientAction::RefreshSurfaceOutputs)
+            }));
     }
 }

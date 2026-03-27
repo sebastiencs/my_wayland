@@ -97,6 +97,32 @@ impl Dispatcher {
     }
 }
 
+#[cfg(test)]
+impl Dispatcher {
+    pub(crate) fn test_has_queued_action<T: 'static>(
+        &self,
+        predicate: impl Fn(&T) -> bool,
+    ) -> bool {
+        self.queue
+            .iter()
+            .filter_map(|action| action.ptr.downcast_ref::<T>())
+            .any(predicate)
+    }
+
+    pub(crate) fn test_has_queued_action_for<T: 'static>(
+        &self,
+        id: impl Into<u64>,
+        predicate: impl Fn(&T) -> bool,
+    ) -> bool {
+        let id = Some(id.into());
+        self.queue
+            .iter()
+            .filter(|action| action.id.specifier == id)
+            .filter_map(|action| action.ptr.downcast_ref::<T>())
+            .any(predicate)
+    }
+}
+
 pub enum Redispatcher<R> {
     Fun {
         ptr: fn(R) -> AnyAction,
