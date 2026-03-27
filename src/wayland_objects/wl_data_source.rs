@@ -286,7 +286,7 @@ mod tests {
 
         assert!(state.seat.selection_source().is_none());
         assert!(dispatcher
-            .test_has_queued_action_for::<ClientAction>(focused_client_id, |action| {
+            .test_has_queued_action_for::<ClientAction, ClientId>(focused_client_id, |action| {
                 matches!(action, ClientAction::RefreshDataDeviceSelection)
             }));
     }
@@ -319,17 +319,20 @@ mod tests {
 
         assert!(state.seat.active_drag().is_none());
         assert!(dispatcher
-            .test_has_queued_action_for::<ClientAction>(target_client_id, |action| {
+            .test_has_queued_action_for::<ClientAction, ClientId>(target_client_id, |action| {
                 matches!(action, ClientAction::DataDeviceDragLeave)
             }));
-        assert!(dispatcher.test_has_queued_action_for::<ClientAction>(owner_client_id, |action| {
-            matches!(
-                action,
-                ClientAction::DataSourceEvent {
-                    source_id: queued_source_id,
-                    event: DataSourceClientEvent::Cancelled,
-                } if *queued_source_id == source_id
-            )
-        }));
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            owner_client_id,
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::DataSourceEvent {
+                        source_id: queued_source_id,
+                        event: DataSourceClientEvent::Cancelled,
+                    } if *queued_source_id == source_id
+                )
+            }
+        ));
     }
 }

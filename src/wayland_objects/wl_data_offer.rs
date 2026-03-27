@@ -567,7 +567,7 @@ mod tests {
         drop(offer);
 
         assert!(state.seat.active_drag().is_none());
-        assert!(dispatcher.test_has_queued_action_for::<ClientAction>(
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
             source_client_id,
             |action| {
                 matches!(
@@ -579,7 +579,7 @@ mod tests {
                 )
             }
         ));
-        assert!(!dispatcher.test_has_queued_action_for::<ClientAction>(
+        assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
             source_client_id,
             |action| {
                 matches!(
@@ -705,7 +705,7 @@ mod tests {
 
         let drag = state.seat.active_drag().expect("drag should stay active");
         assert_eq!(drag.negotiation.offer_ids, vec![offer_b_id]);
-        assert!(!dispatcher.test_has_queued_action_for::<ClientAction>(
+        assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
             source_client_id,
             |action| matches!(
                 action,
@@ -971,7 +971,7 @@ mod tests {
             &mut client_dispatcher,
         );
 
-        assert!(dispatcher.test_has_queued_action_for::<ClientAction>(
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
             source_client_id,
             |action| {
                 matches!(
@@ -1043,7 +1043,7 @@ mod tests {
             &mut client_dispatcher,
         );
 
-        assert!(dispatcher.test_has_queued_action_for::<ClientAction>(
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
             source_client_id,
             |action| {
                 matches!(

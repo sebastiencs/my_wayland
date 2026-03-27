@@ -174,7 +174,7 @@ mod tests {
         );
 
         assert!(dispatcher
-            .test_has_queued_action_for::<ClientAction>(client.client_id(), |action| {
+            .test_has_queued_action_for::<ClientAction, ClientId>(client.client_id(), |action| {
                 matches!(action, ClientAction::RefreshDataDeviceSelection)
             }));
     }

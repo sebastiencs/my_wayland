@@ -14,12 +14,9 @@ use crate::{
     clients::{Client, ClientDispatcher, ClientId},
     drm::{schedule_active_output, schedule_outputs_for_rect, DrmFd},
     egl::EglContext,
-    io_uring::{
-        model::IoUringAction,
-        ring::{ReadWriteCompleted, RingId},
-    },
+    io_uring::{model::IoUringAction, ring::RingId},
     protocol_generated::WlBufferId,
-    runner::{AnyAction, Dispatcher, Model, Redispatcher},
+    runner::{Dispatcher, Model, Redispatcher},
     state::{ObjectId, State},
     wayland_objects::{wl_buffer::WlBuffer, wl_surface::WlSurface},
 };
@@ -310,17 +307,19 @@ fn wait_sync_file_cpu(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
     }
 }
 
-fn next_waiter_id() -> u64 {
+model_instance_id!(pub AcquireReadyWaiterId => AcquireReadyWaiter);
+
+fn next_waiter_id() -> AcquireReadyWaiterId {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    AcquireReadyWaiterId::from(NEXT_ID.fetch_add(1, Ordering::Relaxed))
 }
 
-pub fn fresh_waiter_id() -> u64 {
+pub fn fresh_waiter_id() -> AcquireReadyWaiterId {
     next_waiter_id()
 }
 
 pub struct AcquireReadyWaiter {
-    waiter_id: u64,
+    waiter_id: AcquireReadyWaiterId,
     client_id: ClientId,
     surface_object_id: ObjectId,
     poll_fd: OwnedFd,
@@ -356,7 +355,13 @@ impl Model for AcquireReadyWaiter {
                     fd: self.poll_fd.as_raw_fd(),
                     offset: 0,
                     length: std::mem::size_of::<u64>(),
-                    dispatch_to: Redispatcher::id(self.waiter_id, Self::on_read_ready),
+                    dispatch_to: Redispatcher::to_instance(self.waiter_id, |result| match result {
+                        Ok(_) => AcquireReadyWaiterAction::Ready,
+                        Err(error) => {
+                            log::warn!("surface acquire waiter poll failed: {:?}", error);
+                            AcquireReadyWaiterAction::Failed
+                        }
+                    }),
                 });
             }
             AcquireReadyWaiterAction::Ready => {
@@ -366,7 +371,7 @@ impl Model for AcquireReadyWaiter {
                         .objects
                         .try_grab_object::<WlSurface>(self.surface_object_id)
                     else {
-                        dispatcher.stop_model::<_, Self>(self.waiter_id);
+                        dispatcher.stop_model(self.waiter_id);
                         return Ok(());
                     };
                     surface.activate_blocked_if_waiter_ready(self.waiter_id)
@@ -374,7 +379,7 @@ impl Model for AcquireReadyWaiter {
 
                 if became_active {
                     log::debug!(
-                        "surface acquire waiter fired: waiter_id={} surface_object_id={:?}",
+                        "surface acquire waiter fired: waiter_id={:?} surface_object_id={:?}",
                         self.waiter_id,
                         self.surface_object_id
                     );
@@ -390,7 +395,7 @@ impl Model for AcquireReadyWaiter {
                         schedule_active_output(state, dispatcher);
                     }
                 }
-                dispatcher.stop_model::<_, Self>(self.waiter_id);
+                dispatcher.stop_model(self.waiter_id);
             }
             AcquireReadyWaiterAction::Failed => {
                 self.read_op_id = None;
@@ -401,7 +406,7 @@ impl Model for AcquireReadyWaiter {
                         waiter_id: self.waiter_id,
                     },
                 );
-                dispatcher.stop_model::<_, Self>(self.waiter_id);
+                dispatcher.stop_model(self.waiter_id);
             }
             AcquireReadyWaiterAction::Stop => {
                 if let Some(read_op_id) = self.read_op_id.take() {
@@ -416,7 +421,7 @@ impl Model for AcquireReadyWaiter {
 
 impl AcquireReadyWaiter {
     pub fn new(
-        waiter_id: u64,
+        waiter_id: AcquireReadyWaiterId,
         client_id: ClientId,
         surface_object_id: ObjectId,
         poll_fd: OwnedFd,
@@ -427,16 +432,6 @@ impl AcquireReadyWaiter {
             surface_object_id,
             poll_fd,
             read_op_id: None,
-        }
-    }
-
-    fn on_read_ready(result: io::Result<ReadWriteCompleted>) -> AnyAction {
-        match result {
-            Ok(_) => AnyAction::from(AcquireReadyWaiterAction::Ready),
-            Err(error) => {
-                log::warn!("surface acquire waiter poll failed: {:?}", error);
-                AnyAction::from(AcquireReadyWaiterAction::Failed)
-            }
         }
     }
 }

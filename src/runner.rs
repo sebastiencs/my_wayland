@@ -2,11 +2,18 @@ use std::{
     any::{Any, TypeId},
     cmp::Ordering,
     collections::{BTreeMap, VecDeque},
+    rc::Rc,
 };
 
 use crate::{io_uring::model::IoUringAction, utils::strip_type_name, State};
 
 type Result<T> = std::result::Result<T, ()>;
+
+pub trait ModelInstanceId: Copy + 'static {
+    type Model: Model;
+
+    fn into_raw(self) -> u64;
+}
 
 pub struct Dispatcher {
     /// Actions to dispatch
@@ -36,16 +43,14 @@ impl Dispatcher {
         self.queue.push_back(AnyAction::from(action));
     }
 
-    pub fn dispatch_to<A, I>(&mut self, id: I, action: A)
+    pub fn dispatch_to<I>(&mut self, id: I, action: <I::Model as Model>::Action)
     where
-        I: Into<u64>,
-        A: Sized + 'static,
+        I: ModelInstanceId,
     {
-        assert_ne!(TypeId::of::<A>(), TypeId::of::<AnyAction>());
         self.queue.push_back(AnyAction::from_id(id, action));
     }
 
-    pub fn redispatch_to<R>(&mut self, redispatcher: Redispatcher<R>, action: R) {
+    pub fn redispatch_to<R: 'static>(&mut self, redispatcher: Redispatcher<R>, action: R) {
         if let Some(action) = redispatcher.make(action) {
             self.queue.push_back(action);
         };
@@ -58,23 +63,21 @@ impl Dispatcher {
         self.dispatch(M::START.unwrap());
     }
 
-    pub fn add_model<I, M>(&mut self, id: I, model: M)
+    pub fn add_model<I>(&mut self, id: I, model: I::Model)
     where
-        I: Into<u64>,
-        M: Model,
+        I: ModelInstanceId,
     {
-        let action_id = ActionId::of_with::<M::Action, _>(id);
+        let action_id = ActionId::of_model::<I>(id);
         self.pending_add
             .push_back((action_id, Box::new(model).into_vtable()));
     }
 
-    pub fn start_model<I, M>(&mut self, id: I, model: M)
+    pub fn start_model<I>(&mut self, id: I, model: I::Model)
     where
-        I: Into<u64> + Copy,
-        M: Model,
+        I: ModelInstanceId,
     {
         self.add_model(id, model);
-        self.dispatch_to(id, M::START.unwrap());
+        self.dispatch_to(id, <I::Model as Model>::START.unwrap());
     }
 
     pub fn start_model2<M>(&mut self, model: M)
@@ -87,12 +90,11 @@ impl Dispatcher {
         self.dispatch(M::START.unwrap());
     }
 
-    pub fn stop_model<I, M>(&mut self, id: I)
+    pub fn stop_model<I>(&mut self, id: I)
     where
-        I: Into<u64> + Copy,
-        M: Model,
+        I: ModelInstanceId,
     {
-        let action_id = ActionId::of_with::<M::Action, _>(id);
+        let action_id = ActionId::of_model::<I>(id);
         self.pending_remove.push_back(action_id);
     }
 }
@@ -109,12 +111,12 @@ impl Dispatcher {
             .any(predicate)
     }
 
-    pub(crate) fn test_has_queued_action_for<T: 'static>(
+    pub(crate) fn test_has_queued_action_for<T: 'static, I: ModelInstanceId>(
         &self,
-        id: impl Into<u64>,
+        id: I,
         predicate: impl Fn(&T) -> bool,
     ) -> bool {
-        let id = Some(id.into());
+        let id = Some(id.into_raw());
         self.queue
             .iter()
             .filter(|action| action.id.specifier == id)
@@ -125,18 +127,18 @@ impl Dispatcher {
 
 pub enum Redispatcher<R> {
     Fun {
-        ptr: fn(R) -> AnyAction,
+        ptr: Rc<dyn Fn(R) -> AnyAction>,
         type_name: &'static str,
     },
     WithId {
-        ptr: fn(R) -> AnyAction,
+        ptr: Rc<dyn Fn(R) -> AnyAction>,
         id: u64,
         /// For printing/debug purpose only
         /// So we know to which model we redispatch
         type_name: &'static str,
     },
     Into {
-        ptr: fn(R) -> AnyAction,
+        ptr: Rc<dyn Fn(R) -> AnyAction>,
         /// For printing/debug purpose only
         /// So we know to which model we redispatch
         type_name: &'static str,
@@ -147,9 +149,11 @@ pub enum Redispatcher<R> {
 impl<R> Clone for Redispatcher<R> {
     fn clone(&self) -> Self {
         match self {
-            Self::Fun { ptr, type_name } => Self::Fun { ptr: *ptr, type_name },
-            Self::WithId { ptr, id, type_name } => Self::WithId { ptr: *ptr, id: *id, type_name },
-            Self::Into { ptr, type_name } => Self::Into { ptr: *ptr, type_name },
+            Self::Fun { ptr, type_name } => Self::Fun { ptr: Rc::clone(ptr), type_name },
+            Self::WithId { ptr, id, type_name } => {
+                Self::WithId { ptr: Rc::clone(ptr), id: *id, type_name }
+            }
+            Self::Into { ptr, type_name } => Self::Into { ptr: Rc::clone(ptr), type_name },
             Self::None => Self::None,
         }
     }
@@ -170,48 +174,38 @@ impl<R: std::fmt::Debug> std::fmt::Debug for Redispatcher<R> {
     }
 }
 
-impl<R> Redispatcher<R> {
-    pub fn new<T: Model>(ptr: fn(R) -> AnyAction) -> Self {
+impl<R: 'static> Redispatcher<R> {
+    pub fn to<T: Model>(callback: impl Fn(R) -> T::Action + 'static) -> Self {
         let type_name = std::any::type_name::<T>();
+        let ptr = Rc::new(move |result| AnyAction::from(callback(result)));
         Self::Fun { ptr, type_name }
     }
 
-    pub fn new_noname(ptr: fn(R) -> AnyAction) -> Self {
+    pub fn to_instance<I>(
+        id: I,
+        callback: impl Fn(R) -> <I::Model as Model>::Action + 'static,
+    ) -> Self
+    where
+        I: ModelInstanceId,
+    {
+        let raw_id = id.into_raw();
+        let ptr = Rc::new(move |result| AnyAction::from_id(id, callback(result)));
+        let type_name = std::any::type_name::<I::Model>();
+        Self::WithId { id: raw_id, ptr, type_name }
+    }
+
+    pub fn to_any(callback: impl Fn(R) -> AnyAction + 'static) -> Self {
+        let ptr = Rc::new(callback);
         Self::Fun { ptr, type_name: "" }
-    }
-
-    pub fn into<T>() -> Self
-    where
-        T: From<R> + 'static,
-    {
-        fn auto_generated<R, T: From<R> + 'static>(result: R) -> AnyAction {
-            AnyAction::from(T::from(result))
-        }
-        let ptr = auto_generated::<R, T>;
-        let name = std::any::type_name::<T>();
-        Self::Into { ptr, type_name: name }
-    }
-
-    pub fn id<V>(id: V, ptr: fn(R) -> AnyAction) -> Self
-    where
-        V: Into<u64>,
-    {
-        let id = id.into();
-        let name = std::any::type_name::<V>();
-        Self::WithId { id, ptr, type_name: name }
     }
 }
 
-impl<R> Redispatcher<R> {
+impl<R: 'static> Redispatcher<R> {
     pub fn make(self, value: R) -> Option<AnyAction> {
         match self {
             Self::Fun { ptr, type_name: _ } => Some(ptr(value)),
             Self::Into { ptr, type_name: _ } => Some(ptr(value)),
-            Self::WithId { id, ptr, type_name: _ } => {
-                let mut action = ptr(value);
-                action.id.specifier = Some(id);
-                Some(action)
-            }
+            Self::WithId { id: _, ptr, type_name: _ } => Some(ptr(value)),
             Self::None => None,
         }
     }
@@ -286,6 +280,17 @@ impl ActionId {
             type_id: TypeId::of::<T>(),
             specifier: Some(spec.into()),
             type_name: std::any::type_name::<T>(),
+        }
+    }
+
+    pub fn of_model<I>(id: I) -> Self
+    where
+        I: ModelInstanceId,
+    {
+        Self {
+            type_id: TypeId::of::<<I::Model as Model>::Action>(),
+            specifier: Some(id.into_raw()),
+            type_name: std::any::type_name::<<I::Model as Model>::Action>(),
         }
     }
 }
@@ -395,17 +400,16 @@ impl AnyAction {
         }
     }
 
-    pub fn from_id<T, S>(id: S, v: T) -> Self
+    pub fn from_id<I>(id: I, v: <I::Model as Model>::Action) -> Self
     where
-        T: 'static,
-        S: Into<u64>,
+        I: ModelInstanceId,
     {
         // Panic when calling `AnyAction::from(AnyAction { .. })`
-        assert_ne!(TypeId::of::<T>(), TypeId::of::<AnyAction>());
+        assert_ne!(TypeId::of::<<I::Model as Model>::Action>(), TypeId::of::<AnyAction>());
         Self {
-            id: ActionId::of_with::<T, S>(id),
+            id: ActionId::of_model(id),
             ptr: Box::new(v),
-            type_name: std::any::type_name::<T>(),
+            type_name: std::any::type_name::<<I::Model as Model>::Action>(),
         }
     }
 }

@@ -512,7 +512,7 @@ mod tests {
         drop(data_device);
 
         assert!(state.seat.active_drag().is_none());
-        assert!(dispatcher.test_has_queued_action_for::<ClientAction>(
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
             source_client_id,
             |action| {
                 matches!(

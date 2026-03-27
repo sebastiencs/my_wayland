@@ -92,7 +92,10 @@ impl Libinput {
         dispatcher.dispatch(IoUringAction::Poll {
             id: Some(poll_op_id),
             fd: self.libinput.as_raw_fd(),
-            dispatch_to: Redispatcher::into::<LibinputAction>(),
+            dispatch_to: Redispatcher::to::<Libinput>(|result: std::io::Result<PollCompleted>| {
+                let PollCompleted {} = result.unwrap();
+                LibinputAction::Event
+            }),
         });
     }
 

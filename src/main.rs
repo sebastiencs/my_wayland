@@ -47,6 +47,21 @@ macro_rules! index_map_id {
     };
 }
 
+macro_rules! model_instance_id {
+    ($vis:vis $name:ident => $model:path) => {
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
+        $vis struct $name(u64);
+
+        impl crate::runner::ModelInstanceId for $name {
+            type Model = $model;
+
+            fn into_raw(self) -> u64 {
+                self.0
+            }
+        }
+    };
+}
+
 /// Cache any data
 #[allow(unused)]
 macro_rules! cache {
@@ -95,8 +110,8 @@ use {globals::Globals, state::State};
 
 use crate::{
     clients::Clients,
-    io_uring::{model::IoUringState, ring::PollCompleted},
-    runner::{AnyAction, Dispatcher, Redispatcher, Runner},
+    io_uring::model::IoUringState,
+    runner::{Dispatcher, Redispatcher, Runner},
     udev::Udev,
 };
 
@@ -242,14 +257,13 @@ fn main() {
     let timer = make_timer(Duration::from_secs(10));
 
     if !utils::is_x11() {
-        fn on_timeout(_res: std::io::Result<PollCompleted>) -> AnyAction {
-            eprintln!("ON_TIMEOUT");
-            std::process::abort();
-        }
         dispatcher.dispatch(IoUringAction::Poll {
             id: None,
             fd: timer.as_fd().as_raw_fd(),
-            dispatch_to: Redispatcher::new_noname(on_timeout),
+            dispatch_to: Redispatcher::to_any(|_res| {
+                eprintln!("ON_TIMEOUT");
+                std::process::abort();
+            }),
         });
 
         std::thread::spawn(|| {

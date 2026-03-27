@@ -99,7 +99,7 @@ pub struct WlSurface {
     /// front buffer
     on_screen: OnScreen,
     blocked: Option<BlockedSurfaceState>,
-    blocked_waiter_id: Option<u64>,
+    blocked_waiter_id: Option<crate::sync::AcquireReadyWaiterId>,
     syncobj_surface_object: Option<crate::protocol_generated::WpLinuxDrmSyncobjSurfaceV1Id>,
     viewport_object: Option<crate::protocol_generated::WpViewportId>,
     retired_buffers: Vec<RetiredBufferCandidate>,
@@ -1961,7 +1961,10 @@ impl WlSurface {
         self.on_screen.input_region = region;
     }
 
-    pub fn activate_blocked_if_waiter_ready(&mut self, waiter_id: u64) -> bool {
+    pub fn activate_blocked_if_waiter_ready(
+        &mut self,
+        waiter_id: crate::sync::AcquireReadyWaiterId,
+    ) -> bool {
         if self.blocked_waiter_id != Some(waiter_id) {
             return false;
         }
@@ -1989,7 +1992,7 @@ impl WlSurface {
             ));
         };
         if let Some(waiter_id) = self.blocked_waiter_id.take() {
-            dispatcher.stop_model::<_, AcquireReadyWaiter>(waiter_id);
+            dispatcher.stop_model(waiter_id);
         }
         let waiter_id = sync::fresh_waiter_id();
         self.blocked_waiter_id = Some(waiter_id);
@@ -2050,7 +2053,7 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         if let Some(waiter_id) = self.blocked_waiter_id.take() {
-            dispatcher.stop_model::<_, AcquireReadyWaiter>(waiter_id);
+            dispatcher.stop_model(waiter_id);
         }
         let Some(blocked) = self.blocked.take() else {
             return;
@@ -2074,7 +2077,7 @@ impl WlSurface {
 
     pub fn cancel_blocked_if_waiter_matches(
         &mut self,
-        waiter_id: u64,
+        waiter_id: crate::sync::AcquireReadyWaiterId,
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
@@ -2321,7 +2324,7 @@ impl Object for WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         if let Some(waiter_id) = self.blocked_waiter_id.take() {
-            dispatcher.stop_model::<_, AcquireReadyWaiter>(waiter_id);
+            dispatcher.stop_model(waiter_id);
         }
     }
 }
@@ -3072,7 +3075,7 @@ mod tests {
         let mut state = make_state();
         let (mut client, mut dispatcher) = make_client();
         let mut surface = make_surface();
-        surface.blocked_waiter_id = Some(42);
+        surface.blocked_waiter_id = Some(crate::sync::AcquireReadyWaiterId::from(42u64));
 
         {
             let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);

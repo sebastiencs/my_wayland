@@ -24,9 +24,10 @@ use crate::{
         WlSurfaceId, WpPresentationFeedbackId, XdgPopupId, XdgToplevelId,
     },
     region::RectI,
-    runner::{AnyAction, Dispatcher, Model, Redispatcher},
+    runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
     seat::SeatClientEvent,
-    state::{DataOfferRole, GrabbedObject, ObjectId, OutputId, State},
+    state::{DataOfferRole, DrmId, GrabbedObject, ObjectId, OutputId, State},
+    sync::AcquireReadyWaiterId,
     udev::Udev,
     wayland_objects::{
         wl_data_offer::WlDataOffer,
@@ -97,22 +98,18 @@ impl Clients {
         ClientId(id)
     }
 
-    fn on_accept(result: std::io::Result<AcceptCompleted>) -> AnyAction {
-        match result {
-            Ok(AcceptCompleted { fd: _, new_client }) => {
-                AnyAction::from(ClientsAction::NewClient { new_client })
-            }
-            Err(e) => {
-                log::error!("accept failed: {:?}", e);
-                AnyAction::from(ClientsAction::RearmAccept)
-            }
-        }
-    }
-
     fn dispatch_accept(&self, dispatcher: &mut Dispatcher) {
         dispatcher.dispatch(IoUringAction::Accept {
             fd: self.fd.as_raw_fd(),
-            dispatch_to: Redispatcher::new::<Self>(Self::on_accept),
+            dispatch_to: Redispatcher::to::<Self>(|result| match result {
+                Ok(AcceptCompleted { fd: _, new_client }) => {
+                    ClientsAction::NewClient { new_client }
+                }
+                Err(e) => {
+                    log::error!("accept failed: {:?}", e);
+                    ClientsAction::RearmAccept
+                }
+            }),
         });
     }
 }
@@ -201,7 +198,7 @@ impl Model for Clients {
             Close { id } => {
                 log::trace!("client {:?} closed", id);
                 if self.set.remove(&id) {
-                    dispatcher.stop_model::<_, Client>(id);
+                    dispatcher.stop_model(id);
                 }
             }
         }
@@ -235,6 +232,14 @@ pub struct Client {
     info: Option<Rc<ProcessInfo>>,
     pending_fds: VecDeque<OwnedFd>,
     next_server_id: u32,
+}
+
+impl ModelInstanceId for ClientId {
+    type Model = Client;
+
+    fn into_raw(self) -> u64 {
+        self.0
+    }
 }
 
 pub enum ClientAction {
@@ -304,11 +309,11 @@ pub enum ClientAction {
         feedback_ids: Vec<WpPresentationFeedbackId>,
     },
     DiscardSurfacePresentationFeedbacksForBackend {
-        drm_id: crate::state::DrmId,
+        drm_id: DrmId,
     },
     CancelBlockedSurface {
         surface_object_id: ObjectId,
-        waiter_id: u64,
+        waiter_id: AcquireReadyWaiterId,
     },
     DismissPopupGrab {
         popup_ids: Vec<XdgPopupId>,
@@ -1117,7 +1122,7 @@ impl Client {
         &mut self,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        drm_id: crate::state::DrmId,
+        drm_id: DrmId,
     ) {
         let backend = crate::state::BackendOutputRef::new(drm_id);
         let surface_ids = self
@@ -1999,7 +2004,7 @@ impl Model for Client {
             Close => {
                 log::info!("client_id={:?} closed", self.id);
                 if let Some(id) = self.reader_id.take() {
-                    dispatcher.stop_model::<_, ClientReader>(id);
+                    dispatcher.stop_model(id);
                 };
                 state.activation_tokens.remove_client(self.id);
                 let client_objects: Vec<(WaylandId, ObjectId)> = self
@@ -2092,8 +2097,7 @@ impl Buffer {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::Into)]
-struct ClientReaderId(u64);
+model_instance_id!(ClientReaderId => ClientReader);
 
 /// Responsible for reading client's fd, parsing the message, and
 /// notify `Client`.
@@ -2150,17 +2154,13 @@ impl ClientReader {
         dispatcher.dispatch(IoUringAction::Recvmsg {
             id: Some(recvmsg_op_id),
             fd: self.fd,
-            dispatch_to: Redispatcher::id(self.id, Self::on_recvmsg),
+            dispatch_to: Redispatcher::to_instance(self.id, |result| match result {
+                Ok(RecvmsgCompleted { fd: _, buffer, fds }) => {
+                    ClientReaderAction::ReadMsg { buffer, fds }
+                }
+                Err(error) => ClientReaderAction::ErrorOnSocket { error },
+            }),
         });
-    }
-
-    fn on_recvmsg(result: std::io::Result<RecvmsgCompleted>) -> AnyAction {
-        match result {
-            Ok(RecvmsgCompleted { fd: _, buffer, fds }) => {
-                AnyAction::from(ClientReaderAction::ReadMsg { buffer, fds })
-            }
-            Err(error) => AnyAction::from(ClientReaderAction::ErrorOnSocket { error }),
-        }
     }
 
     fn dispatch_close(&self, dispatcher: &mut Dispatcher) {

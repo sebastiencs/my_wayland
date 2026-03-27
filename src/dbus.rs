@@ -15,7 +15,7 @@ use crate::{
         model::IoUringAction,
         ring::{RecvmsgCompleted, RingId},
     },
-    runner::{AnyAction, Dispatcher, Model, Redispatcher},
+    runner::{Dispatcher, Model, Redispatcher},
     state::State,
     udev::UdevAction,
 };
@@ -452,7 +452,8 @@ struct DbusReader {
     recvmsg_op_id: Option<RingId>,
 }
 
-const DBUS_READER_ID: u64 = 0;
+model_instance_id!(DbusReaderId => DbusReader);
+const DBUS_READER_ID: DbusReaderId = DbusReaderId(0);
 
 #[derive(Debug)]
 enum DbusReaderAction {
@@ -609,24 +610,20 @@ impl DbusReader {
         dispatcher.dispatch(IoUringAction::Recvmsg {
             id: Some(recvmsg_op_id),
             fd: self.fd,
-            dispatch_to: Redispatcher::id(DBUS_READER_ID, Self::on_recvmsg),
+            dispatch_to: Redispatcher::to_instance(DBUS_READER_ID, |result| match result {
+                Ok(RecvmsgCompleted { fd: _, buffer, fds }) => {
+                    DbusReaderAction::ReadMsg { buffer, fds }
+                }
+                Err(error) => {
+                    log::warn!("dbus reader recvmsg failed: {:?}", error);
+                    DbusReaderAction::Stop
+                }
+            }),
         });
     }
 
     fn dispatch_close(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
-        dispatcher.stop_model::<_, DbusReader>(DBUS_READER_ID);
+        dispatcher.stop_model(DBUS_READER_ID);
         Ok(())
-    }
-
-    fn on_recvmsg(result: std::io::Result<RecvmsgCompleted>) -> AnyAction {
-        match result {
-            Ok(RecvmsgCompleted { fd: _, buffer, fds }) => {
-                AnyAction::from(DbusReaderAction::ReadMsg { buffer, fds })
-            }
-            Err(error) => {
-                log::warn!("dbus reader recvmsg failed: {:?}", error);
-                AnyAction::from(DbusReaderAction::Stop)
-            }
-        }
     }
 }

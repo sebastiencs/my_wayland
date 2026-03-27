@@ -32,7 +32,7 @@ use crate::{
         ring::{PollCompleted, ReadWriteCompleted, RingId},
     },
     region::{DamageRegion, RectI},
-    runner::{AnyAction, Dispatcher, Model},
+    runner::{Dispatcher, Model, ModelInstanceId},
     state::{BackendOutputRef, DrmId, ObjectId, OutputId, OutputMode, State},
     sync::{DeferredRelease, RetiredBufferCandidate},
     transform::{self, OutputPresentationTransform},
@@ -2495,6 +2495,14 @@ pub struct DrmReader {
     read_op_id: Option<RingId>,
 }
 
+impl ModelInstanceId for DrmId {
+    type Model = DrmReader;
+
+    fn into_raw(self) -> u64 {
+        usize::from(self) as u64
+    }
+}
+
 #[derive(Debug)]
 pub enum DrmReaderAction {
     Start,
@@ -2554,7 +2562,7 @@ impl Model for DrmReader {
                                 state.output_id_for_drm_crtc(self.drm_id, crtc_id)
                             {
                                 dispatcher.dispatch_to(
-                                    usize::from(output_id) as u64,
+                                    output_id,
                                     DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id },
                                 );
                             }
@@ -2596,8 +2604,8 @@ impl DrmReader {
         }
     }
 
-    fn model_id(&self) -> u64 {
-        usize::from(self.drm_id) as u64
+    fn model_id(&self) -> DrmId {
+        self.drm_id
     }
 
     fn dispatch_poll(&mut self, dispatcher: &mut Dispatcher) {
@@ -2608,7 +2616,10 @@ impl DrmReader {
         dispatcher.dispatch(IoUringAction::Poll {
             id: Some(poll_op_id),
             fd: self.fd.as_raw_fd(),
-            dispatch_to: Redispatcher::id(self.model_id(), Self::on_poll_event),
+            dispatch_to: Redispatcher::to_instance(self.model_id(), |result| match result {
+                Ok(PollCompleted {}) => DrmReaderAction::PollReady,
+                Err(error) => DrmReaderAction::ReadError { error },
+            }),
         });
     }
 
@@ -2622,27 +2633,17 @@ impl DrmReader {
             fd: self.fd.as_raw_fd(),
             offset: 0,
             length: 4096,
-            dispatch_to: Redispatcher::id(self.model_id(), Self::on_read_event),
+            dispatch_to: Redispatcher::to_instance(
+                self.model_id(),
+                |result: std::io::Result<ReadWriteCompleted>| match result {
+                    Ok(ReadWriteCompleted { buffer, .. }) => DrmReaderAction::ReadChunk { buffer },
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        DrmReaderAction::ReadDrained
+                    }
+                    Err(error) => DrmReaderAction::ReadError { error },
+                },
+            ),
         });
-    }
-
-    fn on_poll_event(result: std::io::Result<PollCompleted>) -> AnyAction {
-        match result {
-            Ok(PollCompleted {}) => AnyAction::from(DrmReaderAction::PollReady),
-            Err(error) => AnyAction::from(DrmReaderAction::ReadError { error }),
-        }
-    }
-
-    fn on_read_event(result: std::io::Result<ReadWriteCompleted>) -> AnyAction {
-        match result {
-            Ok(ReadWriteCompleted { buffer, .. }) => {
-                AnyAction::from(DrmReaderAction::ReadChunk { buffer })
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                AnyAction::from(DrmReaderAction::ReadDrained)
-            }
-            Err(error) => AnyAction::from(DrmReaderAction::ReadError { error }),
-        }
     }
 }
 
@@ -2650,6 +2651,14 @@ impl DrmReader {
 pub struct DrmOutputModel {
     drm_id: DrmId,
     output_id: OutputId,
+}
+
+impl ModelInstanceId for OutputId {
+    type Model = DrmOutputModel;
+
+    fn into_raw(self) -> u64 {
+        usize::from(self) as u64
+    }
 }
 
 pub enum DrmAction {
@@ -2675,6 +2684,8 @@ struct DrmCursorAnimationTimer {
     read_op_id: Option<RingId>,
 }
 
+model_instance_id!(DrmCursorAnimationTimerId => DrmCursorAnimationTimer);
+
 pub fn sync_output_nodes_for_backend(state: &mut State, drm_id: DrmId) {
     state.refresh_outputs_for_backend(BackendOutputRef::new(drm_id));
 }
@@ -2684,7 +2695,7 @@ pub fn schedule_output(state: &State, output_id: OutputId, dispatcher: &mut Disp
         log::warn!("schedule_output: invalid logical output {:?}", output_id);
         return;
     }
-    dispatcher.dispatch_to(usize::from(output_id) as u64, DrmAction::ScheduleFrame);
+    dispatcher.dispatch_to(output_id, DrmAction::ScheduleFrame);
 }
 
 pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
@@ -2755,7 +2766,7 @@ fn arm_cursor_animation_timer(
     delay_msec: Option<u32>,
 ) {
     dispatcher.dispatch_to(
-        usize::from(output_id) as u64,
+        DrmCursorAnimationTimerId::from(usize::from(output_id) as u64),
         DrmCursorAnimationTimerAction::Arm { delay_msec },
     );
 }
@@ -2914,8 +2925,7 @@ impl Model for DrmCursorAnimationTimer {
                     })
                     .is_some();
                 if keep_animating {
-                    dispatcher
-                        .dispatch_to(usize::from(self.output_id) as u64, DrmAction::ScheduleFrame);
+                    dispatcher.dispatch_to(self.output_id, DrmAction::ScheduleFrame);
                 }
                 self.dispatch_read(dispatcher);
             }
@@ -2944,6 +2954,10 @@ impl DrmCursorAnimationTimer {
         Self { drm_id, output_id, timer_fd, read_op_id: None }
     }
 
+    fn model_id(&self) -> DrmCursorAnimationTimerId {
+        DrmCursorAnimationTimerId::from(usize::from(self.output_id) as u64)
+    }
+
     fn dispatch_read(&mut self, dispatcher: &mut Dispatcher) {
         if self.read_op_id.is_some() {
             return;
@@ -2955,10 +2969,12 @@ impl DrmCursorAnimationTimer {
             fd: self.timer_fd.as_fd().as_raw_fd(),
             offset: 0,
             length: std::mem::size_of::<u64>(),
-            dispatch_to: crate::runner::Redispatcher::id(
-                usize::from(self.drm_id) as u64,
-                Self::on_read_ready,
-            ),
+            dispatch_to: crate::runner::Redispatcher::to_instance(self.model_id(), |result| {
+                match result {
+                    Ok(_) => DrmCursorAnimationTimerAction::Fired,
+                    Err(error) => DrmCursorAnimationTimerAction::Failed { error },
+                }
+            }),
         });
     }
 
@@ -2969,13 +2985,6 @@ impl DrmCursorAnimationTimer {
                 TimerSetTimeFlags::empty(),
             )
             .map_err(std::io::Error::other)
-    }
-
-    fn on_read_ready(result: std::io::Result<ReadWriteCompleted>) -> AnyAction {
-        match result {
-            Ok(_) => AnyAction::from(DrmCursorAnimationTimerAction::Fired),
-            Err(error) => AnyAction::from(DrmCursorAnimationTimerAction::Failed { error }),
-        }
     }
 }
 
@@ -2993,7 +3002,7 @@ impl Model for DrmOutputModel {
         match action {
             DrmAction::Start => {
                 dispatcher.start_model(
-                    self.model_id(),
+                    self.timer_id(),
                     DrmCursorAnimationTimer::new(self.drm_id, self.output_id),
                 );
             }
@@ -3007,7 +3016,7 @@ impl Model for DrmOutputModel {
                 self.handle_flip_complete(state, dispatcher, sequence, tv_sec, tv_usec, crtc_id);
             }
             DrmAction::Stop => {
-                dispatcher.stop_model::<_, DrmCursorAnimationTimer>(self.model_id());
+                dispatcher.stop_model(self.timer_id());
             }
         };
         Ok(())
@@ -3015,8 +3024,12 @@ impl Model for DrmOutputModel {
 }
 
 impl DrmOutputModel {
-    fn model_id(&self) -> u64 {
-        usize::from(self.output_id) as u64
+    fn model_id(&self) -> OutputId {
+        self.output_id
+    }
+
+    fn timer_id(&self) -> DrmCursorAnimationTimerId {
+        DrmCursorAnimationTimerId::from(usize::from(self.output_id) as u64)
     }
 
     fn schedule_frame(&mut self, state: &mut crate::state::State, dispatcher: &mut Dispatcher) {
@@ -4662,12 +4675,12 @@ mod presentation_timing_tests {
 
         schedule_output(&state, right, &mut dispatcher);
 
-        assert!(dispatcher.test_has_queued_action_for::<super::DrmAction>(
-            usize::from(right) as u64,
+        assert!(dispatcher.test_has_queued_action_for::<super::DrmAction, OutputId>(
+            right,
             |action| matches!(action, super::DrmAction::ScheduleFrame)
         ));
-        assert!(!dispatcher.test_has_queued_action_for::<super::DrmAction>(
-            usize::from(left) as u64,
+        assert!(!dispatcher.test_has_queued_action_for::<super::DrmAction, OutputId>(
+            left,
             |action| matches!(action, super::DrmAction::ScheduleFrame)
         ));
     }
@@ -4687,12 +4700,12 @@ mod presentation_timing_tests {
             &mut dispatcher,
         );
 
-        assert!(dispatcher.test_has_queued_action_for::<super::DrmAction>(
-            usize::from(left) as u64,
+        assert!(dispatcher.test_has_queued_action_for::<super::DrmAction, OutputId>(
+            left,
             |action| matches!(action, super::DrmAction::ScheduleFrame)
         ));
-        assert!(dispatcher.test_has_queued_action_for::<super::DrmAction>(
-            usize::from(right) as u64,
+        assert!(dispatcher.test_has_queued_action_for::<super::DrmAction, OutputId>(
+            right,
             |action| matches!(action, super::DrmAction::ScheduleFrame)
         ));
     }
