@@ -12,7 +12,7 @@ use {
 
 use crate::{
     clients::{Client, ClientDispatcher, ClientId},
-    drm::{schedule_active_output, DrmFd},
+    drm::{schedule_active_output, schedule_outputs_for_rect, DrmFd},
     egl::EglContext,
     io_uring::{
         model::IoUringAction,
@@ -378,7 +378,17 @@ impl Model for AcquireReadyWaiter {
                         self.waiter_id,
                         self.surface_object_id
                     );
-                    schedule_active_output(state, dispatcher);
+                    if let Some(bounds) = state
+                        .objects
+                        .try_ref_object::<crate::wayland_objects::wl_surface::WlSurface>(
+                            self.surface_object_id,
+                        )
+                        .and_then(|surface| surface.global_logical_bounds())
+                    {
+                        schedule_outputs_for_rect(state, bounds, dispatcher);
+                    } else {
+                        schedule_active_output(state, dispatcher);
+                    }
                 }
                 dispatcher.stop_model::<_, Self>(self.waiter_id);
             }

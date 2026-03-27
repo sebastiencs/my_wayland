@@ -8,6 +8,7 @@ use crate::{
     protocol_generated::{WaylandId, WlDataOfferId, WlDataSourceId, WlSeatId, WlSurfaceId},
     region::RectI,
     seat::SeatState,
+    wayland_objects::wl_surface::WlSurface,
     xkb::{KeyboardState, Xkb},
 };
 
@@ -453,6 +454,7 @@ pub struct OutputMode {
 #[derive(Clone, Debug)]
 pub struct Output {
     pub backend: BackendOutputRef,
+    pub drm_crtc_id: u32,
     pub global_name: Option<GlobalName>,
     pub x: i32,
     pub y: i32,
@@ -470,9 +472,10 @@ pub struct Output {
 }
 
 impl Output {
-    pub fn new(backend: BackendOutputRef, drm: &Drm) -> Self {
+    pub fn new(backend: BackendOutputRef, drm_crtc_id: u32, drm: &Drm) -> Self {
         let mut output = Self {
             backend,
+            drm_crtc_id,
             global_name: None,
             x: 0,
             y: 0,
@@ -496,8 +499,15 @@ impl Output {
         self.backend
     }
 
+    pub fn drm_crtc_id(&self) -> u32 {
+        self.drm_crtc_id
+    }
+
     pub fn refresh_from_backend(&mut self, drm: &Drm) {
-        let in_use = &drm.output.in_use;
+        let Some(in_use) = drm.output_connector_in_use(self.drm_crtc_id) else {
+            self.enabled = false;
+            return;
+        };
         let connector = &in_use.connector;
 
         let preferred_mode = connector
@@ -505,7 +515,7 @@ impl Output {
             .as_ref()
             .map(Self::mode_from_connector);
         let current_mode = drm
-            .current_output_mode()
+            .current_output_mode(self.drm_crtc_id)
             .or_else(|| preferred_mode.clone())
             .unwrap_or(OutputMode { width: 0, height: 0, refresh_millihz: 0 });
 
@@ -554,6 +564,147 @@ impl Output {
         };
 
         OutputMode { width: width as i32, height: height as i32, refresh_millihz }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutputLayoutEntry {
+    pub output_id: OutputId,
+    pub backend: BackendOutputRef,
+    pub bounds: RectI,
+}
+
+impl OutputLayoutEntry {
+    pub fn local_bounds(&self) -> RectI {
+        self.bounds.translate(-self.bounds.x, -self.bounds.y)
+    }
+
+    pub fn global_to_local_point(&self, x: i32, y: i32) -> (i32, i32) {
+        (x.saturating_sub(self.bounds.x), y.saturating_sub(self.bounds.y))
+    }
+
+    pub fn global_to_local_rect(&self, rect: RectI) -> RectI {
+        rect.translate(-self.bounds.x, -self.bounds.y)
+    }
+
+    pub fn overlap_area(&self, rect: RectI) -> i64 {
+        let Some(overlap) = self.bounds.intersection(rect) else {
+            return 0;
+        };
+        overlap.width as i64 * overlap.height as i64
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OutputLayout {
+    entries: Vec<OutputLayoutEntry>,
+    extents: Option<RectI>,
+}
+
+impl OutputLayout {
+    pub fn from_outputs(outputs: &IndexMap<OutputId, Output>) -> Self {
+        let entries = outputs
+            .iter()
+            .filter_map(|(output_id, output)| {
+                if !output.enabled {
+                    return None;
+                }
+                Some(OutputLayoutEntry {
+                    output_id,
+                    backend: output.backend(),
+                    bounds: output.logical_bounds()?,
+                })
+            })
+            .collect::<Vec<_>>();
+        let extents = entries
+            .iter()
+            .map(|entry| entry.bounds)
+            .reduce(|acc, bounds| {
+                RectI::from_extents(
+                    acc.x.min(bounds.x),
+                    acc.y.min(bounds.y),
+                    acc.x2().max(bounds.x2()),
+                    acc.y2().max(bounds.y2()),
+                )
+                .expect("output layout extents must stay valid")
+            });
+        Self { entries, extents }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn entries(&self) -> &[OutputLayoutEntry] {
+        &self.entries
+    }
+
+    pub fn extents(&self) -> Option<RectI> {
+        self.extents
+    }
+
+    pub fn entry(&self, output_id: OutputId) -> Option<&OutputLayoutEntry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.output_id == output_id)
+    }
+
+    pub fn bounds(&self, output_id: OutputId) -> Option<RectI> {
+        self.entry(output_id).map(|entry| entry.bounds)
+    }
+
+    pub fn output_at(&self, x: i32, y: i32) -> Option<OutputId> {
+        self.entries
+            .iter()
+            .find(|entry| entry.bounds.contains(x, y))
+            .map(|entry| entry.output_id)
+    }
+
+    pub fn nearest_point(&self, x: i32, y: i32) -> Option<(OutputId, (i32, i32))> {
+        let mut best = None;
+        let mut best_distance = i64::MAX;
+        for entry in &self.entries {
+            let clamped_x = x.clamp(entry.bounds.x, entry.bounds.x2().saturating_sub(1));
+            let clamped_y = y.clamp(entry.bounds.y, entry.bounds.y2().saturating_sub(1));
+            let dx = i64::from(x.saturating_sub(clamped_x));
+            let dy = i64::from(y.saturating_sub(clamped_y));
+            let distance = dx * dx + dy * dy;
+            if distance < best_distance {
+                best_distance = distance;
+                best = Some((entry.output_id, (clamped_x, clamped_y)));
+            }
+        }
+        best
+    }
+
+    pub fn intersecting(&self, rect: RectI) -> Vec<OutputId> {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.bounds.intersects(rect).then_some(entry.output_id))
+            .collect()
+    }
+
+    pub fn primary_output_for_rect(
+        &self,
+        rect: RectI,
+        preferred_output_id: Option<OutputId>,
+    ) -> Option<OutputId> {
+        let mut best = None;
+        let mut best_area = -1i64;
+        let mut best_is_preferred = false;
+        for entry in &self.entries {
+            let area = entry.overlap_area(rect);
+            if area <= 0 {
+                continue;
+            }
+            let is_preferred = Some(entry.output_id) == preferred_output_id;
+            if area > best_area || (area == best_area && is_preferred && !best_is_preferred) {
+                best = Some(entry.output_id);
+                best_area = area;
+                best_is_preferred = is_preferred;
+            }
+        }
+        best.or(preferred_output_id.filter(|output_id| self.entry(*output_id).is_some()))
     }
 }
 
@@ -809,14 +960,135 @@ impl State {
     }
 
     pub fn active_output_id(&self) -> Option<OutputId> {
-        self.active_output
-            .or_else(|| self.outputs.iter().next().map(|(output_id, _)| output_id))
+        let (pointer_x, pointer_y) = self.seat.pointer_position();
+        self.output_at_point(pointer_x.round() as i32, pointer_y.round() as i32)
+            .or_else(|| {
+                self.clamp_point_to_outputs(pointer_x.round() as i32, pointer_y.round() as i32)
+                    .and_then(|(x, y)| self.output_at_point(x, y))
+            })
+            .or_else(|| {
+                self.seat.keyboard_focus().and_then(|focus| {
+                    self.surface_object_id(focus.surface_id)
+                        .and_then(|object_id| self.objects.try_ref_object::<WlSurface>(object_id))
+                        .and_then(|surface| self.layout_output_id_for_surface(surface))
+                })
+            })
+            .or_else(|| self.fallback_output_id())
+    }
+
+    pub fn output_layout(&self) -> OutputLayout {
+        OutputLayout::from_outputs(&self.outputs)
+    }
+
+    pub fn output_layout_bounds(&self) -> Option<RectI> {
+        self.output_layout().extents()
+    }
+
+    pub fn output_bounds(&self, output_id: OutputId) -> Option<RectI> {
+        self.output_layout().bounds(output_id)
+    }
+
+    pub fn output_at_point(&self, x: i32, y: i32) -> Option<OutputId> {
+        self.output_layout().output_at(x, y)
+    }
+
+    pub fn clamp_point_to_outputs(&self, x: i32, y: i32) -> Option<(i32, i32)> {
+        self.output_layout()
+            .nearest_point(x, y)
+            .map(|(_, point)| point)
+    }
+
+    pub fn outputs_intersecting_rect(&self, rect: RectI) -> Vec<OutputId> {
+        self.output_layout().intersecting(rect)
+    }
+
+    pub fn primary_output_for_rect(
+        &self,
+        rect: RectI,
+        preferred_output_id: Option<OutputId>,
+    ) -> Option<OutputId> {
+        let preferred_output_id = preferred_output_id.or(self.active_output_id());
+        self.output_layout()
+            .primary_output_for_rect(rect, preferred_output_id)
+    }
+
+    pub fn output_id_for_surface(&self, surface: &WlSurface) -> Option<OutputId> {
+        self.layout_output_id_for_surface(surface)
+            .or_else(|| self.active_output_id())
     }
 
     pub fn backend_for_output(&self, output_id: OutputId) -> Option<BackendOutputRef> {
         self.outputs
             .try_get(output_id)
             .map(|output| output.backend())
+    }
+
+    pub fn output_crtc_id(&self, output_id: OutputId) -> Option<u32> {
+        self.outputs.try_get(output_id).map(Output::drm_crtc_id)
+    }
+
+    pub fn output_ids_for_drm(&self, drm_id: DrmId) -> Vec<OutputId> {
+        self.outputs
+            .iter()
+            .filter_map(|(output_id, output)| {
+                (output.backend.drm_id == drm_id).then_some(output_id)
+            })
+            .collect()
+    }
+
+    pub fn output_id_for_drm_crtc(&self, drm_id: DrmId, drm_crtc_id: u32) -> Option<OutputId> {
+        self.outputs.iter().find_map(|(output_id, output)| {
+            (output.backend.drm_id == drm_id && output.drm_crtc_id == drm_crtc_id)
+                .then_some(output_id)
+        })
+    }
+
+    pub fn active_output_id_for_drm(&self, drm_id: DrmId) -> Option<OutputId> {
+        self.active_output_id()
+            .filter(|output_id| {
+                self.backend_for_output(*output_id)
+                    .is_some_and(|backend| backend.drm_id == drm_id)
+            })
+            .or_else(|| self.output_ids_for_drm(drm_id).into_iter().next())
+    }
+
+    fn fallback_output_id(&self) -> Option<OutputId> {
+        self.active_output
+            .filter(|output_id| {
+                self.outputs
+                    .try_get(*output_id)
+                    .is_some_and(|output| output.enabled)
+            })
+            .or_else(|| {
+                self.output_layout()
+                    .entries()
+                    .first()
+                    .map(|entry| entry.output_id)
+            })
+    }
+
+    fn layout_output_id_for_surface(&self, surface: &WlSurface) -> Option<OutputId> {
+        let preferred_output_id = surface.active_output_id().filter(|output_id| {
+            self.outputs
+                .try_get(*output_id)
+                .is_some_and(|output| output.enabled)
+        });
+        surface
+            .global_logical_bounds()
+            .and_then(|bounds| {
+                self.output_layout()
+                    .primary_output_for_rect(bounds, preferred_output_id)
+            })
+            .or(preferred_output_id)
+    }
+
+    fn surface_object_id(&self, surface_id: WlSurfaceId) -> Option<ObjectId> {
+        self.objects.iter().find_map(|(object_id, object)| {
+            object
+                .downcast_ref::<WlSurface>()
+                .is_some_and(|surface| surface.surface_id() == surface_id)
+                .then_some(object_id)
+        })
     }
 
     pub fn refresh_output_from_backend(&mut self, output_id: OutputId) -> bool {
@@ -867,6 +1139,56 @@ mod tests {
             protocol_generated::WaylandId,
         },
     };
+
+    fn make_state() -> State {
+        let xkb = Xkb::new();
+        let keyboard = xkb.create_keyboard_state();
+        let mut globals = Globals::new();
+        globals.initialize();
+        State {
+            objects: Default::default(),
+            root_surfaces: Default::default(),
+            inputs: Default::default(),
+            drm: Default::default(),
+            outputs: Default::default(),
+            active_output: None,
+            backend_syncobj_globals: Default::default(),
+            globals,
+            activation_tokens: Default::default(),
+            egl: EGL::new(),
+            seat: Default::default(),
+            keyboard,
+            xkb,
+        }
+    }
+
+    fn make_output(
+        backend: BackendOutputRef,
+        drm_crtc_id: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Output {
+        Output {
+            backend,
+            drm_crtc_id,
+            global_name: None,
+            x,
+            y,
+            physical_width: 0,
+            physical_height: 0,
+            scale: 1,
+            transform: 0,
+            make: String::new(),
+            model: String::new(),
+            name: format!("output-{drm_crtc_id}"),
+            description: String::new(),
+            enabled: true,
+            current_mode: OutputMode { width, height, refresh_millihz: 60_000 },
+            preferred_mode: None,
+        }
+    }
 
     #[derive(Debug)]
     struct TestObject {
@@ -966,5 +1288,186 @@ mod tests {
         assert!(!map.contains(k));
         drop(g);
         assert!(!map.contains(k));
+    }
+
+    #[test]
+    fn output_layout_tracks_extents_and_lookup() {
+        let mut outputs = IndexMap::<OutputId, Output>::default();
+        let left_id = outputs.insert(Output {
+            backend: BackendOutputRef::new(DrmId::from(1usize)),
+            drm_crtc_id: 1,
+            global_name: None,
+            x: -100,
+            y: 20,
+            physical_width: 0,
+            physical_height: 0,
+            scale: 1,
+            transform: 0,
+            make: String::new(),
+            model: String::new(),
+            name: "left".to_string(),
+            description: String::new(),
+            enabled: true,
+            current_mode: OutputMode { width: 100, height: 50, refresh_millihz: 60_000 },
+            preferred_mode: None,
+        });
+        let right_id = outputs.insert(Output {
+            backend: BackendOutputRef::new(DrmId::from(2usize)),
+            drm_crtc_id: 2,
+            global_name: None,
+            x: 0,
+            y: 0,
+            physical_width: 0,
+            physical_height: 0,
+            scale: 1,
+            transform: 0,
+            make: String::new(),
+            model: String::new(),
+            name: "right".to_string(),
+            description: String::new(),
+            enabled: true,
+            current_mode: OutputMode { width: 120, height: 80, refresh_millihz: 60_000 },
+            preferred_mode: None,
+        });
+        let layout = OutputLayout::from_outputs(&outputs);
+        assert_eq!(layout.extents(), RectI::from_extents(-100, 0, 120, 80));
+        assert_eq!(layout.output_at(-50, 40), Some(left_id));
+        assert_eq!(layout.output_at(10, 10), Some(right_id));
+        assert_eq!(layout.output_at(1000, 1000), None);
+    }
+
+    #[test]
+    fn output_layout_primary_output_prefers_overlap_then_hint() {
+        let mut outputs = IndexMap::<OutputId, Output>::default();
+        let first_id = outputs.insert(Output {
+            backend: BackendOutputRef::new(DrmId::from(1usize)),
+            drm_crtc_id: 1,
+            global_name: None,
+            x: 0,
+            y: 0,
+            physical_width: 0,
+            physical_height: 0,
+            scale: 1,
+            transform: 0,
+            make: String::new(),
+            model: String::new(),
+            name: "first".to_string(),
+            description: String::new(),
+            enabled: true,
+            current_mode: OutputMode { width: 100, height: 100, refresh_millihz: 60_000 },
+            preferred_mode: None,
+        });
+        let second_id = outputs.insert(Output {
+            backend: BackendOutputRef::new(DrmId::from(2usize)),
+            drm_crtc_id: 2,
+            global_name: None,
+            x: 100,
+            y: 0,
+            physical_width: 0,
+            physical_height: 0,
+            scale: 1,
+            transform: 0,
+            make: String::new(),
+            model: String::new(),
+            name: "second".to_string(),
+            description: String::new(),
+            enabled: true,
+            current_mode: OutputMode { width: 100, height: 100, refresh_millihz: 60_000 },
+            preferred_mode: None,
+        });
+        let layout = OutputLayout::from_outputs(&outputs);
+        let even_split = RectI::new(50, 0, 100, 100).unwrap();
+        assert_eq!(layout.primary_output_for_rect(even_split, Some(second_id)), Some(second_id));
+        let mostly_first = RectI::new(10, 0, 120, 100).unwrap();
+        assert_eq!(layout.primary_output_for_rect(mostly_first, Some(second_id)), Some(first_id));
+    }
+
+    #[test]
+    fn output_layout_clamps_points_to_nearest_output_region() {
+        let mut outputs = IndexMap::<OutputId, Output>::default();
+        outputs.insert(Output {
+            backend: BackendOutputRef::new(DrmId::from(1usize)),
+            drm_crtc_id: 1,
+            global_name: None,
+            x: 0,
+            y: 0,
+            physical_width: 0,
+            physical_height: 0,
+            scale: 1,
+            transform: 0,
+            make: String::new(),
+            model: String::new(),
+            name: "left".to_string(),
+            description: String::new(),
+            enabled: true,
+            current_mode: OutputMode { width: 100, height: 100, refresh_millihz: 60_000 },
+            preferred_mode: None,
+        });
+        let right_id = outputs.insert(Output {
+            backend: BackendOutputRef::new(DrmId::from(2usize)),
+            drm_crtc_id: 2,
+            global_name: None,
+            x: 200,
+            y: 0,
+            physical_width: 0,
+            physical_height: 0,
+            scale: 1,
+            transform: 0,
+            make: String::new(),
+            model: String::new(),
+            name: "right".to_string(),
+            description: String::new(),
+            enabled: true,
+            current_mode: OutputMode { width: 100, height: 100, refresh_millihz: 60_000 },
+            preferred_mode: None,
+        });
+        let layout = OutputLayout::from_outputs(&outputs);
+        assert_eq!(layout.nearest_point(150, 10), Some((right_id, (200, 10))));
+        assert_eq!(layout.nearest_point(250, 50), Some((right_id, (250, 50))));
+    }
+
+    #[test]
+    fn active_output_prefers_pointer_location_over_stored_fallback() {
+        let mut state = make_state();
+        let left = state.insert_output(make_output(
+            BackendOutputRef::new(DrmId::from(1usize)),
+            1,
+            0,
+            0,
+            100,
+            100,
+        ));
+        let right = state.insert_output(make_output(
+            BackendOutputRef::new(DrmId::from(1usize)),
+            2,
+            100,
+            0,
+            100,
+            100,
+        ));
+
+        assert_eq!(state.active_output, Some(left));
+        assert_eq!(state.active_output_id(), Some(left));
+
+        state.outputs.try_get_mut(left).unwrap().x = -200;
+        state.outputs.try_get_mut(right).unwrap().x = 0;
+
+        assert_eq!(state.active_output_id(), Some(right));
+    }
+
+    #[test]
+    fn output_for_surface_falls_back_to_current_output_without_bounds() {
+        let mut state = make_state();
+        let output_id = state.insert_output(make_output(
+            BackendOutputRef::new(DrmId::from(1usize)),
+            1,
+            0,
+            0,
+            100,
+            100,
+        ));
+        let surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(2), 6);
+
+        assert_eq!(state.output_id_for_surface(&surface), Some(output_id));
     }
 }

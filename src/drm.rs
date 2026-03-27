@@ -27,7 +27,10 @@ use crate::{
     dmabuf::DmaBuf,
     egl::{EglContext, EglFrameBuffer, GlTexture, RenderItem, EGL},
     gbm::{BufferObject, UseFlags},
-    io_uring::ring::{PollCompleted, ReadWriteCompleted, RingId},
+    io_uring::{
+        model::IoUringAction,
+        ring::{PollCompleted, ReadWriteCompleted, RingId},
+    },
     region::{DamageRegion, RectI},
     runner::{AnyAction, Dispatcher, Model},
     state::{BackendOutputRef, DrmId, ObjectId, OutputId, OutputMode, State},
@@ -138,7 +141,7 @@ pub struct Drm {
     device: udev::Device,
     resources: DrmResources,
     egl_context: EglContext,
-    pub output: DrmOutput,
+    pub outputs: BTreeMap<u32, DrmOutput>,
     driver: Driver,
     supports_syncobj_timeline: bool,
     supports_syncobj_eventfd: bool,
@@ -328,6 +331,16 @@ struct FramePlan {
     direct_scanout: Option<DirectScanoutCandidate>,
     cursor_plane: Option<CursorPlaneCandidate>,
     preserve_contents: bool,
+}
+
+#[derive(Debug)]
+struct OutputRenderPlan {
+    output_id: Option<OutputId>,
+    global_bounds: RectI,
+    local_origin: (i32, i32),
+    deferred_releases: Vec<DeferredRelease>,
+    cursor_animation_delay_msec: Option<u32>,
+    frame: FramePlan,
 }
 
 #[derive(Debug)]
@@ -811,6 +824,11 @@ pub struct ConnectorInUse {
 }
 
 impl ConnectorInUse {
+    pub fn crtc_id(&self) -> u32 {
+        let handle: control::RawResourceHandle = self.crtc.handle.into();
+        handle.into()
+    }
+
     pub fn primary_plane(&self) -> (&Plane, &BTreeSet<Modifier>) {
         let plane = &self.planes[self.primary_plane_index];
         let format = &plane.formats[&DrmFourcc::Xrgb8888];
@@ -860,8 +878,20 @@ pub struct InFormat {
 }
 
 impl Drm {
-    pub fn current_output_mode(&self) -> Option<OutputMode> {
-        let mode_blob = self.output.in_use.crtc.mode_id;
+    fn output(&self, drm_crtc_id: u32) -> Option<&DrmOutput> {
+        self.outputs.get(&drm_crtc_id)
+    }
+
+    fn output_mut(&mut self, drm_crtc_id: u32) -> Option<&mut DrmOutput> {
+        self.outputs.get_mut(&drm_crtc_id)
+    }
+
+    pub fn output_connector_in_use(&self, drm_crtc_id: u32) -> Option<&ConnectorInUse> {
+        self.output(drm_crtc_id).map(|output| &output.in_use)
+    }
+
+    pub fn current_output_mode(&self, drm_crtc_id: u32) -> Option<OutputMode> {
+        let mode_blob = self.outputs.get(&drm_crtc_id)?.in_use.crtc.mode_id;
         if mode_blob == 0 {
             return None;
         }
@@ -939,7 +969,7 @@ impl Drm {
 
         let gbm = crate::gbm::GbmDevice::new(&drm).unwrap();
         let egl_context = EglContext::make(egl, gbm);
-        let output = Self::init_drm(&drm, &egl_context, &resources);
+        let outputs = Self::init_drm_outputs(&drm, &egl_context, &resources);
 
         let supports_syncobj_timeline = drm
             .get_driver_capability(drm::DriverCapability::TimelineSyncObj)
@@ -954,16 +984,19 @@ impl Drm {
             resources,
             egl_context,
             driver,
-            output,
+            outputs,
             supports_syncobj_timeline,
             supports_syncobj_eventfd,
         };
-        drm_backend.initialize_cursor_plane_slots();
+        let drm_output_ids = drm_backend.outputs.keys().copied().collect::<Vec<_>>();
+        for drm_output_id in drm_output_ids {
+            drm_backend.initialize_cursor_plane_slots(drm_output_id);
+        }
         drm_backend
     }
 
-    pub fn make_model(&self, drm_id: DrmId) -> DrmModel {
-        DrmModel { drm_id }
+    pub fn make_output_model(&self, drm_id: DrmId, output_id: OutputId) -> DrmOutputModel {
+        DrmOutputModel { drm_id, output_id }
     }
 
     pub fn fd(&self) -> DrmFd {
@@ -992,23 +1025,28 @@ impl Drm {
 
     fn render_output(
         &self,
+        drm_crtc_id: u32,
         items: &[RenderItem],
         damage: &DamageRegion,
         preserve_contents: bool,
     ) -> crate::egl::RenderCompletion {
-        let projection = self.output.render_projection();
-        self.output.render_buffer().gl_framebuffer.render(
+        let output = self
+            .output(drm_crtc_id)
+            .expect("missing DRM output pipeline for render");
+        let projection = output.render_projection();
+        output.render_buffer().gl_framebuffer.render(
             items,
             projection,
-            self.output.render_sync_mode,
+            output.render_sync_mode,
             damage,
             preserve_contents,
-            self.output.presentation_transform,
+            output.presentation_transform,
         )
     }
 
     fn collect_cursor_plane_candidate(
         &mut self,
+        drm_crtc_id: u32,
         request: &CursorPlaneRequest,
         output_bounds: RectI,
     ) -> Option<CursorPlaneCandidate> {
@@ -1029,10 +1067,10 @@ impl Drm {
         }
         let (fb_width, fb_height) = self.fixed_cursor_plane_size();
         let slot = if let Some(slot) = self
-            .output
+            .output(drm_crtc_id)?
             .cursor_slot_index_for_content_key(request.content_key)
         {
-            let cached = self.output.cursor_slot(slot).unwrap();
+            let cached = self.output(drm_crtc_id)?.cursor_slot(slot).unwrap();
             log::debug!(
                 "Reusing cached DRM cursor plane buffer: slot={} visible_size={}x{} fb_size={}x{} pos=({}, {}) hotspot=({}, {}) fb={:?}",
                 slot,
@@ -1048,9 +1086,9 @@ impl Drm {
             );
             slot
         } else {
-            let slot = self.output.preferred_upload_cursor_slot()?;
-            self.upload_cursor_plane_slot(slot, request)?;
-            let cached = self.output.cursor_slot(slot).unwrap();
+            let slot = self.output(drm_crtc_id)?.preferred_upload_cursor_slot()?;
+            self.upload_cursor_plane_slot(drm_crtc_id, slot, request)?;
+            let cached = self.output(drm_crtc_id)?.cursor_slot(slot).unwrap();
             log::debug!(
                 "Prepared DRM cursor plane candidate: slot={} visible_size={}x{} fb_size={}x{} pos=({}, {}) hotspot=({}, {}) fb={:?}",
                 slot,
@@ -1071,19 +1109,23 @@ impl Drm {
 
     fn append_cursor_plane_changes(
         &self,
+        drm_crtc_id: u32,
         changes: &mut control::atomic::AtomicModeReq,
         cursor: Option<&CursorPlaneCandidate>,
     ) {
-        let Some(plane) = self.output.in_use.cursor_plane() else {
+        let Some(output) = self.output(drm_crtc_id) else {
             return;
         };
-        let crtc = self.output.in_use.crtc.handle;
+        let Some(plane) = output.in_use.cursor_plane() else {
+            return;
+        };
+        let crtc = output.in_use.crtc.handle;
         let (cursor_plane_width, cursor_plane_height, cursor_src_width, cursor_src_height) =
             cursor_plane_commit_dimensions(self.fixed_cursor_plane_size());
         let (fb, crtc_value, x, y, width, height, src_width, src_height) = match cursor {
             Some(cursor) => (
                 control::property::Value::Object(Some(
-                    self.output
+                    output
                         .cursor_slot(cursor.slot)
                         .expect("cursor plane slot missing during atomic commit")
                         .buffer
@@ -1162,6 +1204,7 @@ impl Drm {
 
     fn submit_render_buffer(
         &mut self,
+        drm_crtc_id: u32,
         render_completion: &crate::egl::RenderCompletion,
         damage: &DamageRegion,
         output_id: Option<OutputId>,
@@ -1171,7 +1214,9 @@ impl Drm {
         cursor_plane: Option<CursorPlaneCandidate>,
     ) -> std::io::Result<Vec<SurfaceKey>> {
         let (primary_plane, fb, crtc) = {
-            let output = &self.output;
+            let output = self
+                .output(drm_crtc_id)
+                .expect("missing DRM output pipeline for submit");
             let (primary_plane, _) = output.in_use.primary_plane();
             let fb = output.render_buffer().drm_fb.id();
             (primary_plane.clone(), fb, output.in_use.crtc.handle)
@@ -1186,13 +1231,18 @@ impl Drm {
                 y2: rect.y2(),
             })
             .collect();
-        let want_damage_clips = ENABLE_DAMAGE
-            && self.output.allow_fb_damage_clips
-            && primary_plane.fb_damage_clips.is_some()
-            && !rects.is_empty();
-        let want_in_fence = self.output.allow_in_fence_fd
-            && primary_plane.in_fence_fd.is_some()
-            && render_completion.in_fence_fd.is_some();
+        let (want_damage_clips, want_in_fence) = {
+            let output = self.output(drm_crtc_id).unwrap();
+            (
+                ENABLE_DAMAGE
+                    && output.allow_fb_damage_clips
+                    && primary_plane.fb_damage_clips.is_some()
+                    && !rects.is_empty(),
+                output.allow_in_fence_fd
+                    && primary_plane.in_fence_fd.is_some()
+                    && render_completion.in_fence_fd.is_some(),
+            )
+        };
         let mut last_error = None;
 
         for (use_damage_clips, use_in_fence) in
@@ -1209,7 +1259,7 @@ impl Drm {
                 primary_plane.crtc_id,
                 control::property::Value::CRTC(Some(crtc)),
             );
-            self.append_cursor_plane_changes(&mut changes, cursor_plane.as_ref());
+            self.append_cursor_plane_changes(drm_crtc_id, &mut changes, cursor_plane.as_ref());
 
             if let Some(property) = primary_plane.in_fence_fd {
                 let fence_fd = if use_in_fence {
@@ -1264,16 +1314,17 @@ impl Drm {
                             "drm submit_render_buffer: driver rejected FB_DAMAGE_CLIPS on {}, disabling output damage clips",
                             self.driver.name
                         );
-                        self.output.allow_fb_damage_clips = false;
+                        self.output_mut(drm_crtc_id).unwrap().allow_fb_damage_clips = false;
                     }
                     if want_in_fence && !use_in_fence {
                         log::warn!(
                             "drm submit_render_buffer: driver rejected IN_FENCE_FD on {}, disabling explicit KMS in-fences",
                             self.driver.name
                         );
-                        self.output.allow_in_fence_fd = false;
+                        self.output_mut(drm_crtc_id).unwrap().allow_in_fence_fd = false;
                     }
-                    let submission = self.output.allocate_submission(
+                    let buffer_index = self.output(drm_crtc_id).unwrap().render_buffer_index;
+                    let submission = self.output_mut(drm_crtc_id).unwrap().allocate_submission(
                         output_id,
                         scene,
                         frame_callback_surfaces,
@@ -1281,14 +1332,15 @@ impl Drm {
                         false,
                     );
                     let callback_surfaces = submission.frame_callback_surfaces.clone();
-                    self.output
-                        .mark_frame_submitted(SubmittedFrame::Composited {
-                            buffer_index: self.output.render_buffer_index,
+                    self.output_mut(drm_crtc_id).unwrap().mark_frame_submitted(
+                        SubmittedFrame::Composited {
+                            buffer_index,
                             damage: damage.clone(),
                             submission,
                             damage_blob,
                             cursor_slot: cursor_plane.map(|cursor| cursor.slot),
-                        });
+                        },
+                    );
                     return Ok(callback_surfaces);
                 }
                 Err(error) => {
@@ -1322,6 +1374,7 @@ impl Drm {
 
     fn submit_direct_scanout(
         &mut self,
+        drm_crtc_id: u32,
         candidate: DirectScanoutCandidate,
         output_id: Option<OutputId>,
         scene: Vec<SceneItemState>,
@@ -1330,7 +1383,9 @@ impl Drm {
         cursor_plane: Option<CursorPlaneCandidate>,
     ) -> std::io::Result<Vec<SurfaceKey>> {
         let (primary_plane, crtc) = {
-            let output = &self.output;
+            let output = self
+                .output(drm_crtc_id)
+                .expect("missing DRM output pipeline for scanout");
             let (primary_plane, _) = output.in_use.primary_plane();
             (primary_plane.clone(), output.in_use.crtc.handle)
         };
@@ -1346,7 +1401,7 @@ impl Drm {
             primary_plane.crtc_id,
             control::property::Value::CRTC(Some(crtc)),
         );
-        self.append_cursor_plane_changes(&mut changes, cursor_plane.as_ref());
+        self.append_cursor_plane_changes(drm_crtc_id, &mut changes, cursor_plane.as_ref());
         changes.add_property(
             primary_plane.handle,
             primary_plane.crtc.x.handle,
@@ -1391,10 +1446,10 @@ impl Drm {
             changes.add_property(primary_plane.handle, property, control::property::Value::Blob(0));
         }
         if let crate::sync::AcquireSync::SyncFile(sync_file) = &candidate.sync.acquire {
-            let Some(property) = primary_plane
-                .in_fence_fd
-                .filter(|_| self.output.allow_in_fence_fd)
-            else {
+            let Some(property) = primary_plane.in_fence_fd.filter(|_| {
+                self.output(drm_crtc_id)
+                    .is_some_and(|output| output.allow_in_fence_fd)
+            }) else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "scanout sync-file acquire requires IN_FENCE_FD support",
@@ -1410,10 +1465,10 @@ impl Drm {
                 std::io::ErrorKind::InvalidInput,
                 "scanout currently only supports empty or sync-file acquire fences",
             ));
-        } else if let Some(property) = primary_plane
-            .in_fence_fd
-            .filter(|_| self.output.allow_in_fence_fd)
-        {
+        } else if let Some(property) = primary_plane.in_fence_fd.filter(|_| {
+            self.output(drm_crtc_id)
+                .is_some_and(|output| output.allow_in_fence_fd)
+        }) {
             changes.add_property(
                 primary_plane.handle,
                 property,
@@ -1425,7 +1480,7 @@ impl Drm {
             control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
             changes,
         )?;
-        let submission = self.output.allocate_submission(
+        let submission = self.output_mut(drm_crtc_id).unwrap().allocate_submission(
             output_id,
             scene,
             frame_callback_surfaces,
@@ -1433,7 +1488,8 @@ impl Drm {
             true,
         );
         let callback_surfaces = submission.frame_callback_surfaces.clone();
-        self.output
+        self.output_mut(drm_crtc_id)
+            .unwrap()
             .mark_frame_submitted(SubmittedFrame::DirectScanout {
                 submission,
                 framebuffer: candidate.framebuffer,
@@ -1442,12 +1498,16 @@ impl Drm {
         Ok(callback_surfaces)
     }
 
-    fn initialize_cursor_plane_slots(&mut self) {
-        let Some(plane_format) = self.cursor_plane_format() else {
+    fn initialize_cursor_plane_slots(&mut self, drm_crtc_id: u32) {
+        let Some(plane_format) = self.cursor_plane_format(drm_crtc_id) else {
             return;
         };
         let (fb_width, fb_height) = self.fixed_cursor_plane_size();
-        for slot in 0..self.output.cursor_slots.len() {
+        let slot_count = self
+            .output(drm_crtc_id)
+            .map(|output| output.cursor_slots.len())
+            .unwrap_or(0);
+        for slot in 0..slot_count {
             let Some(buffer) = self.allocate_cursor_plane_buffer(&plane_format) else {
                 log::warn!(
                     "Failed to preallocate DRM cursor plane slot {} at {}x{}, falling back to software cursor composition",
@@ -1455,7 +1515,9 @@ impl Drm {
                     fb_width,
                     fb_height
                 );
-                self.output.cursor_slots = [None, None];
+                if let Some(output) = self.output_mut(drm_crtc_id) {
+                    output.cursor_slots = [None, None];
+                }
                 return;
             };
             log::debug!(
@@ -1465,13 +1527,13 @@ impl Drm {
                 fb_height,
                 buffer.framebuffer.id()
             );
-            self.output.cursor_slots[slot] =
+            self.output_mut(drm_crtc_id).unwrap().cursor_slots[slot] =
                 Some(CachedCursorPlaneSlot { content_key: None, buffer });
         }
     }
 
-    fn cursor_plane_format(&self) -> Option<PlaneFormat> {
-        let plane = self.output.in_use.cursor_plane()?;
+    fn cursor_plane_format(&self, drm_crtc_id: u32) -> Option<PlaneFormat> {
+        let plane = self.output(drm_crtc_id)?.in_use.cursor_plane()?;
         let plane_format = plane.formats.get(&DrmFourcc::Argb8888)?.clone();
         if !plane_format.modifiers.contains(&Modifier::INVALID)
             && !plane_format.modifiers.contains(&Modifier::LINEAR)
@@ -1496,11 +1558,14 @@ impl Drm {
 
     fn upload_cursor_plane_slot(
         &mut self,
+        drm_crtc_id: u32,
         slot: usize,
         request: &CursorPlaneRequest,
     ) -> Option<()> {
         let (_, fb_height) = self.fixed_cursor_plane_size();
-        let cached = self.output.cursor_slots[slot].as_mut().unwrap();
+        let cached = self.output_mut(drm_crtc_id)?.cursor_slots[slot]
+            .as_mut()
+            .unwrap();
         if cached.content_key != Some(request.content_key) {
             let pitch = drm::buffer::Buffer::pitch(&cached.buffer.bo) as usize;
             let bytes = match &request.upload {
@@ -1646,11 +1711,25 @@ impl Drm {
         }
     }
 
-    fn init_drm(drm: &DrmFd, egl: &EglContext, drm_resources: &DrmResources) -> DrmOutput {
+    fn init_drm_outputs(
+        drm: &DrmFd,
+        egl: &EglContext,
+        drm_resources: &DrmResources,
+    ) -> BTreeMap<u32, DrmOutput> {
         let DrmResources { planes, crtcs, connectors, .. } = drm_resources;
+        let outputs = Self::find_valid_connectors(connectors, crtcs, planes)
+            .into_iter()
+            .map(|in_use| {
+                let drm_crtc_id = in_use.crtc_id();
+                let output = Self::init_drm_output(drm, egl, in_use);
+                (drm_crtc_id, output)
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert!(!outputs.is_empty(), "Failed to find connector");
+        outputs
+    }
 
-        let in_use = Self::find_first_valid_connector(&connectors, &crtcs, &planes)
-            .expect("Failed to find connector");
+    fn init_drm_output(drm: &DrmFd, egl: &EglContext, in_use: ConnectorInUse) -> DrmOutput {
         let mode = in_use.connector.preferred_mode.as_ref().unwrap();
         let (hdisplay, vdisplay) = mode.size();
         let (primary_plane, plane_modifiers) = in_use.primary_plane();
@@ -1933,48 +2012,49 @@ impl Drm {
         Ok(framebuffer)
     }
 
-    // TODO: Support multiple monitors/connectors
-    fn find_first_valid_connector(
+    fn find_valid_connectors(
         connectors: &BTreeMap<connector::Handle, Connector>,
         crtcs: &BTreeMap<crtc::Handle, Crtc>,
         planes: &BTreeMap<plane::Handle, Plane>,
-    ) -> Option<ConnectorInUse> {
-        let (connector, crtc) = 'here: {
-            for connector in connectors.values() {
-                let connector::State::Connected = connector.state else {
-                    continue;
-                };
-                for crtc in &connector.crtcs {
-                    let crtc = crtcs.get(crtc).unwrap();
-                    if !crtc.active {
-                        continue;
-                    }
-                    break 'here (connector, crtc);
-                }
-            }
-            return None;
-        };
+    ) -> Vec<ConnectorInUse> {
+        let mut claimed_crtcs = BTreeSet::new();
+        let mut outputs = Vec::new();
 
-        let planes = crtc
-            .possible_planes
-            .iter()
-            .map(|handle| planes.get(handle).cloned().unwrap())
-            .collect::<Vec<_>>();
+        for connector in connectors.values() {
+            let connector::State::Connected = connector.state else {
+                continue;
+            };
 
-        let primary_plane_index = planes
-            .iter()
-            .position(|plane| {
+            let Some(crtc) = connector.crtcs.iter().find_map(|crtc_handle| {
+                let crtc = crtcs.get(crtc_handle)?;
+                (crtc.active && !claimed_crtcs.contains(crtc_handle)).then_some(crtc)
+            }) else {
+                continue;
+            };
+
+            let planes = crtc
+                .possible_planes
+                .iter()
+                .map(|handle| planes.get(handle).cloned().unwrap())
+                .collect::<Vec<_>>();
+
+            let Some(primary_plane_index) = planes.iter().position(|plane| {
                 let PlaneType::Primary = plane.kind else { return false };
                 plane.formats.contains_key(&DrmFourcc::Xrgb8888)
-            })
-            .unwrap();
+            }) else {
+                continue;
+            };
 
-        Some(ConnectorInUse {
-            crtc: crtc.clone(),
-            connector: connector.clone(),
-            planes,
-            primary_plane_index,
-        })
+            claimed_crtcs.insert(crtc.handle);
+            outputs.push(ConnectorInUse {
+                crtc: crtc.clone(),
+                connector: connector.clone(),
+                planes,
+                primary_plane_index,
+            });
+        }
+
+        outputs
     }
 
     fn make_crtc(
@@ -2407,16 +2487,16 @@ impl DrmBuffer {
 }
 
 /// Responsible for reading the DRM fd, parsing kernel events, and forwarding to [`DrmModel`].
-struct DrmReader {
+pub struct DrmReader {
     drm_id: DrmId,
-    fd: RawFd,
+    fd: DrmFd,
     read_buffer: DrmBuffer,
     poll_op_id: Option<RingId>,
     read_op_id: Option<RingId>,
 }
 
 #[derive(Debug)]
-enum DrmReaderAction {
+pub enum DrmReaderAction {
     Start,
     PollReady,
     ReadChunk { buffer: Box<[u8]> },
@@ -2432,7 +2512,7 @@ impl Model for DrmReader {
 
     fn process(
         &mut self,
-        _state: &mut crate::state::State,
+        state: &mut crate::state::State,
         action: Self::Action,
         dispatcher: &mut crate::runner::Dispatcher,
     ) -> Result<(), ()> {
@@ -2469,10 +2549,16 @@ impl Model for DrmReader {
                     match event {
                         ParsedDrmEvent::FlipComplete {
                             sequence, tv_sec, tv_usec, crtc_id, ..
-                        } => dispatcher.dispatch_to(
-                            self.model_id(),
-                            DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id },
-                        ),
+                        } => {
+                            if let Some(output_id) =
+                                state.output_id_for_drm_crtc(self.drm_id, crtc_id)
+                            {
+                                dispatcher.dispatch_to(
+                                    usize::from(output_id) as u64,
+                                    DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id },
+                                );
+                            }
+                        }
                         ParsedDrmEvent::Ignored { .. } => {}
                     }
                     self.read_buffer.consume_event(len);
@@ -2487,14 +2573,10 @@ impl Model for DrmReader {
             }
             Stop => {
                 if let Some(poll_op_id) = self.poll_op_id.take() {
-                    dispatcher.dispatch(crate::io_uring::model::IoUringAction::PollRemove {
-                        target: poll_op_id,
-                    });
+                    dispatcher.dispatch(IoUringAction::PollRemove { target: poll_op_id });
                 }
                 if let Some(read_op_id) = self.read_op_id.take() {
-                    dispatcher.dispatch(crate::io_uring::model::IoUringAction::Cancel {
-                        target: read_op_id,
-                    });
+                    dispatcher.dispatch(IoUringAction::Cancel { target: read_op_id });
                 }
             }
         };
@@ -2504,7 +2586,7 @@ impl Model for DrmReader {
 }
 
 impl DrmReader {
-    fn new(drm_id: DrmId, fd: RawFd) -> Self {
+    pub fn new(drm_id: DrmId, fd: DrmFd) -> Self {
         Self {
             drm_id,
             fd,
@@ -2519,25 +2601,25 @@ impl DrmReader {
     }
 
     fn dispatch_poll(&mut self, dispatcher: &mut Dispatcher) {
-        use crate::{io_uring::model::IoUringAction, runner::Redispatcher};
+        use crate::runner::Redispatcher;
 
         let poll_op_id = RingId::fresh();
         self.poll_op_id = Some(poll_op_id);
         dispatcher.dispatch(IoUringAction::Poll {
             id: Some(poll_op_id),
-            fd: self.fd,
+            fd: self.fd.as_raw_fd(),
             dispatch_to: Redispatcher::id(self.model_id(), Self::on_poll_event),
         });
     }
 
     fn dispatch_read_some(&mut self, dispatcher: &mut Dispatcher) {
-        use crate::{io_uring::model::IoUringAction, runner::Redispatcher};
+        use crate::runner::Redispatcher;
 
         let read_op_id = RingId::fresh();
         self.read_op_id = Some(read_op_id);
         dispatcher.dispatch(IoUringAction::ReadSome {
             id: Some(read_op_id),
-            fd: self.fd,
+            fd: self.fd.as_raw_fd(),
             offset: 0,
             length: 4096,
             dispatch_to: Redispatcher::id(self.model_id(), Self::on_read_event),
@@ -2564,9 +2646,10 @@ impl DrmReader {
     }
 }
 
-/// DRM compositor-side model: flip completion and scheduling (fed by [`DrmReader`], like [`crate::dbus::Dbus`]).
-pub struct DrmModel {
+/// DRM compositor-side per-output model: scheduling, rendering, and flip completion.
+pub struct DrmOutputModel {
     drm_id: DrmId,
+    output_id: OutputId,
 }
 
 pub enum DrmAction {
@@ -2587,6 +2670,7 @@ enum DrmCursorAnimationTimerAction {
 
 struct DrmCursorAnimationTimer {
     drm_id: DrmId,
+    output_id: OutputId,
     timer_fd: TimerFd,
     read_op_id: Option<RingId>,
 }
@@ -2596,13 +2680,11 @@ pub fn sync_output_nodes_for_backend(state: &mut State, drm_id: DrmId) {
 }
 
 pub fn schedule_output(state: &State, output_id: OutputId, dispatcher: &mut Dispatcher) {
-    let Some(backend) = state.backend_for_output(output_id) else {
+    if state.backend_for_output(output_id).is_none() {
         log::warn!("schedule_output: invalid logical output {:?}", output_id);
         return;
-    };
-
-    let model_id = usize::from(backend.drm_id) as u64;
-    dispatcher.dispatch_to(model_id, DrmAction::ScheduleFrame);
+    }
+    dispatcher.dispatch_to(usize::from(output_id) as u64, DrmAction::ScheduleFrame);
 }
 
 pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
@@ -2614,9 +2696,68 @@ pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
     schedule_output(state, output_id, dispatcher);
 }
 
-fn arm_cursor_animation_timer(dispatcher: &mut Dispatcher, drm_id: DrmId, delay_msec: Option<u32>) {
-    dispatcher
-        .dispatch_to(usize::from(drm_id) as u64, DrmCursorAnimationTimerAction::Arm { delay_msec });
+pub fn schedule_outputs<I>(state: &State, output_ids: I, dispatcher: &mut Dispatcher)
+where
+    I: IntoIterator<Item = OutputId>,
+{
+    let mut unique = BTreeSet::new();
+    for output_id in output_ids {
+        if unique.insert(output_id) {
+            schedule_output(state, output_id, dispatcher);
+        }
+    }
+}
+
+pub fn schedule_outputs_for_rect(state: &State, rect: RectI, dispatcher: &mut Dispatcher) {
+    let output_ids = state.outputs_intersecting_rect(rect);
+    if output_ids.is_empty() {
+        if let Some(output_id) = state.primary_output_for_rect(rect, None) {
+            schedule_output(state, output_id, dispatcher);
+        }
+        return;
+    }
+    schedule_outputs(state, output_ids, dispatcher);
+}
+
+pub fn schedule_outputs_for_rects<I>(state: &State, rects: I, dispatcher: &mut Dispatcher)
+where
+    I: IntoIterator<Item = RectI>,
+{
+    let mut output_ids = BTreeSet::new();
+    for rect in rects {
+        let rect_outputs = state.outputs_intersecting_rect(rect);
+        if rect_outputs.is_empty() {
+            if let Some(output_id) = state.primary_output_for_rect(rect, None) {
+                output_ids.insert(output_id);
+            }
+            continue;
+        }
+        output_ids.extend(rect_outputs);
+    }
+    schedule_outputs(state, output_ids, dispatcher);
+}
+
+pub fn schedule_outputs_for_points(
+    state: &State,
+    points: impl IntoIterator<Item = (f64, f64)>,
+    dispatcher: &mut Dispatcher,
+) {
+    let output_ids = points.into_iter().filter_map(|(x, y)| {
+        let (x, y) = state.clamp_point_to_outputs(x.round() as i32, y.round() as i32)?;
+        state.output_at_point(x, y)
+    });
+    schedule_outputs(state, output_ids, dispatcher);
+}
+
+fn arm_cursor_animation_timer(
+    dispatcher: &mut Dispatcher,
+    output_id: OutputId,
+    delay_msec: Option<u32>,
+) {
+    dispatcher.dispatch_to(
+        usize::from(output_id) as u64,
+        DrmCursorAnimationTimerAction::Arm { delay_msec },
+    );
 }
 
 pub fn discard_backend_presentation_feedbacks(
@@ -2624,14 +2765,20 @@ pub fn discard_backend_presentation_feedbacks(
     drm_id: DrmId,
     dispatcher: &mut Dispatcher,
 ) {
-    let (feedbacks, damage_blob) = {
+    let discarded = {
         let drm = state.drm.get_mut(drm_id);
-        drm.output
-            .take_in_flight_presentation_feedbacks_for_discard()
+        drm.outputs
+            .values_mut()
+            .map(DrmOutput::take_in_flight_presentation_feedbacks_for_discard)
+            .collect::<Vec<_>>()
     };
-    if let Some(blob) = damage_blob {
-        let drm = state.drm.get(drm_id);
-        let _ = drm.fd.destroy_property_blob(blob);
+    let mut feedbacks = Vec::new();
+    for (pipeline_feedbacks, damage_blob) in discarded {
+        feedbacks.extend(pipeline_feedbacks);
+        if let Some(blob) = damage_blob {
+            let drm = state.drm.get(drm_id);
+            let _ = drm.fd.destroy_property_blob(blob);
+        }
     }
     if feedbacks.is_empty() {
         return;
@@ -2639,11 +2786,7 @@ pub fn discard_backend_presentation_feedbacks(
     dispatch_presentation_feedback_discarded(dispatcher, &feedbacks);
 }
 
-fn output_overlap_area(scene: &[SceneItemState], output: &crate::state::Output) -> i64 {
-    let (width, height) = output.logical_size();
-    let Some(output_rect) = RectI::new(output.x, output.y, width, height) else {
-        return 0;
-    };
+fn output_overlap_area(scene: &[SceneItemState], output_rect: RectI) -> i64 {
     scene
         .iter()
         .map(|item| {
@@ -2664,24 +2807,76 @@ fn select_presentation_output_for_scene(
     scene: &[SceneItemState],
 ) -> Option<OutputId> {
     let backend = BackendOutputRef::new(drm_id);
+    let layout = state.output_layout();
     let output_ids = state.output_ids_for_backend(backend);
     let mut best = None;
     let mut best_area = -1i64;
     for output_id in output_ids {
-        let Some(output) = state.outputs.try_get(output_id) else {
+        let Some(output_rect) = layout.bounds(output_id) else {
             continue;
         };
-        let area = output_overlap_area(scene, output);
+        let area = output_overlap_area(scene, output_rect);
         if area > best_area {
             best_area = area;
             best = Some(output_id);
         }
     }
     best.or_else(|| {
-        state
-            .active_output_id()
-            .filter(|output_id| state.backend_for_output(*output_id) == Some(backend))
+        state.active_output_id().filter(|output_id| {
+            layout
+                .entry(*output_id)
+                .is_some_and(|entry| entry.backend == backend)
+        })
     })
+}
+
+fn collect_output_render_plan(
+    state: &mut State,
+    drm_id: DrmId,
+    logical_output_id: Option<OutputId>,
+    frame_time_msec: u32,
+) -> OutputRenderPlan {
+    let logical_output_id = logical_output_id.expect("missing logical output for DRM render plan");
+    let drm_crtc_id = state
+        .output_crtc_id(logical_output_id)
+        .expect("missing DRM CRTC for logical output");
+    let global_bounds = state.output_bounds(logical_output_id).unwrap_or_else(|| {
+        state
+            .drm
+            .get(drm_id)
+            .output(drm_crtc_id)
+            .unwrap()
+            .output_bounds()
+    });
+    let (
+        mut items,
+        mut software_cursor_items,
+        deferred_releases,
+        cursor_plane,
+        cursor_animation_delay_msec,
+    ) = collect_render_items(state, drm_id, drm_crtc_id, global_bounds, frame_time_msec);
+    translate_scene_items(&mut items, -global_bounds.x, -global_bounds.y);
+    translate_scene_items(&mut software_cursor_items, -global_bounds.x, -global_bounds.y);
+    let frame = {
+        let drm = state.drm.get(drm_id);
+        build_frame_plan(
+            drm.output(drm_crtc_id)
+                .expect("missing DRM output pipeline for frame plan"),
+            items,
+            software_cursor_items,
+            cursor_plane,
+        )
+    };
+    let output_id = Some(logical_output_id)
+        .or_else(|| select_presentation_output_for_scene(state, drm_id, &frame.scene));
+    OutputRenderPlan {
+        output_id,
+        global_bounds,
+        local_origin: (global_bounds.x, global_bounds.y),
+        deferred_releases,
+        cursor_animation_delay_msec,
+        frame,
+    }
 }
 
 impl Model for DrmCursorAnimationTimer {
@@ -2708,15 +2903,19 @@ impl Model for DrmCursorAnimationTimer {
                 }
             }
             DrmCursorAnimationTimerAction::Fired => {
-                if state
-                    .drm
-                    .get(self.drm_id)
-                    .output
-                    .cursor_animation_delay_msec
-                    .is_some()
-                {
+                let keep_animating = state
+                    .output_crtc_id(self.output_id)
+                    .and_then(|drm_crtc_id| {
+                        state
+                            .drm
+                            .get(self.drm_id)
+                            .output(drm_crtc_id)
+                            .and_then(|output| output.cursor_animation_delay_msec)
+                    })
+                    .is_some();
+                if keep_animating {
                     dispatcher
-                        .dispatch_to(usize::from(self.drm_id) as u64, DrmAction::ScheduleFrame);
+                        .dispatch_to(usize::from(self.output_id) as u64, DrmAction::ScheduleFrame);
                 }
                 self.dispatch_read(dispatcher);
             }
@@ -2727,9 +2926,7 @@ impl Model for DrmCursorAnimationTimer {
             DrmCursorAnimationTimerAction::Stop => {
                 let _ = self.set_expiration(None);
                 if let Some(read_op_id) = self.read_op_id.take() {
-                    dispatcher.dispatch(crate::io_uring::model::IoUringAction::Cancel {
-                        target: read_op_id,
-                    });
+                    dispatcher.dispatch(IoUringAction::Cancel { target: read_op_id });
                 }
             }
         }
@@ -2738,13 +2935,13 @@ impl Model for DrmCursorAnimationTimer {
 }
 
 impl DrmCursorAnimationTimer {
-    fn new(drm_id: DrmId) -> Self {
+    fn new(drm_id: DrmId, output_id: OutputId) -> Self {
         let timer_fd = TimerFd::new(
             timerfd::ClockId::CLOCK_MONOTONIC,
             TimerFlags::TFD_CLOEXEC | TimerFlags::TFD_NONBLOCK,
         )
         .expect("failed to create cursor animation timerfd");
-        Self { drm_id, timer_fd, read_op_id: None }
+        Self { drm_id, output_id, timer_fd, read_op_id: None }
     }
 
     fn dispatch_read(&mut self, dispatcher: &mut Dispatcher) {
@@ -2753,7 +2950,7 @@ impl DrmCursorAnimationTimer {
         }
         let read_op_id = RingId::fresh();
         self.read_op_id = Some(read_op_id);
-        dispatcher.dispatch(crate::io_uring::model::IoUringAction::Read {
+        dispatcher.dispatch(IoUringAction::Read {
             id: Some(read_op_id),
             fd: self.timer_fd.as_fd().as_raw_fd(),
             offset: 0,
@@ -2782,7 +2979,7 @@ impl DrmCursorAnimationTimer {
     }
 }
 
-impl Model for DrmModel {
+impl Model for DrmOutputModel {
     type Action = DrmAction;
     const START: Option<Self::Action> = Some(DrmAction::Start);
     const STOP: Option<Self::Action> = Some(DrmAction::Stop);
@@ -2795,24 +2992,21 @@ impl Model for DrmModel {
     ) -> Result<(), ()> {
         match action {
             DrmAction::Start => {
-                sync_output_nodes_for_backend(state, self.drm_id);
-                let fd = state.drm.get(self.drm_id).fd.as_raw_fd();
-                dispatcher.start_model(self.model_id(), DrmReader::new(self.drm_id, fd));
-                dispatcher.start_model(self.model_id(), DrmCursorAnimationTimer::new(self.drm_id));
+                dispatcher.start_model(
+                    self.model_id(),
+                    DrmCursorAnimationTimer::new(self.drm_id, self.output_id),
+                );
             }
             DrmAction::ScheduleFrame => {
-                sync_output_nodes_for_backend(state, self.drm_id);
                 self.schedule_frame(state, dispatcher);
             }
             DrmAction::RenderFrame => {
-                sync_output_nodes_for_backend(state, self.drm_id);
                 self.render_frame(state, dispatcher);
             }
             DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id } => {
                 self.handle_flip_complete(state, dispatcher, sequence, tv_sec, tv_usec, crtc_id);
             }
             DrmAction::Stop => {
-                dispatcher.stop_model::<_, DrmReader>(self.model_id());
                 dispatcher.stop_model::<_, DrmCursorAnimationTimer>(self.model_id());
             }
         };
@@ -2820,44 +3014,54 @@ impl Model for DrmModel {
     }
 }
 
-impl DrmModel {
+impl DrmOutputModel {
     fn model_id(&self) -> u64 {
-        usize::from(self.drm_id) as u64
+        usize::from(self.output_id) as u64
     }
 
     fn schedule_frame(&mut self, state: &mut crate::state::State, dispatcher: &mut Dispatcher) {
-        let scheduled = state.drm.get_mut(self.drm_id).output.request_frame();
+        let Some(drm_crtc_id) = state.output_crtc_id(self.output_id) else {
+            return;
+        };
+        let scheduled = state
+            .drm
+            .get_mut(self.drm_id)
+            .output_mut(drm_crtc_id)
+            .is_some_and(DrmOutput::request_frame);
         if scheduled {
             dispatcher.dispatch_to(self.model_id(), DrmAction::RenderFrame);
         }
     }
 
     fn render_frame(&mut self, state: &mut crate::state::State, dispatcher: &mut Dispatcher) {
+        let Some(drm_crtc_id) = state.output_crtc_id(self.output_id) else {
+            return;
+        };
         let frame_time_msec = monotonic_time_msec();
         let ready = {
             let drm = state.drm.get_mut(self.drm_id);
-            drm.output.begin_render()
+            drm.output_mut(drm_crtc_id)
+                .is_some_and(DrmOutput::begin_render)
         };
         let failed_releases = {
             if !ready {
-                log::warn!("DrmModel::render_frame skipped: output not ready");
+                log::warn!("DrmOutputModel::render_frame skipped: output not ready");
                 return;
             }
-            let (
-                scene_items,
-                software_cursor_items,
+            let output_render_plan = collect_output_render_plan(
+                state,
+                self.drm_id,
+                Some(self.output_id),
+                frame_time_msec,
+            );
+            let OutputRenderPlan {
+                output_id,
+                global_bounds: _,
+                local_origin: _,
                 deferred_releases,
-                cursor_plane,
                 cursor_animation_delay_msec,
-            ) = collect_render_items(state, self.drm_id, frame_time_msec);
-            let (plan, output_id) = {
-                let drm = state.drm.get(self.drm_id);
-                let plan =
-                    build_frame_plan(&drm.output, scene_items, software_cursor_items, cursor_plane);
-                let output_id =
-                    select_presentation_output_for_scene(state, self.drm_id, &plan.scene);
-                (plan, output_id)
-            };
+                frame,
+            } = output_render_plan;
             let FramePlan {
                 mut items,
                 mut software_cursor_items,
@@ -2868,14 +3072,17 @@ impl DrmModel {
                 direct_scanout,
                 mut cursor_plane,
                 mut preserve_contents,
-            } = plan;
+            } = frame;
             let drm = state.drm.get_mut(self.drm_id);
-            drm.output.in_flight_releases = deferred_releases;
-            drm.output.cursor_animation_delay_msec = cursor_animation_delay_msec;
+            drm.output_mut(drm_crtc_id).unwrap().in_flight_releases = deferred_releases;
+            drm.output_mut(drm_crtc_id)
+                .unwrap()
+                .cursor_animation_delay_msec = cursor_animation_delay_msec;
 
             if let Some(candidate) = direct_scanout {
                 if drm
                     .submit_direct_scanout(
+                        drm_crtc_id,
                         candidate,
                         output_id,
                         scene.clone(),
@@ -2885,18 +3092,21 @@ impl DrmModel {
                     )
                     .is_ok()
                 {
-                    drm.output.note_cursor_plane_success();
+                    drm.output_mut(drm_crtc_id)
+                        .unwrap()
+                        .note_cursor_plane_success();
                     dispatch_submission_frame_callbacks(
                         &frame_callback_surfaces,
                         frame_time_msec,
                         dispatcher,
                     );
-                    drm.output.force_full_redraw = true;
+                    drm.output_mut(drm_crtc_id).unwrap().force_full_redraw = true;
                     return;
                 }
                 if !software_cursor_items.is_empty() {
                     items.append(&mut software_cursor_items);
-                    let fallback_plan = build_frame_plan(&drm.output, items, Vec::new(), None);
+                    let fallback_plan =
+                        build_frame_plan(drm.output(drm_crtc_id).unwrap(), items, Vec::new(), None);
                     items = fallback_plan.items;
                     software_cursor_items = fallback_plan.software_cursor_items;
                     scene = fallback_plan.scene;
@@ -2910,10 +3120,11 @@ impl DrmModel {
 
             if damage.is_empty()
                 && cursor_plane.is_none()
-                && !drm.output.has_displayed_cursor_slot()
+                && !drm.output(drm_crtc_id).unwrap().has_displayed_cursor_slot()
             {
-                drm.output.mark_frame_idle();
-                let releases = std::mem::take(&mut drm.output.in_flight_releases);
+                drm.output_mut(drm_crtc_id).unwrap().mark_frame_idle();
+                let releases =
+                    std::mem::take(&mut drm.output_mut(drm_crtc_id).unwrap().in_flight_releases);
                 dispatch_submission_frame_callbacks(
                     &frame_callback_surfaces,
                     frame_time_msec,
@@ -2923,13 +3134,14 @@ impl DrmModel {
             } else {
                 let render_items = scene_items_to_render_items(&items);
                 let render_completion =
-                    drm.render_output(&render_items, &damage, preserve_contents);
+                    drm.render_output(drm_crtc_id, &render_items, &damage, preserve_contents);
                 let callback_surfaces = frame_callback_surfaces.clone();
                 let submit_had_cursor_plane = cursor_plane.is_some();
                 if submit_had_cursor_plane {
                     log::debug!("Submitting DRM frame with cursor plane enabled");
                 }
                 let submit_result = drm.submit_render_buffer(
+                    drm_crtc_id,
                     &render_completion,
                     &damage,
                     output_id,
@@ -2946,17 +3158,23 @@ impl DrmModel {
                                 error
                             );
                             items.append(&mut software_cursor_items);
-                            let fallback_plan =
-                                build_frame_plan(&drm.output, items, Vec::new(), None);
+                            let fallback_plan = build_frame_plan(
+                                drm.output(drm_crtc_id).unwrap(),
+                                items,
+                                Vec::new(),
+                                None,
+                            );
                             let fallback_render_items =
                                 scene_items_to_render_items(&fallback_plan.items);
                             let fallback_render_completion = drm.render_output(
+                                drm_crtc_id,
                                 &fallback_render_items,
                                 &fallback_plan.damage,
                                 fallback_plan.preserve_contents,
                             );
                             let fallback_callbacks = fallback_plan.frame_callback_surfaces.clone();
                             match drm.submit_render_buffer(
+                                drm_crtc_id,
                                 &fallback_render_completion,
                                 &fallback_plan.damage,
                                 output_id,
@@ -2966,7 +3184,9 @@ impl DrmModel {
                                 None,
                             ) {
                                 Ok(_) => {
-                                    drm.output.note_cursor_plane_failure();
+                                    drm.output_mut(drm_crtc_id)
+                                        .unwrap()
+                                        .note_cursor_plane_failure();
                                     dispatch_submission_frame_callbacks(
                                         &fallback_callbacks,
                                         frame_time_msec,
@@ -2975,9 +3195,13 @@ impl DrmModel {
                                     None
                                 }
                                 Err(fallback_error) => {
-                                    drm.output.mark_render_failed();
-                                    let failed_releases =
-                                        std::mem::take(&mut drm.output.in_flight_releases);
+                                    drm.output_mut(drm_crtc_id).unwrap().mark_render_failed();
+                                    let failed_releases = std::mem::take(
+                                        &mut drm
+                                            .output_mut(drm_crtc_id)
+                                            .unwrap()
+                                            .in_flight_releases,
+                                    );
                                     dispatch_presentation_feedback_discarded(
                                         dispatcher,
                                         &fallback_plan.presentation_feedbacks,
@@ -3004,10 +3228,13 @@ impl DrmModel {
                                 }
                             }
                         } else {
-                            drm.output.note_cursor_plane_failure();
-                            drm.output.mark_render_failed();
-                            let failed_releases =
-                                std::mem::take(&mut drm.output.in_flight_releases);
+                            drm.output_mut(drm_crtc_id)
+                                .unwrap()
+                                .note_cursor_plane_failure();
+                            drm.output_mut(drm_crtc_id).unwrap().mark_render_failed();
+                            let failed_releases = std::mem::take(
+                                &mut drm.output_mut(drm_crtc_id).unwrap().in_flight_releases,
+                            );
                             dispatch_presentation_feedback_discarded(
                                 dispatcher,
                                 &presentation_feedbacks,
@@ -3028,8 +3255,10 @@ impl DrmModel {
                             Some(failed_releases)
                         }
                     } else {
-                        drm.output.mark_render_failed();
-                        let failed_releases = std::mem::take(&mut drm.output.in_flight_releases);
+                        drm.output_mut(drm_crtc_id).unwrap().mark_render_failed();
+                        let failed_releases = std::mem::take(
+                            &mut drm.output_mut(drm_crtc_id).unwrap().in_flight_releases,
+                        );
                         dispatch_presentation_feedback_discarded(
                             dispatcher,
                             &presentation_feedbacks,
@@ -3051,7 +3280,9 @@ impl DrmModel {
                     }
                 } else {
                     if submit_had_cursor_plane {
-                        drm.output.note_cursor_plane_success();
+                        drm.output_mut(drm_crtc_id)
+                            .unwrap()
+                            .note_cursor_plane_success();
                     }
                     dispatch_submission_frame_callbacks(
                         &callback_surfaces,
@@ -3077,13 +3308,22 @@ impl DrmModel {
         sequence: u32,
         tv_sec: u32,
         tv_usec: u32,
-        _crtc_id: u32,
+        crtc_id: u32,
     ) {
+        let Some(drm_crtc_id) = state.output_crtc_id(self.output_id) else {
+            return;
+        };
+        if drm_crtc_id != crtc_id {
+            return;
+        }
         let (releases, should_render, completed_submission, cursor_animation_delay_msec) = {
             let drm = state.drm.get_mut(self.drm_id);
-            let releases = std::mem::take(&mut drm.output.in_flight_releases);
-            let (should_render, completed_submission) = drm.output.finish_page_flip();
-            let cursor_animation_delay_msec = drm.output.cursor_animation_delay_msec;
+            let releases =
+                std::mem::take(&mut drm.output_mut(drm_crtc_id).unwrap().in_flight_releases);
+            let (should_render, completed_submission) =
+                drm.output_mut(drm_crtc_id).unwrap().finish_page_flip();
+            let cursor_animation_delay_msec =
+                drm.output(drm_crtc_id).unwrap().cursor_animation_delay_msec;
             (releases, should_render, completed_submission, cursor_animation_delay_msec)
         };
 
@@ -3108,7 +3348,7 @@ impl DrmModel {
             }
         }
         sync_output_nodes_for_backend(state, self.drm_id);
-        arm_cursor_animation_timer(dispatcher, self.drm_id, cursor_animation_delay_msec);
+        arm_cursor_animation_timer(dispatcher, self.output_id, cursor_animation_delay_msec);
         if should_render {
             dispatcher.dispatch_to(self.model_id(), DrmAction::RenderFrame);
         }
@@ -3265,8 +3505,24 @@ fn presentation_refresh_interval_ns(
     refresh_ns.min(u64::from(u32::MAX)) as u32
 }
 
-fn refresh_interval_ns_for_drm(state: &State, drm_id: DrmId, feedback_version: u32) -> u32 {
-    let Some(mode) = state.drm.get(drm_id).current_output_mode() else {
+fn refresh_interval_ns_for_output(
+    state: &State,
+    output_id: Option<OutputId>,
+    feedback_version: u32,
+) -> u32 {
+    let Some(output_id) = output_id else {
+        return 0;
+    };
+    let Some(drm_id) = state
+        .backend_for_output(output_id)
+        .map(|backend| backend.drm_id)
+    else {
+        return 0;
+    };
+    let Some(drm_crtc_id) = state.output_crtc_id(output_id) else {
+        return 0;
+    };
+    let Some(mode) = state.drm.get(drm_id).current_output_mode(drm_crtc_id) else {
         return 0;
     };
     let refresh_is_constant = true;
@@ -3317,7 +3573,7 @@ fn dispatch_presentation_feedback_discarded(
 
 fn dispatch_presentation_feedback_presented(
     state: &State,
-    drm_id: DrmId,
+    _drm_id: DrmId,
     dispatcher: &mut Dispatcher,
     output_id: Option<OutputId>,
     feedbacks: &[SubmissionPresentationFeedback],
@@ -3346,7 +3602,7 @@ fn dispatch_presentation_feedback_presented(
     }
 
     for ((client_id, feedback_version), feedback_ids) in per_client {
-        let refresh = refresh_interval_ns_for_drm(state, drm_id, feedback_version);
+        let refresh = refresh_interval_ns_for_output(state, output_id, feedback_version);
         dispatcher.dispatch_to(
             client_id,
             ClientAction::PresentationFeedbackPresented {
@@ -3568,6 +3824,7 @@ fn push_scene_items_from_snapshots(
     objects: &mut Box<crate::state::IndexMap<ObjectId, Box<dyn crate::object::Object>>>,
     drm: &Drm,
     drm_fd: &DrmFd,
+    drm_crtc_id: u32,
     output_bounds: RectI,
     snapshots: Vec<crate::wayland_objects::wl_surface::SurfaceRenderState>,
     allow_direct_scanout: bool,
@@ -3627,7 +3884,9 @@ fn push_scene_items_from_snapshots(
                 surface_state.sync.acquire,
                 crate::sync::AcquireSync::None | crate::sync::AcquireSync::SyncFile(_)
             ) && (!matches!(surface_state.sync.acquire, crate::sync::AcquireSync::SyncFile(_))
-                || drm.output.in_use.primary_plane().0.in_fence_fd.is_some());
+                || drm
+                    .output(drm_crtc_id)
+                    .is_some_and(|output| output.in_use.primary_plane().0.in_fence_fd.is_some()));
         let direct_scanout = if allow_direct_scanout
             && buffer.dmabuf().is_some()
             && !buffer.y_inverted()
@@ -3639,7 +3898,7 @@ fn push_scene_items_from_snapshots(
             && scanout_sync_ok
         {
             buffer.dmabuf().and_then(|dmabuf| {
-                let primary_plane = drm.output.in_use.primary_plane().0;
+                let primary_plane = drm.output(drm_crtc_id)?.in_use.primary_plane().0;
                 let plane_format = primary_plane.formats.get(&dmabuf.format.drm)?;
                 if !plane_format.modifiers.contains(&dmabuf.modifier)
                     && !plane_format.modifiers.contains(&Modifier::INVALID)
@@ -3706,6 +3965,7 @@ fn collect_cursor_surface_snapshots(
 fn collect_software_cursor_items(
     state: &mut crate::state::State,
     drm_id: DrmId,
+    drm_crtc_id: u32,
     output_bounds: RectI,
     frame_time_msec: u32,
     retired_candidates: &mut Vec<RetiredBufferCandidate>,
@@ -3728,6 +3988,7 @@ fn collect_software_cursor_items(
         objects,
         drm,
         &drm_fd,
+        drm_crtc_id,
         output_bounds,
         cursor_snapshots,
         false,
@@ -3817,6 +4078,8 @@ fn build_cursor_plane_request(
 fn collect_render_items(
     state: &mut crate::state::State,
     drm_id: DrmId,
+    drm_crtc_id: u32,
+    output_bounds: RectI,
     frame_time_msec: u32,
 ) -> (Vec<SceneItem>, Vec<SceneItem>, Vec<DeferredRelease>, Option<CursorPlaneCandidate>, Option<u32>)
 {
@@ -3849,22 +4112,22 @@ fn collect_render_items(
         snapshots
     };
 
-    let output_bounds = {
-        let drm = state.drm.get_mut(drm_id);
-        drm.output.output_bounds()
-    };
     let cursor_plane = {
         let cursor_request = build_cursor_plane_request(state, frame_time_msec);
         let allow_cursor_plane = {
             let drm = state.drm.get_mut(drm_id);
-            cursor_request.is_some() && drm.output.cursor_plane_available()
+            cursor_request.is_some()
+                && drm
+                    .output_mut(drm_crtc_id)
+                    .is_some_and(DrmOutput::cursor_plane_available)
         };
         if allow_cursor_plane {
             let request = cursor_request.as_ref().unwrap();
-            let cursor_plane = state
-                .drm
-                .get_mut(drm_id)
-                .collect_cursor_plane_candidate(request, output_bounds);
+            let cursor_plane = state.drm.get_mut(drm_id).collect_cursor_plane_candidate(
+                drm_crtc_id,
+                request,
+                output_bounds,
+            );
             if cursor_plane.is_some() {
                 cursor_animation_delay_msec = request.next_frame_in_msec;
             }
@@ -3881,6 +4144,7 @@ fn collect_render_items(
         objects,
         drm,
         &drm_fd,
+        drm_crtc_id,
         output_bounds,
         snapshots,
         true,
@@ -3889,6 +4153,7 @@ fn collect_render_items(
         collect_software_cursor_items(
             state,
             drm_id,
+            drm_crtc_id,
             output_bounds,
             frame_time_msec,
             &mut retired_candidates,
@@ -3918,6 +4183,14 @@ fn scene_items_to_render_items(items: &[SceneItem]) -> Vec<RenderItem> {
             blend: item.state_has_alpha,
         })
         .collect()
+}
+
+fn translate_scene_items(items: &mut [SceneItem], dx: i32, dy: i32) {
+    for item in items {
+        item.state.bounds = item.state.bounds.translate(dx, dy);
+        item.damage.translate(dx, dy);
+        item.opaque_region.translate(dx, dy);
+    }
 }
 
 #[cfg(test)]
@@ -4005,11 +4278,11 @@ mod presentation_timing_tests {
             build_surface_cursor_plane_request, collect_submission_metadata,
             cursor_plane_commit_dimensions, find_cursor_slot_index_for_key,
             presentation_feedback_flags, presentation_refresh_interval_ns, rgba_to_drm_argb8888,
-            sanitize_present_timestamp, select_cursor_upload_slot,
-            select_presentation_output_for_scene, submitted_frame_feedbacks_for_discard,
-            CursorPlaneContentKey, CursorSurfaceContentKey, OutputSubmission, SceneItem,
-            SceneItemKey, SceneItemState, SubmissionPresentationFeedback, SubmittedFrame,
-            SurfaceKey,
+            sanitize_present_timestamp, schedule_output, schedule_outputs_for_rects,
+            select_cursor_upload_slot, select_presentation_output_for_scene,
+            submitted_frame_feedbacks_for_discard, CursorPlaneContentKey, CursorSurfaceContentKey,
+            OutputSubmission, SceneItem, SceneItemKey, SceneItemState,
+            SubmissionPresentationFeedback, SubmittedFrame, SurfaceKey,
         },
         crate::{
             clients::ClientId,
@@ -4018,6 +4291,7 @@ mod presentation_timing_tests {
             globals::Globals,
             protocol_generated::{WlBufferId, WlSurfaceId, WpPresentationFeedbackId},
             region::{DamageRegion, RectI},
+            runner::Dispatcher,
             state::{BackendOutputRef, DrmId, ObjectId, Output, OutputId, OutputMode, State},
             transform,
             wayland_objects::{
@@ -4066,9 +4340,17 @@ mod presentation_timing_tests {
         }
     }
 
-    fn make_output(backend: BackendOutputRef, x: i32, y: i32, width: i32, height: i32) -> Output {
+    fn make_output(
+        backend: BackendOutputRef,
+        drm_crtc_id: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Output {
         Output {
             backend,
+            drm_crtc_id,
             global_name: None,
             x,
             y,
@@ -4294,8 +4576,8 @@ mod presentation_timing_tests {
         let mut state = make_state();
         let drm_id = DrmId::from(0usize);
         let backend = BackendOutputRef::new(drm_id);
-        let left = state.insert_output(make_output(backend, 0, 0, 100, 100));
-        let right = state.insert_output(make_output(backend, 100, 0, 100, 100));
+        let left = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
+        let right = state.insert_output(make_output(backend, 2, 100, 0, 100, 100));
         let cursor_item = make_surface_scene_item(
             10,
             RectI::new(120, 5, 16, 16).unwrap(),
@@ -4347,8 +4629,8 @@ mod presentation_timing_tests {
         let mut state = make_state();
         let drm_id = DrmId::from(0usize);
         let backend = BackendOutputRef::new(drm_id);
-        let left = state.insert_output(make_output(backend, 0, 0, 100, 100));
-        let right = state.insert_output(make_output(backend, 100, 0, 100, 100));
+        let left = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
+        let right = state.insert_output(make_output(backend, 2, 100, 0, 100, 100));
         let scene = vec![SceneItemState {
             key: SceneItemKey::Surface(SurfaceKey {
                 client_id: ClientId::from_raw(1),
@@ -4367,6 +4649,52 @@ mod presentation_timing_tests {
 
         assert_eq!(selected, Some(right));
         assert_ne!(selected, Some(left));
+    }
+
+    #[test]
+    fn schedule_output_targets_logical_output_model_id() {
+        let mut state = make_state();
+        let drm_id = DrmId::from(0usize);
+        let backend = BackendOutputRef::new(drm_id);
+        let left = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
+        let right = state.insert_output(make_output(backend, 2, 100, 0, 100, 100));
+        let mut dispatcher = Dispatcher::default();
+
+        schedule_output(&state, right, &mut dispatcher);
+
+        assert!(dispatcher.test_has_queued_action_for::<super::DrmAction>(
+            usize::from(right) as u64,
+            |action| matches!(action, super::DrmAction::ScheduleFrame)
+        ));
+        assert!(!dispatcher.test_has_queued_action_for::<super::DrmAction>(
+            usize::from(left) as u64,
+            |action| matches!(action, super::DrmAction::ScheduleFrame)
+        ));
+    }
+
+    #[test]
+    fn schedule_outputs_for_rects_marks_old_and_new_outputs() {
+        let mut state = make_state();
+        let drm_id = DrmId::from(0usize);
+        let backend = BackendOutputRef::new(drm_id);
+        let left = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
+        let right = state.insert_output(make_output(backend, 2, 100, 0, 100, 100));
+        let mut dispatcher = Dispatcher::default();
+
+        schedule_outputs_for_rects(
+            &state,
+            [RectI::new(0, 0, 100, 100).unwrap(), RectI::new(100, 0, 100, 100).unwrap()],
+            &mut dispatcher,
+        );
+
+        assert!(dispatcher.test_has_queued_action_for::<super::DrmAction>(
+            usize::from(left) as u64,
+            |action| matches!(action, super::DrmAction::ScheduleFrame)
+        ));
+        assert!(dispatcher.test_has_queued_action_for::<super::DrmAction>(
+            usize::from(right) as u64,
+            |action| matches!(action, super::DrmAction::ScheduleFrame)
+        ));
     }
 
     #[test]

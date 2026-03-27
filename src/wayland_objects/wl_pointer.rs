@@ -1,6 +1,5 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
-    drm::schedule_active_output,
     object::{Object, Parser},
     protocol_generated::{wl_pointer, WaylandId, WlPointerId, WlSurfaceId},
     state::State,
@@ -115,7 +114,8 @@ impl Object for WlPointer {
                         client.client_id(),
                         crate::clients::ClientAction::RefreshSurfaceOutputs,
                     );
-                    schedule_active_output(state, dispatcher);
+                    let pointer_pos = state.seat.pointer_position();
+                    crate::drm::schedule_outputs_for_points(state, [pointer_pos], dispatcher);
                 }
             }
             Release => {

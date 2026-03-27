@@ -23,6 +23,7 @@ use crate::{
         wl_display, Array, Constants, WaylandId, WlDataOfferId, WlDataSourceId, WlOutputId,
         WlSurfaceId, WpPresentationFeedbackId, XdgPopupId, XdgToplevelId,
     },
+    region::RectI,
     runner::{AnyAction, Dispatcher, Model, Redispatcher},
     seat::SeatClientEvent,
     state::{DataOfferRole, GrabbedObject, ObjectId, OutputId, State},
@@ -1429,14 +1430,7 @@ impl Client {
             else {
                 continue;
             };
-            if surface_ref.logical_size().is_none() {
-                continue;
-            }
-            let configure_bounds = surface_ref
-                .active_output_id()
-                .or_else(|| state.active_output_id())
-                .and_then(|output_id| state.outputs.try_get(output_id))
-                .map(|output| output.logical_size());
+            let configure_bounds = surface_ref.configure_bounds(state);
 
             let mut xdg_surface = self.grab_object(xdg_surface_id, state);
             let mut toplevel = self.grab_object(toplevel_id, state);
@@ -1488,24 +1482,16 @@ fn surface_intersecting_outputs(
     state: &State,
     render_state: &crate::wayland_objects::wl_surface::SurfaceRenderState,
 ) -> Vec<OutputId> {
-    let Some(surface_bounds) = crate::region::RectI::new(
-        render_state.x,
-        render_state.y,
-        render_state.width,
-        render_state.height,
-    ) else {
+    let Some(surface_bounds) =
+        RectI::new(render_state.x, render_state.y, render_state.width, render_state.height)
+    else {
         return Vec::new();
     };
-    state
-        .outputs
-        .iter()
-        .filter_map(|(output_id, output)| {
-            output
-                .logical_bounds()?
-                .intersects(surface_bounds)
-                .then_some(output_id)
-        })
-        .collect()
+    let mut outputs = state.outputs_intersecting_rect(surface_bounds);
+    if let Some(primary_output_id) = state.primary_output_for_rect(surface_bounds, None) {
+        outputs.sort_by_key(|output_id| (*output_id != primary_output_id, usize::from(*output_id)));
+    }
+    outputs
 }
 
 fn refresh_surface_tree_outputs(
@@ -1573,6 +1559,28 @@ fn refresh_surface_tree_outputs(
             output_id,
             true,
         );
+    }
+
+    if delta.active_output_changed {
+        let preferred_output = state
+            .objects
+            .try_ref_object::<WlSurface>(surface_object_id)
+            .and_then(|surface| surface.preferred_output_id(state))
+            .and_then(|output_id| {
+                state
+                    .outputs
+                    .try_get(output_id)
+                    .map(|output| (output.scale.max(1), output.transform as u32))
+            });
+        if let Some((scale, transform)) = preferred_output {
+            let Some(mut surface) = state
+                .objects
+                .try_grab_object::<WlSurface>(surface_object_id)
+            else {
+                return;
+            };
+            surface.send_preferred_buffer_state_for_output(scale, transform, dispatcher);
+        }
     }
 
     for entry in stack {
@@ -1946,13 +1954,7 @@ impl Model for Client {
                             let surface = state
                                 .objects
                                 .try_ref_object::<WlSurface>(wl_surface_object_id)?;
-                            let output_id = surface
-                                .active_output_id()
-                                .or_else(|| state.active_output_id())?;
-                            state
-                                .outputs
-                                .try_get(output_id)
-                                .map(|output| output.logical_size())
+                            surface.configure_bounds(state)
                         })
                 };
                 let mut xdg_surface = self.grab_object(xdg_surface_id, state);

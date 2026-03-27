@@ -1,6 +1,6 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
-    drm::schedule_active_output,
+    drm::{schedule_active_output, schedule_outputs_for_rect},
     object::{Object, Parser},
     protocol_generated::{wl_subsurface, WaylandId, WlSubsurfaceId, WlSurfaceId},
     state::{ObjectId, State},
@@ -90,7 +90,15 @@ impl Object for WlSubsurface {
                 state.register_root_surface(self.surface_object_id);
                 use crate::wayland_objects::wl_display::WlDisplay;
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
-                schedule_active_output(state, dispatcher);
+                if let Some(bounds) = state
+                    .objects
+                    .try_ref_object::<WlSurface>(self.surface_object_id)
+                    .and_then(|surface| surface.global_logical_bounds())
+                {
+                    schedule_outputs_for_rect(state, bounds, dispatcher);
+                } else {
+                    schedule_active_output(state, dispatcher);
+                }
             }
             SetPosition { x, y } => {
                 let Some(mut surface) = state

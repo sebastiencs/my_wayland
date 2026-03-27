@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::{
     clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest},
-    drm::schedule_active_output,
+    drm::{schedule_active_output, schedule_outputs, schedule_outputs_for_rect},
     object::{Object, Parser},
     protocol_generated::{
         wl_pointer, wl_surface, wp_linux_drm_syncobj_surface_v1, wp_viewport, xdg_wm_base,
@@ -111,6 +111,8 @@ pub struct WlSurface {
     tree: SurfaceTreeState,
     output_membership: BTreeSet<OutputId>,
     active_output: Option<OutputId>,
+    preferred_buffer_scale_sent: Option<i32>,
+    preferred_buffer_transform_sent: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -282,6 +284,8 @@ impl WlSurface {
             tree: SurfaceTreeState::default(),
             output_membership: BTreeSet::new(),
             active_output: None,
+            preferred_buffer_scale_sent: None,
+            preferred_buffer_transform_sent: None,
         }
     }
 
@@ -418,6 +422,10 @@ impl WlSurface {
         self.output_membership.contains(&output_id)
     }
 
+    pub fn output_membership_ids(&self) -> Vec<OutputId> {
+        self.output_membership.iter().copied().collect()
+    }
+
     pub fn update_output_membership(
         &mut self,
         outputs_in_priority_order: Vec<OutputId>,
@@ -455,6 +463,61 @@ impl WlSurface {
     pub fn send_output_leave(&self, output: WlOutputId, dispatcher: &mut ClientDispatcher) {
         log::debug!("sending wl_surface.leave surface={:?} output={:?}", self.id, output);
         self.send_event(wl_surface::Event::Leave { output }, dispatcher);
+    }
+
+    pub fn preferred_output_id(&self, state: &State) -> Option<OutputId> {
+        state.output_id_for_surface(self)
+    }
+
+    pub fn configure_bounds(&self, state: &State) -> Option<(i32, i32)> {
+        self.preferred_output_id(state)
+            .and_then(|output_id| state.outputs.try_get(output_id))
+            .map(|output| output.logical_size())
+    }
+
+    pub fn send_preferred_buffer_state(
+        &mut self,
+        state: &State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let preferred_output_id = self.preferred_output_id(state);
+        let Some(output) =
+            preferred_output_id.and_then(|output_id| state.outputs.try_get(output_id))
+        else {
+            return;
+        };
+        self.send_preferred_buffer_state_for_output(
+            output.scale.max(1),
+            output.transform as u32,
+            dispatcher,
+        );
+    }
+
+    pub fn send_preferred_buffer_state_for_output(
+        &mut self,
+        scale: i32,
+        transform: u32,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        if self.version >= wl_surface::PREFERRED_BUFFER_SCALE_SINCE {
+            if self.preferred_buffer_scale_sent != Some(scale) {
+                self.send_event(
+                    wl_surface::Event::PreferredBufferScale { factor: scale },
+                    dispatcher,
+                );
+                self.preferred_buffer_scale_sent = Some(scale);
+            }
+        }
+
+        if self.version >= wl_surface::PREFERRED_BUFFER_TRANSFORM_SINCE {
+            if self.preferred_buffer_transform_sent != Some(transform) {
+                self.send_event(
+                    wl_surface::Event::PreferredBufferTransform { transform },
+                    dispatcher,
+                );
+                self.preferred_buffer_transform_sent = Some(transform);
+            }
+        }
     }
 
     pub fn set_root_position(&mut self, x: i32, y: i32) {
@@ -1453,11 +1516,8 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         if let Some(xdg_surface_id) = self.impl_id {
-            let configure_bounds = self
-                .active_output_id()
-                .or_else(|| state.active_output_id())
-                .and_then(|output_id| state.outputs.try_get(output_id))
-                .map(|output| output.logical_size());
+            self.send_preferred_buffer_state(state, dispatcher);
+            let configure_bounds = self.configure_bounds(state);
             let mut xdg_surface = client.grab_object(xdg_surface_id, state);
             if !xdg_surface.on_commit(
                 client,
@@ -1534,7 +1594,13 @@ impl WlSurface {
         }
 
         if changed || needs_frame {
-            schedule_active_output(state, dispatcher);
+            if let Some(bounds) = self.global_logical_bounds() {
+                schedule_outputs(state, self.output_membership_ids(), dispatcher);
+                schedule_outputs_for_rect(state, bounds, dispatcher);
+            } else {
+                schedule_outputs(state, self.output_membership_ids(), dispatcher);
+                schedule_active_output(state, dispatcher);
+            }
         }
     }
 
@@ -1837,6 +1903,12 @@ impl WlSurface {
         self.on_screen.logical_size
     }
 
+    pub fn global_logical_bounds(&self) -> Option<RectI> {
+        let logical_size = self.logical_size()?;
+        let (x, y) = self.root_position();
+        RectI::new(x, y, logical_size.width, logical_size.height)
+    }
+
     pub fn force_unmap_for_role_dismissal(
         &mut self,
         client: &mut Client,
@@ -2026,7 +2098,13 @@ impl WlSurface {
         }
         let changed = self.apply_cached_commit(client, state, dispatcher, false);
         if changed {
-            schedule_active_output(state, dispatcher);
+            if let Some(bounds) = self.global_logical_bounds() {
+                schedule_outputs(state, self.output_membership_ids(), dispatcher);
+                schedule_outputs_for_rect(state, bounds, dispatcher);
+            } else {
+                schedule_outputs(state, self.output_membership_ids(), dispatcher);
+                schedule_active_output(state, dispatcher);
+            }
         }
         changed
     }
@@ -2100,7 +2178,13 @@ impl WlSurface {
         state.unregister_root_surface(object_id);
         use crate::wayland_objects::wl_display::WlDisplay;
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
-        schedule_active_output(state, dispatcher);
+        if let Some(bounds) = self.global_logical_bounds() {
+            schedule_outputs(state, self.output_membership_ids(), dispatcher);
+            schedule_outputs_for_rect(state, bounds, dispatcher);
+        } else {
+            schedule_outputs(state, self.output_membership_ids(), dispatcher);
+            schedule_active_output(state, dispatcher);
+        }
     }
 
     pub fn client_id(&self) -> ClientId {
@@ -2254,12 +2338,13 @@ mod tests {
             cursor::CursorSourceRef,
             egl::EGL,
             globals::Globals,
+            io_uring::model::IoUringAction,
             protocol_generated::{
                 xdg_wm_base, WlSubsurfaceId, WlSurfaceId, WpPresentationFeedbackId,
             },
             region::{DamageRegion, RectI, RegionSpec, RegionValue},
             runner::Dispatcher,
-            state::{ObjectId, State},
+            state::{BackendOutputRef, DrmId, ObjectId, Output, OutputMode, State},
             sync::SurfaceSyncState,
             transform::{self, BufferTransform, SizeI, SurfaceViewport},
             xkb::Xkb,
@@ -2307,6 +2392,34 @@ mod tests {
             seat: Default::default(),
             keyboard,
             xkb,
+        }
+    }
+
+    fn make_output(
+        backend: BackendOutputRef,
+        drm_crtc_id: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Output {
+        Output {
+            backend,
+            drm_crtc_id,
+            global_name: None,
+            x,
+            y,
+            physical_width: 0,
+            physical_height: 0,
+            scale: 1,
+            transform: 0,
+            make: String::new(),
+            model: String::new(),
+            name: format!("output-{drm_crtc_id}"),
+            description: String::new(),
+            enabled: true,
+            current_mode: OutputMode { width, height, refresh_millihz: 60_000 },
+            preferred_mode: None,
         }
     }
 
@@ -2400,6 +2513,64 @@ mod tests {
 
         assert!(surface.accepts_input_at(15.0, 25.0));
         assert!(!surface.accepts_input_at(30.0, 25.0));
+    }
+
+    #[test]
+    fn configure_bounds_falls_back_to_current_output_without_surface_geometry() {
+        let mut state = make_state();
+        let output_id = state.insert_output(make_output(
+            BackendOutputRef::new(DrmId::from(1usize)),
+            1,
+            0,
+            0,
+            200,
+            120,
+        ));
+        let surface = WlSurface::new(WlSurfaceId::from(3), ClientId::from_raw(4), 6);
+
+        assert_eq!(surface.preferred_output_id(&state), Some(output_id));
+        assert_eq!(surface.configure_bounds(&state), Some((200, 120)));
+    }
+
+    #[test]
+    fn preferred_buffer_state_sends_v6_hints_once_per_change() {
+        let mut state = make_state();
+        let output_id = state.insert_output(make_output(
+            BackendOutputRef::new(DrmId::from(1usize)),
+            1,
+            0,
+            0,
+            200,
+            120,
+        ));
+        {
+            let output = state.outputs.try_get_mut(output_id).unwrap();
+            output.scale = 2;
+            output.transform = 3;
+        }
+        let mut surface = WlSurface::new(WlSurfaceId::from(9), ClientId::from_raw(6), 6);
+        let (client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        surface.send_preferred_buffer_state(&state, &mut client_dispatcher);
+        drop(client_dispatcher);
+
+        assert_eq!(surface.preferred_buffer_scale_sent, Some(2));
+        assert_eq!(surface.preferred_buffer_transform_sent, Some(3));
+        assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
+            action,
+            IoUringAction::Sendmsg { .. }
+        )));
+
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        surface.send_preferred_buffer_state(&state, &mut client_dispatcher);
+        drop(client_dispatcher);
+
+        assert!(!dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
+            action,
+            IoUringAction::Sendmsg { .. }
+        )));
     }
 
     #[test]

@@ -156,11 +156,20 @@ impl Model for Libinput {
                                 )
                             }
                             PointerEvent::MotionAbsolute(motion) => {
-                                let Some((width, height)) = current_output_size(state) else {
+                                let Some(bounds) = current_output_layout_bounds(state) else {
                                     continue;
                                 };
-                                let x = motion.absolute_x_transformed(width);
-                                let y = motion.absolute_y_transformed(height);
+                                let raw_x = bounds.x as f64
+                                    + motion.absolute_x_transformed(bounds.width as u32) as f64;
+                                let raw_y = bounds.y as f64
+                                    + motion.absolute_y_transformed(bounds.height as u32) as f64;
+                                let (x, y) = state
+                                    .clamp_point_to_outputs(
+                                        raw_x.round() as i32,
+                                        raw_y.round() as i32,
+                                    )
+                                    .map(|(x, y)| (x as f64, y as f64))
+                                    .unwrap_or((raw_x, raw_y));
                                 // log::debug!(
                                 //     "libinput pointer motion absolute x={} y={} time={}",
                                 //     x,
@@ -249,11 +258,8 @@ pub struct Input {
     device: input::Device,
 }
 
-fn current_output_size(state: &State) -> Option<(u32, u32)> {
-    let (_, drm) = state.drm.iter().next()?;
-    let mode = drm.output.in_use.connector.preferred_mode.as_ref()?;
-    let (width, height) = mode.size();
-    Some((width as u32, height as u32))
+fn current_output_layout_bounds(state: &State) -> Option<crate::region::RectI> {
+    state.output_layout_bounds()
 }
 
 #[derive(derive_more::Deref, derive_more::From)]

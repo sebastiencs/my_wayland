@@ -1,6 +1,5 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
-    drm::schedule_active_output,
     object::{Object, Parser},
     protocol_generated::{
         wp_cursor_shape_device_v1, WaylandId, WlPointerId, WpCursorShapeDeviceV1Id,
@@ -80,7 +79,8 @@ impl Object for WpCursorShapeDeviceV1 {
                         client.client_id(),
                         crate::clients::ClientAction::RefreshSurfaceOutputs,
                     );
-                    schedule_active_output(state, dispatcher);
+                    let pointer_pos = state.seat.pointer_position();
+                    crate::drm::schedule_outputs_for_points(state, [pointer_pos], dispatcher);
                 }
             }
         }

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, VecDeque};
 use crate::{
     clients::{ClientAction, ClientId},
     cursor::{CursorSourceRef, CursorState},
-    drm::{schedule_active_output, Drm},
+    drm::{schedule_active_output, schedule_outputs_for_points, schedule_outputs_for_rects, Drm},
     object::Object,
     protocol_generated::{
         Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlKeyboardId, WlPointerId, WlSeatId,
@@ -835,10 +835,12 @@ pub fn handle_pointer_motion(
     dy: f64,
     time: u32,
 ) {
+    let old_pointer_pos = state.seat.pointer_position();
     let seat = &mut state.seat;
     seat.pointer_pos.0 += dx;
     seat.pointer_pos.1 += dy;
     clamp_pointer_to_outputs(state);
+    let new_pointer_pos = state.seat.pointer_position();
     log::debug!(
         "seat pointer motion pos=({:.1}, {:.1}) time={}",
         state.seat.pointer_pos.0,
@@ -849,7 +851,7 @@ pub fn handle_pointer_motion(
         refresh_visible_cursor_surface_outputs(state, dispatcher);
         refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
         if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
-            schedule_active_output(state, dispatcher);
+            schedule_outputs_for_points(state, [old_pointer_pos, new_pointer_pos], dispatcher);
         }
         return;
     }
@@ -860,7 +862,7 @@ pub fn handle_pointer_motion(
     refresh_visible_cursor_surface_outputs(state, dispatcher);
     refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
     if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
-        schedule_active_output(state, dispatcher);
+        schedule_outputs_for_points(state, [old_pointer_pos, new_pointer_pos], dispatcher);
     }
 }
 
@@ -937,8 +939,10 @@ pub fn handle_pointer_motion_absolute(
     y: f64,
     time: u32,
 ) {
+    let old_pointer_pos = state.seat.pointer_position();
     state.seat.pointer_pos = (x, y);
     clamp_pointer_to_outputs(state);
+    let new_pointer_pos = state.seat.pointer_position();
     // log::debug!(
     //     "seat pointer motion absolute pos=({:.1}, {:.1}) time={}",
     //     state.seat.pointer_pos.0,
@@ -949,7 +953,7 @@ pub fn handle_pointer_motion_absolute(
         refresh_visible_cursor_surface_outputs(state, dispatcher);
         refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
         if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
-            schedule_active_output(state, dispatcher);
+            schedule_outputs_for_points(state, [old_pointer_pos, new_pointer_pos], dispatcher);
         }
         return;
     }
@@ -960,7 +964,7 @@ pub fn handle_pointer_motion_absolute(
     refresh_visible_cursor_surface_outputs(state, dispatcher);
     refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
     if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
-        schedule_active_output(state, dispatcher);
+        schedule_outputs_for_points(state, [old_pointer_pos, new_pointer_pos], dispatcher);
     }
 }
 
@@ -1147,7 +1151,7 @@ pub fn finish_active_drag(state: &mut State, dispatcher: &mut Dispatcher) {
             drag.source_client_id,
             ClientAction::RefreshSurfaceOutputs,
         );
-        schedule_active_output(state, dispatcher);
+        schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
     }
     if let Some(target) = drag.target {
         dispatcher.dispatch_to(target.client_id, ClientAction::DataDeviceDragLeave);
@@ -1168,7 +1172,7 @@ pub fn cancel_active_drag(
             drag.source_client_id,
             ClientAction::RefreshSurfaceOutputs,
         );
-        schedule_active_output(state, dispatcher);
+        schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
     }
     if let Some(target) = drag.target {
         dispatcher.dispatch_to(target.client_id, ClientAction::DataDeviceDragLeave);
@@ -1243,9 +1247,16 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
                 state.seat.clear_pointer_interactive_grab();
                 return true;
             };
+            let old_bounds = surface.global_logical_bounds();
             surface.set_root_position(initial_root_pos.0 + dx, initial_root_pos.1 + dy);
+            let new_bounds = surface.global_logical_bounds();
             dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
-            schedule_active_output(state, dispatcher);
+            if let Some(new_bounds) = new_bounds {
+                let rects = old_bounds.into_iter().chain(std::iter::once(new_bounds));
+                schedule_outputs_for_rects(state, rects, dispatcher);
+            } else {
+                schedule_active_output(state, dispatcher);
+            }
         }
         PointerInteractiveGrab::Resize {
             client_id,
@@ -1284,9 +1295,16 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
                 state.seat.clear_pointer_interactive_grab();
                 return true;
             };
+            let old_bounds = surface.global_logical_bounds();
             surface.set_root_position(x, y);
+            let new_bounds = surface.global_logical_bounds();
             dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
-            schedule_active_output(state, dispatcher);
+            if let Some(new_bounds) = new_bounds {
+                let rects = old_bounds.into_iter().chain(std::iter::once(new_bounds));
+                schedule_outputs_for_rects(state, rects, dispatcher);
+            } else {
+                schedule_active_output(state, dispatcher);
+            }
 
             if last_size != (width, height) {
                 dispatch_client_action(
@@ -1498,7 +1516,7 @@ fn refresh_pointer_focus(
                         ClientAction::RefreshSurfaceOutputs,
                     );
                 }
-                schedule_active_output(state, dispatcher);
+                schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
             }
         }
         return;
@@ -1512,7 +1530,7 @@ fn refresh_pointer_focus(
             if let Some(client_id) = previous_cursor_owner {
                 dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
             }
-            schedule_active_output(state, dispatcher);
+            schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
         }
     }
 
@@ -1534,36 +1552,17 @@ fn refresh_pointer_focus(
 }
 
 fn clamp_pointer_to_outputs(state: &mut State) {
-    let Some((width, height)) = output_size(state) else {
-        state.seat.pointer_pos.0 = state.seat.pointer_pos.0.max(0.0);
-        state.seat.pointer_pos.1 = state.seat.pointer_pos.1.max(0.0);
+    let x = state.seat.pointer_pos.0.round() as i32;
+    let y = state.seat.pointer_pos.1.round() as i32;
+    let Some((clamped_x, clamped_y)) = state.clamp_point_to_outputs(x, y) else {
         return;
     };
-
-    let max_x = (width - 1.0).max(0.0);
-    let max_y = (height - 1.0).max(0.0);
-    state.seat.pointer_pos.0 = state.seat.pointer_pos.0.clamp(0.0, max_x);
-    state.seat.pointer_pos.1 = state.seat.pointer_pos.1.clamp(0.0, max_y);
+    state.seat.pointer_pos.0 = clamped_x as f64;
+    state.seat.pointer_pos.1 = clamped_y as f64;
 }
 
-fn output_size(state: &State) -> Option<(f64, f64)> {
-    let mut max_width = 0;
-    let mut max_height = 0;
-
-    for (_, output) in state.outputs.iter() {
-        if !output.enabled {
-            continue;
-        }
-        let (width, height) = output.logical_size();
-        max_width = max_width.max(output.x + width);
-        max_height = max_height.max(output.y + height);
-    }
-
-    if max_width <= 0 || max_height <= 0 {
-        return None;
-    }
-
-    Some((max_width as f64, max_height as f64))
+fn output_bounds(state: &State) -> Option<crate::region::RectI> {
+    state.output_layout_bounds()
 }
 
 fn local_coords(rect: SurfaceRect, pointer_pos: (f64, f64)) -> (f32, f32) {

@@ -19,7 +19,10 @@ use nix::{
 use crate::{
     clients::ClientsAction,
     dbus::DbusAction,
-    drm::{discard_backend_presentation_feedbacks, sync_output_nodes_for_backend, Drm, DrmModel},
+    drm::{
+        discard_backend_presentation_feedbacks, sync_output_nodes_for_backend, Drm, DrmOutputModel,
+        DrmReader,
+    },
     input::LibinputAction,
     io_uring::{
         model::IoUringAction,
@@ -235,7 +238,7 @@ impl Udev {
             );
         }
         discard_backend_presentation_feedbacks(state, drm_id, dispatcher);
-        dispatcher.stop_model::<_, DrmModel>(usize::from(drm_id) as u64);
+        dispatcher.stop_model::<_, DrmReader>(usize::from(drm_id) as u64);
         dispatcher.dispatch(UdevAction::FinalizeBackendRemoval { drm_id });
     }
 
@@ -316,12 +319,25 @@ impl Udev {
 
         let drm = Drm::create_drm(fd, device, &state.egl);
         let drm_id = state.drm.insert(drm);
-        let output = Output::new(BackendOutputRef::new(drm_id), state.drm.get(drm_id));
-        let output_id = state.insert_output(output);
+        let drm_output_ids = state
+            .drm
+            .get(drm_id)
+            .outputs
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let fd = state.drm.get(drm_id).fd();
+        dispatcher.start_model(usize::from(drm_id) as u64, DrmReader::new(drm_id, fd));
+        for drm_output_id in drm_output_ids {
+            let output =
+                Output::new(BackendOutputRef::new(drm_id), drm_output_id, state.drm.get(drm_id));
+            let output_id = state.insert_output(output);
+            self.place_output_automatically(output_id, state);
+            self.publish_output_node(output_id, state, dispatcher);
+            let drm_model = state.drm.get(drm_id).make_output_model(drm_id, output_id);
+            dispatcher.start_model(usize::from(output_id) as u64, drm_model);
+        }
         sync_output_nodes_for_backend(state, drm_id);
-        let drm_model = state.drm.get(drm_id).make_model(drm_id);
-        dispatcher.start_model(usize::from(drm_id) as u64, drm_model);
-        self.publish_output_node(output_id, state, dispatcher);
         if state.drm.get(drm_id).supports_linux_drm_syncobj() {
             let global = WpLinuxDrmSyncobjManagerV1Global::new(drm_id);
             let (interface, version) = global.interface();
@@ -360,6 +376,7 @@ impl Udev {
         state: &mut State,
         dispatcher: &mut Dispatcher,
     ) {
+        dispatcher.stop_model::<_, DrmOutputModel>(usize::from(output_id) as u64);
         dispatcher.dispatch(ClientsAction::OutputRemoved { output_id });
         let global_name = state
             .outputs
@@ -371,6 +388,20 @@ impl Udev {
                 .dispatch(ClientsAction::RegistryGlobalRemoved { name: global_name.as_u32() });
         }
         let _ = state.remove_output(output_id);
+    }
+
+    fn place_output_automatically(&self, output_id: OutputId, state: &mut State) {
+        let next_x = state
+            .outputs
+            .iter()
+            .filter(|(other_output_id, _)| *other_output_id != output_id)
+            .filter_map(|(_, output)| output.logical_bounds().map(|bounds| bounds.x2()))
+            .max()
+            .unwrap_or(0);
+        if let Some(output) = state.outputs.try_get_mut(output_id) {
+            output.x = next_x;
+            output.y = 0;
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
-    drm::schedule_active_output,
+    drm::{schedule_active_output, schedule_outputs_for_rect},
     globals::Global,
     object::{Object, Parser},
     protocol_generated::{
@@ -99,7 +99,17 @@ impl Object for XdgActivationV1 {
                     return;
                 }
                 set_surface_focus(state, dispatcher, Some(focus));
-                schedule_active_output(state, dispatcher);
+                if let Some(bounds) = state
+                    .objects
+                    .try_ref_object::<crate::wayland_objects::wl_surface::WlSurface>(
+                        root_surface_object_id,
+                    )
+                    .and_then(|surface| surface.global_logical_bounds())
+                {
+                    schedule_outputs_for_rect(state, bounds, dispatcher);
+                } else {
+                    schedule_active_output(state, dispatcher);
+                }
             }
         }
     }

@@ -682,13 +682,10 @@ pub mod xdg_toplevel {
                 .try_ref_object::<XdgSurface>(xdg_surface_object_id)?;
             let wl_surface_object_id =
                 client.object_id_for_wayland(xdg_surface.wl_surface_id().into())?;
-            let active_output_id = state
+            state
                 .objects
                 .try_ref_object::<WlSurface>(wl_surface_object_id)
-                .and_then(WlSurface::active_output_id)
-                .or_else(|| state.active_output_id())?;
-            let output = state.outputs.try_get(active_output_id)?;
-            Some(output.logical_size())
+                .and_then(|surface| surface.configure_bounds(state))
         }
 
         fn send_configure_bounds(
