@@ -1,0 +1,18 @@
+# Example configuration for my_wayland.
+# Copy to:  ~/.config/my_wayland/config.toml
+#     or:  $XDG_CONFIG_HOME/my_wayland/config.toml
+
+[general]
+cursor_theme = "default"
+cursor_size = 24
+
+[bindings]
+# Key names follow xkb (e.g. Super, Ctrl, Alt, Shift). Last segment is the key.
+"Super+Escape" = { action = "quit" }
+"Super+Shift+C" = { action = "reload-config" }
+"Super+Return" = { action = "spawn", command = "alacritty" }
+
+# Optional: fixed scale per DRM output name, or "auto".
+# [output.scales]
+# "DP-1" = "auto"
+# "eDP-1" = 1.25
