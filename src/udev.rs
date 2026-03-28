@@ -20,6 +20,7 @@ use crate::{
     clients::ClientsAction,
     dbus::DbusAction,
     drm::{discard_backend_presentation_feedbacks, sync_output_nodes_for_backend, Drm, DrmReader},
+    globals::Global,
     input::LibinputAction,
     io_uring::{
         model::IoUringAction,
@@ -28,8 +29,10 @@ use crate::{
     runner::{Dispatcher, Model, Redispatcher},
     state::{BackendOutputRef, DrmId, Output, OutputId, State},
     wayland_objects::{
+        hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1Global,
         wl_output::WlOutputGlobal,
         wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1Global,
+        zwlr_gamma_control_manager_v1::ZwlrGammaControlManagerV1Global,
     },
 };
 
@@ -188,6 +191,7 @@ impl Udev {
         for output_id in state.output_ids_for_backend(BackendOutputRef::new(drm_id)) {
             dispatcher.dispatch(ClientsAction::OutputStateChanged { output_id });
         }
+        sync_color_control_globals(state, dispatcher);
     }
 
     fn handle_remove_device(
@@ -214,6 +218,7 @@ impl Udev {
             dispatcher
                 .dispatch(ClientsAction::RegistryGlobalRemoved { name: global_name.as_u32() });
         }
+        sync_color_control_globals(state, dispatcher);
 
         let client_ids = state
             .objects
@@ -344,6 +349,7 @@ impl Udev {
                 version,
             });
         }
+        sync_color_control_globals(state, dispatcher);
     }
 
     fn publish_output_node(
@@ -407,4 +413,47 @@ fn set_non_blocking(fd: RawFd) {
     if !flags.contains(OFlag::O_NONBLOCK) {
         fcntl::fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK | flags)).unwrap();
     }
+}
+
+fn sync_color_control_global(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    should_exist: bool,
+    interface_name: &'static str,
+    make_global: fn() -> Box<dyn Global>,
+) {
+    match (should_exist, state.globals.name_for_interface(interface_name)) {
+        (true, None) => {
+            let global = make_global();
+            let (interface, version) = global.interface();
+            let name = state.insert_global(global);
+            dispatcher.dispatch(ClientsAction::RegistryGlobalAdded {
+                name: name.as_u32(),
+                interface: interface.to_string(),
+                version,
+            });
+        }
+        (false, Some(name)) => {
+            let _ = state.remove_global(name);
+            dispatcher.dispatch(ClientsAction::RegistryGlobalRemoved { name: name.as_u32() });
+        }
+        _ => {}
+    }
+}
+
+fn sync_color_control_globals(state: &mut State, dispatcher: &mut Dispatcher) {
+    sync_color_control_global(
+        state,
+        dispatcher,
+        state.any_output_supports_gamma_control(),
+        "zwlr_gamma_control_manager_v1",
+        ZwlrGammaControlManagerV1Global::new,
+    );
+    sync_color_control_global(
+        state,
+        dispatcher,
+        state.any_output_supports_ctm_control(),
+        "hyprland_ctm_control_manager_v1",
+        HyprlandCtmControlManagerV1Global::new,
+    );
 }

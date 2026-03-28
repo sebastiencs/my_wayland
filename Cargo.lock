@@ -587,18 +587,18 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.28.2"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ce5e73202a820a31f8a0ee32ada5e21029c81fd9e3ebf668a40832e4219d9d1"
+checksum = "1004a344b30a54e2ee58d66a71b32d2db2feb0a31f9a2d302bf0536f15de2a33"
 dependencies = [
  "memchr",
 ]
 
 [[package]]
 name = "quick-xml"
-version = "0.31.0"
+version = "0.39.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1004a344b30a54e2ee58d66a71b32d2db2feb0a31f9a2d302bf0536f15de2a33"
+checksum = "958f21e8e7ceb5a1aa7fa87fab28e7c75976e0bfe7e23ff069e0a260f894067d"
 dependencies = [
  "memchr",
 ]
@@ -1039,10 +1039,10 @@ checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
 
 [[package]]
 name = "wayland-scanner"
-version = "0.30.1"
-source = "git+https://github.com/sebastiencs/wayland-rs.git?branch=my_wayland#44848a36fb678236d14ce682051677d840c2efce"
+version = "0.31.9"
+source = "git+https://github.com/sebastiencs/wayland-rs.git?branch=my_wayland#7136a1e1c25e8dcfb63c4095394438a9d8c690de"
 dependencies = [
- "quick-xml 0.28.2",
+ "quick-xml 0.39.2",
 ]
 
 [[package]]

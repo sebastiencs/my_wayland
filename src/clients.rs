@@ -13,15 +13,16 @@ use libc::getsockopt;
 
 use crate::{
     dbus::Dbus,
-    drm::schedule_active_output,
+    drm::{schedule_active_output, schedule_output},
     io_uring::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted, RingId},
     },
     object::{IdToObject, Object, Parser, ParserError},
     protocol_generated::{
-        wl_display, Array, Constants, WaylandId, WlDataOfferId, WlDataSourceId, WlOutputId,
-        WlSurfaceId, WpPresentationFeedbackId, XdgPopupId, XdgToplevelId, ZwlrLayerSurfaceV1Id,
+        wl_display, Array, Constants, HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId,
+        WlDataSourceId, WlOutputId, WlSurfaceId, WpPresentationFeedbackId, XdgPopupId,
+        XdgToplevelId, ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id,
     },
     region::RectI,
     runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
@@ -30,6 +31,7 @@ use crate::{
     sync::AcquireReadyWaiterId,
     udev::Udev,
     wayland_objects::{
+        hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1,
         wl_data_offer::WlDataOffer,
         wl_data_source::WlDataSource,
         wl_display::WlDisplay,
@@ -41,6 +43,7 @@ use crate::{
         wp_presentation_feedback::WpPresentationFeedback,
         xdg_popup::XdgPopup,
         xdg_surface::{xdg_toplevel::XdgToplevel, XdgSurface},
+        zwlr_gamma_control_v1::ZwlrGammaControlV1,
         zwlr_layer_surface_v1::relayout_client_layer_surfaces,
         zxdg_output_v1::ZxdgOutputV1,
     },
@@ -73,6 +76,7 @@ pub enum ClientsAction {
     RegistryGlobalRemoved { name: u32 },
     OutputStateChanged { output_id: OutputId },
     OutputRemoved { output_id: OutputId },
+    GammaControlFailed { output_id: OutputId },
     LayerShellLayoutChanged,
     Close { id: ClientId },
 }
@@ -197,6 +201,12 @@ impl Model for Clients {
                     dispatcher.dispatch_to(client_id, ClientAction::OutputRemoved { output_id });
                 }
             }
+            GammaControlFailed { output_id } => {
+                for client_id in self.set.iter().copied() {
+                    dispatcher
+                        .dispatch_to(client_id, ClientAction::GammaControlFailed { output_id });
+                }
+            }
             LayerShellLayoutChanged => {
                 for client_id in self.set.iter().copied() {
                     dispatcher.dispatch_to(client_id, ClientAction::RefreshLayerSurfaces);
@@ -291,6 +301,9 @@ pub enum ClientAction {
         output_id: OutputId,
     },
     OutputRemoved {
+        output_id: OutputId,
+    },
+    GammaControlFailed {
         output_id: OutputId,
     },
     RefreshLayerSurfaces,
@@ -1521,6 +1534,8 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
         output_id: OutputId,
     ) {
+        self.invalidate_gamma_control_for_output(state, dispatcher, output_id);
+        self.forget_ctm_state_for_output(state, output_id);
         self.refresh_surface_outputs(state, dispatcher);
         let wl_output_ids = self
             .iter_object_ids_of::<WlOutput>(state)
@@ -1553,6 +1568,58 @@ impl Client {
         }
         self.reconfigure_mapped_toplevels(state, dispatcher);
         relayout_client_layer_surfaces(self, state, dispatcher);
+    }
+
+    fn invalidate_gamma_control_for_output(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        output_id: OutputId,
+    ) -> bool {
+        let gamma_control_ids = self
+            .objects
+            .iter()
+            .filter_map(|(wayland_id, entry)| {
+                (entry.type_id == TypeId::of::<ZwlrGammaControlV1>())
+                    .then_some(ZwlrGammaControlV1Id::from(u32::from(*wayland_id)))
+            })
+            .collect::<Vec<_>>();
+        let mut invalidated = false;
+        for gamma_control_id in gamma_control_ids {
+            if !self.contains_object(gamma_control_id, state) {
+                continue;
+            }
+            let gamma_control_object_id = self.object_id(gamma_control_id);
+            let matches_output = state
+                .objects
+                .try_ref_object::<ZwlrGammaControlV1>(gamma_control_object_id)
+                .is_some_and(|gamma_control| gamma_control.controls_output(output_id));
+            if !matches_output {
+                continue;
+            }
+            let mut gamma_control = self.grab_object(gamma_control_id, state);
+            gamma_control.invalidate(state, dispatcher);
+            invalidated = true;
+        }
+        invalidated
+    }
+
+    fn forget_ctm_state_for_output(&mut self, state: &mut State, output_id: OutputId) {
+        let ctm_manager_ids = self
+            .objects
+            .iter()
+            .filter_map(|(wayland_id, entry)| {
+                (entry.type_id == TypeId::of::<HyprlandCtmControlManagerV1>())
+                    .then_some(HyprlandCtmControlManagerV1Id::from(u32::from(*wayland_id)))
+            })
+            .collect::<Vec<_>>();
+        for ctm_manager_id in ctm_manager_ids {
+            if !self.contains_object(ctm_manager_id, state) {
+                continue;
+            }
+            let mut ctm_manager = self.grab_object(ctm_manager_id, state);
+            ctm_manager.forget_output(output_id);
+        }
     }
 }
 
@@ -1895,6 +1962,13 @@ impl Model for Client {
             }
             OutputRemoved { output_id } => {
                 self.handle_output_removed(state, &mut dispatcher, output_id);
+            }
+            GammaControlFailed { output_id } => {
+                if self.invalidate_gamma_control_for_output(state, &mut dispatcher, output_id)
+                    && state.outputs.try_get(output_id).is_some()
+                {
+                    schedule_output(state, output_id, &mut dispatcher);
+                }
             }
             RefreshLayerSurfaces => {
                 relayout_client_layer_surfaces(self, state, &mut dispatcher);

@@ -33,7 +33,7 @@ use crate::{
     },
     region::{DamageRegion, RectI},
     runner::{Dispatcher, Model, ModelInstanceId},
-    state::{BackendOutputRef, DrmId, ObjectId, OutputId, OutputMode, State},
+    state::{BackendOutputRef, ColorTransformMatrix, DrmId, ObjectId, OutputId, OutputMode, State},
     sync::{DeferredRelease, RetiredBufferCandidate},
     transform::{self, OutputPresentationTransform},
     wayland_objects::{
@@ -45,7 +45,7 @@ use crate::{
 };
 
 use crate::{
-    clients::{ClientAction, ClientId},
+    clients::{ClientAction, ClientId, ClientsAction},
     protocol_generated::{WlSurfaceId, WpPresentationFeedbackId},
 };
 
@@ -151,6 +151,7 @@ pub struct Drm {
 #[derive(Debug)]
 pub struct DrmOutput {
     pub in_use: ConnectorInUse,
+    color_state: OutputColorState,
     presentation_transform: OutputPresentationTransform,
     render_sync_mode: RenderSyncMode,
     buffers: [RenderBuffer; 2],
@@ -177,6 +178,29 @@ pub struct DrmOutput {
     allow_in_fence_fd: bool,
     allow_fb_damage_clips: bool,
     next_submission_id: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CrtcColorProperties {
+    gamma_lut: Option<control::property::Handle>,
+    gamma_lut_size: u32,
+    ctm: Option<control::property::Handle>,
+}
+
+#[derive(Debug, Default)]
+struct OutputColorState {
+    gamma_lut: Option<Vec<u16>>,
+    ctm: Option<ColorTransformMatrix>,
+    gamma_dirty: bool,
+    ctm_dirty: bool,
+    gamma_blob_id: Option<u64>,
+    ctm_blob_id: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct PendingColorBlobs {
+    gamma_blob_id: Option<u64>,
+    ctm_blob_id: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -701,6 +725,15 @@ fn get_props<T: control::ResourceHandle>(
         .collect()
 }
 
+fn color_matrix_fixed_point(value: f32) -> u64 {
+    let scaled = (value.abs() as f64 * (1u64 << 32) as f64).round() as u64;
+    if value.is_sign_negative() {
+        scaled | (1u64 << 63)
+    } else {
+        scaled
+    }
+}
+
 #[derive(Clone)]
 pub struct Property<T> {
     value: T,
@@ -776,6 +809,7 @@ struct Crtc {
     possible_planes: HashSet<plane::Handle>,
     active: bool,
     mode_id: u32,
+    color: CrtcColorProperties,
 }
 
 #[derive(Debug)]
@@ -913,6 +947,70 @@ impl Drm {
         })
     }
 
+    pub fn output_gamma_size(&self, drm_crtc_id: u32) -> u32 {
+        self.output(drm_crtc_id)
+            .map(|output| output.in_use.crtc.color.gamma_lut_size)
+            .unwrap_or(0)
+    }
+
+    pub fn output_supports_ctm(&self, drm_crtc_id: u32) -> bool {
+        self.output(drm_crtc_id)
+            .is_some_and(|output| output.in_use.crtc.color.ctm.is_some())
+    }
+
+    pub fn set_output_gamma_lut(
+        &mut self,
+        drm_crtc_id: u32,
+        lut: Option<Vec<u16>>,
+    ) -> std::io::Result<()> {
+        let Some(output) = self.output_mut(drm_crtc_id) else {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing DRM output"));
+        };
+        let expected_len = output.in_use.crtc.color.gamma_lut_size as usize * 3;
+        if expected_len == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "output does not support gamma LUTs",
+            ));
+        }
+        if let Some(lut) = lut.as_ref() {
+            if lut.len() != expected_len {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "gamma LUT length does not match advertised ramp size",
+                ));
+            }
+        }
+        if output.color_state.gamma_lut == lut {
+            return Ok(());
+        }
+        output.color_state.gamma_lut = lut;
+        output.color_state.gamma_dirty = true;
+        Ok(())
+    }
+
+    pub fn set_output_ctm(
+        &mut self,
+        drm_crtc_id: u32,
+        ctm: Option<ColorTransformMatrix>,
+    ) -> std::io::Result<()> {
+        let Some(output) = self.output_mut(drm_crtc_id) else {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing DRM output"));
+        };
+        if output.in_use.crtc.color.ctm.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "output does not support CTM",
+            ));
+        }
+        if output.color_state.ctm == ctm {
+            return Ok(());
+        }
+        output.color_state.ctm = ctm;
+        output.color_state.ctm_dirty = true;
+        Ok(())
+    }
+
     fn optional_plane_attempts(
         &self,
         want_damage_clips: bool,
@@ -932,6 +1030,126 @@ impl Drm {
         attempts.dedup();
         attempts.reverse();
         attempts
+    }
+
+    fn append_output_color_changes(
+        &mut self,
+        drm_crtc_id: u32,
+        changes: &mut control::atomic::AtomicModeReq,
+    ) -> std::io::Result<PendingColorBlobs> {
+        let Some(output) = self.output(drm_crtc_id) else {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing DRM output"));
+        };
+        let crtc_handle = output.in_use.crtc.handle;
+        let color_props = output.in_use.crtc.color.clone();
+        let gamma_dirty = output.color_state.gamma_dirty;
+        let ctm_dirty = output.color_state.ctm_dirty;
+        let gamma_lut = output.color_state.gamma_lut.clone();
+        let ctm = output.color_state.ctm;
+        let ctm_blob_id = output.color_state.ctm_blob_id;
+
+        let mut pending = PendingColorBlobs::default();
+
+        if gamma_dirty {
+            let Some(property) = color_props.gamma_lut else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "output does not support gamma LUTs",
+                ));
+            };
+            match gamma_lut.as_ref() {
+                Some(gamma_lut) => {
+                    let lut = gamma_lut
+                        .chunks_exact(3)
+                        .map(|entry| drm_ffi::drm_sys::drm_color_lut {
+                            red: entry[0],
+                            green: entry[1],
+                            blue: entry[2],
+                            reserved: 0,
+                        })
+                        .collect::<Vec<_>>();
+                    let blob = self.fd.create_property_blob(&lut)?;
+                    pending.gamma_blob_id = blob.as_blob();
+                    changes.add_property(crtc_handle, property, blob);
+                }
+                None => {
+                    changes.add_property(crtc_handle, property, control::property::Value::Blob(0));
+                }
+            }
+        }
+
+        if ctm_dirty || ctm.is_some() {
+            let Some(property) = color_props.ctm else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "output does not support CTM",
+                ));
+            };
+            match ctm {
+                Some(ctm) => {
+                    if ctm_dirty || ctm_blob_id.is_none() {
+                        let mut raw = drm_ffi::drm_sys::drm_color_ctm { matrix: [0; 9] };
+                        for (index, value) in ctm.values.into_iter().enumerate() {
+                            raw.matrix[index] = color_matrix_fixed_point(value);
+                        }
+                        let blob = self.fd.create_property_blob(&raw)?;
+                        pending.ctm_blob_id = blob.as_blob();
+                        changes.add_property(crtc_handle, property, blob);
+                    } else {
+                        changes.add_property(
+                            crtc_handle,
+                            property,
+                            control::property::Value::Blob(
+                                ctm_blob_id.expect("non-dirty CTM must have an existing blob id"),
+                            ),
+                        );
+                    }
+                }
+                None => {
+                    changes.add_property(crtc_handle, property, control::property::Value::Blob(0));
+                }
+            }
+        }
+
+        Ok(pending)
+    }
+
+    fn destroy_pending_color_blobs(&self, blobs: PendingColorBlobs) {
+        if let Some(blob_id) = blobs.gamma_blob_id {
+            let _ = self.fd.destroy_property_blob(blob_id);
+        }
+        if let Some(blob_id) = blobs.ctm_blob_id {
+            let _ = self.fd.destroy_property_blob(blob_id);
+        }
+    }
+
+    fn finish_output_color_commit(&mut self, drm_crtc_id: u32, blobs: PendingColorBlobs) {
+        let Some(_) = self.output(drm_crtc_id) else {
+            return;
+        };
+        let (old_gamma_blob, old_ctm_blob) = {
+            let output = self.output_mut(drm_crtc_id).unwrap();
+            let old_gamma_blob = if output.color_state.gamma_dirty {
+                output.color_state.gamma_dirty = false;
+                std::mem::replace(&mut output.color_state.gamma_blob_id, blobs.gamma_blob_id)
+            } else {
+                None
+            };
+            let old_ctm_blob = if output.color_state.ctm_dirty {
+                output.color_state.ctm_dirty = false;
+                std::mem::replace(&mut output.color_state.ctm_blob_id, blobs.ctm_blob_id)
+            } else {
+                None
+            };
+            (old_gamma_blob, old_ctm_blob)
+        };
+
+        if let Some(blob_id) = old_gamma_blob {
+            let _ = self.fd.destroy_property_blob(blob_id);
+        }
+        if let Some(blob_id) = old_ctm_blob {
+            let _ = self.fd.destroy_property_blob(blob_id);
+        }
     }
 
     pub fn create_drm(fd: OwnedFd, device: udev::Device, egl: &EGL) -> Self {
@@ -1304,12 +1522,18 @@ impl Drm {
                 }
             }
 
+            let color_blobs = match self.append_output_color_changes(drm_crtc_id, &mut changes) {
+                Ok(blobs) => blobs,
+                Err(error) => return Err(error),
+            };
+
             let commit_result = self.fd.atomic_commit(
                 control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
                 changes,
             );
             match commit_result {
                 Ok(()) => {
+                    self.finish_output_color_commit(drm_crtc_id, color_blobs);
                     if want_damage_clips && !use_damage_clips {
                         log::warn!(
                             "drm submit_render_buffer: driver rejected FB_DAMAGE_CLIPS on {}, disabling output damage clips",
@@ -1345,6 +1569,7 @@ impl Drm {
                     return Ok(callback_surfaces);
                 }
                 Err(error) => {
+                    self.destroy_pending_color_blobs(color_blobs);
                     if let Some(blob) = damage_blob {
                         let _ = self.fd.destroy_property_blob(blob);
                     }
@@ -1477,10 +1702,15 @@ impl Drm {
             );
         }
 
-        self.fd.atomic_commit(
+        let color_blobs = self.append_output_color_changes(drm_crtc_id, &mut changes)?;
+        if let Err(error) = self.fd.atomic_commit(
             control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
             changes,
-        )?;
+        ) {
+            self.destroy_pending_color_blobs(color_blobs);
+            return Err(error);
+        }
+        self.finish_output_color_commit(drm_crtc_id, color_blobs);
         let submission = self.output_mut(drm_crtc_id).unwrap().allocate_submission(
             output_id,
             scene,
@@ -1842,6 +2072,7 @@ impl Drm {
 
         DrmOutput {
             in_use,
+            color_state: OutputColorState::default(),
             presentation_transform: OutputPresentationTransform::FlipY,
             render_sync_mode,
             buffers,
@@ -2079,6 +2310,14 @@ impl Drm {
             possible_planes,
             active: props.get("ACTIVE").map(|(v, _)| *v != 0).unwrap_or(false),
             mode_id: props.get("MODE_ID").map(|(v, _)| *v as u32).unwrap(),
+            color: CrtcColorProperties {
+                gamma_lut: props.get("GAMMA_LUT").map(|(_, info)| info.handle()),
+                gamma_lut_size: props
+                    .get("GAMMA_LUT_SIZE")
+                    .map(|(value, _)| *value as u32)
+                    .unwrap_or(0),
+                ctm: props.get("CTM").map(|(_, info)| info.handle()),
+            },
         };
 
         (handle, crtc)
@@ -2708,6 +2947,23 @@ pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
     schedule_output(state, output_id, dispatcher);
 }
 
+fn dispatch_gamma_control_failed_if_pending(
+    drm: &Drm,
+    drm_crtc_id: u32,
+    output_id: Option<OutputId>,
+    dispatcher: &mut Dispatcher,
+) {
+    let Some(output_id) = output_id else {
+        return;
+    };
+    if drm
+        .output(drm_crtc_id)
+        .is_some_and(|output| output.color_state.gamma_dirty)
+    {
+        dispatcher.dispatch(ClientsAction::GammaControlFailed { output_id });
+    }
+}
+
 pub fn schedule_outputs<I>(state: &State, output_ids: I, dispatcher: &mut Dispatcher)
 where
     I: IntoIterator<Item = OutputId>,
@@ -3209,6 +3465,12 @@ impl DrmOutputModel {
                                     None
                                 }
                                 Err(fallback_error) => {
+                                    dispatch_gamma_control_failed_if_pending(
+                                        drm,
+                                        drm_crtc_id,
+                                        output_id,
+                                        dispatcher,
+                                    );
                                     drm.output_mut(drm_crtc_id).unwrap().mark_render_failed();
                                     let failed_releases = std::mem::take(
                                         &mut drm
@@ -3242,6 +3504,12 @@ impl DrmOutputModel {
                                 }
                             }
                         } else {
+                            dispatch_gamma_control_failed_if_pending(
+                                drm,
+                                drm_crtc_id,
+                                output_id,
+                                dispatcher,
+                            );
                             drm.output_mut(drm_crtc_id)
                                 .unwrap()
                                 .note_cursor_plane_failure();
@@ -3269,6 +3537,12 @@ impl DrmOutputModel {
                             Some(failed_releases)
                         }
                     } else {
+                        dispatch_gamma_control_failed_if_pending(
+                            drm,
+                            drm_crtc_id,
+                            output_id,
+                            dispatcher,
+                        );
                         drm.output_mut(drm_crtc_id).unwrap().mark_render_failed();
                         let failed_releases = std::mem::take(
                             &mut drm.output_mut(drm_crtc_id).unwrap().in_flight_releases,
@@ -4367,6 +4641,9 @@ mod presentation_timing_tests {
             backend,
             drm_crtc_id,
             global_name: None,
+            gamma_lut_size: 0,
+            ctm_supported: false,
+            gamma_control_object_id: None,
             x,
             y,
             physical_width: 0,

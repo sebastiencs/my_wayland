@@ -129,10 +129,6 @@ pub mod wl_display {
     impl crate::object::IdToObject for WlDisplayId {
         type Object = crate::wayland_objects::wl_display::WlDisplay;
     }
-    /// Minimum interface version for the `sync` message (XML `since`).
-    pub const SYNC_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_registry` message (XML `since`).
-    pub const GET_REGISTRY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Asynchronous roundtrip
@@ -180,10 +176,6 @@ pub mod wl_display {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `error` message (XML `since`).
-    pub const ERROR_SINCE: u32 = 1;
-    /// Minimum interface version for the `delete_id` message (XML `since`).
-    pub const DELETE_ID_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Fatal error event
@@ -287,8 +279,6 @@ pub mod wl_registry {
     impl crate::object::IdToObject for WlRegistryId {
         type Object = crate::wayland_objects::wl_registry::WlRegistry;
     }
-    /// Minimum interface version for the `bind` message (XML `since`).
-    pub const BIND_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Bind an object to the display
@@ -319,10 +309,6 @@ pub mod wl_registry {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `global` message (XML `since`).
-    pub const GLOBAL_SINCE: u32 = 1;
-    /// Minimum interface version for the `global_remove` message (XML `since`).
-    pub const GLOBAL_REMOVE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Announce global object
@@ -399,8 +385,6 @@ pub mod wl_callback {
     impl crate::object::IdToObject for WlCallbackId {
         type Object = crate::wayland_objects::wl_callback::WlCallback;
     }
-    /// Minimum interface version for the `done` message (XML `since`).
-    pub const DONE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Done event
@@ -444,10 +428,6 @@ pub mod wl_compositor {
     impl crate::object::IdToObject for WlCompositorId {
         type Object = crate::wayland_objects::wl_compositor::WlCompositor;
     }
-    /// Minimum interface version for the `create_surface` message (XML `since`).
-    pub const CREATE_SURFACE_SINCE: u32 = 1;
-    /// Minimum interface version for the `create_region` message (XML `since`).
-    pub const CREATE_REGION_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Create new surface
@@ -497,12 +477,6 @@ pub mod wl_shm_pool {
     impl crate::object::IdToObject for WlShmPoolId {
         type Object = crate::wayland_objects::wl_shm_pool::WlShmPool;
     }
-    /// Minimum interface version for the `create_buffer` message (XML `since`).
-    pub const CREATE_BUFFER_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `resize` message (XML `since`).
-    pub const RESIZE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Create a buffer from the pool
@@ -599,9 +573,7 @@ pub mod wl_shm {
     impl crate::object::IdToObject for WlShmId {
         type Object = crate::wayland_objects::wl_shm::WlShm;
     }
-    /// Minimum interface version for the `create_pool` message (XML `since`).
-    pub const CREATE_POOL_SINCE: u32 = 1;
-    /// Minimum interface version for the `release` message (XML `since`).
+    /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 2;
     #[derive(Debug)]
     pub enum Request {
@@ -640,8 +612,6 @@ pub mod wl_shm {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `format` message (XML `since`).
-    pub const FORMAT_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Pixel format description
@@ -962,8 +932,6 @@ pub mod wl_buffer {
     impl crate::object::IdToObject for WlBufferId {
         type Object = crate::wayland_objects::wl_buffer::WlBuffer;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy a buffer
@@ -985,8 +953,6 @@ pub mod wl_buffer {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `release` message (XML `since`).
-    pub const RELEASE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Compositor releases buffer
@@ -1042,15 +1008,9 @@ pub mod wl_data_offer {
     impl crate::object::IdToObject for WlDataOfferId {
         type Object = crate::wayland_objects::wl_data_offer::WlDataOffer;
     }
-    /// Minimum interface version for the `accept` message (XML `since`).
-    pub const ACCEPT_SINCE: u32 = 1;
-    /// Minimum interface version for the `receive` message (XML `since`).
-    pub const RECEIVE_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `finish` message (XML `since`).
+    /// Minimum interface version for the `finish` message (XML `since` / `version`).
     pub const FINISH_SINCE: u32 = 3;
-    /// Minimum interface version for the `set_actions` message (XML `since`).
+    /// Minimum interface version for the `set_actions` message (XML `since` / `version`).
     pub const SET_ACTIONS_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Request {
@@ -1175,11 +1135,9 @@ pub mod wl_data_offer {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `offer` message (XML `since`).
-    pub const OFFER_SINCE: u32 = 1;
-    /// Minimum interface version for the `source_actions` message (XML `since`).
+    /// Minimum interface version for the `source_actions` message (XML `since` / `version`).
     pub const SOURCE_ACTIONS_SINCE: u32 = 3;
-    /// Minimum interface version for the `action` message (XML `since`).
+    /// Minimum interface version for the `action` message (XML `since` / `version`).
     pub const ACTION_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Event {
@@ -1298,11 +1256,7 @@ pub mod wl_data_source {
     impl crate::object::IdToObject for WlDataSourceId {
         type Object = crate::wayland_objects::wl_data_source::WlDataSource;
     }
-    /// Minimum interface version for the `offer` message (XML `since`).
-    pub const OFFER_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_actions` message (XML `since`).
+    /// Minimum interface version for the `set_actions` message (XML `since` / `version`).
     pub const SET_ACTIONS_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Request {
@@ -1352,17 +1306,11 @@ pub mod wl_data_source {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `target` message (XML `since`).
-    pub const TARGET_SINCE: u32 = 1;
-    /// Minimum interface version for the `send` message (XML `since`).
-    pub const SEND_SINCE: u32 = 1;
-    /// Minimum interface version for the `cancelled` message (XML `since`).
-    pub const CANCELLED_SINCE: u32 = 1;
-    /// Minimum interface version for the `dnd_drop_performed` message (XML `since`).
+    /// Minimum interface version for the `dnd_drop_performed` message (XML `since` / `version`).
     pub const DND_DROP_PERFORMED_SINCE: u32 = 3;
-    /// Minimum interface version for the `dnd_finished` message (XML `since`).
+    /// Minimum interface version for the `dnd_finished` message (XML `since` / `version`).
     pub const DND_FINISHED_SINCE: u32 = 3;
-    /// Minimum interface version for the `action` message (XML `since`).
+    /// Minimum interface version for the `action` message (XML `since` / `version`).
     pub const ACTION_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Event {
@@ -1528,11 +1476,7 @@ pub mod wl_data_device {
     impl crate::object::IdToObject for WlDataDeviceId {
         type Object = crate::wayland_objects::wl_data_device::WlDataDevice;
     }
-    /// Minimum interface version for the `start_drag` message (XML `since`).
-    pub const START_DRAG_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_selection` message (XML `since`).
-    pub const SET_SELECTION_SINCE: u32 = 1;
-    /// Minimum interface version for the `release` message (XML `since`).
+    /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 2;
     #[derive(Debug)]
     pub enum Request {
@@ -1616,18 +1560,6 @@ pub mod wl_data_device {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `data_offer` message (XML `since`).
-    pub const DATA_OFFER_SINCE: u32 = 1;
-    /// Minimum interface version for the `enter` message (XML `since`).
-    pub const ENTER_SINCE: u32 = 1;
-    /// Minimum interface version for the `leave` message (XML `since`).
-    pub const LEAVE_SINCE: u32 = 1;
-    /// Minimum interface version for the `motion` message (XML `since`).
-    pub const MOTION_SINCE: u32 = 1;
-    /// Minimum interface version for the `drop` message (XML `since`).
-    pub const DROP_SINCE: u32 = 1;
-    /// Minimum interface version for the `selection` message (XML `since`).
-    pub const SELECTION_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Introduce a new wl_data_offer
@@ -1792,10 +1724,6 @@ pub mod wl_data_device_manager {
     impl crate::object::IdToObject for WlDataDeviceManagerId {
         type Object = crate::wayland_objects::wl_data_device_manager::WlDataDeviceManager;
     }
-    /// Minimum interface version for the `create_data_source` message (XML `since`).
-    pub const CREATE_DATA_SOURCE_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_data_device` message (XML `since`).
-    pub const GET_DATA_DEVICE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Create a new data source
@@ -1885,8 +1813,6 @@ pub mod wl_shell {
     impl crate::object::IdToObject for WlShellId {
         type Object = crate::wayland_objects::wl_shell::WlShell;
     }
-    /// Minimum interface version for the `get_shell_surface` message (XML `since`).
-    pub const GET_SHELL_SURFACE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Create a shell surface from a surface
@@ -1943,26 +1869,6 @@ pub mod wl_shell_surface {
     impl crate::object::IdToObject for WlShellSurfaceId {
         type Object = crate::wayland_objects::wl_shell_surface::WlShellSurface;
     }
-    /// Minimum interface version for the `pong` message (XML `since`).
-    pub const PONG_SINCE: u32 = 1;
-    /// Minimum interface version for the `move` message (XML `since`).
-    pub const MOVE_SINCE: u32 = 1;
-    /// Minimum interface version for the `resize` message (XML `since`).
-    pub const RESIZE_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_toplevel` message (XML `since`).
-    pub const SET_TOPLEVEL_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_transient` message (XML `since`).
-    pub const SET_TRANSIENT_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_fullscreen` message (XML `since`).
-    pub const SET_FULLSCREEN_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_popup` message (XML `since`).
-    pub const SET_POPUP_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_maximized` message (XML `since`).
-    pub const SET_MAXIMIZED_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_title` message (XML `since`).
-    pub const SET_TITLE_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_class` message (XML `since`).
-    pub const SET_CLASS_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Respond to a ping event
@@ -2190,12 +2096,6 @@ pub mod wl_shell_surface {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `ping` message (XML `since`).
-    pub const PING_SINCE: u32 = 1;
-    /// Minimum interface version for the `configure` message (XML `since`).
-    pub const CONFIGURE_SINCE: u32 = 1;
-    /// Minimum interface version for the `popup_done` message (XML `since`).
-    pub const POPUP_DONE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Ping client
@@ -2375,27 +2275,13 @@ pub mod wl_surface {
     impl crate::object::IdToObject for WlSurfaceId {
         type Object = crate::wayland_objects::wl_surface::WlSurface;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `attach` message (XML `since`).
-    pub const ATTACH_SINCE: u32 = 1;
-    /// Minimum interface version for the `damage` message (XML `since`).
-    pub const DAMAGE_SINCE: u32 = 1;
-    /// Minimum interface version for the `frame` message (XML `since`).
-    pub const FRAME_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_opaque_region` message (XML `since`).
-    pub const SET_OPAQUE_REGION_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_input_region` message (XML `since`).
-    pub const SET_INPUT_REGION_SINCE: u32 = 1;
-    /// Minimum interface version for the `commit` message (XML `since`).
-    pub const COMMIT_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_buffer_transform` message (XML `since`).
+    /// Minimum interface version for the `set_buffer_transform` message (XML `since` / `version`).
     pub const SET_BUFFER_TRANSFORM_SINCE: u32 = 2;
-    /// Minimum interface version for the `set_buffer_scale` message (XML `since`).
+    /// Minimum interface version for the `set_buffer_scale` message (XML `since` / `version`).
     pub const SET_BUFFER_SCALE_SINCE: u32 = 3;
-    /// Minimum interface version for the `damage_buffer` message (XML `since`).
+    /// Minimum interface version for the `damage_buffer` message (XML `since` / `version`).
     pub const DAMAGE_BUFFER_SINCE: u32 = 4;
-    /// Minimum interface version for the `offset` message (XML `since`).
+    /// Minimum interface version for the `offset` message (XML `since` / `version`).
     pub const OFFSET_SINCE: u32 = 5;
     #[derive(Debug)]
     pub enum Request {
@@ -2794,13 +2680,9 @@ pub mod wl_surface {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `enter` message (XML `since`).
-    pub const ENTER_SINCE: u32 = 1;
-    /// Minimum interface version for the `leave` message (XML `since`).
-    pub const LEAVE_SINCE: u32 = 1;
-    /// Minimum interface version for the `preferred_buffer_scale` message (XML `since`).
+    /// Minimum interface version for the `preferred_buffer_scale` message (XML `since` / `version`).
     pub const PREFERRED_BUFFER_SCALE_SINCE: u32 = 6;
-    /// Minimum interface version for the `preferred_buffer_transform` message (XML `since`).
+    /// Minimum interface version for the `preferred_buffer_transform` message (XML `since` / `version`).
     pub const PREFERRED_BUFFER_TRANSFORM_SINCE: u32 = 6;
     #[derive(Debug)]
     pub enum Event {
@@ -2929,13 +2811,7 @@ pub mod wl_seat {
     impl crate::object::IdToObject for WlSeatId {
         type Object = crate::wayland_objects::wl_seat::WlSeat;
     }
-    /// Minimum interface version for the `get_pointer` message (XML `since`).
-    pub const GET_POINTER_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_keyboard` message (XML `since`).
-    pub const GET_KEYBOARD_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_touch` message (XML `since`).
-    pub const GET_TOUCH_SINCE: u32 = 1;
-    /// Minimum interface version for the `release` message (XML `since`).
+    /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 5;
     #[derive(Debug)]
     pub enum Request {
@@ -3001,9 +2877,7 @@ pub mod wl_seat {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `capabilities` message (XML `since`).
-    pub const CAPABILITIES_SINCE: u32 = 1;
-    /// Minimum interface version for the `name` message (XML `since`).
+    /// Minimum interface version for the `name` message (XML `since` / `version`).
     pub const NAME_SINCE: u32 = 2;
     #[derive(Debug)]
     pub enum Event {
@@ -3125,9 +2999,7 @@ pub mod wl_pointer {
     impl crate::object::IdToObject for WlPointerId {
         type Object = crate::wayland_objects::wl_pointer::WlPointer;
     }
-    /// Minimum interface version for the `set_cursor` message (XML `since`).
-    pub const SET_CURSOR_SINCE: u32 = 1;
-    /// Minimum interface version for the `release` message (XML `since`).
+    /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Request {
@@ -3202,27 +3074,17 @@ pub mod wl_pointer {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `enter` message (XML `since`).
-    pub const ENTER_SINCE: u32 = 1;
-    /// Minimum interface version for the `leave` message (XML `since`).
-    pub const LEAVE_SINCE: u32 = 1;
-    /// Minimum interface version for the `motion` message (XML `since`).
-    pub const MOTION_SINCE: u32 = 1;
-    /// Minimum interface version for the `button` message (XML `since`).
-    pub const BUTTON_SINCE: u32 = 1;
-    /// Minimum interface version for the `axis` message (XML `since`).
-    pub const AXIS_SINCE: u32 = 1;
-    /// Minimum interface version for the `frame` message (XML `since`).
+    /// Minimum interface version for the `frame` message (XML `since` / `version`).
     pub const FRAME_SINCE: u32 = 5;
-    /// Minimum interface version for the `axis_source` message (XML `since`).
+    /// Minimum interface version for the `axis_source` message (XML `since` / `version`).
     pub const AXIS_SOURCE_SINCE: u32 = 5;
-    /// Minimum interface version for the `axis_stop` message (XML `since`).
+    /// Minimum interface version for the `axis_stop` message (XML `since` / `version`).
     pub const AXIS_STOP_SINCE: u32 = 5;
-    /// Minimum interface version for the `axis_discrete` message (XML `since`).
+    /// Minimum interface version for the `axis_discrete` message (XML `since` / `version`).
     pub const AXIS_DISCRETE_SINCE: u32 = 5;
-    /// Minimum interface version for the `axis_value120` message (XML `since`).
+    /// Minimum interface version for the `axis_value120` message (XML `since` / `version`).
     pub const AXIS_VALUE120_SINCE: u32 = 8;
-    /// Minimum interface version for the `axis_relative_direction` message (XML `since`).
+    /// Minimum interface version for the `axis_relative_direction` message (XML `since` / `version`).
     pub const AXIS_RELATIVE_DIRECTION_SINCE: u32 = 9;
     #[derive(Debug)]
     pub enum Event {
@@ -3695,7 +3557,7 @@ pub mod wl_keyboard {
     impl crate::object::IdToObject for WlKeyboardId {
         type Object = crate::wayland_objects::wl_keyboard::WlKeyboard;
     }
-    /// Minimum interface version for the `release` message (XML `since`).
+    /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Request {
@@ -3715,17 +3577,7 @@ pub mod wl_keyboard {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `keymap` message (XML `since`).
-    pub const KEYMAP_SINCE: u32 = 1;
-    /// Minimum interface version for the `enter` message (XML `since`).
-    pub const ENTER_SINCE: u32 = 1;
-    /// Minimum interface version for the `leave` message (XML `since`).
-    pub const LEAVE_SINCE: u32 = 1;
-    /// Minimum interface version for the `key` message (XML `since`).
-    pub const KEY_SINCE: u32 = 1;
-    /// Minimum interface version for the `modifiers` message (XML `since`).
-    pub const MODIFIERS_SINCE: u32 = 1;
-    /// Minimum interface version for the `repeat_info` message (XML `since`).
+    /// Minimum interface version for the `repeat_info` message (XML `since` / `version`).
     pub const REPEAT_INFO_SINCE: u32 = 4;
     #[derive(Debug)]
     pub enum Event {
@@ -3976,7 +3828,7 @@ pub mod wl_touch {
     impl crate::object::IdToObject for WlTouchId {
         type Object = crate::wayland_objects::wl_touch::WlTouch;
     }
-    /// Minimum interface version for the `release` message (XML `since`).
+    /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Request {
@@ -3996,19 +3848,9 @@ pub mod wl_touch {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `down` message (XML `since`).
-    pub const DOWN_SINCE: u32 = 1;
-    /// Minimum interface version for the `up` message (XML `since`).
-    pub const UP_SINCE: u32 = 1;
-    /// Minimum interface version for the `motion` message (XML `since`).
-    pub const MOTION_SINCE: u32 = 1;
-    /// Minimum interface version for the `frame` message (XML `since`).
-    pub const FRAME_SINCE: u32 = 1;
-    /// Minimum interface version for the `cancel` message (XML `since`).
-    pub const CANCEL_SINCE: u32 = 1;
-    /// Minimum interface version for the `shape` message (XML `since`).
+    /// Minimum interface version for the `shape` message (XML `since` / `version`).
     pub const SHAPE_SINCE: u32 = 6;
-    /// Minimum interface version for the `orientation` message (XML `since`).
+    /// Minimum interface version for the `orientation` message (XML `since` / `version`).
     pub const ORIENTATION_SINCE: u32 = 6;
     #[derive(Debug)]
     pub enum Event {
@@ -4224,7 +4066,7 @@ pub mod wl_output {
     impl crate::object::IdToObject for WlOutputId {
         type Object = crate::wayland_objects::wl_output::WlOutput;
     }
-    /// Minimum interface version for the `release` message (XML `since`).
+    /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Request {
@@ -4245,17 +4087,13 @@ pub mod wl_output {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `geometry` message (XML `since`).
-    pub const GEOMETRY_SINCE: u32 = 1;
-    /// Minimum interface version for the `mode` message (XML `since`).
-    pub const MODE_SINCE: u32 = 1;
-    /// Minimum interface version for the `done` message (XML `since`).
+    /// Minimum interface version for the `done` message (XML `since` / `version`).
     pub const DONE_SINCE: u32 = 2;
-    /// Minimum interface version for the `scale` message (XML `since`).
+    /// Minimum interface version for the `scale` message (XML `since` / `version`).
     pub const SCALE_SINCE: u32 = 2;
-    /// Minimum interface version for the `name` message (XML `since`).
+    /// Minimum interface version for the `name` message (XML `since` / `version`).
     pub const NAME_SINCE: u32 = 4;
-    /// Minimum interface version for the `description` message (XML `since`).
+    /// Minimum interface version for the `description` message (XML `since` / `version`).
     pub const DESCRIPTION_SINCE: u32 = 4;
     #[derive(Debug)]
     pub enum Event {
@@ -4569,12 +4407,6 @@ pub mod wl_region {
     impl crate::object::IdToObject for WlRegionId {
         type Object = crate::wayland_objects::wl_region::WlRegion;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `add` message (XML `since`).
-    pub const ADD_SINCE: u32 = 1;
-    /// Minimum interface version for the `subtract` message (XML `since`).
-    pub const SUBTRACT_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy region
@@ -4663,10 +4495,6 @@ pub mod wl_subcompositor {
     impl crate::object::IdToObject for WlSubcompositorId {
         type Object = crate::wayland_objects::wl_subcompositor::WlSubcompositor;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_subsurface` message (XML `since`).
-    pub const GET_SUBSURFACE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Unbind from the subcompositor interface
@@ -4789,18 +4617,6 @@ pub mod wl_subsurface {
     impl crate::object::IdToObject for WlSubsurfaceId {
         type Object = crate::wayland_objects::wl_subsurface::WlSubsurface;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_position` message (XML `since`).
-    pub const SET_POSITION_SINCE: u32 = 1;
-    /// Minimum interface version for the `place_above` message (XML `since`).
-    pub const PLACE_ABOVE_SINCE: u32 = 1;
-    /// Minimum interface version for the `place_below` message (XML `since`).
-    pub const PLACE_BELOW_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_sync` message (XML `since`).
-    pub const SET_SYNC_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_desync` message (XML `since`).
-    pub const SET_DESYNC_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Remove sub-surface interface
@@ -4934,10 +4750,6 @@ pub mod wl_fixes {
     impl crate::object::IdToObject for WlFixesId {
         type Object = crate::wayland_objects::wl_fixes::WlFixes;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy_registry` message (XML `since`).
-    pub const DESTROY_REGISTRY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroys this object
@@ -5002,10 +4814,6 @@ pub mod wp_presentation {
     impl crate::object::IdToObject for WpPresentationId {
         type Object = crate::wayland_objects::wp_presentation::WpPresentation;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `feedback` message (XML `since`).
-    pub const FEEDBACK_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Unbind from the presentation interface
@@ -5043,8 +4851,6 @@ pub mod wp_presentation {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `clock_id` message (XML `since`).
-    pub const CLOCK_ID_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Clock ID for timestamps
@@ -5134,12 +4940,6 @@ pub mod wp_presentation_feedback {
     impl crate::object::IdToObject for WpPresentationFeedbackId {
         type Object = crate::wayland_objects::wp_presentation_feedback::WpPresentationFeedback;
     }
-    /// Minimum interface version for the `sync_output` message (XML `since`).
-    pub const SYNC_OUTPUT_SINCE: u32 = 1;
-    /// Minimum interface version for the `presented` message (XML `since`).
-    pub const PRESENTED_SINCE: u32 = 1;
-    /// Minimum interface version for the `discarded` message (XML `since`).
-    pub const DISCARDED_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Presentation synchronized to this output
@@ -5322,10 +5122,6 @@ pub mod wp_viewporter {
     impl crate::object::IdToObject for WpViewporterId {
         type Object = crate::wayland_objects::wp_viewporter::WpViewporter;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_viewport` message (XML `since`).
-    pub const GET_VIEWPORT_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Unbind from the cropping and scaling interface
@@ -5431,12 +5227,6 @@ pub mod wp_viewport {
     impl crate::object::IdToObject for WpViewportId {
         type Object = crate::wayland_objects::wp_viewport::WpViewport;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_source` message (XML `since`).
-    pub const SET_SOURCE_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_destination` message (XML `since`).
-    pub const SET_DESTINATION_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Remove scaling and cropping from the surface
@@ -5532,14 +5322,6 @@ pub mod xdg_wm_base {
     impl crate::object::IdToObject for XdgWmBaseId {
         type Object = crate::wayland_objects::xdg_wm_base::XdgWmBase;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `create_positioner` message (XML `since`).
-    pub const CREATE_POSITIONER_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_xdg_surface` message (XML `since`).
-    pub const GET_XDG_SURFACE_SINCE: u32 = 1;
-    /// Minimum interface version for the `pong` message (XML `since`).
-    pub const PONG_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy xdg_wm_base
@@ -5596,8 +5378,6 @@ pub mod xdg_wm_base {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `ping` message (XML `since`).
-    pub const PING_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Check if the client is alive
@@ -5686,25 +5466,11 @@ pub mod xdg_positioner {
     impl crate::object::IdToObject for XdgPositionerId {
         type Object = crate::wayland_objects::xdg_positioner::XdgPositioner;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_size` message (XML `since`).
-    pub const SET_SIZE_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_anchor_rect` message (XML `since`).
-    pub const SET_ANCHOR_RECT_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_anchor` message (XML `since`).
-    pub const SET_ANCHOR_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_gravity` message (XML `since`).
-    pub const SET_GRAVITY_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_constraint_adjustment` message (XML `since`).
-    pub const SET_CONSTRAINT_ADJUSTMENT_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_offset` message (XML `since`).
-    pub const SET_OFFSET_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_reactive` message (XML `since`).
+    /// Minimum interface version for the `set_reactive` message (XML `since` / `version`).
     pub const SET_REACTIVE_SINCE: u32 = 3;
-    /// Minimum interface version for the `set_parent_size` message (XML `since`).
+    /// Minimum interface version for the `set_parent_size` message (XML `since` / `version`).
     pub const SET_PARENT_SIZE_SINCE: u32 = 3;
-    /// Minimum interface version for the `set_parent_configure` message (XML `since`).
+    /// Minimum interface version for the `set_parent_configure` message (XML `since` / `version`).
     pub const SET_PARENT_CONFIGURE_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Request {
@@ -6044,16 +5810,6 @@ pub mod xdg_surface {
     impl crate::object::IdToObject for XdgSurfaceId {
         type Object = crate::wayland_objects::xdg_surface::XdgSurface;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_toplevel` message (XML `since`).
-    pub const GET_TOPLEVEL_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_popup` message (XML `since`).
-    pub const GET_POPUP_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_window_geometry` message (XML `since`).
-    pub const SET_WINDOW_GEOMETRY_SINCE: u32 = 1;
-    /// Minimum interface version for the `ack_configure` message (XML `since`).
-    pub const ACK_CONFIGURE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_surface
@@ -6183,8 +5939,6 @@ pub mod xdg_surface {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `configure` message (XML `since`).
-    pub const CONFIGURE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Suggest a surface change
@@ -6276,34 +6030,6 @@ pub mod xdg_toplevel {
     impl crate::object::IdToObject for XdgToplevelId {
         type Object = crate::wayland_objects::xdg_toplevel::XdgToplevel;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_parent` message (XML `since`).
-    pub const SET_PARENT_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_title` message (XML `since`).
-    pub const SET_TITLE_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_app_id` message (XML `since`).
-    pub const SET_APP_ID_SINCE: u32 = 1;
-    /// Minimum interface version for the `show_window_menu` message (XML `since`).
-    pub const SHOW_WINDOW_MENU_SINCE: u32 = 1;
-    /// Minimum interface version for the `move` message (XML `since`).
-    pub const MOVE_SINCE: u32 = 1;
-    /// Minimum interface version for the `resize` message (XML `since`).
-    pub const RESIZE_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_max_size` message (XML `since`).
-    pub const SET_MAX_SIZE_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_min_size` message (XML `since`).
-    pub const SET_MIN_SIZE_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_maximized` message (XML `since`).
-    pub const SET_MAXIMIZED_SINCE: u32 = 1;
-    /// Minimum interface version for the `unset_maximized` message (XML `since`).
-    pub const UNSET_MAXIMIZED_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_fullscreen` message (XML `since`).
-    pub const SET_FULLSCREEN_SINCE: u32 = 1;
-    /// Minimum interface version for the `unset_fullscreen` message (XML `since`).
-    pub const UNSET_FULLSCREEN_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_minimized` message (XML `since`).
-    pub const SET_MINIMIZED_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_toplevel
@@ -6664,13 +6390,9 @@ pub mod xdg_toplevel {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `configure` message (XML `since`).
-    pub const CONFIGURE_SINCE: u32 = 1;
-    /// Minimum interface version for the `close` message (XML `since`).
-    pub const CLOSE_SINCE: u32 = 1;
-    /// Minimum interface version for the `configure_bounds` message (XML `since`).
+    /// Minimum interface version for the `configure_bounds` message (XML `since` / `version`).
     pub const CONFIGURE_BOUNDS_SINCE: u32 = 4;
-    /// Minimum interface version for the `wm_capabilities` message (XML `since`).
+    /// Minimum interface version for the `wm_capabilities` message (XML `since` / `version`).
     pub const WM_CAPABILITIES_SINCE: u32 = 5;
     #[derive(Debug)]
     pub enum Event {
@@ -6970,11 +6692,7 @@ pub mod xdg_popup {
     impl crate::object::IdToObject for XdgPopupId {
         type Object = crate::wayland_objects::xdg_popup::XdgPopup;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `grab` message (XML `since`).
-    pub const GRAB_SINCE: u32 = 1;
-    /// Minimum interface version for the `reposition` message (XML `since`).
+    /// Minimum interface version for the `reposition` message (XML `since` / `version`).
     pub const REPOSITION_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Request {
@@ -7075,11 +6793,7 @@ pub mod xdg_popup {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `configure` message (XML `since`).
-    pub const CONFIGURE_SINCE: u32 = 1;
-    /// Minimum interface version for the `popup_done` message (XML `since`).
-    pub const POPUP_DONE_SINCE: u32 = 1;
-    /// Minimum interface version for the `repositioned` message (XML `since`).
+    /// Minimum interface version for the `repositioned` message (XML `since` / `version`).
     pub const REPOSITIONED_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Event {
@@ -7189,10 +6903,6 @@ pub mod wp_content_type_manager_v1 {
     impl crate::object::IdToObject for WpContentTypeManagerV1Id {
         type Object = crate::wayland_objects::wp_content_type_manager_v1::WpContentTypeManagerV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_surface_content_type` message (XML `since`).
-    pub const GET_SURFACE_CONTENT_TYPE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the content type manager object
@@ -7245,10 +6955,6 @@ pub mod wp_content_type_v1 {
     impl crate::object::IdToObject for WpContentTypeV1Id {
         type Object = crate::wayland_objects::wp_content_type_v1::WpContentTypeV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_content_type` message (XML `since`).
-    pub const SET_CONTENT_TYPE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the content type object
@@ -7355,10 +7061,6 @@ pub mod wp_drm_lease_device_v1 {
     impl crate::object::IdToObject for WpDrmLeaseDeviceV1Id {
         type Object = crate::wayland_objects::wp_drm_lease_device_v1::WpDrmLeaseDeviceV1;
     }
-    /// Minimum interface version for the `create_lease_request` message (XML `since`).
-    pub const CREATE_LEASE_REQUEST_SINCE: u32 = 1;
-    /// Minimum interface version for the `release` message (XML `since`).
-    pub const RELEASE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Create a lease request object
@@ -7389,14 +7091,6 @@ pub mod wp_drm_lease_device_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `drm_fd` message (XML `since`).
-    pub const DRM_FD_SINCE: u32 = 1;
-    /// Minimum interface version for the `connector` message (XML `since`).
-    pub const CONNECTOR_SINCE: u32 = 1;
-    /// Minimum interface version for the `done` message (XML `since`).
-    pub const DONE_SINCE: u32 = 1;
-    /// Minimum interface version for the `released` message (XML `since`).
-    pub const RELEASED_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Open a non-master fd for this DRM node
@@ -7494,8 +7188,6 @@ pub mod wp_drm_lease_connector_v1 {
     impl crate::object::IdToObject for WpDrmLeaseConnectorV1Id {
         type Object = crate::wayland_objects::wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy connector
@@ -7518,16 +7210,6 @@ pub mod wp_drm_lease_connector_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `name` message (XML `since`).
-    pub const NAME_SINCE: u32 = 1;
-    /// Minimum interface version for the `description` message (XML `since`).
-    pub const DESCRIPTION_SINCE: u32 = 1;
-    /// Minimum interface version for the `connector_id` message (XML `since`).
-    pub const CONNECTOR_ID_SINCE: u32 = 1;
-    /// Minimum interface version for the `done` message (XML `since`).
-    pub const DONE_SINCE: u32 = 1;
-    /// Minimum interface version for the `withdrawn` message (XML `since`).
-    pub const WITHDRAWN_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Name
@@ -7637,10 +7319,6 @@ pub mod wp_drm_lease_request_v1 {
     impl crate::object::IdToObject for WpDrmLeaseRequestV1Id {
         type Object = crate::wayland_objects::wp_drm_lease_request_v1::WpDrmLeaseRequestV1;
     }
-    /// Minimum interface version for the `request_connector` message (XML `since`).
-    pub const REQUEST_CONNECTOR_SINCE: u32 = 1;
-    /// Minimum interface version for the `submit` message (XML `since`).
-    pub const SUBMIT_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Request a connector for this lease
@@ -7709,8 +7387,6 @@ pub mod wp_drm_lease_v1 {
     impl crate::object::IdToObject for WpDrmLeaseV1Id {
         type Object = crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroys the lease object
@@ -7735,10 +7411,6 @@ pub mod wp_drm_lease_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `lease_fd` message (XML `since`).
-    pub const LEASE_FD_SINCE: u32 = 1;
-    /// Minimum interface version for the `finished` message (XML `since`).
-    pub const FINISHED_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Shares the DRM file descriptor
@@ -7809,11 +7481,7 @@ pub mod ext_idle_notifier_v1 {
     impl crate::object::IdToObject for ExtIdleNotifierV1Id {
         type Object = crate::wayland_objects::ext_idle_notifier_v1::ExtIdleNotifierV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_idle_notification` message (XML `since`).
-    pub const GET_IDLE_NOTIFICATION_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_input_idle_notification` message (XML `since`).
+    /// Minimum interface version for the `get_input_idle_notification` message (XML `since` / `version`).
     pub const GET_INPUT_IDLE_NOTIFICATION_SINCE: u32 = 2;
     #[derive(Debug)]
     pub enum Request {
@@ -7909,8 +7577,6 @@ pub mod ext_idle_notification_v1 {
     impl crate::object::IdToObject for ExtIdleNotificationV1Id {
         type Object = crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the notification object
@@ -7929,10 +7595,6 @@ pub mod ext_idle_notification_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `idled` message (XML `since`).
-    pub const IDLED_SINCE: u32 = 1;
-    /// Minimum interface version for the `resumed` message (XML `since`).
-    pub const RESUMED_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Notification object is idle
@@ -7985,10 +7647,6 @@ pub mod ext_session_lock_manager_v1 {
     impl crate::object::IdToObject for ExtSessionLockManagerV1Id {
         type Object = crate::wayland_objects::ext_session_lock_manager_v1::ExtSessionLockManagerV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `lock` message (XML `since`).
-    pub const LOCK_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the session lock manager object
@@ -8078,12 +7736,6 @@ pub mod ext_session_lock_v1 {
     impl crate::object::IdToObject for ExtSessionLockV1Id {
         type Object = crate::wayland_objects::ext_session_lock_v1::ExtSessionLockV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_lock_surface` message (XML `since`).
-    pub const GET_LOCK_SURFACE_SINCE: u32 = 1;
-    /// Minimum interface version for the `unlock_and_destroy` message (XML `since`).
-    pub const UNLOCK_AND_DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the session lock
@@ -8152,10 +7804,6 @@ pub mod ext_session_lock_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `locked` message (XML `since`).
-    pub const LOCKED_SINCE: u32 = 1;
-    /// Minimum interface version for the `finished` message (XML `since`).
-    pub const FINISHED_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Session successfully locked
@@ -8257,10 +7905,6 @@ pub mod ext_session_lock_surface_v1 {
     impl crate::object::IdToObject for ExtSessionLockSurfaceV1Id {
         type Object = crate::wayland_objects::ext_session_lock_surface_v1::ExtSessionLockSurfaceV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `ack_configure` message (XML `since`).
-    pub const ACK_CONFIGURE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the lock surface object
@@ -8318,8 +7962,6 @@ pub mod ext_session_lock_surface_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `configure` message (XML `since`).
-    pub const CONFIGURE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// The client should resize its surface
@@ -8384,10 +8026,6 @@ pub mod wp_fractional_scale_manager_v1 {
         type Object =
             crate::wayland_objects::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_fractional_scale` message (XML `since`).
-    pub const GET_FRACTIONAL_SCALE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Unbind the fractional surface scale interface
@@ -8441,8 +8079,6 @@ pub mod wp_fractional_scale_v1 {
     impl crate::object::IdToObject for WpFractionalScaleV1Id {
         type Object = crate::wayland_objects::wp_fractional_scale_v1::WpFractionalScaleV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Remove surface scale information for surface
@@ -8462,8 +8098,6 @@ pub mod wp_fractional_scale_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `preferred_scale` message (XML `since`).
-    pub const PREFERRED_SCALE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Notify of new preferred scale
@@ -8512,10 +8146,6 @@ pub mod wp_single_pixel_buffer_manager_v1 {
         type Object =
             crate::wayland_objects::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `create_u32_rgba_buffer` message (XML `since`).
-    pub const CREATE_U32_RGBA_BUFFER_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the manager
@@ -8602,10 +8232,6 @@ pub mod wp_tearing_control_manager_v1 {
         type Object =
             crate::wayland_objects::wp_tearing_control_manager_v1::WpTearingControlManagerV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_tearing_control` message (XML `since`).
-    pub const GET_TEARING_CONTROL_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy tearing control factory object
@@ -8661,10 +8287,6 @@ pub mod wp_tearing_control_v1 {
     impl crate::object::IdToObject for WpTearingControlV1Id {
         type Object = crate::wayland_objects::wp_tearing_control_v1::WpTearingControlV1;
     }
-    /// Minimum interface version for the `set_presentation_hint` message (XML `since`).
-    pub const SET_PRESENTATION_HINT_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Set presentation hint
@@ -8728,12 +8350,6 @@ pub mod xdg_activation_v1 {
     impl crate::object::IdToObject for XdgActivationV1Id {
         type Object = crate::wayland_objects::xdg_activation_v1::XdgActivationV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_activation_token` message (XML `since`).
-    pub const GET_ACTIVATION_TOKEN_SINCE: u32 = 1;
-    /// Minimum interface version for the `activate` message (XML `since`).
-    pub const ACTIVATE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_activation object
@@ -8803,16 +8419,6 @@ pub mod xdg_activation_token_v1 {
     impl crate::object::IdToObject for XdgActivationTokenV1Id {
         type Object = crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1;
     }
-    /// Minimum interface version for the `set_serial` message (XML `since`).
-    pub const SET_SERIAL_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_app_id` message (XML `since`).
-    pub const SET_APP_ID_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_surface` message (XML `since`).
-    pub const SET_SURFACE_SINCE: u32 = 1;
-    /// Minimum interface version for the `commit` message (XML `since`).
-    pub const COMMIT_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Specifies the seat and serial of the activating event
@@ -8884,8 +8490,6 @@ pub mod xdg_activation_token_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `done` message (XML `since`).
-    pub const DONE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// The exported activation token
@@ -8947,10 +8551,6 @@ pub mod xwayland_shell_v1 {
     impl crate::object::IdToObject for XwaylandShellV1Id {
         type Object = crate::wayland_objects::xwayland_shell_v1::XwaylandShellV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_xwayland_surface` message (XML `since`).
-    pub const GET_XWAYLAND_SURFACE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the Xwayland shell object
@@ -9010,10 +8610,6 @@ pub mod xwayland_surface_v1 {
     impl crate::object::IdToObject for XwaylandSurfaceV1Id {
         type Object = crate::wayland_objects::xwayland_surface_v1::XwaylandSurfaceV1;
     }
-    /// Minimum interface version for the `set_serial` message (XML `since`).
-    pub const SET_SERIAL_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Associates a Xwayland window to a wl_surface
@@ -9092,12 +8688,6 @@ pub mod wp_cursor_shape_manager_v1 {
     impl crate::object::IdToObject for WpCursorShapeManagerV1Id {
         type Object = crate::wayland_objects::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_pointer` message (XML `since`).
-    pub const GET_POINTER_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_tablet_tool_v2` message (XML `since`).
-    pub const GET_TABLET_TOOL_V2_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the manager
@@ -9149,10 +8739,6 @@ pub mod wp_cursor_shape_device_v1 {
     impl crate::object::IdToObject for WpCursorShapeDeviceV1Id {
         type Object = crate::wayland_objects::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_shape` message (XML `since`).
-    pub const SET_SHAPE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the cursor shape device
@@ -9313,12 +8899,6 @@ pub mod wp_linux_drm_syncobj_manager_v1 {
         type Object =
             crate::wayland_objects::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_surface` message (XML `since`).
-    pub const GET_SURFACE_SINCE: u32 = 1;
-    /// Minimum interface version for the `import_timeline` message (XML `since`).
-    pub const IMPORT_TIMELINE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy explicit synchronization factory object
@@ -9396,8 +8976,6 @@ pub mod wp_linux_drm_syncobj_timeline_v1 {
         type Object =
             crate::wayland_objects::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the timeline
@@ -9461,12 +9039,6 @@ pub mod wp_linux_drm_syncobj_surface_v1 {
         type Object =
             crate::wayland_objects::wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_acquire_point` message (XML `since`).
-    pub const SET_ACQUIRE_POINT_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_release_point` message (XML `since`).
-    pub const SET_RELEASE_POINT_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the surface synchronization object
@@ -9681,13 +9253,9 @@ pub mod zwp_linux_dmabuf_v1 {
     impl crate::object::IdToObject for ZwpLinuxDmabufV1Id {
         type Object = crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `create_params` message (XML `since`).
-    pub const CREATE_PARAMS_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_default_feedback` message (XML `since`).
+    /// Minimum interface version for the `get_default_feedback` message (XML `since` / `version`).
     pub const GET_DEFAULT_FEEDBACK_SINCE: u32 = 4;
-    /// Minimum interface version for the `get_surface_feedback` message (XML `since`).
+    /// Minimum interface version for the `get_surface_feedback` message (XML `since` / `version`).
     pub const GET_SURFACE_FEEDBACK_SINCE: u32 = 4;
     #[derive(Debug)]
     pub enum Request {
@@ -9737,9 +9305,7 @@ pub mod zwp_linux_dmabuf_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `format` message (XML `since`).
-    pub const FORMAT_SINCE: u32 = 1;
-    /// Minimum interface version for the `modifier` message (XML `since`).
+    /// Minimum interface version for the `modifier` message (XML `since` / `version`).
     pub const MODIFIER_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Event {
@@ -9845,13 +9411,7 @@ pub mod zwp_linux_buffer_params_v1 {
     impl crate::object::IdToObject for ZwpLinuxBufferParamsV1Id {
         type Object = crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `add` message (XML `since`).
-    pub const ADD_SINCE: u32 = 1;
-    /// Minimum interface version for the `create` message (XML `since`).
-    pub const CREATE_SINCE: u32 = 1;
-    /// Minimum interface version for the `create_immed` message (XML `since`).
+    /// Minimum interface version for the `create_immed` message (XML `since` / `version`).
     pub const CREATE_IMMED_SINCE: u32 = 2;
     #[derive(Debug)]
     pub enum Request {
@@ -10036,10 +9596,6 @@ pub mod zwp_linux_buffer_params_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `created` message (XML `since`).
-    pub const CREATED_SINCE: u32 = 1;
-    /// Minimum interface version for the `failed` message (XML `since`).
-    pub const FAILED_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Buffer creation succeeded
@@ -10151,8 +9707,6 @@ pub mod zwp_linux_dmabuf_feedback_v1 {
         type Object =
             crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the feedback object
@@ -10172,20 +9726,6 @@ pub mod zwp_linux_dmabuf_feedback_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `done` message (XML `since`).
-    pub const DONE_SINCE: u32 = 1;
-    /// Minimum interface version for the `format_table` message (XML `since`).
-    pub const FORMAT_TABLE_SINCE: u32 = 1;
-    /// Minimum interface version for the `main_device` message (XML `since`).
-    pub const MAIN_DEVICE_SINCE: u32 = 1;
-    /// Minimum interface version for the `tranche_done` message (XML `since`).
-    pub const TRANCHE_DONE_SINCE: u32 = 1;
-    /// Minimum interface version for the `tranche_target_device` message (XML `since`).
-    pub const TRANCHE_TARGET_DEVICE_SINCE: u32 = 1;
-    /// Minimum interface version for the `tranche_formats` message (XML `since`).
-    pub const TRANCHE_FORMATS_SINCE: u32 = 1;
-    /// Minimum interface version for the `tranche_flags` message (XML `since`).
-    pub const TRANCHE_FLAGS_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// All feedback has been sent
@@ -10415,10 +9955,6 @@ pub mod zwp_linux_explicit_synchronization_v1 {
     impl crate::object::IdToObject for ZwpLinuxExplicitSynchronizationV1Id {
         type Object = crate::wayland_objects::zwp_linux_explicit_synchronization_v1::ZwpLinuxExplicitSynchronizationV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_synchronization` message (XML `since`).
-    pub const GET_SYNCHRONIZATION_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy explicit synchronization factory object
@@ -10510,12 +10046,6 @@ pub mod zwp_linux_surface_synchronization_v1 {
     impl crate::object::IdToObject for ZwpLinuxSurfaceSynchronizationV1Id {
         type Object = crate::wayland_objects::zwp_linux_surface_synchronization_v1::ZwpLinuxSurfaceSynchronizationV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_acquire_fence` message (XML `since`).
-    pub const SET_ACQUIRE_FENCE_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_release` message (XML `since`).
-    pub const GET_RELEASE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy synchronization object
@@ -10644,10 +10174,6 @@ pub mod zwp_linux_buffer_release_v1 {
     impl crate::object::IdToObject for ZwpLinuxBufferReleaseV1Id {
         type Object = crate::wayland_objects::zwp_linux_buffer_release_v1::ZwpLinuxBufferReleaseV1;
     }
-    /// Minimum interface version for the `fenced_release` message (XML `since`).
-    pub const FENCED_RELEASE_SINCE: u32 = 1;
-    /// Minimum interface version for the `immediate_release` message (XML `since`).
-    pub const IMMEDIATE_RELEASE_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Release buffer with fence
@@ -10719,10 +10245,6 @@ pub mod zwp_tablet_manager_v2 {
     impl crate::object::IdToObject for ZwpTabletManagerV2Id {
         type Object = crate::wayland_objects::zwp_tablet_manager_v2::ZwpTabletManagerV2;
     }
-    /// Minimum interface version for the `get_tablet_seat` message (XML `since`).
-    pub const GET_TABLET_SEAT_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Get the tablet seat
@@ -10768,8 +10290,6 @@ pub mod zwp_tablet_seat_v2 {
     impl crate::object::IdToObject for ZwpTabletSeatV2Id {
         type Object = crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Release the memory for the tablet seat object
@@ -10789,12 +10309,6 @@ pub mod zwp_tablet_seat_v2 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `tablet_added` message (XML `since`).
-    pub const TABLET_ADDED_SINCE: u32 = 1;
-    /// Minimum interface version for the `tool_added` message (XML `since`).
-    pub const TOOL_ADDED_SINCE: u32 = 1;
-    /// Minimum interface version for the `pad_added` message (XML `since`).
-    pub const PAD_ADDED_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// New device notification
@@ -10894,10 +10408,6 @@ pub mod zwp_tablet_tool_v2 {
     impl crate::object::IdToObject for ZwpTabletToolV2Id {
         type Object = crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2;
     }
-    /// Minimum interface version for the `set_cursor` message (XML `since`).
-    pub const SET_CURSOR_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Set the tablet tool's surface
@@ -10963,44 +10473,6 @@ pub mod zwp_tablet_tool_v2 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `type` message (XML `since`).
-    pub const TYPE_SINCE: u32 = 1;
-    /// Minimum interface version for the `hardware_serial` message (XML `since`).
-    pub const HARDWARE_SERIAL_SINCE: u32 = 1;
-    /// Minimum interface version for the `hardware_id_wacom` message (XML `since`).
-    pub const HARDWARE_ID_WACOM_SINCE: u32 = 1;
-    /// Minimum interface version for the `capability` message (XML `since`).
-    pub const CAPABILITY_SINCE: u32 = 1;
-    /// Minimum interface version for the `done` message (XML `since`).
-    pub const DONE_SINCE: u32 = 1;
-    /// Minimum interface version for the `removed` message (XML `since`).
-    pub const REMOVED_SINCE: u32 = 1;
-    /// Minimum interface version for the `proximity_in` message (XML `since`).
-    pub const PROXIMITY_IN_SINCE: u32 = 1;
-    /// Minimum interface version for the `proximity_out` message (XML `since`).
-    pub const PROXIMITY_OUT_SINCE: u32 = 1;
-    /// Minimum interface version for the `down` message (XML `since`).
-    pub const DOWN_SINCE: u32 = 1;
-    /// Minimum interface version for the `up` message (XML `since`).
-    pub const UP_SINCE: u32 = 1;
-    /// Minimum interface version for the `motion` message (XML `since`).
-    pub const MOTION_SINCE: u32 = 1;
-    /// Minimum interface version for the `pressure` message (XML `since`).
-    pub const PRESSURE_SINCE: u32 = 1;
-    /// Minimum interface version for the `distance` message (XML `since`).
-    pub const DISTANCE_SINCE: u32 = 1;
-    /// Minimum interface version for the `tilt` message (XML `since`).
-    pub const TILT_SINCE: u32 = 1;
-    /// Minimum interface version for the `rotation` message (XML `since`).
-    pub const ROTATION_SINCE: u32 = 1;
-    /// Minimum interface version for the `slider` message (XML `since`).
-    pub const SLIDER_SINCE: u32 = 1;
-    /// Minimum interface version for the `wheel` message (XML `since`).
-    pub const WHEEL_SINCE: u32 = 1;
-    /// Minimum interface version for the `button` message (XML `since`).
-    pub const BUTTON_SINCE: u32 = 1;
-    /// Minimum interface version for the `frame` message (XML `since`).
-    pub const FRAME_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Tool type
@@ -11466,8 +10938,6 @@ pub mod zwp_tablet_v2 {
     impl crate::object::IdToObject for ZwpTabletV2Id {
         type Object = crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the tablet object
@@ -11486,16 +10956,6 @@ pub mod zwp_tablet_v2 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `name` message (XML `since`).
-    pub const NAME_SINCE: u32 = 1;
-    /// Minimum interface version for the `id` message (XML `since`).
-    pub const ID_SINCE: u32 = 1;
-    /// Minimum interface version for the `path` message (XML `since`).
-    pub const PATH_SINCE: u32 = 1;
-    /// Minimum interface version for the `done` message (XML `since`).
-    pub const DONE_SINCE: u32 = 1;
-    /// Minimum interface version for the `removed` message (XML `since`).
-    pub const REMOVED_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Tablet device name
@@ -11615,10 +11075,6 @@ pub mod zwp_tablet_pad_ring_v2 {
     impl crate::object::IdToObject for ZwpTabletPadRingV2Id {
         type Object = crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2;
     }
-    /// Minimum interface version for the `set_feedback` message (XML `since`).
-    pub const SET_FEEDBACK_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Set compositor feedback
@@ -11665,14 +11121,6 @@ pub mod zwp_tablet_pad_ring_v2 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `source` message (XML `since`).
-    pub const SOURCE_SINCE: u32 = 1;
-    /// Minimum interface version for the `angle` message (XML `since`).
-    pub const ANGLE_SINCE: u32 = 1;
-    /// Minimum interface version for the `stop` message (XML `since`).
-    pub const STOP_SINCE: u32 = 1;
-    /// Minimum interface version for the `frame` message (XML `since`).
-    pub const FRAME_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Ring event source
@@ -11796,10 +11244,6 @@ pub mod zwp_tablet_pad_strip_v2 {
     impl crate::object::IdToObject for ZwpTabletPadStripV2Id {
         type Object = crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2;
     }
-    /// Minimum interface version for the `set_feedback` message (XML `since`).
-    pub const SET_FEEDBACK_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Set compositor feedback
@@ -11846,14 +11290,6 @@ pub mod zwp_tablet_pad_strip_v2 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `source` message (XML `since`).
-    pub const SOURCE_SINCE: u32 = 1;
-    /// Minimum interface version for the `position` message (XML `since`).
-    pub const POSITION_SINCE: u32 = 1;
-    /// Minimum interface version for the `stop` message (XML `since`).
-    pub const STOP_SINCE: u32 = 1;
-    /// Minimum interface version for the `frame` message (XML `since`).
-    pub const FRAME_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Strip event source
@@ -11995,8 +11431,6 @@ pub mod zwp_tablet_pad_group_v2 {
     impl crate::object::IdToObject for ZwpTabletPadGroupV2Id {
         type Object = crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the pad object
@@ -12016,18 +11450,6 @@ pub mod zwp_tablet_pad_group_v2 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `buttons` message (XML `since`).
-    pub const BUTTONS_SINCE: u32 = 1;
-    /// Minimum interface version for the `ring` message (XML `since`).
-    pub const RING_SINCE: u32 = 1;
-    /// Minimum interface version for the `strip` message (XML `since`).
-    pub const STRIP_SINCE: u32 = 1;
-    /// Minimum interface version for the `modes` message (XML `since`).
-    pub const MODES_SINCE: u32 = 1;
-    /// Minimum interface version for the `done` message (XML `since`).
-    pub const DONE_SINCE: u32 = 1;
-    /// Minimum interface version for the `mode_switch` message (XML `since`).
-    pub const MODE_SWITCH_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Buttons announced
@@ -12204,10 +11626,6 @@ pub mod zwp_tablet_pad_v2 {
     impl crate::object::IdToObject for ZwpTabletPadV2Id {
         type Object = crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2;
     }
-    /// Minimum interface version for the `set_feedback` message (XML `since`).
-    pub const SET_FEEDBACK_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Set compositor feedback
@@ -12266,22 +11684,6 @@ pub mod zwp_tablet_pad_v2 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `group` message (XML `since`).
-    pub const GROUP_SINCE: u32 = 1;
-    /// Minimum interface version for the `path` message (XML `since`).
-    pub const PATH_SINCE: u32 = 1;
-    /// Minimum interface version for the `buttons` message (XML `since`).
-    pub const BUTTONS_SINCE: u32 = 1;
-    /// Minimum interface version for the `done` message (XML `since`).
-    pub const DONE_SINCE: u32 = 1;
-    /// Minimum interface version for the `button` message (XML `since`).
-    pub const BUTTON_SINCE: u32 = 1;
-    /// Minimum interface version for the `enter` message (XML `since`).
-    pub const ENTER_SINCE: u32 = 1;
-    /// Minimum interface version for the `leave` message (XML `since`).
-    pub const LEAVE_SINCE: u32 = 1;
-    /// Minimum interface version for the `removed` message (XML `since`).
-    pub const REMOVED_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Group announced
@@ -12447,10 +11849,6 @@ pub mod zxdg_output_manager_v1 {
     impl crate::object::IdToObject for ZxdgOutputManagerV1Id {
         type Object = crate::wayland_objects::zxdg_output_manager_v1::ZxdgOutputManagerV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_xdg_output` message (XML `since`).
-    pub const GET_XDG_OUTPUT_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_output_manager object
@@ -12499,8 +11897,6 @@ pub mod zxdg_output_v1 {
     impl crate::object::IdToObject for ZxdgOutputV1Id {
         type Object = crate::wayland_objects::zxdg_output_v1::ZxdgOutputV1;
     }
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_output object
@@ -12520,15 +11916,9 @@ pub mod zxdg_output_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `logical_position` message (XML `since`).
-    pub const LOGICAL_POSITION_SINCE: u32 = 1;
-    /// Minimum interface version for the `logical_size` message (XML `since`).
-    pub const LOGICAL_SIZE_SINCE: u32 = 1;
-    /// Minimum interface version for the `done` message (XML `since`).
-    pub const DONE_SINCE: u32 = 1;
-    /// Minimum interface version for the `name` message (XML `since`).
+    /// Minimum interface version for the `name` message (XML `since` / `version`).
     pub const NAME_SINCE: u32 = 2;
-    /// Minimum interface version for the `description` message (XML `since`).
+    /// Minimum interface version for the `description` message (XML `since` / `version`).
     pub const DESCRIPTION_SINCE: u32 = 2;
     #[derive(Debug)]
     pub enum Event {
@@ -12704,10 +12094,6 @@ pub mod zwlr_gamma_control_manager_v1 {
         type Object =
             crate::wayland_objects::zwlr_gamma_control_manager_v1::ZwlrGammaControlManagerV1;
     }
-    /// Minimum interface version for the `get_gamma_control` message (XML `since`).
-    pub const GET_GAMMA_CONTROL_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Get a gamma control for an output
@@ -12756,10 +12142,6 @@ pub mod zwlr_gamma_control_v1 {
     impl crate::object::IdToObject for ZwlrGammaControlV1Id {
         type Object = crate::wayland_objects::zwlr_gamma_control_v1::ZwlrGammaControlV1;
     }
-    /// Minimum interface version for the `set_gamma` message (XML `since`).
-    pub const SET_GAMMA_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Set the gamma table
@@ -12793,10 +12175,6 @@ pub mod zwlr_gamma_control_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `gamma_size` message (XML `since`).
-    pub const GAMMA_SIZE_SINCE: u32 = 1;
-    /// Minimum interface version for the `failed` message (XML `since`).
-    pub const FAILED_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Size of gamma ramps
@@ -12866,9 +12244,7 @@ pub mod zwlr_layer_shell_v1 {
     impl crate::object::IdToObject for ZwlrLayerShellV1Id {
         type Object = crate::wayland_objects::zwlr_layer_shell_v1::ZwlrLayerShellV1;
     }
-    /// Minimum interface version for the `get_layer_surface` message (XML `since`).
-    pub const GET_LAYER_SURFACE_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
+    /// Minimum interface version for the `destroy` message (XML `since` / `version`).
     pub const DESTROY_SINCE: u32 = 3;
     #[derive(Debug)]
     pub enum Request {
@@ -12981,25 +12357,9 @@ pub mod zwlr_layer_surface_v1 {
     impl crate::object::IdToObject for ZwlrLayerSurfaceV1Id {
         type Object = crate::wayland_objects::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
     }
-    /// Minimum interface version for the `set_size` message (XML `since`).
-    pub const SET_SIZE_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_anchor` message (XML `since`).
-    pub const SET_ANCHOR_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_exclusive_zone` message (XML `since`).
-    pub const SET_EXCLUSIVE_ZONE_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_margin` message (XML `since`).
-    pub const SET_MARGIN_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_keyboard_interactivity` message (XML `since`).
-    pub const SET_KEYBOARD_INTERACTIVITY_SINCE: u32 = 1;
-    /// Minimum interface version for the `get_popup` message (XML `since`).
-    pub const GET_POPUP_SINCE: u32 = 1;
-    /// Minimum interface version for the `ack_configure` message (XML `since`).
-    pub const ACK_CONFIGURE_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
-    /// Minimum interface version for the `set_layer` message (XML `since`).
+    /// Minimum interface version for the `set_layer` message (XML `since` / `version`).
     pub const SET_LAYER_SINCE: u32 = 2;
-    /// Minimum interface version for the `set_exclusive_edge` message (XML `since`).
+    /// Minimum interface version for the `set_exclusive_edge` message (XML `since` / `version`).
     pub const SET_EXCLUSIVE_EDGE_SINCE: u32 = 5;
     #[derive(Debug)]
     pub enum Request {
@@ -13167,10 +12527,6 @@ pub mod zwlr_layer_surface_v1 {
             Ok(request)
         }
     }
-    /// Minimum interface version for the `configure` message (XML `since`).
-    pub const CONFIGURE_SINCE: u32 = 1;
-    /// Minimum interface version for the `closed` message (XML `since`).
-    pub const CLOSED_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Event {
         /// Suggest a surface change
@@ -13325,18 +12681,12 @@ pub mod hyprland_ctm_control_manager_v1 {
         for crate::wayland_objects::hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1
     {
         const INTERFACE_NAME: &'static str = "hyprland_ctm_control_manager_v1";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 2;
     }
     impl crate::object::IdToObject for HyprlandCtmControlManagerV1Id {
         type Object =
             crate::wayland_objects::hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1;
     }
-    /// Minimum interface version for the `set_ctm_for_output` message (XML `since`).
-    pub const SET_CTM_FOR_OUTPUT_SINCE: u32 = 1;
-    /// Minimum interface version for the `commit` message (XML `since`).
-    pub const COMMIT_SINCE: u32 = 1;
-    /// Minimum interface version for the `destroy` message (XML `since`).
-    pub const DESTROY_SINCE: u32 = 1;
     #[derive(Debug)]
     pub enum Request {
         /// Set the CTM of an output
@@ -13402,6 +12752,38 @@ pub mod hyprland_ctm_control_manager_v1 {
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
+        }
+    }
+    /// Minimum interface version for the `blocked` message (XML `since` / `version`).
+    pub const BLOCKED_SINCE: u32 = 2;
+    #[derive(Debug)]
+    pub enum Event {
+        ///
+        ///
+        /// This event is sent if another manager was bound by any client
+        /// at the time the current manager was bound.
+        /// Any set_ctm_for_output requests from a blocked manager will be
+        /// silently ignored by the compositor.
+        ///
+        /// The client should destroy the manager after receiving this event.
+        Blocked,
+    }
+    impl EventWriter
+        for crate::wayland_objects::hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Blocked {} => {
+                    let mut raw = RawEvent::new(self.id(), 0, 0);
+                    raw
+                }
+            }
         }
     }
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]

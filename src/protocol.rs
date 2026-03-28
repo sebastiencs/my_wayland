@@ -254,16 +254,20 @@ fn write_parser(f: &mut impl Write, this_interface: &str, msgs: &[Message]) -> s
     Ok(())
 }
 
-/// Emits `pub const NAME_SINCE: u32 = N` for each wire message (from XML `since`, default 1).
+/// Emits `pub const NAME_SINCE: u32 = N` for each wire message (effective introduced version).
 fn write_message_since_constants(f: &mut impl Write, msgs: &[Message]) -> std::io::Result<()> {
     for msg in msgs {
-        let const_name = format!("{}_SINCE", msg.name.to_shouty_snake_case());
-        writeln!(
-            f,
-            "  /// Minimum interface version for the `{}` message (XML `since`).",
-            msg.name
-        )?;
-        writeln!(f, "  pub const {}: u32 = {};", const_name, msg.since)?;
+        let v = msg.effective_introduced_version();
+        // ignore since = 1
+        if v > 1 {
+            let const_name = format!("{}_SINCE", msg.name.to_shouty_snake_case());
+            writeln!(
+                f,
+                "  /// Minimum interface version for the `{}` message (XML `since` / `version`).",
+                msg.name
+            )?;
+            writeln!(f, "  pub const {}: u32 = {};", const_name, v)?;
+        }
     }
     Ok(())
 }
@@ -380,10 +384,14 @@ pub fn gen() -> std::io::Result<()> {
         // "/usr/share/wlr-protocols/unstable/wlr-output-power-management-unstable-v1.xml",
         // "/usr/share/wlr-protocols/unstable/wlr-virtual-pointer-unstable-v1.xml",
 
-        "/usr/share/hyprland-protocols/protocols/hyprland-ctm-control-v1.xml",
-        // "/usr/share/hyprland-protocols/protocols/hyprland-focus-grab-v1.xml",
-        // "/usr/share/hyprland-protocols/protocols/hyprland-global-shortcuts-v1.xml",
-        // "/usr/share/hyprland-protocols/protocols/hyprland-toplevel-export-v1.xml",
+        "/home/sebastien/github/hyprland-protocols/protocols/hyprland-ctm-control-v1.xml",
+        // "/home/sebastien/github/hyprland-protocols/protocols/hyprland-global-shortcuts-v1.xml",
+        // "/home/sebastien/github/hyprland-protocols/protocols/hyprland-lock-notify-v1.xml",
+        // "/home/sebastien/github/hyprland-protocols/protocols/hyprland-toplevel-export-v1.xml",
+        // "/home/sebastien/github/hyprland-protocols/protocols/hyprland-focus-grab-v1.xml",
+        // "/home/sebastien/github/hyprland-protocols/protocols/hyprland-input-capture-v1.xml",
+        // "/home/sebastien/github/hyprland-protocols/protocols/hyprland-surface-v1.xml",
+        // "/home/sebastien/github/hyprland-protocols/protocols/hyprland-toplevel-mapping-v1.xml",
     ];
 
     let out_path =

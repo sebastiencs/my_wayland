@@ -454,11 +454,25 @@ pub struct OutputMode {
     pub refresh_millihz: i32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorTransformMatrix {
+    pub values: [f32; 9],
+}
+
+impl ColorTransformMatrix {
+    pub const fn identity() -> Self {
+        Self { values: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Output {
     pub backend: BackendOutputRef,
     pub drm_crtc_id: u32,
     pub global_name: Option<GlobalName>,
+    pub gamma_lut_size: u32,
+    pub ctm_supported: bool,
+    pub gamma_control_object_id: Option<ObjectId>,
     pub x: i32,
     pub y: i32,
     pub physical_width: i32,
@@ -480,6 +494,9 @@ impl Output {
             backend,
             drm_crtc_id,
             global_name: None,
+            gamma_lut_size: 0,
+            ctm_supported: false,
+            gamma_control_object_id: None,
             x: 0,
             y: 0,
             physical_width: 0,
@@ -509,6 +526,8 @@ impl Output {
     pub fn refresh_from_backend(&mut self, drm: &Drm) {
         let Some(in_use) = drm.output_connector_in_use(self.drm_crtc_id) else {
             self.enabled = false;
+            self.gamma_lut_size = 0;
+            self.ctm_supported = false;
             return;
         };
         let connector = &in_use.connector;
@@ -539,6 +558,8 @@ impl Output {
         self.name = name;
         self.description = description;
         self.enabled = true;
+        self.gamma_lut_size = drm.output_gamma_size(self.drm_crtc_id);
+        self.ctm_supported = drm.output_supports_ctm(self.drm_crtc_id);
         self.current_mode = current_mode;
         self.preferred_mode = preferred_mode;
     }
@@ -1055,6 +1076,104 @@ impl State {
         self.outputs.try_get(output_id).map(Output::drm_crtc_id)
     }
 
+    pub fn output_gamma_lut_size(&self, output_id: OutputId) -> Option<u32> {
+        self.outputs
+            .try_get(output_id)
+            .map(|output| output.gamma_lut_size)
+    }
+
+    pub fn output_supports_gamma_control(&self, output_id: OutputId) -> bool {
+        self.output_gamma_lut_size(output_id)
+            .is_some_and(|size| size > 0)
+    }
+
+    pub fn output_supports_ctm_control(&self, output_id: OutputId) -> bool {
+        self.outputs
+            .try_get(output_id)
+            .is_some_and(|output| output.ctm_supported)
+    }
+
+    pub fn any_output_supports_gamma_control(&self) -> bool {
+        self.outputs
+            .iter()
+            .any(|(_, output)| output.enabled && output.gamma_lut_size > 0)
+    }
+
+    pub fn any_output_supports_ctm_control(&self) -> bool {
+        self.outputs
+            .iter()
+            .any(|(_, output)| output.enabled && output.ctm_supported)
+    }
+
+    pub fn client_allows_ctm_control(&self, _client: &crate::clients::Client) -> bool {
+        true
+    }
+
+    pub fn gamma_control_owner(&self, output_id: OutputId) -> Option<ObjectId> {
+        self.outputs
+            .try_get(output_id)
+            .and_then(|output| output.gamma_control_object_id)
+    }
+
+    pub fn set_gamma_control_owner(
+        &mut self,
+        output_id: OutputId,
+        object_id: ObjectId,
+    ) -> Result<(), std::io::Error> {
+        let Some(output) = self.outputs.try_get_mut(output_id) else {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "output disappeared"));
+        };
+        output.gamma_control_object_id = Some(object_id);
+        Ok(())
+    }
+
+    pub fn clear_gamma_control_owner(&mut self, output_id: OutputId, object_id: ObjectId) {
+        let Some(output) = self.outputs.try_get_mut(output_id) else {
+            return;
+        };
+        if output.gamma_control_object_id == Some(object_id) {
+            output.gamma_control_object_id = None;
+        }
+    }
+
+    pub fn set_output_gamma_lut(
+        &mut self,
+        output_id: OutputId,
+        lut: Option<Vec<u16>>,
+    ) -> Result<(), std::io::Error> {
+        let Some(output) = self.outputs.try_get(output_id) else {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "output disappeared"));
+        };
+        let backend = output.backend;
+        let drm_crtc_id = output.drm_crtc_id;
+        let Some(drm) = self.drm.try_get_mut(backend.drm_id) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "backend disappeared for output",
+            ));
+        };
+        drm.set_output_gamma_lut(drm_crtc_id, lut)
+    }
+
+    pub fn set_output_ctm(
+        &mut self,
+        output_id: OutputId,
+        ctm: Option<ColorTransformMatrix>,
+    ) -> Result<(), std::io::Error> {
+        let Some(output) = self.outputs.try_get(output_id) else {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "output disappeared"));
+        };
+        let backend = output.backend;
+        let drm_crtc_id = output.drm_crtc_id;
+        let Some(drm) = self.drm.try_get_mut(backend.drm_id) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "backend disappeared for output",
+            ));
+        };
+        drm.set_output_ctm(drm_crtc_id, ctm)
+    }
+
     pub fn output_ids_for_drm(&self, drm_id: DrmId) -> Vec<OutputId> {
         self.outputs
             .iter()
@@ -1204,6 +1323,9 @@ mod tests {
             backend,
             drm_crtc_id,
             global_name: None,
+            gamma_lut_size: 0,
+            ctm_supported: false,
+            gamma_control_object_id: None,
             x,
             y,
             physical_width: 0,
@@ -1327,6 +1449,9 @@ mod tests {
             backend: BackendOutputRef::new(DrmId::from(1usize)),
             drm_crtc_id: 1,
             global_name: None,
+            gamma_lut_size: 0,
+            ctm_supported: false,
+            gamma_control_object_id: None,
             x: -100,
             y: 20,
             physical_width: 0,
@@ -1345,6 +1470,9 @@ mod tests {
             backend: BackendOutputRef::new(DrmId::from(2usize)),
             drm_crtc_id: 2,
             global_name: None,
+            gamma_lut_size: 0,
+            ctm_supported: false,
+            gamma_control_object_id: None,
             x: 0,
             y: 0,
             physical_width: 0,
@@ -1373,6 +1501,9 @@ mod tests {
             backend: BackendOutputRef::new(DrmId::from(1usize)),
             drm_crtc_id: 1,
             global_name: None,
+            gamma_lut_size: 0,
+            ctm_supported: false,
+            gamma_control_object_id: None,
             x: 0,
             y: 0,
             physical_width: 0,
@@ -1391,6 +1522,9 @@ mod tests {
             backend: BackendOutputRef::new(DrmId::from(2usize)),
             drm_crtc_id: 2,
             global_name: None,
+            gamma_lut_size: 0,
+            ctm_supported: false,
+            gamma_control_object_id: None,
             x: 100,
             y: 0,
             physical_width: 0,
@@ -1419,6 +1553,9 @@ mod tests {
             backend: BackendOutputRef::new(DrmId::from(1usize)),
             drm_crtc_id: 1,
             global_name: None,
+            gamma_lut_size: 0,
+            ctm_supported: false,
+            gamma_control_object_id: None,
             x: 0,
             y: 0,
             physical_width: 0,
@@ -1437,6 +1574,9 @@ mod tests {
             backend: BackendOutputRef::new(DrmId::from(2usize)),
             drm_crtc_id: 2,
             global_name: None,
+            gamma_lut_size: 0,
+            ctm_supported: false,
+            gamma_control_object_id: None,
             x: 200,
             y: 0,
             physical_width: 0,

@@ -82,6 +82,12 @@ impl Globals {
             .any(|(_, global)| global.interface().0 == interface)
     }
 
+    pub fn name_for_interface(&self, interface: &str) -> Option<GlobalName> {
+        self.map
+            .iter()
+            .find_map(|(name, global)| (global.interface().0 == interface).then_some(name))
+    }
+
     /// Take a global out of the registry for binding. Fails if `name` is not a live global slot.
     pub fn try_grab_global(&mut self, name: u32) -> Option<Grab<GlobalName, Box<dyn Global>>> {
         let key = GlobalName::from(name as usize);
