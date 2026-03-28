@@ -2128,7 +2128,14 @@ impl Model for Client {
                     self.objects.remove(&wid);
                     let _ = state.remove_object(object_id);
                 }
-                let cursor_changed = state.seat.remove_client(self.id);
+                let seat_removal = state.seat.remove_client(self.id);
+                if seat_removal.interactive_grab_cleared {
+                    crate::seat::recover_pointer_after_interactive_grab_loss(
+                        state,
+                        &mut dispatcher,
+                        0,
+                    );
+                }
                 if state
                     .seat
                     .active_drag()
@@ -2137,7 +2144,10 @@ impl Model for Client {
                     crate::seat::cancel_active_drag(state, &mut dispatcher, None);
                 }
                 self.pending_fds.clear();
-                if cursor_changed || had_client_objects {
+                if seat_removal.cursor_changed
+                    || seat_removal.interactive_grab_cleared
+                    || had_client_objects
+                {
                     schedule_active_output(state, &mut dispatcher);
                 }
             }

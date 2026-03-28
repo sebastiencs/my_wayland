@@ -198,6 +198,10 @@ impl CursorState {
         self.set_named_cursor_internal(CursorOwner::Client(owner_client_id), icon_names)
     }
 
+    pub fn set_compositor_named_cursor(&mut self, icon_names: &[&'static str]) -> bool {
+        self.set_named_cursor_internal(CursorOwner::Compositor, icon_names)
+    }
+
     fn set_named_cursor_internal(
         &mut self,
         owner: CursorOwner,

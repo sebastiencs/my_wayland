@@ -31,6 +31,9 @@ const WAYLAND_DISPLAY_NAME: &str = "my-wayland-0";
 const DEFAULT_CURSOR_THEME: &str = "default";
 const DEFAULT_CURSOR_SIZE: u32 = 24;
 const INOTIFY_BUFFER_SIZE: usize = 4096;
+const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+const BTN_MIDDLE: u32 = 0x112;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputScaleSetting {
@@ -43,6 +46,7 @@ pub struct RuntimeConfig {
     path: PathBuf,
     pub general: GeneralConfig,
     pub bindings: Vec<Binding>,
+    pub mouse_bindings: Vec<MouseBinding>,
     output_scales: BTreeMap<String, OutputScaleSetting>,
 }
 
@@ -58,10 +62,23 @@ pub struct Binding {
     pub action: CompositorAction,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MouseBinding {
+    pub trigger: MouseBindingTrigger,
+    pub action: MouseBindingAction,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct KeyBinding {
     pub description: String,
     pub keysym: xkb::Keysym,
+    pub modifiers: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MouseBindingTrigger {
+    pub description: String,
+    pub button: u32,
     pub modifiers: u32,
 }
 
@@ -71,6 +88,13 @@ pub enum CompositorAction {
     Spawn { command: String },
     Quit,
     ReloadConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(tag = "action", rename_all = "kebab-case")]
+pub enum MouseBindingAction {
+    MoveWindow,
+    ResizeWindow,
 }
 
 #[derive(Debug)]
@@ -96,6 +120,7 @@ pub enum ConfigWatcherAction {
 struct ConfigFile {
     general: GeneralConfigFile,
     bindings: BTreeMap<String, CompositorAction>,
+    mouse_bindings: BTreeMap<String, MouseBindingAction>,
     output: OutputConfigFile,
 }
 
@@ -191,6 +216,17 @@ impl RuntimeConfig {
             bindings.push(Binding { trigger, action });
         }
 
+        let mut mouse_bindings = Vec::with_capacity(parsed.mouse_bindings.len());
+        let mut seen_mouse = BTreeSet::new();
+        for (description, action) in parsed.mouse_bindings {
+            let trigger = parse_mouse_binding(&description, xkb.keymap())
+                .with_context(|| format!("invalid mouse binding `{description}`"))?;
+            if !seen_mouse.insert((trigger.button, trigger.modifiers)) {
+                bail!("duplicate mouse binding for `{description}`");
+            }
+            mouse_bindings.push(MouseBinding { trigger, action });
+        }
+
         let mut output_scales = BTreeMap::new();
         for (name, value) in parsed.output.scales {
             let setting = output_scale_setting_from_file(value)
@@ -205,6 +241,7 @@ impl RuntimeConfig {
                 cursor_size: sanitize_cursor_size(parsed.general.cursor_size),
             },
             bindings,
+            mouse_bindings,
             output_scales,
         })
     }
@@ -217,6 +254,7 @@ impl RuntimeConfig {
                 cursor_size: DEFAULT_CURSOR_SIZE,
             },
             bindings: Vec::new(),
+            mouse_bindings: Vec::new(),
             output_scales: BTreeMap::new(),
         }
     }
@@ -239,6 +277,18 @@ impl RuntimeConfig {
             .iter()
             .find(|binding| binding.trigger.matches(keysym, modifiers))
             .map(|binding| binding.action.clone())
+    }
+
+    pub fn binding_for_pointer_button(
+        &self,
+        keyboard: &KeyboardState,
+        button: u32,
+    ) -> Option<MouseBindingAction> {
+        let modifiers = keyboard.effective_modifiers();
+        self.mouse_bindings
+            .iter()
+            .find(|binding| binding.trigger.matches(button, modifiers))
+            .map(|binding| binding.action)
     }
 
     #[cfg(test)]
@@ -267,6 +317,12 @@ impl GeneralConfig {
 impl KeyBinding {
     fn matches(&self, keysym: xkb::Keysym, modifiers: u32) -> bool {
         self.keysym == keysym && self.modifiers == modifiers
+    }
+}
+
+impl MouseBindingTrigger {
+    fn matches(&self, button: u32, modifiers: u32) -> bool {
+        self.button == button && self.modifiers == modifiers
     }
 }
 
@@ -533,6 +589,32 @@ fn parse_binding(description: &str, keymap: &xkb::Keymap) -> anyhow::Result<KeyB
     if keysym.raw() == xkb::keysyms::KEY_NoSymbol {
         bail!("unknown keysym `{}`", key_name);
     }
+    let modifiers = parse_modifier_mask(modifier_names, keymap)?;
+    Ok(KeyBinding { description: description.to_string(), keysym, modifiers })
+}
+
+fn parse_mouse_binding(
+    description: &str,
+    keymap: &xkb::Keymap,
+) -> anyhow::Result<MouseBindingTrigger> {
+    let parts: Vec<_> = description
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.is_empty() {
+        bail!("binding is empty");
+    }
+    let (button_name, modifier_names) = parts.split_last().unwrap();
+    let Some(button_name) = button_name.strip_prefix("mouse:") else {
+        bail!("mouse binding must end with `mouse:<button>`");
+    };
+    let button = parse_mouse_button(button_name)?;
+    let modifiers = parse_modifier_mask(modifier_names, keymap)?;
+    Ok(MouseBindingTrigger { description: description.to_string(), button, modifiers })
+}
+
+fn parse_modifier_mask(modifier_names: &[&str], keymap: &xkb::Keymap) -> anyhow::Result<u32> {
     let mut modifiers = 0u32;
     for modifier_name in modifier_names {
         let canonical = normalize_modifier_name(modifier_name)
@@ -546,7 +628,18 @@ fn parse_binding(description: &str, keymap: &xkb::Keymap) -> anyhow::Result<KeyB
         }
         modifiers |= 1u32 << index;
     }
-    Ok(KeyBinding { description: description.to_string(), keysym, modifiers })
+    Ok(modifiers)
+}
+
+fn parse_mouse_button(name: &str) -> anyhow::Result<u32> {
+    match name.to_ascii_lowercase().as_str() {
+        "left" => Ok(BTN_LEFT),
+        "right" => Ok(BTN_RIGHT),
+        "middle" => Ok(BTN_MIDDLE),
+        other => other
+            .parse()
+            .with_context(|| format!("unknown mouse button `{name}`")),
+    }
 }
 
 fn normalize_modifier_name(name: &str) -> Option<&'static str> {
@@ -737,6 +830,73 @@ mod tests {
 
         let error = RuntimeConfig::compile(PathBuf::from("config.toml"), parsed, &xkb).unwrap_err();
         assert!(error.to_string().contains("duplicate binding"));
+    }
+
+    #[test]
+    fn parses_mouse_bindings_with_aliases() {
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:left" = { action = "move-window" }
+            "Alt+mouse:273" = { action = "resize-window" }
+            "#,
+            &xkb,
+        )
+        .unwrap();
+
+        assert_eq!(config.mouse_bindings.len(), 2);
+        let move_binding = config
+            .mouse_bindings
+            .iter()
+            .find(|binding| binding.trigger.description == "Super+mouse:left")
+            .unwrap();
+        let resize_binding = config
+            .mouse_bindings
+            .iter()
+            .find(|binding| binding.trigger.description == "Alt+mouse:273")
+            .unwrap();
+        assert_eq!(move_binding.trigger.button, BTN_LEFT);
+        assert_eq!(move_binding.action, MouseBindingAction::MoveWindow);
+        assert_eq!(resize_binding.trigger.button, BTN_RIGHT);
+        assert_eq!(resize_binding.action, MouseBindingAction::ResizeWindow);
+    }
+
+    #[test]
+    fn matches_mouse_binding_for_pressed_modifiers() {
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:left" = { action = "move-window" }
+            "#,
+            &xkb,
+        )
+        .unwrap();
+        let mut keyboard = xkb.create_keyboard_state();
+
+        assert_eq!(config.binding_for_pointer_button(&keyboard, BTN_LEFT), None);
+        keyboard.update_key(125, true);
+        assert_eq!(
+            config.binding_for_pointer_button(&keyboard, BTN_LEFT),
+            Some(MouseBindingAction::MoveWindow)
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_mouse_bindings() {
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:left" = { action = "move-window" }
+            "Mod4+mouse:272" = { action = "resize-window" }
+            "#,
+            &xkb,
+        );
+
+        let error = config.unwrap_err();
+        assert!(error.to_string().contains("duplicate mouse binding"));
     }
 
     #[test]

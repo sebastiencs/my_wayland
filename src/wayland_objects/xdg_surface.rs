@@ -598,6 +598,35 @@ pub mod xdg_toplevel {
         current_states: BTreeSet<proto_xdg_toplevel::State>,
     }
 
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct InteractiveSizeConstraints {
+        min_size: Option<(i32, i32)>,
+        max_size: Option<(i32, i32)>,
+    }
+
+    impl InteractiveSizeConstraints {
+        pub fn clamp(self, width: i32, height: i32) -> (i32, i32) {
+            let (mut width, mut height) = (width.max(1), height.max(1));
+            if let Some((min_width, min_height)) = self.min_size {
+                if min_width > 0 {
+                    width = width.max(min_width);
+                }
+                if min_height > 0 {
+                    height = height.max(min_height);
+                }
+            }
+            if let Some((max_width, max_height)) = self.max_size {
+                if max_width > 0 {
+                    width = width.min(max_width);
+                }
+                if max_height > 0 {
+                    height = height.min(max_height);
+                }
+            }
+            (width, height)
+        }
+    }
+
     impl XdgToplevel {
         pub fn new(
             id: XdgToplevelId,
@@ -736,6 +765,28 @@ pub mod xdg_toplevel {
             self.id
         }
 
+        pub fn interactive_size_constraints(&self) -> InteractiveSizeConstraints {
+            InteractiveSizeConstraints { min_size: self.min_size, max_size: self.max_size }
+        }
+
+        pub fn clamp_interactive_size(&self, width: i32, height: i32) -> (i32, i32) {
+            self.interactive_size_constraints().clamp(width, height)
+        }
+
+        pub fn is_maximized(&self) -> bool {
+            self.requested_maximized
+                || self
+                    .current_states
+                    .contains(&proto_xdg_toplevel::State::Maximized)
+        }
+
+        pub fn is_fullscreen(&self) -> bool {
+            self.requested_fullscreen
+                || self
+                    .current_states
+                    .contains(&proto_xdg_toplevel::State::Fullscreen)
+        }
+
         pub fn send_interactive_resize_configure(
             &mut self,
             configure_bounds: Option<(i32, i32)>,
@@ -745,6 +796,7 @@ pub mod xdg_toplevel {
             resizing: bool,
             dispatcher: &mut ClientDispatcher,
         ) {
+            let (width, height) = self.clamp_interactive_size(width, height);
             let mut states = self.effective_states();
             if resizing {
                 let resizing_flag = proto_xdg_toplevel::State::Resizing as u32;
@@ -764,6 +816,26 @@ pub mod xdg_toplevel {
                 dispatcher,
             );
             xdg_surface.queue_toplevel_configure(width, height, states, dispatcher);
+        }
+
+        #[cfg(test)]
+        pub(crate) fn test_set_maximized(&mut self, maximized: bool) {
+            self.requested_maximized = maximized;
+        }
+
+        #[cfg(test)]
+        pub(crate) fn test_set_fullscreen(&mut self, fullscreen: bool) {
+            self.requested_fullscreen = fullscreen;
+        }
+
+        #[cfg(test)]
+        pub(crate) fn test_set_interactive_size_constraints(
+            &mut self,
+            min_size: Option<(i32, i32)>,
+            max_size: Option<(i32, i32)>,
+        ) {
+            self.min_size = min_size;
+            self.max_size = max_size;
         }
 
         pub fn reset_on_unmap(&mut self) {
@@ -982,6 +1054,7 @@ pub mod xdg_toplevel {
                     };
                     if !crate::seat::request_toplevel_move(
                         state,
+                        dispatcher,
                         client.client_id(),
                         surface_id,
                         serial,
@@ -1037,11 +1110,13 @@ pub mod xdg_toplevel {
                     };
                     if !crate::seat::request_toplevel_resize(
                         state,
+                        dispatcher,
                         client.client_id(),
                         surface_id,
                         serial,
                         surface_object_id,
                         self.id,
+                        self.interactive_size_constraints(),
                         edges,
                         surface.root_position(),
                         initial_size,

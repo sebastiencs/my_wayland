@@ -12,6 +12,12 @@ cursor_size = 24
 "Super+Shift+C" = { action = "reload-config" }
 "Super+Return" = { action = "spawn", command = "alacritty" }
 
+[mouse_bindings]
+# Mouse bindings use modifier names plus `mouse:<button>`.
+# Supported button aliases: left, right, middle. Raw Linux button codes also work.
+"Super+mouse:left" = { action = "move-window" }
+"Super+mouse:right" = { action = "resize-window" }
+
 # Optional: fixed scale per DRM output name, or "auto".
 # [output.scales]
 # "DP-1" = "auto"

@@ -7,16 +7,18 @@ use crate::{
     drm::{schedule_active_output, schedule_outputs_for_points, schedule_outputs_for_rects, Drm},
     object::Object,
     protocol_generated::{
-        Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlKeyboardId, WlPointerId, WlSeatId,
-        WlSurfaceId, XdgPopupId, XdgToplevelId,
+        xdg_toplevel::ResizeEdge, Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId,
+        WlKeyboardId, WlPointerId, WlSeatId, WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgToplevelId,
     },
+    region::RectI,
     runner::Dispatcher,
     state::{
         DragNegotiationState, DragPhase, DragState, DragTargetState, DrmId, IndexMap, ObjectId,
         SelectionSourceState, State,
     },
     wayland_objects::{
-        wl_surface::{StackEntry, WlSurface},
+        wl_surface::{Role, StackEntry, WlSurface},
+        xdg_surface::xdg_toplevel::{InteractiveSizeConstraints, XdgToplevel},
         zwlr_layer_surface_v1::{
             layer_surface_keyboard_focus_with_snapshot, lookup_snapshot_surface,
             ordered_scene_root_surface_ids, ordered_scene_root_surface_ids_with_snapshot,
@@ -25,6 +27,16 @@ use crate::{
     },
     xkb::KeyboardModifiers,
 };
+
+const POINTER_MOVE_CURSOR_ICON_NAMES: &[&str] = &["grab", "grabbing", "move"];
+const POINTER_RESIZE_NW_CURSOR_ICON_NAMES: &[&str] = &["nw-resize", "size_fdiag"];
+const POINTER_RESIZE_NE_CURSOR_ICON_NAMES: &[&str] = &["ne-resize", "size_bdiag"];
+const POINTER_RESIZE_SW_CURSOR_ICON_NAMES: &[&str] = &["sw-resize", "size_bdiag"];
+const POINTER_RESIZE_SE_CURSOR_ICON_NAMES: &[&str] = &["se-resize", "size_fdiag"];
+const POINTER_RESIZE_N_CURSOR_ICON_NAMES: &[&str] = &["n-resize", "size_ver"];
+const POINTER_RESIZE_S_CURSOR_ICON_NAMES: &[&str] = &["s-resize", "size_ver"];
+const POINTER_RESIZE_W_CURSOR_ICON_NAMES: &[&str] = &["w-resize", "size_hor"];
+const POINTER_RESIZE_E_CURSOR_ICON_NAMES: &[&str] = &["e-resize", "size_hor"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SurfaceFocus {
@@ -112,6 +124,12 @@ struct PointerEnterState {
     client_id: ClientId,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SeatClientRemovalResult {
+    pub cursor_changed: bool,
+    pub interactive_grab_cleared: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct KeyboardTriggerState {
     serial: u32,
@@ -138,6 +156,7 @@ enum PointerInteractiveGrab {
         client_id: ClientId,
         root_surface_object_id: ObjectId,
         xdg_toplevel_id: XdgToplevelId,
+        size_constraints: InteractiveSizeConstraints,
         edges: u32,
         initial_pointer_pos: (f64, f64),
         initial_root_pos: (i32, i32),
@@ -166,6 +185,7 @@ pub struct SeatState {
     pointer_resources: BTreeMap<ClientId, Vec<WlPointerId>>,
     keyboard_resources: BTreeMap<ClientId, Vec<WlKeyboardId>>,
     intercepted_keyboard_keys: BTreeSet<u32>,
+    intercepted_pointer_buttons: BTreeSet<u32>,
 }
 
 impl Default for SeatState {
@@ -192,6 +212,7 @@ impl Default for SeatState {
             pointer_resources: BTreeMap::default(),
             keyboard_resources: BTreeMap::default(),
             intercepted_keyboard_keys: BTreeSet::default(),
+            intercepted_pointer_buttons: BTreeSet::default(),
         }
     }
 }
@@ -522,7 +543,8 @@ impl SeatState {
         })
     }
 
-    pub fn remove_client(&mut self, client_id: ClientId) -> bool {
+    pub(crate) fn remove_client(&mut self, client_id: ClientId) -> SeatClientRemovalResult {
+        let mut result = SeatClientRemovalResult::default();
         self.client_serials.remove(&client_id);
         self.data_device_resources.remove(&client_id);
         self.pointer_resources.remove(&client_id);
@@ -567,7 +589,8 @@ impl SeatState {
                 }
             })
         {
-            self.pointer_interactive_grab = None;
+            self.clear_pointer_interactive_grab();
+            result.interactive_grab_cleared = true;
         }
         if self
             .active_drag
@@ -585,7 +608,8 @@ impl SeatState {
                 drag.phase = DragPhase::Cancelled;
             }
         }
-        self.cursor.clear_for_client(client_id)
+        result.cursor_changed = self.cursor.clear_for_client(client_id);
+        result
     }
 
     fn next_serial(&mut self) -> u32 {
@@ -654,6 +678,10 @@ impl SeatState {
         self.cursor.set_named_cursor(client_id, icon_names)
     }
 
+    pub fn set_compositor_named_cursor(&mut self, icon_names: &[&'static str]) -> bool {
+        self.cursor.set_compositor_named_cursor(icon_names)
+    }
+
     pub fn set_default_cursor(&mut self) -> bool {
         self.cursor.ensure_default_named_cursor()
     }
@@ -694,6 +722,10 @@ impl SeatState {
         self.cursor.is_visible()
     }
 
+    pub fn clear_cursor(&mut self) -> bool {
+        self.cursor.clear()
+    }
+
     pub fn set_cursor_theme(&mut self, theme_name: String, theme_size: u32) -> bool {
         self.cursor.set_theme(theme_name, theme_size)
     }
@@ -722,6 +754,14 @@ impl SeatState {
 
     fn take_intercepted_keyboard_key(&mut self, key: u32) -> bool {
         self.intercepted_keyboard_keys.remove(&key)
+    }
+
+    fn intercept_pointer_button(&mut self, button: u32) {
+        self.intercepted_pointer_buttons.insert(button);
+    }
+
+    fn take_intercepted_pointer_button(&mut self, button: u32) -> bool {
+        self.intercepted_pointer_buttons.remove(&button)
     }
 
     fn validate_implicit_grab_serial(
@@ -829,6 +869,7 @@ impl SeatState {
         client_id: ClientId,
         root_surface_object_id: ObjectId,
         xdg_toplevel_id: XdgToplevelId,
+        size_constraints: InteractiveSizeConstraints,
         edges: u32,
         initial_root_pos: (i32, i32),
         initial_size: (i32, i32),
@@ -837,6 +878,7 @@ impl SeatState {
             client_id,
             root_surface_object_id,
             xdg_toplevel_id,
+            size_constraints,
             edges,
             initial_pointer_pos: self.pointer_pos,
             initial_root_pos,
@@ -847,6 +889,7 @@ impl SeatState {
 
     fn clear_pointer_interactive_grab(&mut self) {
         self.pointer_interactive_grab = None;
+        self.intercepted_pointer_buttons.clear();
     }
 }
 
@@ -898,7 +941,10 @@ pub fn handle_pointer_button(
     if let Some(focus) = popup_keyboard_focus(state) {
         set_keyboard_focus(state, dispatcher, Some(focus));
     }
-    refresh_pointer_focus(state, dispatcher, time, false);
+    let interactive_grab_active = state.seat.pointer_interactive_grab.is_some();
+    if !interactive_grab_active {
+        refresh_pointer_focus(state, dispatcher, time, false);
+    }
     let pointer_focus = state.seat.pointer_focus;
     log::debug!(
         "seat pointer button button={} state={} time={} focus={:?}",
@@ -913,12 +959,24 @@ pub fn handle_pointer_button(
         .seat
         .record_pointer_button(button_state, serial, pointer_focus.map(|focus| focus.target));
 
+    if button_state != 1 && state.seat.take_intercepted_pointer_button(button) {
+        finish_pointer_interactive_grab(state, dispatcher, time);
+        return;
+    }
+
     if let Some(drag) = state.seat.active_drag() {
         if drag.phase == DragPhase::Dragging
             && button_state != 1
             && state.seat.pointer_button_count == 0
         {
             complete_drag_drop(state, dispatcher);
+        }
+        return;
+    }
+
+    if interactive_grab_active {
+        if button_state != 1 && state.seat.pointer_button_count == 0 {
+            finish_pointer_interactive_grab(state, dispatcher, time);
         }
         return;
     }
@@ -931,9 +989,21 @@ pub fn handle_pointer_button(
         set_keyboard_focus(state, dispatcher, pointer_focus.map(|focus| focus.target));
     }
 
+    if button_state == 1 {
+        if let Some(action) = state
+            .config
+            .binding_for_pointer_button(&state.keyboard, button)
+        {
+            if begin_pointer_binding(state, dispatcher, action) {
+                state.seat.intercept_pointer_button(button);
+                return;
+            }
+        }
+    }
+
     let Some(pointer_focus) = state.seat.pointer_focus else {
         if button_state != 1 {
-            finish_pointer_interactive_grab(state, dispatcher);
+            finish_pointer_interactive_grab(state, dispatcher, time);
         }
         return;
     };
@@ -950,7 +1020,7 @@ pub fn handle_pointer_button(
     );
 
     if button_state != 1 {
-        finish_pointer_interactive_grab(state, dispatcher);
+        finish_pointer_interactive_grab(state, dispatcher, time);
     }
 }
 
@@ -1357,7 +1427,7 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
                 .objects
                 .try_grab_object::<WlSurface>(root_surface_object_id)
             else {
-                state.seat.clear_pointer_interactive_grab();
+                abort_pointer_interactive_grab(state, dispatcher, 0);
                 return true;
             };
             let old_bounds = surface.global_logical_bounds();
@@ -1375,6 +1445,7 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
             client_id,
             root_surface_object_id,
             xdg_toplevel_id,
+            size_constraints,
             edges,
             initial_pointer_pos,
             initial_root_pos,
@@ -1387,25 +1458,30 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
             let (mut x, mut y) = initial_root_pos;
 
             if edges & 4 != 0 {
-                width = (initial_size.0 - dx).max(1);
-                x = initial_root_pos.0 + (initial_size.0 - width);
+                width = initial_size.0 - dx;
             }
             if edges & 8 != 0 {
-                width = (initial_size.0 + dx).max(1);
+                width = initial_size.0 + dx;
             }
             if edges & 1 != 0 {
-                height = (initial_size.1 - dy).max(1);
-                y = initial_root_pos.1 + (initial_size.1 - height);
+                height = initial_size.1 - dy;
             }
             if edges & 2 != 0 {
-                height = (initial_size.1 + dy).max(1);
+                height = initial_size.1 + dy;
+            }
+            (width, height) = size_constraints.clamp(width, height);
+            if edges & 4 != 0 {
+                x = initial_root_pos.0 + (initial_size.0 - width);
+            }
+            if edges & 1 != 0 {
+                y = initial_root_pos.1 + (initial_size.1 - height);
             }
 
             let Some(mut surface) = state
                 .objects
                 .try_grab_object::<WlSurface>(root_surface_object_id)
             else {
-                state.seat.clear_pointer_interactive_grab();
+                abort_pointer_interactive_grab(state, dispatcher, 0);
                 return true;
             };
             let old_bounds = surface.global_logical_bounds();
@@ -1437,6 +1513,7 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
                 client_id,
                 root_surface_object_id,
                 xdg_toplevel_id,
+                size_constraints,
                 edges,
                 initial_pointer_pos,
                 initial_root_pos,
@@ -1448,7 +1525,7 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
     true
 }
 
-fn finish_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher) {
+fn finish_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {
     let Some(grab) = state.seat.pointer_interactive_grab else {
         return;
     };
@@ -1465,6 +1542,280 @@ fn finish_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatche
         );
     }
     state.seat.clear_pointer_interactive_grab();
+    end_compositor_pointer_grab(state, dispatcher, time);
+}
+
+pub(crate) fn abort_pointer_interactive_grab(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    time: u32,
+) -> bool {
+    if state.seat.pointer_interactive_grab.is_none() {
+        return false;
+    }
+    state.seat.clear_pointer_interactive_grab();
+    end_compositor_pointer_grab(state, dispatcher, time);
+    true
+}
+
+pub(crate) fn recover_pointer_after_interactive_grab_loss(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    time: u32,
+) {
+    end_compositor_pointer_grab(state, dispatcher, time);
+}
+
+fn clear_pointer_focus_for_compositor_grab(state: &mut State, dispatcher: &mut Dispatcher) {
+    let Some(old_focus) = state.seat.pointer_focus.take() else {
+        state.seat.clear_pointer_enter();
+        return;
+    };
+    let serial = state.seat.next_serial();
+    dispatch_client_event(
+        dispatcher,
+        old_focus.target.client_id,
+        SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface_id },
+    );
+    dispatch_client_event(dispatcher, old_focus.target.client_id, SeatClientEvent::PointerFrame);
+    state.seat.clear_pointer_enter();
+}
+
+fn update_visible_cursor_for_grab_change(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    update: impl FnOnce(&mut SeatState) -> bool,
+) {
+    let previous_cursor_owner = visible_cursor_owner_client(state);
+    if !update(&mut state.seat) {
+        return;
+    }
+    if let Some(client_id) = previous_cursor_owner {
+        dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
+    }
+    refresh_visible_cursor_surface_outputs(state, dispatcher);
+    schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
+}
+
+fn begin_compositor_pointer_grab(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    cursor_icons: &[&'static str],
+) {
+    clear_pointer_focus_for_compositor_grab(state, dispatcher);
+    update_visible_cursor_for_grab_change(state, dispatcher, |seat| {
+        seat.set_compositor_named_cursor(cursor_icons)
+    });
+}
+
+fn end_compositor_pointer_grab(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {
+    update_visible_cursor_for_grab_change(state, dispatcher, SeatState::clear_cursor);
+    refresh_pointer_focus(state, dispatcher, time, false);
+    update_visible_cursor_for_grab_change(state, dispatcher, SeatState::set_default_cursor);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WindowPointerRole {
+    XdgToplevel {
+        xdg_toplevel_id: XdgToplevelId,
+        size_constraints: InteractiveSizeConstraints,
+        is_maximized: bool,
+        is_fullscreen: bool,
+    },
+    Unsupported, // TODO: Handle other window types like XWayland
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WindowPointerTarget {
+    client_id: ClientId,
+    surface_id: WlSurfaceId,
+    root_surface_object_id: ObjectId,
+    role: WindowPointerRole,
+    initial_root_pos: (i32, i32),
+    initial_size: (i32, i32),
+    bounds: RectI,
+}
+
+fn begin_pointer_binding(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    action: config::MouseBindingAction,
+) -> bool {
+    let Some(target) = window_pointer_target_at(state, state.seat.pointer_position()) else {
+        return false;
+    };
+
+    match (action, target.role) {
+        (
+            _,
+            WindowPointerRole::XdgToplevel { is_maximized: true, .. }
+            | WindowPointerRole::XdgToplevel { is_fullscreen: true, .. },
+        )
+        | (_, WindowPointerRole::Unsupported) => return false,
+        _ => {}
+    }
+
+    state.raise_root_surface(target.root_surface_object_id);
+    schedule_outputs_for_rects(state, [target.bounds], dispatcher);
+    set_keyboard_focus(
+        state,
+        dispatcher,
+        Some(SurfaceFocus { client_id: target.client_id, surface_id: target.surface_id }),
+    );
+
+    match (action, target.role) {
+        (config::MouseBindingAction::MoveWindow, _) => start_interactive_move(
+            state,
+            dispatcher,
+            target.client_id,
+            target.root_surface_object_id,
+            target.initial_root_pos,
+        ),
+        (
+            config::MouseBindingAction::ResizeWindow,
+            WindowPointerRole::XdgToplevel { xdg_toplevel_id, size_constraints, .. },
+        ) => start_interactive_resize(
+            state,
+            dispatcher,
+            target.client_id,
+            target.root_surface_object_id,
+            xdg_toplevel_id,
+            size_constraints,
+            resize_edges_for_pointer(target.bounds, state.seat.pointer_position()),
+            target.initial_root_pos,
+            target.initial_size,
+        ),
+        _ => return false,
+    }
+
+    true
+}
+
+fn window_pointer_target_at(state: &State, pointer_pos: (f64, f64)) -> Option<WindowPointerTarget> {
+    let mut hit = None;
+
+    for object_id in ordered_scene_root_surface_ids(state) {
+        let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
+            continue;
+        };
+        if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
+            continue;
+        }
+        let Some(bounds) = surface.global_logical_bounds() else {
+            continue;
+        };
+        if rect_contains_point(bounds, pointer_pos) {
+            hit = resolve_window_pointer_target(state, object_id, bounds);
+        }
+    }
+
+    hit
+}
+
+fn resolve_window_pointer_target(
+    state: &State,
+    root_surface_object_id: ObjectId,
+    bounds: RectI,
+) -> Option<WindowPointerTarget> {
+    let root_surface = state
+        .objects
+        .try_ref_object::<WlSurface>(root_surface_object_id)?;
+    let role = match root_surface.role() {
+        Role::XdgSurface => root_surface
+            .xdg_surface_id()
+            .map(|xdg_surface_id| resolve_xdg_window_pointer_role(state, xdg_surface_id))
+            .unwrap_or(WindowPointerRole::Unsupported),
+        _ => WindowPointerRole::Unsupported,
+    };
+
+    Some(WindowPointerTarget {
+        client_id: root_surface.client_id(),
+        surface_id: root_surface.surface_id(),
+        root_surface_object_id,
+        role,
+        initial_root_pos: root_surface.root_position(),
+        initial_size: root_surface
+            .logical_size()
+            .map(|size| (size.width, size.height))?,
+        bounds,
+    })
+}
+
+fn resolve_xdg_window_pointer_role(
+    state: &State,
+    xdg_surface_id: XdgSurfaceId,
+) -> WindowPointerRole {
+    state
+        .objects
+        .iter()
+        .find_map(|(_object_id, object)| {
+            object.downcast_ref::<XdgToplevel>().and_then(|toplevel| {
+                (toplevel.xdg_surface_id() == xdg_surface_id).then_some(
+                    WindowPointerRole::XdgToplevel {
+                        xdg_toplevel_id: toplevel.toplevel_id(),
+                        size_constraints: toplevel.interactive_size_constraints(),
+                        is_maximized: toplevel.is_maximized(),
+                        is_fullscreen: toplevel.is_fullscreen(),
+                    },
+                )
+            })
+        })
+        .unwrap_or(WindowPointerRole::Unsupported)
+}
+
+fn rect_contains_point(bounds: RectI, pointer_pos: (f64, f64)) -> bool {
+    pointer_pos.0 >= bounds.x as f64
+        && pointer_pos.0 < (bounds.x + bounds.width) as f64
+        && pointer_pos.1 >= bounds.y as f64
+        && pointer_pos.1 < (bounds.y + bounds.height) as f64
+}
+
+fn resize_edges_for_pointer(bounds: RectI, pointer_pos: (f64, f64)) -> u32 {
+    let left_boundary = bounds.x as f64 + (bounds.width as f64 / 3.0);
+    let right_boundary = bounds.x as f64 + ((bounds.width as f64 * 2.0) / 3.0);
+    let top_boundary = bounds.y as f64 + (bounds.height as f64 / 3.0);
+    let bottom_boundary = bounds.y as f64 + ((bounds.height as f64 * 2.0) / 3.0);
+
+    let horizontal = if pointer_pos.0 < left_boundary {
+        Some(ResizeEdge::Left as u32)
+    } else if pointer_pos.0 >= right_boundary {
+        Some(ResizeEdge::Right as u32)
+    } else {
+        None
+    };
+    let vertical = if pointer_pos.1 < top_boundary {
+        Some(ResizeEdge::Top as u32)
+    } else if pointer_pos.1 >= bottom_boundary {
+        Some(ResizeEdge::Bottom as u32)
+    } else {
+        None
+    };
+
+    match (vertical, horizontal) {
+        (Some(vertical), Some(horizontal)) => vertical | horizontal,
+        (Some(vertical), None) => vertical,
+        (None, Some(horizontal)) => horizontal,
+        (None, None) => {
+            let left_distance = pointer_pos.0 - bounds.x as f64;
+            let right_distance = (bounds.x + bounds.width) as f64 - pointer_pos.0;
+            let top_distance = pointer_pos.1 - bounds.y as f64;
+            let bottom_distance = (bounds.y + bounds.height) as f64 - pointer_pos.1;
+
+            let mut best_edge = ResizeEdge::Left as u32;
+            let mut best_distance = left_distance;
+            for (distance, edge) in [
+                (right_distance, ResizeEdge::Right as u32),
+                (top_distance, ResizeEdge::Top as u32),
+                (bottom_distance, ResizeEdge::Bottom as u32),
+            ] {
+                if distance < best_distance {
+                    best_distance = distance;
+                    best_edge = edge;
+                }
+            }
+            best_edge
+        }
+    }
 }
 
 fn hit_test_subtree(
@@ -1897,6 +2248,7 @@ pub fn remove_popup_grab(
 
 pub fn request_toplevel_move(
     state: &mut State,
+    dispatcher: &mut Dispatcher,
     client_id: ClientId,
     surface_id: WlSurfaceId,
     serial: u32,
@@ -1909,19 +2261,19 @@ pub fn request_toplevel_move(
     {
         return false;
     }
-    state
-        .seat
-        .start_toplevel_move(client_id, root_surface_object_id, initial_root_pos);
+    start_interactive_move(state, dispatcher, client_id, root_surface_object_id, initial_root_pos);
     true
 }
 
 pub fn request_toplevel_resize(
     state: &mut State,
+    dispatcher: &mut Dispatcher,
     client_id: ClientId,
     surface_id: WlSurfaceId,
     serial: u32,
     root_surface_object_id: ObjectId,
     xdg_toplevel_id: XdgToplevelId,
+    size_constraints: InteractiveSizeConstraints,
     edges: u32,
     initial_root_pos: (i32, i32),
     initial_size: (i32, i32),
@@ -1932,15 +2284,65 @@ pub fn request_toplevel_resize(
     {
         return false;
     }
-    state.seat.start_toplevel_resize(
+    start_interactive_resize(
+        state,
+        dispatcher,
         client_id,
         root_surface_object_id,
         xdg_toplevel_id,
+        size_constraints,
         edges,
         initial_root_pos,
         initial_size,
     );
     true
+}
+
+fn start_interactive_move(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    client_id: ClientId,
+    root_surface_object_id: ObjectId,
+    initial_root_pos: (i32, i32),
+) {
+    begin_compositor_pointer_grab(state, dispatcher, POINTER_MOVE_CURSOR_ICON_NAMES);
+    state
+        .seat
+        .start_toplevel_move(client_id, root_surface_object_id, initial_root_pos);
+}
+
+fn start_interactive_resize(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    client_id: ClientId,
+    root_surface_object_id: ObjectId,
+    xdg_toplevel_id: XdgToplevelId,
+    size_constraints: InteractiveSizeConstraints,
+    edges: u32,
+    initial_root_pos: (i32, i32),
+    initial_size: (i32, i32),
+) {
+    let cursor_icons = match edges {
+        e if e == ResizeEdge::Top as u32 => POINTER_RESIZE_N_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::Bottom as u32 => POINTER_RESIZE_S_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::Left as u32 => POINTER_RESIZE_W_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::Right as u32 => POINTER_RESIZE_E_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::TopLeft as u32 => POINTER_RESIZE_NW_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::TopRight as u32 => POINTER_RESIZE_NE_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::BottomLeft as u32 => POINTER_RESIZE_SW_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::BottomRight as u32 => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
+        _ => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
+    };
+    begin_compositor_pointer_grab(state, dispatcher, cursor_icons);
+    state.seat.start_toplevel_resize(
+        client_id,
+        root_surface_object_id,
+        xdg_toplevel_id,
+        size_constraints,
+        edges,
+        initial_root_pos,
+        initial_size,
+    );
 }
 
 fn remove_resource<K, V>(map: &mut BTreeMap<K, Vec<V>>, key: K, value: V)
@@ -2165,7 +2567,9 @@ mod xdg_seat_tests {
     use {
         super::{
             begin_popup_grab, cancel_active_drag, complete_drag_drop, handle_keyboard_key,
-            remove_popup_grab, SeatClientEvent, SeatState, SurfaceFocus,
+            handle_pointer_button, handle_pointer_motion,
+            recover_pointer_after_interactive_grab_loss, remove_popup_grab, SeatClientEvent,
+            SeatState, SurfaceFocus,
         },
         crate::{
             clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent},
@@ -2342,6 +2746,21 @@ mod xdg_seat_tests {
         );
         drop(xdg_surface);
         client.object_id(toplevel_id)
+    }
+
+    fn set_toplevel_window_state(
+        state: &mut State,
+        toplevel_object_id: ObjectId,
+        maximized: bool,
+        fullscreen: bool,
+    ) {
+        let toplevel = state
+            .objects
+            .get_mut(toplevel_object_id)
+            .downcast_mut::<XdgToplevel>()
+            .unwrap();
+        toplevel.test_set_maximized(maximized);
+        toplevel.test_set_fullscreen(fullscreen);
     }
 
     #[test]
@@ -2521,6 +2940,462 @@ mod xdg_seat_tests {
 
         assert!(super::maybe_dismiss_popup_grab_on_button(&mut state, &mut dispatcher, 1, 1000));
         assert!(state.seat.popup_grab.is_none());
+    }
+
+    #[test]
+    fn compositor_mouse_move_binding_starts_drag_and_swallows_button_events() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(170),
+            XdgSurfaceId::from(180),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(180),
+            XdgToplevelId::from(190),
+        );
+
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(900usize), 40, 50, 120, 80);
+        }
+
+        state.config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:left" = { action = "move-window" }
+            "#,
+            &state.xkb,
+        )
+        .unwrap();
+        state.keyboard.update_key(125, true);
+        state.seat.pointer_pos = (70.0, 80.0);
+        assert!(state.seat.set_cursor_surface(
+            client.client_id(),
+            WlSurfaceId::from(999),
+            ObjectId::from(998usize),
+            2,
+            3,
+        ));
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Move { .. })
+        ));
+        assert_eq!(
+            state.seat.keyboard_focus,
+            Some(SurfaceFocus {
+                client_id: client.client_id(),
+                surface_id: WlSurfaceId::from(170)
+            })
+        );
+        assert!(state.seat.pointer_focus.is_none());
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::SeatEvent {
+                        event: SeatClientEvent::PointerLeave { surface, .. },
+                    } if *surface == WlSurfaceId::from(170)
+                )
+            }
+        ));
+        assert!(!matches!(
+            state.seat.visible_cursor_source(),
+            Some(CursorSourceRef::Surface { owner_client_id, .. })
+                if owner_client_id == client.client_id()
+        ));
+        assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::SeatEvent {
+                        event: SeatClientEvent::PointerButton { button, .. },
+                    } if *button == 0x110
+                )
+            }
+        ));
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x111, 1, 105);
+        handle_pointer_button(&mut state, &mut dispatcher, 0x111, 0, 106);
+
+        assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::SeatEvent {
+                        event: SeatClientEvent::PointerButton { button, .. },
+                    } if *button == 0x111
+                )
+            }
+        ));
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 0, 110);
+
+        assert!(state.seat.pointer_interactive_grab.is_none());
+        assert!(state.seat.pointer_focus.is_some());
+        assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::SeatEvent {
+                        event: SeatClientEvent::PointerButton { button, state, .. },
+                    } if *button == 0x110 && *state == 0
+                )
+            }
+        ));
+    }
+
+    #[test]
+    fn compositor_mouse_resize_binding_uses_pointer_thirds_for_edges() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(200),
+            XdgSurfaceId::from(210),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(210),
+            XdgToplevelId::from(220),
+        );
+
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(901usize), 10, 20, 80, 60);
+        }
+
+        state.config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:right" = { action = "resize-window" }
+            "#,
+            &state.xkb,
+        )
+        .unwrap();
+        state.keyboard.update_key(125, true);
+        state.seat.pointer_pos = (85.0, 50.0);
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x111, 1, 100);
+
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Resize { edges, .. })
+                if edges == xdg_toplevel::ResizeEdge::Right as u32
+        ));
+    }
+
+    #[test]
+    fn compositor_mouse_move_binding_uses_window_bounds_without_pointer_focus() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(230),
+            XdgSurfaceId::from(240),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(240),
+            XdgToplevelId::from(250),
+        );
+
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(902usize), 15, 25, 100, 80);
+            surface.test_set_input_region(crate::region::RegionValue::empty());
+        }
+
+        state.config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:left" = { action = "move-window" }
+            "#,
+            &state.xkb,
+        )
+        .unwrap();
+        state.keyboard.update_key(125, true);
+        state.seat.pointer_pos = (60.0, 55.0);
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+
+        assert!(state.seat.pointer_focus.is_none());
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Move { .. })
+        ));
+    }
+
+    #[test]
+    fn compositor_mouse_move_binding_rejects_maximized_windows() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(260),
+            XdgSurfaceId::from(270),
+        );
+        let toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(270),
+            XdgToplevelId::from(280),
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(903usize), 20, 30, 120, 90);
+        }
+        set_toplevel_window_state(&mut state, toplevel_object_id, true, false);
+
+        state.config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:left" = { action = "move-window" }
+            "#,
+            &state.xkb,
+        )
+        .unwrap();
+        state.keyboard.update_key(125, true);
+        state.seat.pointer_pos = (80.0, 70.0);
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+
+        assert!(state.seat.pointer_interactive_grab.is_none());
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::SeatEvent {
+                        event: SeatClientEvent::PointerButton { button, state, .. },
+                    } if *button == 0x110 && *state == 1
+                )
+            }
+        ));
+    }
+
+    #[test]
+    fn compositor_mouse_resize_binding_rejects_fullscreen_windows() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(290),
+            XdgSurfaceId::from(300),
+        );
+        let toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(300),
+            XdgToplevelId::from(310),
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(904usize), 0, 0, 200, 150);
+        }
+        set_toplevel_window_state(&mut state, toplevel_object_id, false, true);
+
+        state.config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:right" = { action = "resize-window" }
+            "#,
+            &state.xkb,
+        )
+        .unwrap();
+        state.keyboard.update_key(125, true);
+        state.seat.pointer_pos = (150.0, 100.0);
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x111, 1, 100);
+
+        assert!(state.seat.pointer_interactive_grab.is_none());
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::SeatEvent {
+                        event: SeatClientEvent::PointerButton { button, state, .. },
+                    } if *button == 0x111 && *state == 1
+                )
+            }
+        ));
+    }
+
+    #[test]
+    fn compositor_mouse_grab_surface_loss_runs_full_teardown() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(320),
+            XdgSurfaceId::from(330),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(330),
+            XdgToplevelId::from(340),
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(905usize), 30, 40, 120, 90);
+        }
+
+        state.config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:left" = { action = "move-window" }
+            "#,
+            &state.xkb,
+        )
+        .unwrap();
+        state.keyboard.update_key(125, true);
+        state.seat.pointer_pos = (60.0, 70.0);
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+        assert!(state.seat.pointer_interactive_grab.is_some());
+        assert!(state.remove_object(wl_surface_object_id).is_some());
+
+        handle_pointer_motion(&mut state, &mut dispatcher, 5.0, 0.0, 110);
+
+        assert!(state.seat.pointer_interactive_grab.is_none());
+        assert!(state.seat.intercepted_pointer_buttons.is_empty());
+        assert!(matches!(
+            state.seat.visible_cursor_source(),
+            Some(CursorSourceRef::Named { owner_client_id: None, .. })
+        ));
+        assert!(state.seat.pointer_focus.is_none());
+    }
+
+    #[test]
+    fn removing_grab_client_clears_intercepted_buttons_and_recovers_cursor() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(350),
+            XdgSurfaceId::from(360),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(360),
+            XdgToplevelId::from(370),
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(906usize), 10, 10, 100, 80);
+        }
+
+        state.config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:left" = { action = "move-window" }
+            "#,
+            &state.xkb,
+        )
+        .unwrap();
+        state.keyboard.update_key(125, true);
+        state.seat.pointer_pos = (50.0, 50.0);
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+        assert!(state.seat.pointer_interactive_grab.is_some());
+        assert!(!state.seat.intercepted_pointer_buttons.is_empty());
+
+        let removal = state.seat.remove_client(client.client_id());
+        assert!(removal.interactive_grab_cleared);
+        assert!(state.seat.pointer_interactive_grab.is_none());
+        assert!(state.seat.intercepted_pointer_buttons.is_empty());
+
+        recover_pointer_after_interactive_grab_loss(&mut state, &mut dispatcher, 0);
+
+        assert!(matches!(
+            state.seat.visible_cursor_source(),
+            Some(CursorSourceRef::Named { owner_client_id: None, .. })
+        ));
     }
 
     #[test]
@@ -2728,6 +3603,94 @@ mod xdg_seat_tests {
             state.seat.pointer_interactive_grab,
             Some(super::PointerInteractiveGrab::Resize { edges, .. })
                 if edges == xdg_toplevel::ResizeEdge::BottomRight as u32
+        ));
+    }
+
+    #[test]
+    fn interactive_resize_clamps_left_edge_to_toplevel_constraints() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        client.insert_object(&mut state, WlSeat::new(WlSeatId::from(5)));
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(130),
+            XdgSurfaceId::from(140),
+        );
+        let toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(140),
+            XdgToplevelId::from(150),
+        );
+
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(800usize), 40, 50, 100, 80);
+        }
+
+        {
+            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
+            toplevel.test_set_interactive_size_constraints(Some((90, 0)), Some((110, 0)));
+        }
+
+        let focus = SurfaceFocus {
+            client_id: client.client_id(),
+            surface_id: WlSurfaceId::from(130),
+        };
+        let serial = state.seat.next_serial();
+        state.seat.record_pointer_button(1, serial, Some(focus));
+        state.seat.pointer_pos = (40.0, 90.0);
+
+        {
+            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
+            toplevel.on(
+                &mut client,
+                &mut state,
+                toplevel_resize_request(
+                    XdgToplevelId::from(150),
+                    WlSeatId::from(5),
+                    serial,
+                    xdg_toplevel::ResizeEdge::Left as u32,
+                ),
+                &mut client_dispatcher,
+            );
+        }
+
+        handle_pointer_motion(&mut state, &mut dispatcher, 60.0, 0.0, 110);
+
+        let surface = state
+            .objects
+            .get(wl_surface_object_id)
+            .downcast_ref::<WlSurface>()
+            .unwrap();
+        assert_eq!(surface.root_position(), (50, 50));
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::InteractiveResizeConfigure {
+                        xdg_toplevel_id,
+                        width,
+                        height,
+                        resizing,
+                    } if *xdg_toplevel_id == XdgToplevelId::from(150)
+                        && *width == 90
+                        && *height == 80
+                        && *resizing
+                )
+            }
         ));
     }
 
