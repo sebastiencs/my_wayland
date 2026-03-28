@@ -263,40 +263,40 @@ fn main() {
     dispatcher.start::<input::Libinput>();
     dispatcher.start::<config::ConfigWatcher>();
 
-    let timer = make_timer(Duration::from_secs(10));
+    // let timer = make_timer(Duration::from_secs(10));
 
-    if !utils::is_x11() {
-        dispatcher.dispatch(IoUringAction::Poll {
-            id: None,
-            fd: timer.as_fd().as_raw_fd(),
-            dispatch_to: Redispatcher::to_any(|_res| {
-                eprintln!("ON_TIMEOUT");
-                std::process::abort();
-            }),
-        });
+    // if !utils::is_x11() {
+    //     dispatcher.dispatch(IoUringAction::Poll {
+    //         id: None,
+    //         fd: timer.as_fd().as_raw_fd(),
+    //         dispatch_to: Redispatcher::to_any(|_res| {
+    //             eprintln!("ON_TIMEOUT");
+    //             std::process::abort();
+    //         }),
+    //     });
 
-        std::thread::spawn(|| {
-            std::thread::sleep(Duration::from_millis(500));
-            let _output = std::process::Command::new("fish")
-                .args(&[
-                    "-c",
-                    // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 vlc",
-                    // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 alacritty",
-                    // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 /home/sebastien/github/client-toolkit/target/debug/examples/generic_simple_window",
-                    // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/my-wayland-0 /home/sebastien/github/wayland-rs/target/debug/examples/simple_window",
-                    // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/my-wayland-0 /usr/bin/wev",
-                    "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/my-wayland-0 alacritty",
-                    // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/my-wayland-0 /home/sebastien/github/weston/build/clients/weston-simple-egl",
-                ])
-                .status()
-                .unwrap();
-            //     .piped()
-            //     .output()
-            //     .unwrap();
-            // eprintln!("command stdout={}", String::from_utf8(output.stdout).unwrap());
-            // eprintln!("command stderr={}", String::from_utf8(output.stderr).unwrap());
-        });
-    }
+    //     std::thread::spawn(|| {
+    //         std::thread::sleep(Duration::from_millis(500));
+    //         let _output = std::process::Command::new("fish")
+    //             .args(&[
+    //                 "-c",
+    //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 vlc",
+    //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 alacritty",
+    //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 /home/sebastien/github/client-toolkit/target/debug/examples/generic_simple_window",
+    //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/my-wayland-0 /home/sebastien/github/wayland-rs/target/debug/examples/simple_window",
+    //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/my-wayland-0 /usr/bin/wev",
+    //                 "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/my-wayland-0 alacritty",
+    //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/my-wayland-0 /home/sebastien/github/weston/build/clients/weston-simple-egl",
+    //             ])
+    //             .status()
+    //             .unwrap();
+    //         //     .piped()
+    //         //     .output()
+    //         //     .unwrap();
+    //         // eprintln!("command stdout={}", String::from_utf8(output.stdout).unwrap());
+    //         // eprintln!("command stderr={}", String::from_utf8(output.stderr).unwrap());
+    //     });
+    // }
 
     runner.run(dispatcher);
 
