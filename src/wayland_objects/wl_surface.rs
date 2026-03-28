@@ -17,7 +17,10 @@ use crate::{
         wl_callback::WlCallback,
         wl_region::WlRegion,
         xdg_surface::XdgSurface,
-        zwlr_layer_surface_v1::{output_usable_bounds, ZwlrLayerSurfaceV1},
+        zwlr_layer_surface_v1::{
+            output_usable_bounds, output_usable_bounds_with_snapshot, LayerLayoutObjectSnapshot,
+            ZwlrLayerSurfaceV1,
+        },
     },
     ENABLE_DAMAGE,
 };
@@ -519,8 +522,16 @@ impl WlSurface {
     }
 
     pub fn configure_bounds(&self, state: &State) -> Option<(i32, i32)> {
+        self.configure_bounds_with_snapshot(state, None)
+    }
+
+    pub fn configure_bounds_with_snapshot(
+        &self,
+        state: &State,
+        snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+    ) -> Option<(i32, i32)> {
         self.preferred_output_id(state)
-            .and_then(|output_id| output_usable_bounds(state, output_id))
+            .and_then(|output_id| output_usable_bounds_with_snapshot(state, output_id, snapshot))
             .map(|bounds| (bounds.width, bounds.height))
     }
 
@@ -1572,7 +1583,11 @@ impl WlSurface {
             self.send_preferred_buffer_state(state, dispatcher);
             match shell_surface {
                 ShellSurfaceObject::XdgSurface(xdg_surface_id) => {
-                    let configure_bounds = self.configure_bounds(state);
+                    let surface_object_id = client.object_id(self.id);
+                    let layout_snapshot =
+                        LayerLayoutObjectSnapshot::for_surface(surface_object_id, self);
+                    let configure_bounds =
+                        self.configure_bounds_with_snapshot(state, Some(layout_snapshot));
                     let mut xdg_surface = client.grab_object(xdg_surface_id, state);
                     if !xdg_surface.on_commit(
                         client,
@@ -1587,12 +1602,16 @@ impl WlSurface {
                     }
                 }
                 ShellSurfaceObject::LayerSurface(layer_surface_id) => {
+                    let surface_object_id = client.object_id(self.id);
+                    let layer_surface_object_id = client.object_id(layer_surface_id);
                     let mut layer_surface = client.grab_object(layer_surface_id, state);
                     if !layer_surface.on_commit(
                         client,
                         state,
                         dispatcher,
-                        client.object_id(self.id),
+                        surface_object_id,
+                        self,
+                        layer_surface_object_id,
                         self.has_pending_buffer_attach(),
                         matches!(self.pending.buffer, Some(None)),
                     ) {

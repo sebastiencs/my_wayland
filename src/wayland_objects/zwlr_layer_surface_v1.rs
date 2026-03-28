@@ -8,7 +8,7 @@ use crate::{
         XdgPopupId, ZwlrLayerShellV1Id, ZwlrLayerSurfaceV1Id,
     },
     region::RectI,
-    seat::refresh_keyboard_focus,
+    seat::{refresh_keyboard_focus, refresh_keyboard_focus_with_snapshot},
     state::{ObjectId, OutputId, State},
     wayland_objects::{
         wl_display::WlDisplay,
@@ -147,6 +147,35 @@ struct ComputedLayerLayout {
     bottom_roots: Vec<ObjectId>,
     top_roots: Vec<ObjectId>,
     overlay_roots: Vec<ObjectId>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LayerLayoutObjectSnapshot<'a> {
+    pub surface_object_id: ObjectId,
+    pub surface: &'a WlSurface,
+    pub layer_surface_object_id: Option<ObjectId>,
+    pub layer_surface: Option<&'a ZwlrLayerSurfaceV1>,
+}
+
+impl<'a> LayerLayoutObjectSnapshot<'a> {
+    pub fn for_surface(surface_object_id: ObjectId, surface: &'a WlSurface) -> Self {
+        Self {
+            surface_object_id,
+            surface,
+            layer_surface_object_id: None,
+            layer_surface: None,
+        }
+    }
+
+    pub fn with_layer_surface(
+        mut self,
+        layer_surface_object_id: ObjectId,
+        layer_surface: &'a ZwlrLayerSurfaceV1,
+    ) -> Self {
+        self.layer_surface_object_id = Some(layer_surface_object_id);
+        self.layer_surface = Some(layer_surface);
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -507,7 +536,9 @@ impl ZwlrLayerSurfaceV1 {
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        _surface_object_id: ObjectId,
+        surface_object_id: ObjectId,
+        surface: &WlSurface,
+        layer_surface_object_id: ObjectId,
         has_pending_buffer_attach: bool,
         is_null_buffer_commit: bool,
     ) -> bool {
@@ -541,7 +572,10 @@ impl ZwlrLayerSurfaceV1 {
                 was_layer,
                 self,
             ) {
-                refresh_keyboard_focus(state, dispatcher);
+                let layout_snapshot =
+                    LayerLayoutObjectSnapshot::for_surface(surface_object_id, surface)
+                        .with_layer_surface(layer_surface_object_id, self);
+                refresh_keyboard_focus_with_snapshot(state, dispatcher, Some(layout_snapshot));
             }
             return true;
         }
@@ -571,7 +605,10 @@ impl ZwlrLayerSurfaceV1 {
             was_layer,
             self,
         ) {
-            refresh_keyboard_focus(state, dispatcher);
+            let layout_snapshot =
+                LayerLayoutObjectSnapshot::for_surface(surface_object_id, surface)
+                    .with_layer_surface(layer_surface_object_id, self);
+            refresh_keyboard_focus_with_snapshot(state, dispatcher, Some(layout_snapshot));
         }
 
         true
@@ -955,7 +992,36 @@ fn compute_output_layout(
     output_layout
 }
 
-fn compute_layer_layout(state: &State) -> ComputedLayerLayout {
+pub(crate) fn lookup_snapshot_surface<'a>(
+    state: &'a State,
+    snapshot: Option<LayerLayoutObjectSnapshot<'a>>,
+    object_id: ObjectId,
+) -> Option<&'a WlSurface> {
+    snapshot
+        .filter(|snapshot| snapshot.surface_object_id == object_id)
+        .map(|snapshot| snapshot.surface)
+        .or_else(|| state.objects.try_ref_object::<WlSurface>(object_id))
+}
+
+fn snapshot_layer_surface<'a>(
+    state: &'a State,
+    snapshot: Option<LayerLayoutObjectSnapshot<'a>>,
+    object_id: ObjectId,
+) -> Option<&'a ZwlrLayerSurfaceV1> {
+    snapshot
+        .filter(|snapshot| snapshot.layer_surface_object_id == Some(object_id))
+        .and_then(|snapshot| snapshot.layer_surface)
+        .or_else(|| {
+            state
+                .objects
+                .try_ref_object::<ZwlrLayerSurfaceV1>(object_id)
+        })
+}
+
+fn compute_layer_layout(
+    state: &State,
+    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+) -> ComputedLayerLayout {
     let live_root_ids = state.root_surface_ids();
     let root_order = live_root_ids
         .iter()
@@ -965,7 +1031,7 @@ fn compute_layer_layout(state: &State) -> ComputedLayerLayout {
     let mut snapshots_by_output = BTreeMap::<OutputId, Vec<LayerSnapshot>>::new();
 
     for object_id in live_root_ids.iter().copied() {
-        let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
+        let Some(surface) = lookup_snapshot_surface(state, snapshot, object_id) else {
             continue;
         };
         let Some(layer_surface_id) = surface.layer_surface_id() else {
@@ -974,9 +1040,7 @@ fn compute_layer_layout(state: &State) -> ComputedLayerLayout {
         let Some(layer_surface_object_id) = state.layer_surface_object_id(layer_surface_id) else {
             continue;
         };
-        let Some(layer_surface) = state
-            .objects
-            .try_ref_object::<ZwlrLayerSurfaceV1>(layer_surface_object_id)
+        let Some(layer_surface) = snapshot_layer_surface(state, snapshot, layer_surface_object_id)
         else {
             continue;
         };
@@ -1014,7 +1078,15 @@ fn compute_layer_layout(state: &State) -> ComputedLayerLayout {
 }
 
 pub fn output_usable_bounds(state: &State, output_id: OutputId) -> Option<RectI> {
-    let layout = compute_layer_layout(state);
+    output_usable_bounds_with_snapshot(state, output_id, None)
+}
+
+pub fn output_usable_bounds_with_snapshot(
+    state: &State,
+    output_id: OutputId,
+    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+) -> Option<RectI> {
+    let layout = compute_layer_layout(state, snapshot);
     layout
         .usable_by_output
         .get(&output_id)
@@ -1023,12 +1095,19 @@ pub fn output_usable_bounds(state: &State, output_id: OutputId) -> Option<RectI>
 }
 
 pub fn ordered_scene_root_surface_ids(state: &State) -> Vec<ObjectId> {
-    let layout = compute_layer_layout(state);
+    ordered_scene_root_surface_ids_with_snapshot(state, None)
+}
+
+pub fn ordered_scene_root_surface_ids_with_snapshot(
+    state: &State,
+    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+) -> Vec<ObjectId> {
+    let layout = compute_layer_layout(state, snapshot);
     let mut ordered = Vec::new();
     ordered.extend(layout.background_roots);
     ordered.extend(layout.bottom_roots);
     for object_id in state.root_surface_ids() {
-        let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
+        let Some(surface) = lookup_snapshot_surface(state, snapshot, object_id) else {
             continue;
         };
         if surface.role() == crate::wayland_objects::wl_surface::Role::LayerSurface {
@@ -1045,18 +1124,22 @@ pub fn layer_surface_keyboard_focus(
     state: &State,
     surface_object_id: ObjectId,
 ) -> Option<LayerKeyboardFocus> {
-    let surface = state
-        .objects
-        .try_ref_object::<WlSurface>(surface_object_id)?;
+    layer_surface_keyboard_focus_with_snapshot(state, surface_object_id, None)
+}
+
+pub fn layer_surface_keyboard_focus_with_snapshot(
+    state: &State,
+    surface_object_id: ObjectId,
+    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+) -> Option<LayerKeyboardFocus> {
+    let surface = lookup_snapshot_surface(state, snapshot, surface_object_id)?;
     let Some(layer_surface_id) = surface.layer_surface_id() else {
         return popup_parent_layer_surface_keyboard_focus(state, surface);
     };
     let Some(layer_surface_object_id) = state.layer_surface_object_id(layer_surface_id) else {
         return Some(LayerKeyboardFocus::None);
     };
-    let Some(layer_surface) = state
-        .objects
-        .try_ref_object::<ZwlrLayerSurfaceV1>(layer_surface_object_id)
+    let Some(layer_surface) = snapshot_layer_surface(state, snapshot, layer_surface_object_id)
     else {
         return Some(LayerKeyboardFocus::None);
     };
@@ -1103,7 +1186,7 @@ pub fn relayout_client_layer_surfaces(
         layer_surface.ensure_output_assignment(state);
     }
 
-    let layout = compute_layer_layout(state);
+    let layout = compute_layer_layout(state, None);
 
     for object_id in object_ids {
         let Some(mut layer_surface) = state

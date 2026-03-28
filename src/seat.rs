@@ -18,8 +18,9 @@ use crate::{
     wayland_objects::{
         wl_surface::{StackEntry, WlSurface},
         zwlr_layer_surface_v1::{
-            layer_surface_keyboard_focus, ordered_scene_root_surface_ids, LayerKeyboardFocus,
-            LayerShellLayer,
+            layer_surface_keyboard_focus_with_snapshot, lookup_snapshot_surface,
+            ordered_scene_root_surface_ids, ordered_scene_root_surface_ids_with_snapshot,
+            LayerKeyboardFocus, LayerLayoutObjectSnapshot, LayerShellLayer,
         },
     },
     xkb::KeyboardModifiers,
@@ -1101,9 +1102,17 @@ fn normalize_keyboard_focus(
     state: &State,
     requested_focus: Option<SurfaceFocus>,
 ) -> Option<SurfaceFocus> {
+    normalize_keyboard_focus_with_snapshot(state, requested_focus, None)
+}
+
+fn normalize_keyboard_focus_with_snapshot(
+    state: &State,
+    requested_focus: Option<SurfaceFocus>,
+    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+) -> Option<SurfaceFocus> {
     let requested_focus = requested_focus.and_then(|focus| {
         let surface_object_id = surface_object_id_for_wayland_id(state, focus.surface_id)?;
-        match layer_surface_keyboard_focus(state, surface_object_id) {
+        match layer_surface_keyboard_focus_with_snapshot(state, surface_object_id, snapshot) {
             Some(LayerKeyboardFocus::None) => None,
             _ => Some(focus),
         }
@@ -1115,16 +1124,26 @@ fn normalize_keyboard_focus(
         }
     }
 
-    topmost_exclusive_layer_focus(state).or(requested_focus)
+    topmost_exclusive_layer_focus_with_snapshot(state, snapshot).or(requested_focus)
 }
 
 fn topmost_exclusive_layer_focus(state: &State) -> Option<SurfaceFocus> {
-    for object_id in ordered_scene_root_surface_ids(state).into_iter().rev() {
-        let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
+    topmost_exclusive_layer_focus_with_snapshot(state, None)
+}
+
+fn topmost_exclusive_layer_focus_with_snapshot(
+    state: &State,
+    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+) -> Option<SurfaceFocus> {
+    for object_id in ordered_scene_root_surface_ids_with_snapshot(state, snapshot)
+        .into_iter()
+        .rev()
+    {
+        let Some(surface) = lookup_snapshot_surface(state, snapshot, object_id) else {
             continue;
         };
         let Some(LayerKeyboardFocus::Exclusive { layer }) =
-            layer_surface_keyboard_focus(state, object_id)
+            layer_surface_keyboard_focus_with_snapshot(state, object_id, snapshot)
         else {
             continue;
         };
@@ -1217,9 +1236,18 @@ pub fn set_surface_focus(
 }
 
 pub fn refresh_keyboard_focus(state: &mut State, dispatcher: &mut Dispatcher) {
+    refresh_keyboard_focus_with_snapshot(state, dispatcher, None);
+}
+
+pub fn refresh_keyboard_focus_with_snapshot(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+) {
     let preferred_focus =
         popup_keyboard_focus(state).or_else(|| state.seat.pointer_focus.map(|focus| focus.target));
-    set_keyboard_focus(state, dispatcher, preferred_focus);
+    let new_focus = normalize_keyboard_focus_with_snapshot(state, preferred_focus, snapshot);
+    set_keyboard_focus(state, dispatcher, new_focus);
 }
 
 pub fn refresh_active_drag_focus(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {
