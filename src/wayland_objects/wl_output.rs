@@ -154,7 +154,10 @@ impl WlOutput {
             return;
         }
         let scale = wl_output::Event::Scale {
-            factor: self.output(state).map(|output| output.scale).unwrap_or(1),
+            factor: self
+                .output(state)
+                .map(|output| output.legacy_scale())
+                .unwrap_or(1),
         };
         self.send_event(scale, dispatcher);
     }

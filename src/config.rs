@@ -14,13 +14,14 @@ use {
 };
 
 use crate::{
-    drm::schedule_outputs_for_points,
+    clients::ClientsAction,
+    drm::{schedule_outputs, schedule_outputs_for_points},
     io_uring::{
         model::IoUringAction,
         ring::{PollCompleted, RingId},
     },
     runner::{Dispatcher, Model, Redispatcher},
-    state::State,
+    state::{FractionalScale, State},
     xkb::{KeyboardState, Xkb},
 };
 
@@ -31,11 +32,18 @@ const DEFAULT_CURSOR_THEME: &str = "default";
 const DEFAULT_CURSOR_SIZE: u32 = 24;
 const INOTIFY_BUFFER_SIZE: usize = 4096;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputScaleSetting {
+    Auto,
+    Fixed(FractionalScale),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfig {
     path: PathBuf,
     pub general: GeneralConfig,
     pub bindings: Vec<Binding>,
+    output_scales: BTreeMap<String, OutputScaleSetting>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,6 +96,46 @@ pub enum ConfigWatcherAction {
 struct ConfigFile {
     general: GeneralConfigFile,
     bindings: BTreeMap<String, CompositorAction>,
+    output: OutputConfigFile,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct OutputConfigFile {
+    #[serde(default)]
+    scales: BTreeMap<String, OutputScaleSettingFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OutputScaleSettingFile {
+    Text(String),
+    Number(f64),
+}
+
+fn output_scale_setting_from_file(
+    value: OutputScaleSettingFile,
+) -> anyhow::Result<OutputScaleSetting> {
+    match value {
+        OutputScaleSettingFile::Text(s) => {
+            if s.eq_ignore_ascii_case("auto") {
+                Ok(OutputScaleSetting::Auto)
+            } else {
+                let f: f64 = s
+                    .parse()
+                    .with_context(|| format!("invalid output scale `{s}`"))?;
+                output_scale_setting_from_f64(f)
+            }
+        }
+        OutputScaleSettingFile::Number(n) => output_scale_setting_from_f64(n),
+    }
+}
+
+fn output_scale_setting_from_f64(scale: f64) -> anyhow::Result<OutputScaleSetting> {
+    let Some(scale) = FractionalScale::try_from_f64(scale) else {
+        bail!("output scale must be finite and positive");
+    };
+    Ok(OutputScaleSetting::Fixed(scale))
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,6 +190,14 @@ impl RuntimeConfig {
             }
             bindings.push(Binding { trigger, action });
         }
+
+        let mut output_scales = BTreeMap::new();
+        for (name, value) in parsed.output.scales {
+            let setting = output_scale_setting_from_file(value)
+                .with_context(|| format!("invalid output scale for `{name}`"))?;
+            output_scales.insert(name, setting);
+        }
+
         Ok(Self {
             path,
             general: GeneralConfig {
@@ -149,6 +205,7 @@ impl RuntimeConfig {
                 cursor_size: sanitize_cursor_size(parsed.general.cursor_size),
             },
             bindings,
+            output_scales,
         })
     }
 
@@ -160,11 +217,16 @@ impl RuntimeConfig {
                 cursor_size: DEFAULT_CURSOR_SIZE,
             },
             bindings: Vec::new(),
+            output_scales: BTreeMap::new(),
         }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn output_scale(&self, output_name: &str) -> Option<OutputScaleSetting> {
+        self.output_scales.get(output_name).copied()
     }
 
     pub fn binding_for_key(&self, keyboard: &KeyboardState, key: u32) -> Option<CompositorAction> {
@@ -381,6 +443,7 @@ pub fn reload_from_disk(
     let changed = state.config != next;
     state.config = next;
     apply_general_settings(state, dispatcher);
+    apply_output_settings(state, dispatcher);
     let trigger = match trigger {
         ReloadTrigger::ManualBinding => "manual binding",
         ReloadTrigger::AutomaticWatch => "file watch",
@@ -396,6 +459,18 @@ pub fn apply_general_settings(state: &mut State, dispatcher: &mut Dispatcher) {
         .set_cursor_theme(general.cursor_theme.clone(), general.cursor_size);
     if changed && state.seat.cursor_is_visible() {
         schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
+    }
+}
+
+pub fn apply_output_settings(state: &mut State, dispatcher: &mut Dispatcher) {
+    let changed_outputs = state.apply_output_scales_from_config();
+    if changed_outputs.is_empty() {
+        return;
+    }
+
+    schedule_outputs(state, changed_outputs.iter().copied(), dispatcher);
+    for output_id in changed_outputs {
+        dispatcher.dispatch(ClientsAction::OutputStateChanged { output_id });
     }
 }
 

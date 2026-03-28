@@ -1,6 +1,6 @@
 use crate::{
     clients::ClientId,
-    config::RuntimeConfig,
+    config::{OutputScaleSetting, RuntimeConfig},
     drm::Drm,
     egl::EGL,
     globals::{Global, GlobalName, Globals},
@@ -454,6 +454,59 @@ pub struct OutputMode {
     pub refresh_millihz: i32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub struct FractionalScale(u32);
+
+impl FractionalScale {
+    pub const DENOMINATOR: u32 = 120;
+    pub const ONE: Self = Self(Self::DENOMINATOR);
+    pub const ONE_POINT_FIVE: Self = Self(180);
+    pub const TWO: Self = Self(240);
+
+    pub const fn from_v120(raw: u32) -> Self {
+        Self(if raw == 0 { 1 } else { raw })
+    }
+
+    pub const fn from_integer(scale: u32) -> Self {
+        Self::from_v120(scale.saturating_mul(Self::DENOMINATOR))
+    }
+
+    pub fn try_from_f64(scale: f64) -> Option<Self> {
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        let raw = (scale * f64::from(Self::DENOMINATOR)).round();
+        (raw >= 1.0 && raw <= f64::from(u32::MAX)).then_some(Self(raw as u32))
+    }
+
+    pub const fn as_v120(self) -> u32 {
+        self.0
+    }
+
+    pub fn as_f64(self) -> f64 {
+        f64::from(self.0) / f64::from(Self::DENOMINATOR)
+    }
+
+    pub fn ceil(self) -> i32 {
+        self.0.div_ceil(Self::DENOMINATOR) as i32
+    }
+
+    pub fn logical_length(self, pixels: i32) -> i32 {
+        if pixels <= 0 {
+            return 0;
+        }
+        let pixels = i64::from(pixels);
+        let scale = i64::from(self.0);
+        ((pixels * i64::from(Self::DENOMINATOR)) + (scale / 2)).div_euclid(scale) as i32
+    }
+}
+
+impl Default for FractionalScale {
+    fn default() -> Self {
+        Self::ONE
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColorTransformMatrix {
     pub values: [f32; 9],
@@ -477,7 +530,7 @@ pub struct Output {
     pub y: i32,
     pub physical_width: i32,
     pub physical_height: i32,
-    pub scale: i32,
+    pub scale: FractionalScale,
     pub transform: i32,
     pub make: String,
     pub model: String,
@@ -501,7 +554,7 @@ impl Output {
             y: 0,
             physical_width: 0,
             physical_height: 0,
-            scale: 1,
+            scale: FractionalScale::ONE,
             transform: 0,
             make: String::new(),
             model: String::new(),
@@ -564,13 +617,52 @@ impl Output {
         self.preferred_mode = preferred_mode;
     }
 
+    pub fn configured_scale(&self, config: &RuntimeConfig) -> FractionalScale {
+        match config.output_scale(self.name.as_str()) {
+            Some(OutputScaleSetting::Fixed(scale)) => scale,
+            Some(OutputScaleSetting::Auto) => self.auto_scale(),
+            None => FractionalScale::ONE,
+        }
+    }
+
+    pub fn auto_scale(&self) -> FractionalScale {
+        if !self.enabled || self.physical_width <= 0 || self.physical_height <= 0 {
+            return FractionalScale::ONE;
+        }
+
+        let diagonal_px =
+            f64::from(self.current_mode.width).hypot(f64::from(self.current_mode.height));
+        if diagonal_px <= 0.0 {
+            return FractionalScale::ONE;
+        }
+
+        let mm_per_inch = 25.4;
+        let diagonal_in = (f64::from(self.physical_width) / mm_per_inch)
+            .hypot(f64::from(self.physical_height) / mm_per_inch);
+        if diagonal_in <= 0.0 {
+            return FractionalScale::ONE;
+        }
+
+        let ppi = diagonal_px / diagonal_in;
+        if ppi > 200.0 {
+            FractionalScale::TWO
+        } else if ppi > 140.0 {
+            FractionalScale::ONE_POINT_FIVE
+        } else {
+            FractionalScale::ONE
+        }
+    }
+
+    pub fn legacy_scale(&self) -> i32 {
+        self.scale.ceil()
+    }
+
     pub fn logical_size(&self) -> (i32, i32) {
-        let scale = self.scale.max(1);
         let (width, height) = match self.transform {
             1 | 3 | 5 | 7 => (self.current_mode.height, self.current_mode.width),
             _ => (self.current_mode.width, self.current_mode.height),
         };
-        (width / scale, height / scale)
+        (self.scale.logical_length(width), self.scale.logical_length(height))
     }
 
     pub fn logical_bounds(&self) -> Option<RectI> {
@@ -995,6 +1087,8 @@ impl State {
     }
 
     pub fn insert_output(&mut self, output: Output) -> OutputId {
+        let mut output = output;
+        output.scale = output.configured_scale(&self.config);
         let output_id = self.outputs.insert(output);
         self.active_output.get_or_insert(output_id);
         output_id
@@ -1249,7 +1343,28 @@ impl State {
             return false;
         };
         output.refresh_from_backend(drm);
+        output.scale = output.configured_scale(&self.config);
         true
+    }
+
+    pub fn apply_output_scales_from_config(&mut self) -> Vec<OutputId> {
+        let output_ids = self
+            .outputs
+            .iter()
+            .map(|(output_id, _)| output_id)
+            .collect::<Vec<_>>();
+        let mut changed = Vec::new();
+        for output_id in output_ids {
+            let desired_scale = self.outputs[output_id].configured_scale(&self.config);
+            let Some(output) = self.outputs.try_get_mut(output_id) else {
+                continue;
+            };
+            if output.scale != desired_scale {
+                output.scale = desired_scale;
+                changed.push(output_id);
+            }
+        }
+        changed
     }
 
     pub fn refresh_outputs_for_backend(&mut self, backend: BackendOutputRef) {
@@ -1265,6 +1380,7 @@ impl State {
         for output_id in output_ids {
             if let Some(output) = self.outputs.try_get_mut(output_id) {
                 output.refresh_from_backend(drm);
+                output.scale = output.configured_scale(&self.config);
             }
         }
     }
@@ -1330,7 +1446,7 @@ mod tests {
             y,
             physical_width: 0,
             physical_height: 0,
-            scale: 1,
+            scale: FractionalScale::ONE,
             transform: 0,
             make: String::new(),
             model: String::new(),
@@ -1456,7 +1572,7 @@ mod tests {
             y: 20,
             physical_width: 0,
             physical_height: 0,
-            scale: 1,
+            scale: FractionalScale::ONE,
             transform: 0,
             make: String::new(),
             model: String::new(),
@@ -1477,7 +1593,7 @@ mod tests {
             y: 0,
             physical_width: 0,
             physical_height: 0,
-            scale: 1,
+            scale: FractionalScale::ONE,
             transform: 0,
             make: String::new(),
             model: String::new(),
@@ -1508,7 +1624,7 @@ mod tests {
             y: 0,
             physical_width: 0,
             physical_height: 0,
-            scale: 1,
+            scale: FractionalScale::ONE,
             transform: 0,
             make: String::new(),
             model: String::new(),
@@ -1529,7 +1645,7 @@ mod tests {
             y: 0,
             physical_width: 0,
             physical_height: 0,
-            scale: 1,
+            scale: FractionalScale::ONE,
             transform: 0,
             make: String::new(),
             model: String::new(),
@@ -1560,7 +1676,7 @@ mod tests {
             y: 0,
             physical_width: 0,
             physical_height: 0,
-            scale: 1,
+            scale: FractionalScale::ONE,
             transform: 0,
             make: String::new(),
             model: String::new(),
@@ -1581,7 +1697,7 @@ mod tests {
             y: 0,
             physical_width: 0,
             physical_height: 0,
-            scale: 1,
+            scale: FractionalScale::ONE,
             transform: 0,
             make: String::new(),
             model: String::new(),

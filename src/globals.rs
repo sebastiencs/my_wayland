@@ -6,6 +6,7 @@ use crate::{
         wl_compositor::WlCompositorGlobal, wl_data_device_manager::WlDataDeviceManagerGlobal,
         wl_seat::WlSeatGlobal, wl_shm::WlShmGlobal, wl_subcompositor::WlSubcompositorGlobal,
         wp_cursor_shape_manager_v1::WpCursorShapeManagerV1Global,
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1Global,
         wp_presentation::WpPresentationGlobal, wp_viewporter::WpViewporterGlobal,
         xdg_activation_v1::XdgActivationV1Global, xdg_wm_base::XdgWmBaseGlobal,
         zwlr_layer_shell_v1::ZwlrLayerShellV1Global,
@@ -52,6 +53,7 @@ impl Globals {
             WlSubcompositorGlobal::new,
             WlSeatGlobal::new, // TODO: `WlSeatGlobal` should be added dynamically
             WpPresentationGlobal::new,
+            WpFractionalScaleManagerV1Global::new,
             WpViewporterGlobal::new,
             // ZwpLinuxDmabufV1Global::new,
             WpCursorShapeManagerV1Global::new,

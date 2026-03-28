@@ -22,6 +22,8 @@ pub mod wl_subsurface;
 pub mod wl_surface;
 pub mod wp_cursor_shape_device_v1;
 pub mod wp_cursor_shape_manager_v1;
+pub mod wp_fractional_scale_manager_v1;
+pub mod wp_fractional_scale_v1;
 pub mod wp_linux_drm_syncobj_manager_v1;
 pub mod wp_linux_drm_syncobj_surface_v1;
 pub mod wp_linux_drm_syncobj_timeline_v1;
@@ -89,8 +91,9 @@ fake_obj! {
     { ext_idle_notification_v1, ExtIdleNotificationV1 },
     { ext_session_lock_manager_v1, ExtSessionLockManagerV1 },
     { ext_session_lock_v1, ExtSessionLockV1 },
-    { wp_fractional_scale_manager_v1, WpFractionalScaleManagerV1 },
-    { wp_fractional_scale_v1, WpFractionalScaleV1 },
+    { ext_workspace_manager_v1, ExtWorkspaceManagerV1 },
+    { ext_workspace_group_handle_v1, ExtWorkspaceGroupHandleV1 },
+    { ext_workspace_handle_v1, ExtWorkspaceHandleV1 },
     { wp_single_pixel_buffer_manager_v1, WpSinglePixelBufferManagerV1 },
     { wp_tearing_control_manager_v1, WpTearingControlManagerV1 },
     { wp_tearing_control_v1, WpTearingControlV1 },
@@ -98,6 +101,8 @@ fake_obj! {
     { xwayland_shell_v1, XwaylandShellV1 },
     { ext_session_lock_surface_v1, ExtSessionLockSurfaceV1 },
     { xwayland_surface_v1, XwaylandSurfaceV1 },
+    { xdg_toplevel_drag_manager_v1, XdgToplevelDragManagerV1 },
+    { xdg_toplevel_drag_v1, XdgToplevelDragV1 },
     { zwp_linux_buffer_release_v1, ZwpLinuxBufferReleaseV1 },
     { zwp_linux_dmabuf_feedback_v1, ZwpLinuxDmabufFeedbackV1 },
     { zwp_linux_explicit_synchronization_v1, ZwpLinuxExplicitSynchronizationV1 },

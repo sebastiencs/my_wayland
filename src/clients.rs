@@ -1706,26 +1706,25 @@ fn refresh_surface_tree_outputs(
         );
     }
 
-    if delta.active_output_changed {
-        let preferred_output = state
+    let preferred_output = state
+        .objects
+        .try_ref_object::<WlSurface>(surface_object_id)
+        .and_then(|surface| surface.preferred_output_id(state))
+        .and_then(|output_id| {
+            state
+                .outputs
+                .try_get(output_id)
+                .map(|output| (output.scale, output.legacy_scale().max(1), output.transform as u32))
+        });
+    if let Some((fractional_scale, scale, transform)) = preferred_output {
+        let Some(mut surface) = state
             .objects
-            .try_ref_object::<WlSurface>(surface_object_id)
-            .and_then(|surface| surface.preferred_output_id(state))
-            .and_then(|output_id| {
-                state
-                    .outputs
-                    .try_get(output_id)
-                    .map(|output| (output.scale.max(1), output.transform as u32))
-            });
-        if let Some((scale, transform)) = preferred_output {
-            let Some(mut surface) = state
-                .objects
-                .try_grab_object::<WlSurface>(surface_object_id)
-            else {
-                return;
-            };
-            surface.send_preferred_buffer_state_for_output(scale, transform, dispatcher);
-        }
+            .try_grab_object::<WlSurface>(surface_object_id)
+        else {
+            return;
+        };
+        surface.send_preferred_fractional_scale_for_output(fractional_scale, state, dispatcher);
+        surface.send_preferred_buffer_state_for_output(scale, transform, dispatcher);
     }
 
     for entry in stack {
@@ -2643,5 +2642,121 @@ mod clients_wire_tests {
         let _returned = unsafe { OwnedFd::from_raw_fd(returned) };
 
         assert!(fds.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod surface_output_refresh_tests {
+    use crate::{
+        clients::{Client, ClientId},
+        egl::EGL,
+        globals::Globals,
+        io_uring::model::IoUringAction,
+        runner::Dispatcher,
+        state::{BackendOutputRef, DrmId, FractionalScale, ObjectId, Output, OutputMode, State},
+        wayland_objects::{wl_surface::WlSurface, wp_fractional_scale_v1::WpFractionalScaleV1},
+        xkb::Xkb,
+    };
+
+    fn make_state() -> State {
+        let xkb = Xkb::new();
+        let keyboard = xkb.create_keyboard_state();
+        let mut globals = Globals::new();
+        globals.initialize();
+        State {
+            objects: Default::default(),
+            root_surfaces: Default::default(),
+            layer_surface_objects: Default::default(),
+            inputs: Default::default(),
+            drm: Default::default(),
+            outputs: Default::default(),
+            active_output: None,
+            backend_syncobj_globals: Default::default(),
+            globals,
+            activation_tokens: Default::default(),
+            egl: EGL::new(),
+            config: Default::default(),
+            seat: Default::default(),
+            keyboard,
+            xkb,
+        }
+    }
+
+    fn make_output(x: i32, y: i32, width: i32, height: i32) -> Output {
+        Output {
+            backend: BackendOutputRef::new(DrmId::from(1usize)),
+            drm_crtc_id: 1,
+            global_name: None,
+            gamma_lut_size: 0,
+            ctm_supported: false,
+            gamma_control_object_id: None,
+            x,
+            y,
+            physical_width: 0,
+            physical_height: 0,
+            scale: FractionalScale::ONE,
+            transform: 0,
+            make: String::new(),
+            model: String::new(),
+            name: "output-1".to_string(),
+            description: String::new(),
+            enabled: true,
+            current_mode: OutputMode { width, height, refresh_millihz: 60_000 },
+            preferred_mode: None,
+        }
+    }
+
+    #[test]
+    fn refresh_surface_outputs_resends_fractional_scale_when_output_scale_changes() {
+        let mut state = make_state();
+        let mut client = Client::new_for_tests(ClientId::from_raw(9));
+        let output_id = state.insert_output(make_output(0, 0, 200, 120));
+        let surface_id = crate::protocol_generated::WlSurfaceId::from(10u32);
+        let fractional_id = crate::protocol_generated::WpFractionalScaleV1Id::from(11u32);
+        let ((_, surface_object_id), _) =
+            client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
+        state.register_root_surface(surface_object_id);
+
+        let fractional_object_id = state
+            .insert_object(WpFractionalScaleV1::new(fractional_id, surface_object_id))
+            .1;
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface
+                .set_fractional_scale_object(fractional_object_id)
+                .unwrap();
+            surface.test_map(ObjectId::from(999usize), 0, 0, 200, 120);
+        }
+
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            client.refresh_surface_outputs(&mut state, &mut client_dispatcher);
+        }
+        assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
+            action,
+            IoUringAction::Sendmsg { .. }
+        )));
+
+        state.outputs.try_get_mut(output_id).unwrap().scale = FractionalScale::ONE_POINT_FIVE;
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            client.refresh_surface_outputs(&mut state, &mut client_dispatcher);
+        }
+        assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
+            action,
+            IoUringAction::Sendmsg { .. }
+        )));
+
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            client.refresh_surface_outputs(&mut state, &mut client_dispatcher);
+        }
+        assert!(!dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
+            action,
+            IoUringAction::Sendmsg { .. }
+        )));
     }
 }

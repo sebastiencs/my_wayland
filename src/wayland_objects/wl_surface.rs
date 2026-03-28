@@ -5,17 +5,18 @@ use crate::{
     drm::{schedule_active_output, schedule_outputs, schedule_outputs_for_rect},
     object::{Object, Parser},
     protocol_generated::{
-        wl_pointer, wl_surface, wp_linux_drm_syncobj_surface_v1, wp_viewport, xdg_wm_base,
-        WaylandId, WlBufferId, WlCallbackId, WlOutputId, WlRegionId, WlSubsurfaceId, WlSurfaceId,
-        WpPresentationFeedbackId, XdgSurfaceId, ZwlrLayerSurfaceV1Id,
+        wl_pointer, wl_surface, wp_fractional_scale_v1, wp_linux_drm_syncobj_surface_v1,
+        wp_viewport, xdg_wm_base, WaylandId, WlBufferId, WlCallbackId, WlOutputId, WlRegionId,
+        WlSubsurfaceId, WlSurfaceId, WpPresentationFeedbackId, XdgSurfaceId, ZwlrLayerSurfaceV1Id,
     },
     region::{DamageRegion, RectI, RegionValue},
-    state::{ObjectId, OutputId, State},
+    state::{FractionalScale, ObjectId, OutputId, State},
     sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
     transform::{self, BufferTransform, SizeI, SurfaceViewport},
     wayland_objects::{
         wl_callback::WlCallback,
         wl_region::WlRegion,
+        wp_fractional_scale_v1::WpFractionalScaleV1,
         xdg_surface::XdgSurface,
         zwlr_layer_surface_v1::{
             output_usable_bounds, output_usable_bounds_with_snapshot, LayerLayoutObjectSnapshot,
@@ -117,6 +118,7 @@ pub struct WlSurface {
     blocked: Option<BlockedSurfaceState>,
     blocked_waiter_id: Option<crate::sync::AcquireReadyWaiterId>,
     syncobj_surface_object: Option<crate::protocol_generated::WpLinuxDrmSyncobjSurfaceV1Id>,
+    fractional_scale_object: Option<ObjectId>,
     viewport_object: Option<crate::protocol_generated::WpViewportId>,
     retired_buffers: Vec<RetiredBufferCandidate>,
     /// `wl_surface.frame` callbacks to complete on the next `commit`.
@@ -127,6 +129,7 @@ pub struct WlSurface {
     tree: SurfaceTreeState,
     output_membership: BTreeSet<OutputId>,
     active_output: Option<OutputId>,
+    preferred_fractional_scale_sent: Option<u32>,
     preferred_buffer_scale_sent: Option<i32>,
     preferred_buffer_transform_sent: Option<u32>,
 }
@@ -292,6 +295,7 @@ impl WlSurface {
             blocked: None,
             blocked_waiter_id: None,
             syncobj_surface_object: None,
+            fractional_scale_object: None,
             viewport_object: None,
             retired_buffers: Vec::new(),
             pending_frame_callbacks: Vec::new(),
@@ -301,6 +305,7 @@ impl WlSurface {
             tree: SurfaceTreeState::default(),
             output_membership: BTreeSet::new(),
             active_output: None,
+            preferred_fractional_scale_sent: None,
             preferred_buffer_scale_sent: None,
             preferred_buffer_transform_sent: None,
         }
@@ -323,6 +328,64 @@ impl WlSurface {
     ) {
         if self.syncobj_surface_object == Some(object) {
             self.syncobj_surface_object = None;
+        }
+    }
+
+    pub fn set_fractional_scale_object(&mut self, object_id: ObjectId) -> Result<(), ()> {
+        if self.fractional_scale_object.is_some() {
+            return Err(());
+        }
+        self.fractional_scale_object = Some(object_id);
+        Ok(())
+    }
+
+    pub fn clear_fractional_scale_object(&mut self, object_id: ObjectId) {
+        if self.fractional_scale_object == Some(object_id) {
+            self.fractional_scale_object = None;
+            self.preferred_fractional_scale_sent = None;
+        }
+    }
+
+    pub fn has_fractional_scale_object(&self) -> bool {
+        self.fractional_scale_object.is_some()
+    }
+
+    fn delete_owned_object(
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        id: WaylandId,
+    ) {
+        if client.object_id_for_wayland(id).is_some() {
+            use crate::wayland_objects::wl_display::WlDisplay;
+            client.delete_id(&WlDisplay::default(), state, dispatcher, id);
+        }
+    }
+
+    fn cleanup_extension_objects(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        if let Some(object_id) = self.fractional_scale_object.take() {
+            self.preferred_fractional_scale_sent = None;
+            let fractional_id = state
+                .objects
+                .try_ref_object::<WpFractionalScaleV1>(object_id)
+                .map(|object| object.id());
+            if let Some(fractional_id) = fractional_id {
+                Self::delete_owned_object(client, state, dispatcher, fractional_id);
+            }
+        }
+
+        if let Some(viewport_id) = self.viewport_object.take() {
+            self.pending.viewport = SurfaceViewport::default();
+            Self::delete_owned_object(client, state, dispatcher, viewport_id.into());
+        }
+
+        if let Some(syncobj_surface_id) = self.syncobj_surface_object.take() {
+            Self::delete_owned_object(client, state, dispatcher, syncobj_surface_id.into());
         }
     }
 
@@ -547,10 +610,47 @@ impl WlSurface {
             return;
         };
         self.send_preferred_buffer_state_for_output(
-            output.scale.max(1),
+            output.legacy_scale().max(1),
             output.transform as u32,
             dispatcher,
         );
+    }
+
+    pub fn send_preferred_fractional_scale(
+        &mut self,
+        state: &State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let preferred_output_id = self.preferred_output_id(state);
+        let Some(output) =
+            preferred_output_id.and_then(|output_id| state.outputs.try_get(output_id))
+        else {
+            return;
+        };
+        self.send_preferred_fractional_scale_for_output(output.scale, state, dispatcher);
+    }
+
+    pub fn send_preferred_fractional_scale_for_output(
+        &mut self,
+        scale: FractionalScale,
+        state: &State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let Some(object_id) = self.fractional_scale_object else {
+            return;
+        };
+        let scale = scale.as_v120();
+        if self.preferred_fractional_scale_sent == Some(scale) {
+            return;
+        }
+        let Some(object) = state
+            .objects
+            .try_ref_object::<WpFractionalScaleV1>(object_id)
+        else {
+            return;
+        };
+        object.send_preferred_scale(scale, dispatcher);
+        self.preferred_fractional_scale_sent = Some(scale);
     }
 
     pub fn send_preferred_buffer_state_for_output(
@@ -1580,6 +1680,7 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         if let Some(shell_surface) = self.shell_surface {
+            self.send_preferred_fractional_scale(state, dispatcher);
             self.send_preferred_buffer_state(state, dispatcher);
             match shell_surface {
                 ShellSurfaceObject::XdgSurface(xdg_surface_id) => {
@@ -2272,6 +2373,7 @@ impl WlSurface {
                 parent_surface.remove_child_from_tree(client.object_id(self.id));
             }
         }
+        self.cleanup_extension_objects(client, state, dispatcher);
         state.unregister_root_surface(object_id);
         use crate::wayland_objects::wl_display::WlDisplay;
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
@@ -2437,13 +2539,21 @@ mod tests {
             globals::Globals,
             io_uring::model::IoUringAction,
             protocol_generated::{
-                xdg_wm_base, WlSubsurfaceId, WlSurfaceId, WpPresentationFeedbackId,
+                xdg_wm_base, WlSubsurfaceId, WlSurfaceId, WpFractionalScaleV1Id,
+                WpLinuxDrmSyncobjSurfaceV1Id, WpPresentationFeedbackId, WpViewportId,
             },
             region::{DamageRegion, RectI, RegionSpec, RegionValue},
             runner::Dispatcher,
-            state::{BackendOutputRef, DrmId, ObjectId, Output, OutputMode, State},
+            state::{
+                BackendOutputRef, DrmId, FractionalScale, ObjectId, Output, OutputMode, State,
+            },
             sync::SurfaceSyncState,
             transform::{self, BufferTransform, SizeI, SurfaceViewport},
+            wayland_objects::{
+                wp_fractional_scale_v1::WpFractionalScaleV1,
+                wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
+                wp_viewport::WpViewport,
+            },
             xkb::Xkb,
         },
     };
@@ -2513,7 +2623,7 @@ mod tests {
             y,
             physical_width: 0,
             physical_height: 0,
-            scale: 1,
+            scale: FractionalScale::ONE,
             transform: 0,
             make: String::new(),
             model: String::new(),
@@ -2528,6 +2638,18 @@ mod tests {
     fn insert_surface(state: &mut State, surface: WlSurface) -> ObjectId {
         let object_id = state.insert_object(surface).1;
         state.register_root_surface(object_id);
+        object_id
+    }
+
+    fn attach_fractional_scale_object(state: &mut State, surface_object_id: ObjectId) -> ObjectId {
+        let object_id = state
+            .insert_object(WpFractionalScaleV1::new(
+                WpFractionalScaleV1Id::from(77),
+                surface_object_id,
+            ))
+            .1;
+        let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+        surface.set_fractional_scale_object(object_id).unwrap();
         object_id
     }
 
@@ -2589,6 +2711,58 @@ mod tests {
     }
 
     #[test]
+    fn deleting_surface_removes_surface_extension_objects() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let ((_, surface_object_id), _) = client
+            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(5), client.client_id(), 6));
+        state.register_root_surface(surface_object_id);
+
+        let fractional_id = WpFractionalScaleV1Id::from(6);
+        let ((_, fractional_object_id), _) = client
+            .insert_object(&mut state, WpFractionalScaleV1::new(fractional_id, surface_object_id));
+        let viewport_id = WpViewportId::from(7);
+        let ((_, viewport_object_id), _) =
+            client.insert_object(&mut state, WpViewport::new(viewport_id, surface_object_id));
+        let syncobj_surface_id = WpLinuxDrmSyncobjSurfaceV1Id::from(8);
+        let ((_, syncobj_surface_object_id), _) = client.insert_object(
+            &mut state,
+            WpLinuxDrmSyncobjSurfaceV1::new(syncobj_surface_id, surface_object_id),
+        );
+
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface
+                .set_fractional_scale_object(fractional_object_id)
+                .unwrap();
+            surface.set_viewport_object(viewport_id).unwrap();
+            surface
+                .set_syncobj_surface_object(syncobj_surface_id)
+                .unwrap();
+            surface.delete_self(&mut client, &mut state, &mut client_dispatcher);
+        }
+        drop(client_dispatcher);
+
+        assert!(!client.contains_object(WlSurfaceId::from(5), &state));
+        assert!(!client.contains_object(fractional_id, &state));
+        assert!(!client.contains_object(viewport_id, &state));
+        assert!(!client.contains_object(syncobj_surface_id, &state));
+        assert!(state
+            .objects
+            .try_ref_object::<WpFractionalScaleV1>(fractional_object_id)
+            .is_none());
+        assert!(state
+            .objects
+            .try_ref_object::<WpViewport>(viewport_object_id)
+            .is_none());
+        assert!(state
+            .objects
+            .try_ref_object::<WpLinuxDrmSyncobjSurfaceV1>(syncobj_surface_object_id)
+            .is_none());
+    }
+
+    #[test]
     fn surface_defaults_match_region_protocol_defaults() {
         let surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(1), 6);
         assert_eq!(surface.on_screen.input_region, RegionValue::infinite());
@@ -2647,7 +2821,7 @@ mod tests {
         ));
         {
             let output = state.outputs.try_get_mut(output_id).unwrap();
-            output.scale = 2;
+            output.scale = FractionalScale::from_integer(2);
             output.transform = 3;
         }
         let mut surface = WlSurface::new(WlSurfaceId::from(9), ClientId::from_raw(6), 6);
@@ -2670,6 +2844,106 @@ mod tests {
         drop(client_dispatcher);
 
         assert!(!dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
+            action,
+            IoUringAction::Sendmsg { .. }
+        )));
+    }
+
+    #[test]
+    fn preferred_fractional_scale_sends_once_per_scale_value() {
+        let mut state = make_state();
+        let output_id = state.insert_output(make_output(
+            BackendOutputRef::new(DrmId::from(1usize)),
+            1,
+            0,
+            0,
+            200,
+            120,
+        ));
+        state.outputs.try_get_mut(output_id).unwrap().scale = FractionalScale::ONE_POINT_FIVE;
+
+        let surface_object_id = insert_surface(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(10), ClientId::from_raw(6), 6),
+        );
+        let fractional_object_id = attach_fractional_scale_object(&mut state, surface_object_id);
+
+        let mut surface = WlSurface::new(WlSurfaceId::from(10), ClientId::from_raw(6), 6);
+        surface.update_output_membership(vec![output_id]);
+        surface.fractional_scale_object = Some(fractional_object_id);
+
+        let (client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        surface.send_preferred_fractional_scale(&state, &mut client_dispatcher);
+        drop(client_dispatcher);
+
+        assert_eq!(
+            surface.preferred_fractional_scale_sent,
+            Some(FractionalScale::ONE_POINT_FIVE.as_v120())
+        );
+        assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
+            action,
+            IoUringAction::Sendmsg { .. }
+        )));
+
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        surface.send_preferred_fractional_scale(&state, &mut client_dispatcher);
+        drop(client_dispatcher);
+
+        assert!(!dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
+            action,
+            IoUringAction::Sendmsg { .. }
+        )));
+    }
+
+    #[test]
+    fn preferred_fractional_scale_updates_when_surface_moves_outputs() {
+        let mut state = make_state();
+        let left_output = state.insert_output(make_output(
+            BackendOutputRef::new(DrmId::from(1usize)),
+            1,
+            0,
+            0,
+            200,
+            120,
+        ));
+        let right_output = state.insert_output(make_output(
+            BackendOutputRef::new(DrmId::from(1usize)),
+            2,
+            200,
+            0,
+            200,
+            120,
+        ));
+        state.outputs.try_get_mut(left_output).unwrap().scale = FractionalScale::ONE;
+        state.outputs.try_get_mut(right_output).unwrap().scale = FractionalScale::TWO;
+
+        let surface_object_id = insert_surface(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(11), ClientId::from_raw(7), 6),
+        );
+        let fractional_object_id = attach_fractional_scale_object(&mut state, surface_object_id);
+
+        let mut surface = WlSurface::new(WlSurfaceId::from(11), ClientId::from_raw(7), 6);
+        surface.fractional_scale_object = Some(fractional_object_id);
+        surface.update_output_membership(vec![left_output]);
+
+        let (client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        surface.send_preferred_fractional_scale(&state, &mut client_dispatcher);
+        drop(client_dispatcher);
+        assert_eq!(surface.preferred_fractional_scale_sent, Some(FractionalScale::ONE.as_v120()));
+
+        let mut dispatcher = Dispatcher::default();
+        surface.update_output_membership(vec![right_output]);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        surface.send_preferred_fractional_scale(&state, &mut client_dispatcher);
+        drop(client_dispatcher);
+
+        assert_eq!(surface.preferred_fractional_scale_sent, Some(FractionalScale::TWO.as_v120()));
+        assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
             action,
             IoUringAction::Sendmsg { .. }
         )));

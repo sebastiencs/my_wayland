@@ -4579,7 +4579,10 @@ mod presentation_timing_tests {
             protocol_generated::{WlBufferId, WlSurfaceId, WpPresentationFeedbackId},
             region::{DamageRegion, RectI},
             runner::Dispatcher,
-            state::{BackendOutputRef, DrmId, ObjectId, Output, OutputId, OutputMode, State},
+            state::{
+                BackendOutputRef, DrmId, FractionalScale, ObjectId, Output, OutputId, OutputMode,
+                State,
+            },
             transform,
             wayland_objects::{
                 wl_buffer::WlBuffer,
@@ -4648,7 +4651,7 @@ mod presentation_timing_tests {
             y,
             physical_width: 0,
             physical_height: 0,
-            scale: 1,
+            scale: FractionalScale::ONE,
             transform: 0,
             make: String::new(),
             model: String::new(),
