@@ -94,7 +94,7 @@ impl Object for WpFractionalScaleManagerV1 {
                     let _ = surface.set_fractional_scale_object(object_id);
                 }
                 let mut surface = state.objects.grab_object::<WlSurface>(surface_oid);
-                surface.send_preferred_fractional_scale(state, dispatcher);
+                surface.send_preferred_fractional_scale_for_object(state, surface_oid, dispatcher);
             }
         }
     }
@@ -188,5 +188,32 @@ mod tests {
             action,
             IoUringAction::Sendmsg { .. }
         )));
+    }
+
+    #[test]
+    fn get_fractional_scale_does_not_iterate_objects_while_surface_is_grabbed() {
+        let mut state = make_state();
+        let mut client = Client::new_for_tests(crate::clients::ClientId::from_raw(8));
+        let manager_id = WpFractionalScaleManagerV1Id::from(3u32);
+        let fractional_id = WpFractionalScaleV1Id::from(4u32);
+        let surface_id = WlSurfaceId::from(5u32);
+        client.insert_object(&mut state, WpFractionalScaleManagerV1 { id: manager_id });
+        client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
+
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        {
+            let mut manager = client.grab_object(manager_id, &mut state);
+            manager.on(
+                &mut client,
+                &mut state,
+                get_fractional_scale_request(manager_id, fractional_id, surface_id.into()),
+                &mut client_dispatcher,
+            );
+        }
+        drop(client_dispatcher);
+
+        assert!(client.contains_object(fractional_id, &state));
     }
 }

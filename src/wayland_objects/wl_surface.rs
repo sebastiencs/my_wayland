@@ -584,6 +584,14 @@ impl WlSurface {
         state.output_id_for_surface(self)
     }
 
+    pub fn preferred_output_id_for_object(
+        &self,
+        state: &State,
+        surface_object_id: ObjectId,
+    ) -> Option<OutputId> {
+        state.output_id_for_surface_object(surface_object_id, self)
+    }
+
     pub fn configure_bounds(&self, state: &State) -> Option<(i32, i32)> {
         self.configure_bounds_with_snapshot(state, None)
     }
@@ -604,6 +612,25 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         let preferred_output_id = self.preferred_output_id(state);
+        self.send_preferred_buffer_state_with_output(preferred_output_id, state, dispatcher);
+    }
+
+    pub fn send_preferred_buffer_state_for_object(
+        &mut self,
+        state: &State,
+        surface_object_id: ObjectId,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let preferred_output_id = self.preferred_output_id_for_object(state, surface_object_id);
+        self.send_preferred_buffer_state_with_output(preferred_output_id, state, dispatcher);
+    }
+
+    fn send_preferred_buffer_state_with_output(
+        &mut self,
+        preferred_output_id: Option<OutputId>,
+        state: &State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
         let Some(output) =
             preferred_output_id.and_then(|output_id| state.outputs.try_get(output_id))
         else {
@@ -622,6 +649,25 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         let preferred_output_id = self.preferred_output_id(state);
+        self.send_preferred_fractional_scale_with_output(preferred_output_id, state, dispatcher);
+    }
+
+    pub fn send_preferred_fractional_scale_for_object(
+        &mut self,
+        state: &State,
+        surface_object_id: ObjectId,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let preferred_output_id = self.preferred_output_id_for_object(state, surface_object_id);
+        self.send_preferred_fractional_scale_with_output(preferred_output_id, state, dispatcher);
+    }
+
+    fn send_preferred_fractional_scale_with_output(
+        &mut self,
+        preferred_output_id: Option<OutputId>,
+        state: &State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
         let Some(output) =
             preferred_output_id.and_then(|output_id| state.outputs.try_get(output_id))
         else {
@@ -1680,11 +1726,11 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         if let Some(shell_surface) = self.shell_surface {
-            self.send_preferred_fractional_scale(state, dispatcher);
-            self.send_preferred_buffer_state(state, dispatcher);
+            let surface_object_id = client.object_id(self.id);
+            self.send_preferred_fractional_scale_for_object(state, surface_object_id, dispatcher);
+            self.send_preferred_buffer_state_for_object(state, surface_object_id, dispatcher);
             match shell_surface {
                 ShellSurfaceObject::XdgSurface(xdg_surface_id) => {
-                    let surface_object_id = client.object_id(self.id);
                     let layout_snapshot =
                         LayerLayoutObjectSnapshot::for_surface(surface_object_id, self);
                     let configure_bounds =

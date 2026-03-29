@@ -1654,10 +1654,24 @@ impl State {
             .primary_output_for_rect(rect, preferred_output_id)
     }
 
-    pub fn output_id_for_surface(&self, surface: &WlSurface) -> Option<OutputId> {
+    pub fn output_id_for_surface_object(
+        &self,
+        surface_object_id: ObjectId,
+        surface: &WlSurface,
+    ) -> Option<OutputId> {
         self.layout_output_id_for_surface(surface)
             .or_else(|| {
-                self.surface_object_id(surface.surface_id())
+                self.root_surface_workspace(surface_object_id)
+                    .and_then(|workspace_id| self.workspace_output_id(workspace_id))
+            })
+            .or_else(|| self.active_output_id())
+    }
+
+    pub fn output_id_for_surface(&self, surface: &WlSurface) -> Option<OutputId> {
+        let surface_object_id = self.surface_object_id(surface.surface_id());
+        self.layout_output_id_for_surface(surface)
+            .or_else(|| {
+                surface_object_id
                     .and_then(|object_id| self.root_surface_workspace(object_id))
                     .and_then(|workspace_id| self.workspace_output_id(workspace_id))
             })
