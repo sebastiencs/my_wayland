@@ -1220,10 +1220,11 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
             else {
                 continue;
             };
-            let (rx, ry) = tiled_root_position_from_content_rect(
+            let (rx, ry) = tiled_root_position_for_layout(
                 state,
                 operation.surface_object_id,
                 &surface,
+                operation.frame_rect,
                 operation.content_rect,
             );
             surface.set_root_position(rx, ry);
@@ -1320,12 +1321,15 @@ pub(crate) fn effective_window_geometry_for_surface(
         .or(Some(surface_bounds))
 }
 
-/// Places the wl_surface root so that `window_geometry` in surface-local coordinates lines up
-/// with the tiled `content_rect` (frame minus decoration insets).
-pub(crate) fn tiled_root_position_from_content_rect(
+/// Places the wl_surface root for a tiled layout.
+///
+/// With explicit xdg window geometry, we align the geometry rect to the tile's frame rect.
+/// Without explicit geometry, we fall back to placing the root buffer at the content rect.
+pub(crate) fn tiled_root_position_for_layout(
     state: &State,
     surface_object_id: ObjectId,
     surface: &WlSurface,
+    frame_rect: RectI,
     content_rect: RectI,
 ) -> (i32, i32) {
     let Some((_, toplevel)) =
@@ -1333,18 +1337,18 @@ pub(crate) fn tiled_root_position_from_content_rect(
     else {
         return (content_rect.x, content_rect.y);
     };
+    let Some(explicit_geometry) = toplevel.window_geometry() else {
+        return (content_rect.x, content_rect.y);
+    };
     let Some(window_geometry) = effective_window_geometry_for_surface(
         state,
         surface_object_id,
         surface,
-        toplevel.window_geometry(),
+        Some(explicit_geometry),
     ) else {
         return (content_rect.x, content_rect.y);
     };
-    (
-        content_rect.x.saturating_sub(window_geometry.x),
-        content_rect.y.saturating_sub(window_geometry.y),
-    )
+    (frame_rect.x.saturating_sub(window_geometry.x), frame_rect.y.saturating_sub(window_geometry.y))
 }
 
 fn clamp_window_geometry_to_surface_bounds(window_geometry: RectI, surface_bounds: RectI) -> RectI {
@@ -2460,6 +2464,124 @@ mod tests {
         )
         .unwrap();
         assert_eq!(insets, DecorationInsets { top: 32, right: 0, bottom: 0, left: 0 });
+    }
+
+    #[test]
+    fn tiled_root_position_aligns_negative_origin_geometry_to_frame_rect() {
+        let mut state = make_state();
+        let mut client = Client::new_for_tests(ClientId::from_raw(44));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (surface_object_id, _xdg_surface_object_id, toplevel_object_id) =
+            insert_root_xdg_toplevel(
+                &mut state,
+                &mut client,
+                &mut client_dispatcher,
+                WlSurfaceId::from(45u32),
+                XdgSurfaceId::from(46u32),
+                XdgToplevelId::from(47u32),
+                (80, 60),
+            );
+
+        let ((_, child_surface_object_id), _) = client.insert_object(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(48u32), client.client_id(), 6),
+        );
+        {
+            let root_surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            root_surface.add_pending_child(child_surface_object_id);
+        }
+        {
+            let child_surface = state
+                .objects
+                .get_mut(child_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            child_surface.assign_subsurface(
+                crate::protocol_generated::WlSubsurfaceId::from(49u32),
+                surface_object_id,
+            );
+            child_surface.set_subsurface_position(-4, -12);
+            child_surface.test_map(ObjectId::from(901usize), 0, 0, 90, 80);
+        }
+        {
+            let mut root_surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            assert!(root_surface.apply_pending_tree_state(&mut state));
+        }
+        {
+            let toplevel = state
+                .objects
+                .get_mut(toplevel_object_id)
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.set_window_geometry(Some(RectI { x: -4, y: -12, width: 90, height: 80 }));
+        }
+
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(surface_object_id)
+            .unwrap();
+        let frame_rect = RectI { x: 10, y: 20, width: 90, height: 80 };
+        let content_rect = RectI { x: 14, y: 32, width: 80, height: 60 };
+
+        assert_eq!(
+            tiled_root_position_for_layout(
+                &state,
+                surface_object_id,
+                surface,
+                frame_rect,
+                content_rect,
+            ),
+            (14, 32)
+        );
+    }
+
+    #[test]
+    fn tiled_root_position_aligns_positive_origin_geometry_to_frame_rect() {
+        let mut state = make_state();
+        let mut client = Client::new_for_tests(ClientId::from_raw(60));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (surface_object_id, _xdg_surface_object_id, toplevel_object_id) =
+            insert_root_xdg_toplevel(
+                &mut state,
+                &mut client,
+                &mut client_dispatcher,
+                WlSurfaceId::from(61u32),
+                XdgSurfaceId::from(62u32),
+                XdgToplevelId::from(63u32),
+                (800, 600),
+            );
+        {
+            let toplevel = state
+                .objects
+                .get_mut(toplevel_object_id)
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.set_window_geometry(Some(RectI { x: 0, y: 32, width: 800, height: 568 }));
+        }
+
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(surface_object_id)
+            .unwrap();
+        let frame_rect = RectI { x: 10, y: 20, width: 800, height: 568 };
+        let content_rect = RectI { x: 10, y: 52, width: 800, height: 536 };
+
+        assert_eq!(
+            tiled_root_position_for_layout(
+                &state,
+                surface_object_id,
+                surface,
+                frame_rect,
+                content_rect,
+            ),
+            (10, -12)
+        );
     }
 
     #[test]
