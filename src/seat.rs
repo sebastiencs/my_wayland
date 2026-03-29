@@ -19,7 +19,10 @@ use crate::{
     tiling::TiledResizeState,
     wayland_objects::{
         wl_surface::{Role, StackEntry, WlSurface},
-        xdg_surface::xdg_toplevel::{InteractiveSizeConstraints, XdgToplevel},
+        xdg_surface::{
+            xdg_toplevel::{InteractiveSizeConstraints, XdgToplevel},
+            XdgSurface,
+        },
         zwlr_layer_surface_v1::{
             layer_surface_keyboard_focus_with_snapshot, lookup_snapshot_surface,
             ordered_scene_root_surface_ids, ordered_scene_root_surface_ids_with_snapshot,
@@ -1810,6 +1813,32 @@ fn begin_pointer_binding(
     true
 }
 
+fn xdg_surface_for_wl_surface<'a>(state: &'a State, surface: &WlSurface) -> Option<&'a XdgSurface> {
+    let wl_id = surface.surface_id();
+    state.objects.iter().find_map(|(_oid, obj)| {
+        obj.downcast_ref::<XdgSurface>()
+            .filter(|xdg| xdg.wl_surface_id() == wl_id)
+    })
+}
+
+/// Hit target for compositor pointer bindings (move/resize). Uses xdg window geometry when set so
+/// client-side decorations drawn on subsurfaces (outside the root buffer rect) still count.
+fn root_surface_pointer_bounds(state: &State, root_surface_object_id: ObjectId) -> Option<RectI> {
+    let surface = state
+        .objects
+        .try_ref_object::<WlSurface>(root_surface_object_id)?;
+    let (rx, ry) = surface.root_position();
+    if surface.role() == Role::XdgSurface {
+        if let Some(xdg) = xdg_surface_for_wl_surface(state, surface) {
+            let geom = xdg.window_geometry_rect_for_surface(surface);
+            if let Some(global) = RectI::new(rx + geom.x, ry + geom.y, geom.width, geom.height) {
+                return Some(global);
+            }
+        }
+    }
+    surface.global_logical_bounds()
+}
+
 fn window_pointer_target_at(state: &State, pointer_pos: (f64, f64)) -> Option<WindowPointerTarget> {
     let mut hit = None;
 
@@ -1820,7 +1849,7 @@ fn window_pointer_target_at(state: &State, pointer_pos: (f64, f64)) -> Option<Wi
         if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
             continue;
         }
-        let Some(bounds) = surface.global_logical_bounds() else {
+        let Some(bounds) = root_surface_pointer_bounds(state, object_id) else {
             continue;
         };
         if rect_contains_point(bounds, pointer_pos) {

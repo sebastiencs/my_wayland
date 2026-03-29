@@ -151,6 +151,19 @@ impl XdgSurface {
         RectI { x: 0, y: 0, width: size.width, height: size.height }
     }
 
+    /// Surface-local geometry for the whole interactive window (see `set_window_geometry`),
+    /// falling back to the committed `wl_surface` extents — same basis as [`Self::parent_geometry`]
+    /// but without needing a [`Client`] handle.
+    pub(crate) fn window_geometry_rect_for_surface(&self, surface: &WlSurface) -> RectI {
+        if let Some(geometry) = self.current_window_geometry {
+            return geometry;
+        }
+        let Some(size) = surface.logical_size() else {
+            return RectI { x: 0, y: 0, width: 0, height: 0 };
+        };
+        RectI { x: 0, y: 0, width: size.width, height: size.height }
+    }
+
     fn send_wm_base_error(
         &self,
         client: &Client,
