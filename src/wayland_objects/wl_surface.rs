@@ -596,12 +596,31 @@ impl WlSurface {
         self.configure_bounds_with_snapshot(state, None)
     }
 
+    pub fn configure_bounds_for_object(
+        &self,
+        state: &State,
+        surface_object_id: ObjectId,
+    ) -> Option<(i32, i32)> {
+        self.configure_bounds_with_snapshot_for_object(state, surface_object_id, None)
+    }
+
     pub fn configure_bounds_with_snapshot(
         &self,
         state: &State,
         snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
     ) -> Option<(i32, i32)> {
         self.preferred_output_id(state)
+            .and_then(|output_id| output_usable_bounds_with_snapshot(state, output_id, snapshot))
+            .map(|bounds| (bounds.width, bounds.height))
+    }
+
+    pub fn configure_bounds_with_snapshot_for_object(
+        &self,
+        state: &State,
+        surface_object_id: ObjectId,
+        snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+    ) -> Option<(i32, i32)> {
+        self.preferred_output_id_for_object(state, surface_object_id)
             .and_then(|output_id| output_usable_bounds_with_snapshot(state, output_id, snapshot))
             .map(|bounds| (bounds.width, bounds.height))
     }
@@ -1733,8 +1752,11 @@ impl WlSurface {
                 ShellSurfaceObject::XdgSurface(xdg_surface_id) => {
                     let layout_snapshot =
                         LayerLayoutObjectSnapshot::for_surface(surface_object_id, self);
-                    let configure_bounds =
-                        self.configure_bounds_with_snapshot(state, Some(layout_snapshot));
+                    let configure_bounds = self.configure_bounds_with_snapshot_for_object(
+                        state,
+                        surface_object_id,
+                        Some(layout_snapshot),
+                    );
                     let mut xdg_surface = client.grab_object(xdg_surface_id, state);
                     if !xdg_surface.on_commit(
                         client,
@@ -2857,6 +2879,31 @@ mod tests {
 
         assert_eq!(surface.preferred_output_id(&state), Some(output_id));
         assert_eq!(surface.configure_bounds(&state), Some((200, 120)));
+    }
+
+    #[test]
+    fn configure_bounds_for_object_works_while_surface_is_grabbed() {
+        let mut state = make_state();
+        let output_id = state.insert_output(make_output(
+            BackendOutputRef::new(DrmId::from(1usize)),
+            1,
+            0,
+            0,
+            200,
+            120,
+        ));
+        let (_, surface_object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(11u32), ClientId::from_raw(4), 6));
+
+        let surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+        assert_eq!(
+            surface.preferred_output_id_for_object(&state, surface_object_id),
+            Some(output_id)
+        );
+        assert_eq!(
+            surface.configure_bounds_for_object(&state, surface_object_id),
+            Some((200, 120))
+        );
     }
 
     #[test]
