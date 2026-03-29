@@ -2739,7 +2739,7 @@ impl ModelInstanceId for DrmId {
     type Model = DrmReader;
 
     fn into_raw(self) -> u64 {
-        usize::from(self) as u64
+        self.as_u64()
     }
 }
 
@@ -2897,7 +2897,7 @@ impl ModelInstanceId for OutputId {
     type Model = DrmOutputModel;
 
     fn into_raw(self) -> u64 {
-        usize::from(self) as u64
+        self.as_u64()
     }
 }
 
@@ -3023,7 +3023,7 @@ fn arm_cursor_animation_timer(
     delay_msec: Option<u32>,
 ) {
     dispatcher.dispatch_to(
-        DrmCursorAnimationTimerId::from(usize::from(output_id) as u64),
+        DrmCursorAnimationTimerId::from(output_id.as_u64()),
         DrmCursorAnimationTimerAction::Arm { delay_msec },
     );
 }
@@ -3212,7 +3212,7 @@ impl DrmCursorAnimationTimer {
     }
 
     fn model_id(&self) -> DrmCursorAnimationTimerId {
-        DrmCursorAnimationTimerId::from(usize::from(self.output_id) as u64)
+        DrmCursorAnimationTimerId::from(self.output_id.as_u64())
     }
 
     fn dispatch_read(&mut self, dispatcher: &mut Dispatcher) {
@@ -3286,7 +3286,7 @@ impl DrmOutputModel {
     }
 
     fn timer_id(&self) -> DrmCursorAnimationTimerId {
-        DrmCursorAnimationTimerId::from(usize::from(self.output_id) as u64)
+        DrmCursorAnimationTimerId::from(self.output_id.as_u64())
     }
 
     fn schedule_frame(&mut self, state: &mut crate::state::State, dispatcher: &mut Dispatcher) {
@@ -4036,7 +4036,7 @@ fn collect_named_cursor_render_item(
                     state: SceneItemState {
                         key: SceneItemKey::Cursor,
                         surface_key: None,
-                        buffer_object_id: ObjectId::from(u32::MAX as usize),
+                        buffer_object_id: ObjectId::from_parts(u32::MAX, 0),
                         bounds,
                         tex_transform: transform::Mat3::identity(),
                     },

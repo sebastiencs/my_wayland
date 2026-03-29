@@ -32,16 +32,47 @@ macro_rules! wayland_id {
 
 macro_rules! index_map_id {
     ($name:ident) => {
-        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
-        pub struct $name(u32);
-        impl From<usize> for $name {
-            fn from(value: usize) -> Self {
-                Self(value.try_into().unwrap())
+        #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name {
+            index: u32,
+            generation: u32,
+        }
+        impl $name {
+            pub const fn from_parts(index: u32, generation: u32) -> Self {
+                Self { index, generation }
+            }
+
+            pub const fn index(self) -> u32 {
+                self.index
+            }
+
+            pub const fn generation(self) -> u32 {
+                self.generation
+            }
+
+            pub const fn as_u64(self) -> u64 {
+                ((self.generation as u64) << 32) | (self.index as u64)
             }
         }
-        impl From<$name> for usize {
-            fn from(value: $name) -> usize {
-                value.0 as usize
+
+        impl crate::state::IndexMapKey for $name {
+            fn from_parts(index: u32, generation: u32) -> Self {
+                Self { index, generation }
+            }
+
+            fn index(self) -> u32 {
+                self.index
+            }
+
+            fn generation(self) -> u32 {
+                self.generation
+            }
+        }
+
+        #[cfg(test)]
+        impl From<usize> for $name {
+            fn from(value: usize) -> Self {
+                Self::from_parts(value.try_into().unwrap(), 0)
             }
         }
     };

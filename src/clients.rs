@@ -1634,7 +1634,7 @@ fn surface_intersecting_outputs(
     };
     let mut outputs = state.outputs_intersecting_rect(surface_bounds);
     if let Some(primary_output_id) = state.primary_output_for_rect(surface_bounds, None) {
-        outputs.sort_by_key(|output_id| (*output_id != primary_output_id, usize::from(*output_id)));
+        outputs.sort_by_key(|output_id| (*output_id != primary_output_id, output_id.as_u64()));
     }
     outputs
 }

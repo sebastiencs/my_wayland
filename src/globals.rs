@@ -14,12 +14,19 @@ use crate::{
     },
 };
 
+use std::collections::BTreeMap;
+
 pub struct Globals {
-    pub map: Box<IndexMap<GlobalName, Box<dyn Global>>>,
+    pub map: Box<IndexMap<GlobalSlotId, Box<dyn Global>>>,
     current_name: u32,
+    names_by_slot: BTreeMap<GlobalSlotId, GlobalName>,
+    slots_by_name: BTreeMap<GlobalName, GlobalSlotId>,
 }
 
-index_map_id!(GlobalName);
+index_map_id!(GlobalSlotId);
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GlobalName(u32);
 
 impl GlobalName {
     pub fn as_u32(&self) -> u32 {
@@ -42,7 +49,12 @@ pub trait Global {
 
 impl Globals {
     pub fn new() -> Self {
-        Self { map: Box::default(), current_name: 1 }
+        Self {
+            map: Box::default(),
+            current_name: 1,
+            names_by_slot: BTreeMap::new(),
+            slots_by_name: BTreeMap::new(),
+        }
     }
 
     pub fn initialize(&mut self) {
@@ -62,20 +74,36 @@ impl Globals {
             ZwlrLayerShellV1Global::new,
             ZxdgOutputManagerV1Global::new,
         ] {
-            self.map.insert(fun());
+            self.insert(fun());
         }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (GlobalName, &Box<dyn Global>)> {
-        self.map.iter()
+        self.map.iter().map(|(slot_id, global)| {
+            let name = *self
+                .names_by_slot
+                .get(&slot_id)
+                .expect("missing global wire name");
+            (name, global)
+        })
     }
 
     pub fn insert(&mut self, global: Box<dyn Global>) -> GlobalName {
-        self.map.insert(global)
+        let slot_id = self.map.insert(global);
+        let name = GlobalName(self.current_name);
+        self.current_name = self
+            .current_name
+            .checked_add(1)
+            .expect("global name space exhausted");
+        assert!(self.names_by_slot.insert(slot_id, name).is_none());
+        assert!(self.slots_by_name.insert(name, slot_id).is_none());
+        name
     }
 
     pub fn remove(&mut self, name: GlobalName) -> Option<Box<dyn Global>> {
-        self.map.remove(name)
+        let slot_id = self.slots_by_name.remove(&name)?;
+        self.names_by_slot.remove(&slot_id);
+        self.map.remove(slot_id)
     }
 
     pub fn contains_interface(&self, interface: &str) -> bool {
@@ -85,14 +113,19 @@ impl Globals {
     }
 
     pub fn name_for_interface(&self, interface: &str) -> Option<GlobalName> {
-        self.map
-            .iter()
-            .find_map(|(name, global)| (global.interface().0 == interface).then_some(name))
+        self.map.iter().find_map(|(slot_id, global)| {
+            (global.interface().0 == interface).then(|| {
+                *self
+                    .names_by_slot
+                    .get(&slot_id)
+                    .expect("missing global wire name")
+            })
+        })
     }
 
     /// Take a global out of the registry for binding. Fails if `name` is not a live global slot.
-    pub fn try_grab_global(&mut self, name: u32) -> Option<Grab<GlobalName, Box<dyn Global>>> {
-        let key = GlobalName::from(name as usize);
-        self.map.try_grab(key)
+    pub fn try_grab_global(&mut self, name: u32) -> Option<Grab<GlobalSlotId, Box<dyn Global>>> {
+        let slot_id = *self.slots_by_name.get(&GlobalName(name))?;
+        self.map.try_grab(slot_id)
     }
 }
