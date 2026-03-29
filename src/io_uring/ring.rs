@@ -454,7 +454,7 @@ impl From<&CompletionQueueEntry> for Completed {
     fn from(e: &CompletionQueueEntry) -> Self {
         Self {
             user_data: (e.user_data >> 32) as u32,
-            id: RingId((e.user_data & 0xFFFF) as u32),
+            id: RingId((e.user_data & 0xFFFF_FFFF) as u32),
             result: e.res,
         }
     }
