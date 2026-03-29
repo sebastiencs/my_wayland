@@ -1830,7 +1830,7 @@ fn root_surface_pointer_bounds(state: &State, root_surface_object_id: ObjectId) 
     let (rx, ry) = surface.root_position();
     if surface.role() == Role::XdgSurface {
         if let Some(xdg) = xdg_surface_for_wl_surface(state, surface) {
-            let geom = xdg.window_geometry_rect_for_surface(surface);
+            let geom = xdg.window_geometry_rect_for_surface(root_surface_object_id, state);
             if let Some(global) = RectI::new(rx + geom.x, ry + geom.y, geom.width, geom.height) {
                 return Some(global);
             }

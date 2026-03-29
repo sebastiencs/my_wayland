@@ -1,15 +1,15 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use crate::{
-    clients::{Client, ClientDispatcher, ClientsAction, EventWriter, RawRequest},
-    drm::schedule_outputs,
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     object::{Object, Parser},
     protocol_generated::{
         xdg_surface, xdg_wm_base, WaylandId, WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgToplevelId,
         XdgWmBaseId,
     },
     region::RectI,
-    state::State,
+    state::{ObjectId, State},
+    transform::SizeI,
     wayland_objects::{
         wl_display::WlDisplay, wl_surface::WlSurface, xdg_popup::XdgPopup,
         xdg_positioner::XdgPositioner, xdg_wm_base::XdgWmBase,
@@ -51,6 +51,14 @@ struct PopupConfigureState {
 struct PendingConfigure {
     serial: u32,
     state: ConfigureState,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CommitRoleChanges {
+    pub apply_window_geometry: bool,
+    pub initial_commit_complete: bool,
+    pub map_popup: bool,
+    pub reset_on_unmap: bool,
 }
 
 #[derive(Debug)]
@@ -103,6 +111,14 @@ impl XdgSurface {
         self.wl_surface
     }
 
+    pub(crate) fn current_window_geometry(&self) -> Option<RectI> {
+        self.current_window_geometry
+    }
+
+    pub(crate) fn initial_commit_complete(&self) -> bool {
+        self.initial_commit_complete
+    }
+
     pub(crate) fn popup_role_id(&self) -> Option<XdgPopupId> {
         match self.role_object {
             RoleObject::Popup(id) => Some(id),
@@ -136,32 +152,41 @@ impl XdgSurface {
     }
 
     pub(crate) fn parent_geometry(&self, client: &Client, state: &State) -> RectI {
-        if let Some(geometry) = self.current_window_geometry {
-            return geometry;
-        }
         let Some(surface_object_id) = client.object_id_for_wayland(self.wl_surface.into()) else {
             return RectI { x: 0, y: 0, width: 0, height: 0 };
         };
-        let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
-            return RectI { x: 0, y: 0, width: 0, height: 0 };
-        };
-        let Some(size) = surface.logical_size() else {
-            return RectI { x: 0, y: 0, width: 0, height: 0 };
-        };
-        RectI { x: 0, y: 0, width: size.width, height: size.height }
+        self.effective_window_geometry(surface_object_id, state)
     }
 
     /// Surface-local geometry for the whole interactive window (see `set_window_geometry`),
     /// falling back to the committed `wl_surface` extents — same basis as [`Self::parent_geometry`]
     /// but without needing a [`Client`] handle.
-    pub(crate) fn window_geometry_rect_for_surface(&self, surface: &WlSurface) -> RectI {
-        if let Some(geometry) = self.current_window_geometry {
-            return geometry;
-        }
-        let Some(size) = surface.logical_size() else {
-            return RectI { x: 0, y: 0, width: 0, height: 0 };
-        };
-        RectI { x: 0, y: 0, width: size.width, height: size.height }
+    pub(crate) fn window_geometry_rect_for_surface(
+        &self,
+        surface_object_id: ObjectId,
+        state: &State,
+    ) -> RectI {
+        self.effective_window_geometry(surface_object_id, state)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_current_window_geometry(&mut self, geometry: Option<RectI>) {
+        self.current_window_geometry = geometry;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_pending_window_geometry(&mut self, geometry: Option<RectI>) {
+        self.pending_window_geometry = geometry;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pending_configure_count(&self) -> usize {
+        self.pending_configures.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_initial_commit_complete(&mut self, complete: bool) {
+        self.initial_commit_complete = complete;
     }
 
     fn send_wm_base_error(
@@ -264,6 +289,8 @@ impl XdgSurface {
         self.initial_commit_complete = false;
         self.pending_configures.clear();
         self.last_acked = None;
+        self.pending_window_geometry = None;
+        self.current_window_geometry = None;
     }
 
     fn validate_committed_state(
@@ -284,18 +311,95 @@ impl XdgSurface {
         true
     }
 
-    pub fn on_commit(
+    fn geometry_after_this_commit(&self) -> Option<RectI> {
+        self.pending_window_geometry
+            .or(self.current_window_geometry)
+    }
+
+    fn clamp_geometry_to_surface_bounds(raw: RectI, surface_bounds: RectI) -> RectI {
+        let x1 = raw.x.clamp(surface_bounds.x, surface_bounds.x2());
+        let y1 = raw.y.clamp(surface_bounds.y, surface_bounds.y2());
+        let x2 = raw.x2().clamp(surface_bounds.x, surface_bounds.x2());
+        let y2 = raw.y2().clamp(surface_bounds.y, surface_bounds.y2());
+        RectI::from_extents(x1, y1, x2, y2).unwrap_or(surface_bounds)
+    }
+
+    pub(crate) fn effective_window_geometry(
+        &self,
+        surface_object_id: ObjectId,
+        state: &State,
+    ) -> RectI {
+        let Some(surface_bounds) = WlSurface::local_surface_tree_bounds(state, surface_object_id)
+        else {
+            return self.current_window_geometry.unwrap_or(RectI {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            });
+        };
+        self.current_window_geometry
+            .map(|raw| Self::clamp_geometry_to_surface_bounds(raw, surface_bounds))
+            .unwrap_or(surface_bounds)
+    }
+
+    pub(crate) fn apply_commit_role_changes(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        _dispatcher: &mut ClientDispatcher,
+        role_changes: CommitRoleChanges,
+    ) {
+        if role_changes.apply_window_geometry {
+            if self.pending_window_geometry.is_some() {
+                self.current_window_geometry = self.pending_window_geometry.take();
+            }
+            if let RoleObject::Toplevel(id) = self.role_object {
+                if let Some(mut toplevel) = state
+                    .objects
+                    .try_grab_object::<xdg_toplevel::XdgToplevel>(client.object_id(id))
+                {
+                    toplevel.set_window_geometry(self.current_window_geometry);
+                }
+            }
+        }
+        if role_changes.initial_commit_complete {
+            self.initial_commit_complete = true;
+        }
+        if role_changes.map_popup {
+            if let RoleObject::Popup(id) = self.role_object {
+                let mut popup = client.grab_object(id, state);
+                popup.mark_mapped();
+            }
+        }
+        if role_changes.reset_on_unmap {
+            if let RoleObject::Toplevel(id) = self.role_object {
+                let mut toplevel = client.grab_object(id, state);
+                toplevel.reset_on_unmap();
+            }
+            if let RoleObject::Popup(id) = self.role_object {
+                let mut popup = client.grab_object(id, state);
+                popup.mark_unmapped();
+            }
+            self.reset_configure_state();
+        }
+    }
+
+    pub(crate) fn on_commit(
         &mut self,
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
+        current_logical_size: Option<SizeI>,
         has_pending_buffer_attach: bool,
         is_null_buffer_commit: bool,
         configure_bounds: Option<(i32, i32)>,
-    ) -> bool {
-        if self.pending_window_geometry.is_some() {
-            self.current_window_geometry = self.pending_window_geometry.take();
-        }
+    ) -> Option<CommitRoleChanges> {
+        let surface_object_id = client.object_id(self.wl_surface_id());
+        let mut role_changes = CommitRoleChanges {
+            apply_window_geometry: self.pending_window_geometry.is_some(),
+            ..Default::default()
+        };
 
         if !self.initial_commit_complete {
             match self.role_object {
@@ -310,7 +414,7 @@ impl XdgSurface {
                         xdg_surface::Error::NotConstructed as u32,
                         "xdg_surface committed before get_toplevel or get_popup",
                     );
-                    return false;
+                    return None;
                 }
                 RoleObject::Toplevel(id) => {
                     if has_pending_buffer_attach {
@@ -320,18 +424,39 @@ impl XdgSurface {
                             xdg_surface::Error::UnconfiguredBuffer,
                             "initial xdg_toplevel commit must not attach a buffer",
                         );
-                        return false;
+                        return None;
                     }
-                    let surface_object_id = client.object_id(self.wl_surface_id());
                     let toplevel_object_id = client.object_id(id);
-                    let target_min_size = state
+                    let fallback_decoration_insets = state.config.general.decoration_insets;
+                    let committed_window_geometry = self.geometry_after_this_commit();
+                    let (target_min_size, surface_decoration_insets) = state
                         .objects
                         .try_ref_object::<xdg_toplevel::XdgToplevel>(toplevel_object_id)
-                        .and_then(|toplevel| toplevel.minimum_size());
+                        .map(|toplevel| {
+                            let insets = if toplevel.decoration_mode()
+                                == xdg_toplevel::ToplevelDecorationMode::ServerSide
+                            {
+                                fallback_decoration_insets
+                            } else {
+                                committed_window_geometry
+                                    .and_then(|window_geometry| {
+                                        current_logical_size.and_then(|logical_size| {
+                                            crate::tiling::decoration_insets_from_window_geometry_and_logical_size(
+                                                logical_size,
+                                                window_geometry,
+                                            )
+                                        })
+                                    })
+                                    .unwrap_or(fallback_decoration_insets)
+                            };
+                            (toplevel.minimum_size(), insets)
+                        })
+                        .unwrap_or((None, fallback_decoration_insets));
                     let initial_layout_configure =
                         crate::tiling::initial_layout_configure_for_surface(
                             state,
                             surface_object_id,
+                            surface_decoration_insets,
                             target_min_size,
                             configure_bounds,
                         );
@@ -342,8 +467,8 @@ impl XdgSurface {
                         self,
                         dispatcher,
                     );
-                    self.initial_commit_complete = true;
-                    return true;
+                    role_changes.initial_commit_complete = true;
+                    return Some(role_changes);
                 }
                 RoleObject::Popup(id) => {
                     if has_pending_buffer_attach {
@@ -353,39 +478,27 @@ impl XdgSurface {
                             xdg_surface::Error::UnconfiguredBuffer,
                             "initial xdg_popup commit must not attach a buffer",
                         );
-                        return false;
+                        return None;
                     }
                     let mut popup = client.grab_object(id, state);
                     popup.send_initial_configure(self, client, state, dispatcher);
-                    self.initial_commit_complete = true;
-                    return true;
+                    role_changes.initial_commit_complete = true;
+                    return Some(role_changes);
                 }
             }
         }
 
         if !self.validate_committed_state(client, dispatcher, has_pending_buffer_attach) {
-            return false;
+            return None;
         }
 
-        if has_pending_buffer_attach {
-            if let RoleObject::Popup(id) = self.role_object {
-                let mut popup = client.grab_object(id, state);
-                popup.mark_mapped();
-            }
-        }
         if is_null_buffer_commit {
-            if let RoleObject::Toplevel(id) = self.role_object {
-                let mut toplevel = client.grab_object(id, state);
-                toplevel.reset_on_unmap();
-            }
-            if let RoleObject::Popup(id) = self.role_object {
-                let mut popup = client.grab_object(id, state);
-                popup.mark_unmapped();
-            }
-            self.reset_configure_state();
+            role_changes.reset_on_unmap = true;
+        } else if has_pending_buffer_attach && matches!(self.role_object, RoleObject::Popup(_)) {
+            role_changes.map_popup = true;
         }
 
-        true
+        Some(role_changes)
     }
 
     pub(crate) fn add_popup_child(&mut self, popup_id: XdgPopupId) {
@@ -614,11 +727,15 @@ pub mod xdg_toplevel {
         drm::schedule_outputs,
         object::{Object, Parser},
         protocol_generated::{
-            xdg_toplevel as proto_xdg_toplevel, Array, WaylandId, WlOutputId, WlSeatId,
-            XdgToplevelId,
+            xdg_toplevel as proto_xdg_toplevel, zxdg_toplevel_decoration_v1, Array, WaylandId,
+            WlOutputId, WlSeatId, XdgToplevelId,
         },
-        state::State,
-        wayland_objects::{wl_display::WlDisplay, wl_surface::WlSurface},
+        region::RectI,
+        state::{ObjectId, State},
+        wayland_objects::{
+            wl_display::WlDisplay, wl_surface::WlSurface,
+            zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+        },
     };
 
     use super::XdgSurface;
@@ -638,12 +755,22 @@ pub mod xdg_toplevel {
         current_width: i32,
         current_height: i32,
         current_states: BTreeSet<proto_xdg_toplevel::State>,
+        decoration_mode: ToplevelDecorationMode,
+        window_geometry: Option<RectI>,
+        decoration_object_id: Option<ObjectId>,
     }
 
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct InteractiveSizeConstraints {
         min_size: Option<(i32, i32)>,
         max_size: Option<(i32, i32)>,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub enum ToplevelDecorationMode {
+        ServerSide,
+        #[default]
+        ClientSide,
     }
 
     impl InteractiveSizeConstraints {
@@ -689,6 +816,9 @@ pub mod xdg_toplevel {
                 current_width: 0,
                 current_height: 0,
                 current_states: BTreeSet::default(),
+                decoration_mode: ToplevelDecorationMode::ClientSide,
+                window_geometry: None,
+                decoration_object_id: None,
             }
         }
 
@@ -833,8 +963,8 @@ pub mod xdg_toplevel {
                 self.send_layout_configure(
                     configure_bounds,
                     xdg_surface,
-                    layout.rect.width,
-                    layout.rect.height,
+                    layout.frame_rect.width,
+                    layout.frame_rect.height,
                     layout.tiled_edges,
                     layout.fullscreen,
                     false,
@@ -898,6 +1028,48 @@ pub mod xdg_toplevel {
                 ((width > 1) || (height > 1) || self.min_size == Some((1, 1)))
                     .then_some((width, height))
             })
+        }
+
+        pub fn decoration_mode(&self) -> ToplevelDecorationMode {
+            self.decoration_mode
+        }
+
+        pub fn window_geometry(&self) -> Option<RectI> {
+            self.window_geometry
+        }
+
+        pub fn set_decoration_mode(&mut self, mode: ToplevelDecorationMode) -> bool {
+            if self.decoration_mode == mode {
+                return false;
+            }
+            self.decoration_mode = mode;
+            true
+        }
+
+        pub fn set_window_geometry(&mut self, window_geometry: Option<RectI>) {
+            self.window_geometry = window_geometry;
+        }
+
+        pub fn has_decoration_object(&self) -> bool {
+            self.decoration_object_id.is_some()
+        }
+
+        pub fn decoration_object_id(&self) -> Option<ObjectId> {
+            self.decoration_object_id
+        }
+
+        pub fn set_decoration_object(&mut self, object_id: ObjectId) -> bool {
+            if self.decoration_object_id.is_some() {
+                return false;
+            }
+            self.decoration_object_id = Some(object_id);
+            true
+        }
+
+        pub fn clear_decoration_object(&mut self, object_id: ObjectId) {
+            if self.decoration_object_id == Some(object_id) {
+                self.decoration_object_id = None;
+            }
         }
 
         pub fn set_requested_fullscreen(&mut self, fullscreen: bool) {
@@ -1008,6 +1180,11 @@ pub mod xdg_toplevel {
             self.max_size = max_size;
         }
 
+        #[cfg(test)]
+        pub(crate) fn test_set_decoration_mode(&mut self, mode: ToplevelDecorationMode) {
+            self.decoration_mode = mode;
+        }
+
         pub fn reset_on_unmap(&mut self) {
             self.parent = None;
             self.requested_fullscreen = false;
@@ -1015,6 +1192,8 @@ pub mod xdg_toplevel {
             self.current_width = 0;
             self.current_height = 0;
             self.current_states.clear();
+            self.decoration_mode = ToplevelDecorationMode::ClientSide;
+            self.window_geometry = None;
         }
 
         /// `wm_capabilities` exists only since xdg_wm_base version 5; older clients (e.g. wev) must
@@ -1163,6 +1342,21 @@ pub mod xdg_toplevel {
 
             match client.parse::<Self>(req).unwrap() {
                 Destroy => {
+                    if let Some(decoration_object_id) = self.decoration_object_id() {
+                        if let Some(decoration) = state
+                            .objects
+                            .try_ref_object::<ZxdgToplevelDecorationV1>(decoration_object_id)
+                        {
+                            client.protocol_violation_disconnect(
+                                dispatcher,
+                                decoration.id(),
+                                zxdg_toplevel_decoration_v1::Error::Orphaned as u32,
+                                "The xdg_toplevel_decoration object must be destroyed before its xdg_toplevel.",
+                            );
+                            return;
+                        }
+                        self.decoration_object_id = None;
+                    }
                     let object_id = client.object_id(self.id);
                     state.unregister_xdg_toplevel_role(
                         client.client_id(),
@@ -1430,5 +1624,254 @@ pub mod xdg_toplevel {
             assert!(states.contains(&(proto_xdg_toplevel::State::Activated as u32)));
             assert!(!states.contains(&(proto_xdg_toplevel::State::Fullscreen as u32)));
         }
+
+        #[test]
+        fn reset_on_unmap_restores_default_decoration_mode() {
+            let mut toplevel =
+                XdgToplevel::new(XdgToplevelId::from(9), super::super::XdgSurfaceId::from(10), 7);
+            toplevel.set_decoration_mode(ToplevelDecorationMode::ServerSide);
+            toplevel.set_window_geometry(Some(RectI { x: 1, y: 2, width: 3, height: 4 }));
+
+            toplevel.reset_on_unmap();
+
+            assert_eq!(toplevel.decoration_mode(), ToplevelDecorationMode::ClientSide);
+            assert_eq!(toplevel.window_geometry(), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::{
+            clients::{Client, ClientId},
+            egl::EGL,
+            globals::Globals,
+            protocol_generated::{WaylandId, WlSurfaceId, XdgToplevelId},
+            runner::Dispatcher,
+            state::{BackendOutputRef, DrmId, FractionalScale, ObjectId, Output, OutputMode},
+            wayland_objects::{
+                wl_surface::Role, xdg_surface::xdg_toplevel::XdgToplevel,
+                zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+            },
+            xkb::Xkb,
+        },
+    };
+
+    fn make_state() -> State {
+        let xkb = Xkb::new();
+        let keyboard = xkb.create_keyboard_state();
+        let mut globals = Globals::new();
+        globals.initialize();
+        State {
+            objects: Default::default(),
+            root_surfaces: Default::default(),
+            layer_surface_objects: Default::default(),
+            inputs: Default::default(),
+            drm: Default::default(),
+            outputs: Default::default(),
+            active_output: None,
+            workspace_groups: Default::default(),
+            workspaces: Default::default(),
+            output_workspace_groups: Default::default(),
+            root_surface_workspaces: Default::default(),
+            managed_root_surfaces: Default::default(),
+            xdg_toplevel_roles: Default::default(),
+            next_workspace_serial: 1,
+            backend_syncobj_globals: Default::default(),
+            globals,
+            activation_tokens: Default::default(),
+            egl: EGL::new(),
+            config: Default::default(),
+            seat: Default::default(),
+            keyboard,
+            xkb,
+        }
+    }
+
+    fn make_output(width: i32, height: i32) -> Output {
+        Output {
+            backend: BackendOutputRef::new(DrmId::from(0usize)),
+            drm_crtc_id: 1,
+            global_name: None,
+            gamma_lut_size: 0,
+            ctm_supported: false,
+            gamma_control_object_id: None,
+            x: 0,
+            y: 0,
+            physical_width: 0,
+            physical_height: 0,
+            scale: FractionalScale::ONE,
+            transform: 0,
+            make: String::new(),
+            model: String::new(),
+            name: "test-output".to_string(),
+            description: String::new(),
+            enabled: true,
+            current_mode: OutputMode { width, height, refresh_millihz: 60_000 },
+            preferred_mode: None,
+        }
+    }
+
+    #[test]
+    fn geometry_commit_updates_toplevel_window_geometry() {
+        let mut state = make_state();
+        let output_id = state.insert_output(make_output(120, 80));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let mut client = Client::new_for_tests(ClientId::from_raw(77));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let wl_surface_id = WlSurfaceId::from(10u32);
+        let xdg_surface_id = XdgSurfaceId::from(11u32);
+        let toplevel_id = XdgToplevelId::from(12u32);
+
+        let ((_, surface_object_id), _) =
+            client.insert_object(&mut state, WlSurface::new(wl_surface_id, client.client_id(), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            assert!(surface
+                .set_role(Role::XdgSurface, &mut client_dispatcher)
+                .is_ok());
+            surface.set_xdg_surface_impl(xdg_surface_id);
+            surface.test_map(ObjectId::from(950usize), 0, 0, 80, 60);
+        }
+        state.register_root_surface(surface_object_id);
+
+        let xdg_surface = XdgSurface {
+            id: xdg_surface_id,
+            wm_base_id: XdgWmBaseId::from(1),
+            wl_surface: wl_surface_id,
+            wm_base_version: 7,
+            role_kind: Some(RoleKind::Toplevel),
+            role_object: RoleObject::Toplevel(toplevel_id),
+            initial_commit_complete: true,
+            next_configure_serial: 1,
+            pending_configures: VecDeque::new(),
+            last_acked: None,
+            pending_window_geometry: None,
+            current_window_geometry: None,
+            popup_children: Vec::new(),
+        };
+        client.insert_object(&mut state, xdg_surface);
+        let ((_, toplevel_object_id), _) =
+            client.insert_object(&mut state, XdgToplevel::new(toplevel_id, xdg_surface_id, 7));
+        state.register_xdg_toplevel_role(client.client_id(), xdg_surface_id, toplevel_object_id);
+
+        assert_eq!(state.root_surface_workspace(surface_object_id), Some(workspace_id));
+        state.relayout_dirty_workspaces();
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(surface_object_id)
+            .unwrap();
+        assert_eq!(surface.root_position(), (0, 0));
+
+        {
+            let xdg_surface = client.ref_object_mut(xdg_surface_id, &mut state);
+            xdg_surface.pending_window_geometry =
+                Some(RectI { x: 0, y: -12, width: 80, height: 72 });
+        }
+
+        {
+            let mut xdg_surface = client.grab_object(xdg_surface_id, &mut state);
+            let role_changes = xdg_surface
+                .on_commit(
+                    &mut client,
+                    &mut state,
+                    &mut client_dispatcher,
+                    None,
+                    false,
+                    false,
+                    None,
+                )
+                .expect("geometry-only commit should be accepted");
+            xdg_surface.apply_commit_role_changes(
+                &mut client,
+                &mut state,
+                &mut client_dispatcher,
+                role_changes,
+            );
+        }
+
+        let toplevel = state
+            .objects
+            .try_ref_object::<XdgToplevel>(toplevel_object_id)
+            .unwrap();
+        assert_eq!(toplevel.window_geometry(), Some(RectI { x: 0, y: -12, width: 80, height: 72 }));
+    }
+
+    #[test]
+    fn reset_configure_state_clears_window_geometry() {
+        let mut xdg_surface = XdgSurface::new(
+            XdgSurfaceId::from(20),
+            XdgWmBaseId::from(21),
+            WlSurfaceId::from(22),
+            7,
+        );
+        xdg_surface.pending_window_geometry = Some(RectI { x: 1, y: 2, width: 3, height: 4 });
+        xdg_surface.current_window_geometry = Some(RectI { x: 5, y: 6, width: 7, height: 8 });
+
+        xdg_surface.reset_configure_state();
+
+        assert_eq!(xdg_surface.pending_window_geometry, None);
+        assert_eq!(xdg_surface.current_window_geometry, None);
+    }
+
+    #[test]
+    fn destroying_toplevel_before_decoration_posts_orphaned_error() {
+        let mut state = make_state();
+        let mut client = Client::new_for_tests(ClientId::from_raw(88));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let wl_surface_id = WlSurfaceId::from(30u32);
+        let xdg_surface_id = XdgSurfaceId::from(31u32);
+        let toplevel_id = XdgToplevelId::from(32u32);
+        let decoration_id = crate::protocol_generated::ZxdgToplevelDecorationV1Id::from(33u32);
+
+        let ((_, surface_object_id), _) =
+            client.insert_object(&mut state, WlSurface::new(wl_surface_id, client.client_id(), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            assert!(surface
+                .set_role(Role::XdgSurface, &mut client_dispatcher)
+                .is_ok());
+            surface.set_xdg_surface_impl(xdg_surface_id);
+        }
+        client.insert_object(
+            &mut state,
+            XdgSurface::new(xdg_surface_id, XdgWmBaseId::from(1), wl_surface_id, 7),
+        );
+        let ((_, toplevel_object_id), _) =
+            client.insert_object(&mut state, XdgToplevel::new(toplevel_id, xdg_surface_id, 7));
+        state.register_xdg_toplevel_role(client.client_id(), xdg_surface_id, toplevel_object_id);
+        let ((_, decoration_object_id), _) = client.insert_object(
+            &mut state,
+            ZxdgToplevelDecorationV1::new(decoration_id, toplevel_object_id),
+        );
+        {
+            let toplevel = state
+                .objects
+                .get_mut(toplevel_object_id)
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            assert!(toplevel.set_decoration_object(decoration_object_id));
+        }
+
+        let destroy_request: RawRequest<'static> =
+            (&*crate::clients::RawEvent::new(toplevel_id.into(), 0, 0).into_bytes())
+                .try_into()
+                .unwrap();
+        {
+            let mut toplevel = client.grab_object(toplevel_id, &mut state);
+            toplevel.on(&mut client, &mut state, destroy_request, &mut client_dispatcher);
+        }
+        drop(client_dispatcher);
+
+        assert!(client.contains_object(toplevel_id, &state));
+        assert!(dispatcher.test_has_queued_action::<crate::io_uring::model::IoUringAction>(
+            |action| matches!(action, crate::io_uring::model::IoUringAction::Sendmsg { .. })
+        ));
     }
 }

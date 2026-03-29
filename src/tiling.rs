@@ -5,9 +5,10 @@ use crate::{
     protocol_generated::{xdg_toplevel, XdgSurfaceId},
     region::RectI,
     state::{ManagedWindowMode, ObjectId, State, WorkspaceId},
+    transform::SizeI,
     wayland_objects::{
         wl_surface::{Role, WlSurface},
-        xdg_surface::xdg_toplevel::XdgToplevel,
+        xdg_surface::xdg_toplevel::{ToplevelDecorationMode, XdgToplevel},
         zwlr_layer_surface_v1::output_usable_bounds,
     },
 };
@@ -32,9 +33,11 @@ struct LayoutOperation {
     content_rect: RectI,
 }
 
+type DecorationInsetsMap = BTreeMap<ObjectId, DecorationInsets>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InitialLayoutConfigure {
-    pub rect: RectI,
+    pub frame_rect: RectI,
     pub tiled_edges: u32,
     pub fullscreen: bool,
 }
@@ -935,6 +938,7 @@ pub fn tiled_edges_for_surface(state: &State, surface_object_id: ObjectId) -> Op
 pub fn initial_layout_configure_for_surface(
     state: &mut State,
     surface_object_id: ObjectId,
+    surface_decoration_insets: DecorationInsets,
     target_min_size: Option<(i32, i32)>,
     configure_bounds: Option<(i32, i32)>,
 ) -> Option<InitialLayoutConfigure> {
@@ -1000,7 +1004,14 @@ pub fn initial_layout_configure_for_surface(
         })
         .collect::<BTreeMap<_, _>>();
     let gap_policy = workspace_gap_policy(state, workspace_id);
-    let decoration_insets = state.config.general.decoration_insets;
+    let mut decoration_insets = decoration_insets_for_surfaces(
+        state,
+        workspace_surface_ids
+            .iter()
+            .copied()
+            .filter(|object_id| *object_id != surface_object_id),
+    );
+    decoration_insets.insert(surface_object_id, surface_decoration_insets);
     let mut predictive_layout = state.workspaces.try_get(workspace_id)?.layout.clone();
     sync_workspace_layout_candidates(
         &mut predictive_layout,
@@ -1014,10 +1025,10 @@ pub fn initial_layout_configure_for_surface(
         tiling_bounds,
         fullscreen_bounds,
         gap_policy,
-        decoration_insets,
+        &decoration_insets,
         &min_sizes,
     );
-    let rect = predictive_layout
+    let frame_rect = predictive_layout
         .tiled_rect(surface_object_id)
         .or_else(|| {
             predictive_layout
@@ -1025,23 +1036,9 @@ pub fn initial_layout_configure_for_surface(
                 .as_ref()
                 .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id)
                 .then_some(fullscreen_bounds)
-        })
-        .map(|rect| {
-            if predictive_layout
-                .fullscreen
-                .as_ref()
-                .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id)
-            {
-                rect
-            } else {
-                content_rect_for_tiled_frame(
-                    rect,
-                    tiled_decoration_insets(state, surface_object_id),
-                )
-            }
         })?;
     Some(InitialLayoutConfigure {
-        rect,
+        frame_rect,
         tiled_edges: predictive_layout
             .tiled_edges(surface_object_id)
             .or_else(|| {
@@ -1194,7 +1191,15 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
         let tiling_bounds = workspace_tiling_bounds(state, workspace_id, fullscreen_bounds);
         let min_sizes = workspace_minimum_sizes(state, workspace_id);
         let gap_policy = workspace_gap_policy(state, workspace_id);
-        let decoration_insets = state.config.general.decoration_insets;
+        let decoration_insets = decoration_insets_for_surfaces(
+            state,
+            state
+                .managed_root_surfaces
+                .iter()
+                .filter_map(|(object_id, managed)| {
+                    (managed.workspace_id == workspace_id).then_some(*object_id)
+                }),
+        );
         let operations = {
             let Some(workspace) = state.workspaces.try_get_mut(workspace_id) else {
                 continue;
@@ -1204,7 +1209,7 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
                 tiling_bounds,
                 fullscreen_bounds,
                 gap_policy,
-                decoration_insets,
+                &decoration_insets,
                 &min_sizes,
             )
         };
@@ -1232,8 +1237,120 @@ fn workspace_gap_policy(state: &State, _workspace_id: WorkspaceId) -> GapPolicy 
     }
 }
 
-fn tiled_decoration_insets(state: &State, _surface_object_id: ObjectId) -> DecorationInsets {
-    state.config.general.decoration_insets
+fn tiled_decoration_insets(state: &State, surface_object_id: ObjectId) -> DecorationInsets {
+    effective_decoration_insets(state, surface_object_id)
+}
+
+fn decoration_insets_for_surface(
+    decoration_insets: &DecorationInsetsMap,
+    surface_object_id: ObjectId,
+) -> DecorationInsets {
+    decoration_insets
+        .get(&surface_object_id)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn decoration_insets_for_surfaces<I>(state: &State, surface_object_ids: I) -> DecorationInsetsMap
+where
+    I: IntoIterator<Item = ObjectId>,
+{
+    surface_object_ids
+        .into_iter()
+        .map(|surface_object_id| {
+            (surface_object_id, effective_decoration_insets(state, surface_object_id))
+        })
+        .collect()
+}
+
+pub(crate) fn effective_decoration_insets(
+    state: &State,
+    surface_object_id: ObjectId,
+) -> DecorationInsets {
+    let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
+        return state.config.general.decoration_insets;
+    };
+    effective_decoration_insets_for_surface(state, surface_object_id, surface)
+}
+
+pub(crate) fn effective_decoration_insets_for_surface(
+    state: &State,
+    surface_object_id: ObjectId,
+    surface: &WlSurface,
+) -> DecorationInsets {
+    let fallback = state.config.general.decoration_insets;
+    let Some((_, toplevel)) =
+        xdg_toplevel_for_surface_ids(state, surface.client_id(), surface.xdg_surface_id())
+    else {
+        return fallback;
+    };
+    if toplevel.decoration_mode() == ToplevelDecorationMode::ServerSide {
+        return fallback;
+    }
+    let Some(window_geometry) = effective_window_geometry_for_surface(
+        state,
+        surface_object_id,
+        surface,
+        toplevel.window_geometry(),
+    ) else {
+        return fallback;
+    };
+    decoration_insets_from_window_geometry(surface, window_geometry).unwrap_or(fallback)
+}
+
+pub(crate) fn effective_window_geometry_for_surface(
+    state: &State,
+    surface_object_id: ObjectId,
+    surface: &WlSurface,
+    window_geometry: Option<RectI>,
+) -> Option<RectI> {
+    let surface_bounds =
+        WlSurface::local_surface_tree_bounds_with_surface(state, surface_object_id, surface)?;
+    window_geometry
+        .map(|raw| clamp_window_geometry_to_surface_bounds(raw, surface_bounds))
+        .or(Some(surface_bounds))
+}
+
+fn clamp_window_geometry_to_surface_bounds(window_geometry: RectI, surface_bounds: RectI) -> RectI {
+    let x1 = window_geometry
+        .x
+        .clamp(surface_bounds.x, surface_bounds.x2());
+    let y1 = window_geometry
+        .y
+        .clamp(surface_bounds.y, surface_bounds.y2());
+    let x2 = window_geometry
+        .x2()
+        .clamp(surface_bounds.x, surface_bounds.x2());
+    let y2 = window_geometry
+        .y2()
+        .clamp(surface_bounds.y, surface_bounds.y2());
+    RectI::from_extents(x1, y1, x2, y2).unwrap_or(surface_bounds)
+}
+
+pub(crate) fn decoration_insets_from_window_geometry(
+    surface: &WlSurface,
+    window_geometry: RectI,
+) -> Option<DecorationInsets> {
+    let logical_size = surface.logical_size()?;
+    decoration_insets_from_window_geometry_and_logical_size(logical_size, window_geometry)
+}
+
+pub(crate) fn decoration_insets_from_window_geometry_and_logical_size(
+    logical_size: SizeI,
+    window_geometry: RectI,
+) -> Option<DecorationInsets> {
+    Some(DecorationInsets {
+        left: window_geometry.x.saturating_neg().max(0),
+        top: window_geometry.y.saturating_neg().max(0),
+        right: window_geometry
+            .x2()
+            .saturating_sub(logical_size.width)
+            .max(0),
+        bottom: window_geometry
+            .y2()
+            .saturating_sub(logical_size.height)
+            .max(0),
+    })
 }
 
 fn workspace_tiling_bounds(
@@ -1343,7 +1460,7 @@ fn apply_workspace_layout(
     tiling_bounds: RectI,
     fullscreen_bounds: RectI,
     gap_policy: GapPolicy,
-    decoration_insets: DecorationInsets,
+    decoration_insets: &DecorationInsetsMap,
     min_sizes: &BTreeMap<ObjectId, (i32, i32)>,
 ) -> Vec<LayoutOperation> {
     let mut operations = Vec::new();
@@ -1388,7 +1505,7 @@ fn apply_node_layout(
     workspace_bounds: RectI,
     edge_constraints: TiledEdgeConstraints,
     gap_policy: GapPolicy,
-    decoration_insets: DecorationInsets,
+    decoration_insets: &DecorationInsetsMap,
     min_sizes: &BTreeMap<ObjectId, (i32, i32)>,
     operations: &mut Vec<LayoutOperation>,
 ) {
@@ -1405,7 +1522,10 @@ fn apply_node_layout(
             operations.push(LayoutOperation {
                 surface_object_id: leaf.surface_object_id,
                 frame_rect: rect,
-                content_rect: content_rect_for_tiled_frame(rect, decoration_insets),
+                content_rect: content_rect_for_tiled_frame(
+                    rect,
+                    decoration_insets_for_surface(decoration_insets, leaf.surface_object_id),
+                ),
             });
         }
         LayoutNode::Container(container) => {
@@ -1544,7 +1664,7 @@ fn compute_child_main_sizes(
     container: &ContainerNode,
     rect: RectI,
     gap_policy: GapPolicy,
-    decoration_insets: DecorationInsets,
+    decoration_insets: &DecorationInsetsMap,
     min_sizes: &BTreeMap<ObjectId, (i32, i32)>,
 ) -> Vec<i32> {
     let span = match container.axis {
@@ -1613,7 +1733,7 @@ fn child_minimum_main_size(
     axis: SplitAxis,
     size_hint: LayoutSizeHint,
     gap_policy: GapPolicy,
-    decoration_insets: DecorationInsets,
+    decoration_insets: &DecorationInsetsMap,
     min_sizes: &BTreeMap<ObjectId, (i32, i32)>,
 ) -> i32 {
     let (min_width, min_height) = node_minimum_size(
@@ -1635,7 +1755,7 @@ fn node_minimum_size(
     node_id: LayoutNodeId,
     size_hint: Option<LayoutSizeHint>,
     gap_policy: GapPolicy,
-    decoration_insets: DecorationInsets,
+    decoration_insets: &DecorationInsetsMap,
     min_sizes: &BTreeMap<ObjectId, (i32, i32)>,
 ) -> (i32, i32) {
     let Some(node) = layout.nodes.get(&node_id) else {
@@ -1647,14 +1767,15 @@ fn node_minimum_size(
                 .get(&leaf.surface_object_id)
                 .copied()
                 .unwrap_or((1, 1));
+            let insets = decoration_insets_for_surface(decoration_insets, leaf.surface_object_id);
             (
                 min_width
-                    .saturating_add(decoration_insets.left)
-                    .saturating_add(decoration_insets.right)
+                    .saturating_add(insets.left)
+                    .saturating_add(insets.right)
                     .max(1),
                 min_height
-                    .saturating_add(decoration_insets.top)
-                    .saturating_add(decoration_insets.bottom)
+                    .saturating_add(insets.top)
+                    .saturating_add(insets.bottom)
                     .max(1),
             )
         }
@@ -1868,6 +1989,17 @@ fn minimum_size_for_surface(state: &State, surface_object_id: ObjectId) -> (i32,
     toplevel.minimum_size().unwrap_or((1, 1))
 }
 
+fn xdg_toplevel_for_surface_ids(
+    state: &State,
+    client_id: crate::clients::ClientId,
+    xdg_surface_id: Option<XdgSurfaceId>,
+) -> Option<(ObjectId, &XdgToplevel)> {
+    let xdg_surface_id = xdg_surface_id?;
+    let object_id = state.xdg_toplevel_object_id(client_id, xdg_surface_id)?;
+    let toplevel = state.objects.try_ref_object::<XdgToplevel>(object_id)?;
+    Some((object_id, toplevel))
+}
+
 fn xdg_toplevel_for_xdg_surface(
     state: &State,
     surface_object_id: ObjectId,
@@ -1877,9 +2009,7 @@ fn xdg_toplevel_for_xdg_surface(
     let surface = state
         .objects
         .try_ref_object::<WlSurface>(surface_object_id)?;
-    let object_id = state.xdg_toplevel_object_id(surface.client_id(), xdg_surface_id)?;
-    let toplevel = state.objects.try_ref_object::<XdgToplevel>(object_id)?;
-    Some((object_id, toplevel))
+    xdg_toplevel_for_surface_ids(state, surface.client_id(), Some(xdg_surface_id))
 }
 
 fn is_managed_root_surface_live(state: &State, surface_object_id: ObjectId) -> bool {
@@ -1934,7 +2064,82 @@ pub(crate) fn test_tiled_resize_state() -> TiledResizeState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {
+        super::*,
+        crate::{
+            clients::{Client, ClientId},
+            egl::EGL,
+            globals::Globals,
+            protocol_generated::{WlSurfaceId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId},
+            runner::Dispatcher,
+            state::State,
+            wayland_objects::{
+                wl_surface::Role,
+                xdg_surface::{xdg_toplevel::ToplevelDecorationMode, XdgSurface},
+            },
+            xkb::Xkb,
+        },
+    };
+
+    fn make_state() -> State {
+        let xkb = Xkb::new();
+        let keyboard = xkb.create_keyboard_state();
+        let mut globals = Globals::new();
+        globals.initialize();
+        State {
+            objects: Default::default(),
+            root_surfaces: Default::default(),
+            layer_surface_objects: Default::default(),
+            inputs: Default::default(),
+            drm: Default::default(),
+            outputs: Default::default(),
+            active_output: None,
+            workspace_groups: Default::default(),
+            workspaces: Default::default(),
+            output_workspace_groups: Default::default(),
+            root_surface_workspaces: Default::default(),
+            managed_root_surfaces: Default::default(),
+            xdg_toplevel_roles: Default::default(),
+            next_workspace_serial: 1,
+            backend_syncobj_globals: Default::default(),
+            globals,
+            activation_tokens: Default::default(),
+            egl: EGL::new(),
+            config: Default::default(),
+            seat: Default::default(),
+            keyboard,
+            xkb,
+        }
+    }
+
+    fn insert_root_xdg_toplevel(
+        state: &mut State,
+        client: &mut Client,
+        dispatcher: &mut crate::clients::ClientDispatcher<'_>,
+        wl_surface_id: WlSurfaceId,
+        xdg_surface_id: XdgSurfaceId,
+        toplevel_id: XdgToplevelId,
+        logical_size: (i32, i32),
+    ) -> (ObjectId, ObjectId, ObjectId) {
+        let ((_, surface_object_id), _) =
+            client.insert_object(state, WlSurface::new(wl_surface_id, client.client_id(), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            assert!(surface.set_role(Role::XdgSurface, dispatcher).is_ok());
+            surface.set_xdg_surface_impl(xdg_surface_id);
+            surface.test_map(ObjectId::from(900usize), 0, 0, logical_size.0, logical_size.1);
+        }
+        state.register_root_surface(surface_object_id);
+
+        let ((_, xdg_surface_object_id), _) = client.insert_object(
+            state,
+            XdgSurface::new(xdg_surface_id, XdgWmBaseId::from(1), wl_surface_id, 7),
+        );
+        let ((_, toplevel_object_id), _) =
+            client.insert_object(state, XdgToplevel::new(toplevel_id, xdg_surface_id, 7));
+        state.register_xdg_toplevel_role(client.client_id(), xdg_surface_id, toplevel_object_id);
+        (surface_object_id, xdg_surface_object_id, toplevel_object_id)
+    }
 
     #[test]
     fn tiled_resize_uses_grab_start_weights() {
@@ -1950,7 +2155,7 @@ mod tests {
             bounds,
             bounds,
             GapPolicy::default(),
-            DecorationInsets::default(),
+            &BTreeMap::default(),
             &BTreeMap::default(),
         );
 
@@ -1985,7 +2190,7 @@ mod tests {
             bounds,
             bounds,
             GapPolicy::default(),
-            DecorationInsets::default(),
+            &BTreeMap::default(),
             &BTreeMap::default(),
         );
 
@@ -2093,7 +2298,7 @@ mod tests {
             bounds,
             bounds,
             GapPolicy::default(),
-            DecorationInsets::default(),
+            &BTreeMap::default(),
             &min_sizes,
         );
 
@@ -2126,7 +2331,7 @@ mod tests {
             RectI { x: 0, y: 0, width: 100, height: 40 },
             RectI { x: 0, y: 0, width: 100, height: 40 },
             GapPolicy { outer_gap: 0, inner_gap: 10 },
-            DecorationInsets::default(),
+            &BTreeMap::default(),
             &BTreeMap::default(),
         );
 
@@ -2147,7 +2352,7 @@ mod tests {
             RectI { x: 5, y: 7, width: 90, height: 30 },
             RectI { x: 0, y: 0, width: 100, height: 40 },
             GapPolicy::default(),
-            DecorationInsets::default(),
+            &BTreeMap::default(),
             &BTreeMap::default(),
         );
 
@@ -2179,6 +2384,212 @@ mod tests {
     }
 
     #[test]
+    fn window_geometry_derives_per_edge_decoration_insets() {
+        let surface = WlSurface::new(WlSurfaceId::from(30u32), ClientId::from_raw(31), 6);
+        let mut state = make_state();
+        let ((_, surface_object_id), _) =
+            Client::new_for_tests(ClientId::from_raw(32)).insert_object(&mut state, surface);
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.test_map(ObjectId::from(901usize), 0, 0, 80, 60);
+            let insets = decoration_insets_from_window_geometry(
+                &surface,
+                RectI { x: -4, y: -12, width: 90, height: 80 },
+            )
+            .unwrap();
+            assert_eq!(insets, DecorationInsets { top: 12, right: 6, bottom: 8, left: 4 });
+        }
+    }
+
+    #[test]
+    fn effective_decoration_insets_fall_back_to_config_without_explicit_geometry() {
+        let mut state = make_state();
+        state.config.general.decoration_insets =
+            DecorationInsets { top: 7, right: 1, bottom: 2, left: 3 };
+        let mut client = Client::new_for_tests(ClientId::from_raw(40));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (surface_object_id, _xdg_surface_object_id, _toplevel_object_id) =
+            insert_root_xdg_toplevel(
+                &mut state,
+                &mut client,
+                &mut client_dispatcher,
+                WlSurfaceId::from(41u32),
+                XdgSurfaceId::from(42u32),
+                XdgToplevelId::from(43u32),
+                (80, 60),
+            );
+
+        assert_eq!(
+            effective_decoration_insets(&state, surface_object_id),
+            DecorationInsets { top: 7, right: 1, bottom: 2, left: 3 }
+        );
+    }
+
+    #[test]
+    fn effective_decoration_insets_use_explicit_window_geometry_for_csd() {
+        let mut state = make_state();
+        state.config.general.decoration_insets =
+            DecorationInsets { top: 1, right: 1, bottom: 1, left: 1 };
+        let mut client = Client::new_for_tests(ClientId::from_raw(50));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (surface_object_id, _xdg_surface_object_id, toplevel_object_id) =
+            insert_root_xdg_toplevel(
+                &mut state,
+                &mut client,
+                &mut client_dispatcher,
+                WlSurfaceId::from(51u32),
+                XdgSurfaceId::from(52u32),
+                XdgToplevelId::from(53u32),
+                (80, 60),
+            );
+        let ((_, child_surface_object_id), _) = client.insert_object(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(54u32), client.client_id(), 6),
+        );
+        {
+            let root_surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            root_surface.add_pending_child(child_surface_object_id);
+        }
+        {
+            let child_surface = state
+                .objects
+                .get_mut(child_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            child_surface.assign_subsurface(
+                crate::protocol_generated::WlSubsurfaceId::from(55u32),
+                surface_object_id,
+            );
+            child_surface.set_subsurface_position(-4, -12);
+            child_surface.test_map(ObjectId::from(901usize), 0, 0, 90, 80);
+        }
+        {
+            let mut root_surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            assert!(root_surface.apply_pending_tree_state(&mut state));
+        }
+        {
+            let toplevel = state
+                .objects
+                .get_mut(toplevel_object_id)
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.set_window_geometry(Some(RectI { x: -4, y: -12, width: 90, height: 80 }));
+        }
+
+        assert_eq!(
+            effective_decoration_insets(&state, surface_object_id),
+            DecorationInsets { top: 12, right: 6, bottom: 8, left: 4 }
+        );
+    }
+
+    #[test]
+    fn effective_decoration_insets_clamp_window_geometry_to_surface_tree_bounds() {
+        let mut state = make_state();
+        state.config.general.decoration_insets =
+            DecorationInsets { top: 1, right: 1, bottom: 1, left: 1 };
+        let mut client = Client::new_for_tests(ClientId::from_raw(55));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (surface_object_id, _xdg_surface_object_id, toplevel_object_id) =
+            insert_root_xdg_toplevel(
+                &mut state,
+                &mut client,
+                &mut client_dispatcher,
+                WlSurfaceId::from(56u32),
+                XdgSurfaceId::from(57u32),
+                XdgToplevelId::from(58u32),
+                (80, 60),
+            );
+        let ((_, child_surface_object_id), _) = client.insert_object(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(59u32), client.client_id(), 6),
+        );
+        {
+            let root_surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            root_surface.add_pending_child(child_surface_object_id);
+        }
+        {
+            let child_surface = state
+                .objects
+                .get_mut(child_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            child_surface.assign_subsurface(
+                crate::protocol_generated::WlSubsurfaceId::from(60u32),
+                surface_object_id,
+            );
+            child_surface.set_subsurface_position(-4, -12);
+            child_surface.test_map(ObjectId::from(902usize), 0, 0, 90, 80);
+        }
+        {
+            let mut root_surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            assert!(root_surface.apply_pending_tree_state(&mut state));
+        }
+        {
+            let toplevel = state
+                .objects
+                .get_mut(toplevel_object_id)
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.set_window_geometry(Some(RectI { x: -10, y: -20, width: 120, height: 100 }));
+        }
+
+        assert_eq!(
+            effective_decoration_insets(&state, surface_object_id),
+            DecorationInsets { top: 12, right: 6, bottom: 8, left: 4 }
+        );
+    }
+
+    #[test]
+    fn server_side_decoration_mode_uses_configured_fallback_insets() {
+        let mut state = make_state();
+        state.config.general.decoration_insets =
+            DecorationInsets { top: 2, right: 3, bottom: 4, left: 5 };
+        let mut client = Client::new_for_tests(ClientId::from_raw(60));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (surface_object_id, _xdg_surface_object_id, toplevel_object_id) =
+            insert_root_xdg_toplevel(
+                &mut state,
+                &mut client,
+                &mut client_dispatcher,
+                WlSurfaceId::from(61u32),
+                XdgSurfaceId::from(62u32),
+                XdgToplevelId::from(63u32),
+                (80, 60),
+            );
+        {
+            let toplevel = state
+                .objects
+                .get_mut(toplevel_object_id)
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.set_window_geometry(Some(RectI { x: -7, y: -9, width: 94, height: 74 }));
+        }
+        state
+            .objects
+            .get_mut(toplevel_object_id)
+            .downcast_mut::<XdgToplevel>()
+            .unwrap()
+            .test_set_decoration_mode(ToplevelDecorationMode::ServerSide);
+
+        assert_eq!(
+            effective_decoration_insets(&state, surface_object_id),
+            DecorationInsets { top: 2, right: 3, bottom: 4, left: 5 }
+        );
+    }
+
+    #[test]
     fn fullscreen_layout_ignores_gaps_and_insets() {
         let mut layout = WorkspaceLayout::default();
         let surface = ObjectId::from(16usize);
@@ -2191,12 +2602,37 @@ mod tests {
             RectI { x: 20, y: 30, width: 80, height: 20 },
             fullscreen_bounds,
             GapPolicy { outer_gap: 10, inner_gap: 7 },
-            DecorationInsets { top: 2, right: 2, bottom: 2, left: 2 },
+            &BTreeMap::from([(surface, DecorationInsets { top: 2, right: 2, bottom: 2, left: 2 })]),
             &BTreeMap::default(),
         );
 
         assert_eq!(operations[0].frame_rect, fullscreen_bounds);
         assert_eq!(operations[0].content_rect, fullscreen_bounds);
+    }
+
+    #[test]
+    fn mixed_decoration_insets_shrink_each_leaf_independently() {
+        let mut layout = WorkspaceLayout::default();
+        let left = ObjectId::from(160usize);
+        let right = ObjectId::from(161usize);
+        assert!(layout.insert_tiled(left));
+        assert!(layout.insert_tiled(right));
+
+        let operations = apply_workspace_layout(
+            &mut layout,
+            RectI { x: 0, y: 0, width: 120, height: 80 },
+            RectI { x: 0, y: 0, width: 120, height: 80 },
+            GapPolicy::default(),
+            &BTreeMap::from([
+                (left, DecorationInsets { top: 10, right: 0, bottom: 0, left: 0 }),
+                (right, DecorationInsets::default()),
+            ]),
+            &BTreeMap::default(),
+        );
+
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0].content_rect.y, 10);
+        assert_eq!(operations[1].content_rect.y, 0);
     }
 
     #[test]
@@ -2212,7 +2648,7 @@ mod tests {
             RectI { x: 0, y: 0, width: 8, height: 20 },
             RectI { x: 0, y: 0, width: 8, height: 20 },
             GapPolicy { outer_gap: 0, inner_gap: 4 },
-            DecorationInsets::default(),
+            &BTreeMap::default(),
             &BTreeMap::from([(left, (10, 1)), (right, (10, 1))]),
         );
 
@@ -2222,6 +2658,29 @@ mod tests {
             .sum::<i32>();
         let gap = operations[1].frame_rect.x - operations[0].frame_rect.x2();
         assert_eq!(total_width + gap, 8);
+    }
+
+    #[test]
+    fn node_minimum_size_uses_per_surface_decoration_insets() {
+        let mut layout = WorkspaceLayout::default();
+        let left = ObjectId::from(170usize);
+        let right = ObjectId::from(171usize);
+        assert!(layout.insert_tiled(left));
+        assert!(layout.insert_tiled(right));
+
+        let minimum = node_minimum_size(
+            &layout,
+            layout.root.expect("root should exist"),
+            None,
+            GapPolicy::default(),
+            &BTreeMap::from([
+                (left, DecorationInsets { top: 0, right: 4, bottom: 0, left: 2 }),
+                (right, DecorationInsets { top: 0, right: 1, bottom: 0, left: 1 }),
+            ]),
+            &BTreeMap::from([(left, (10, 1)), (right, (10, 1))]),
+        );
+
+        assert_eq!(minimum, (28, 1));
     }
 
     #[test]
@@ -2253,7 +2712,7 @@ mod tests {
             container_id,
             Some(LayoutSizeHint { width: 5, height: 30 }),
             GapPolicy { outer_gap: 0, inner_gap: 10 },
-            DecorationInsets::default(),
+            &BTreeMap::default(),
             &BTreeMap::default(),
         );
 
@@ -2275,7 +2734,7 @@ mod tests {
             RectI { x: 0, y: 0, width: 120, height: 80 },
             RectI { x: 0, y: 0, width: 120, height: 80 },
             GapPolicy::default(),
-            DecorationInsets::default(),
+            &BTreeMap::default(),
             &BTreeMap::default(),
         );
 

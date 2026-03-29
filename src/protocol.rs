@@ -365,7 +365,7 @@ pub fn gen() -> std::io::Result<()> {
         "/usr/share/wayland-protocols/unstable/tablet/tablet-unstable-v2.xml",
         // "/usr/share/wayland-protocols/unstable/text-input/text-input-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/text-input/text-input-unstable-v3.xml",
-        // "/usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml",
+        "/usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/xdg-foreign/xdg-foreign-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/xdg-foreign/xdg-foreign-unstable-v2.xml",
         "/usr/share/wayland-protocols/unstable/xdg-output/xdg-output-unstable-v1.xml",

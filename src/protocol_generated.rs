@@ -102,6 +102,8 @@ wayland_id! {
   ZwpTabletPadStripV2Id,
   ZwpTabletPadGroupV2Id,
   ZwpTabletPadV2Id,
+  ZxdgDecorationManagerV1Id,
+  ZxdgToplevelDecorationV1Id,
   ZxdgOutputManagerV1Id,
   ZxdgOutputV1Id,
   ExtWorkspaceManagerV1Id,
@@ -11837,6 +11839,199 @@ pub mod zwp_tablet_pad_v2 {
         Released = 0,
         /// The button is pressed,
         Pressed = 1,
+    }
+}
+
+/// Window decoration manager
+///
+/// This interface allows a compositor to announce support for server-side
+/// decorations.
+///
+/// A window decoration is a set of window controls as deemed appropriate by
+/// the party managing them, such as user interface components used to move,
+/// resize and change a window's state.
+///
+/// A client can use this protocol to request being decorated by a supporting
+/// compositor.
+///
+/// If compositor and client do not negotiate the use of a server-side
+/// decoration using this protocol, clients continue to self-decorate as they
+/// see fit.
+///
+/// Warning! The protocol described in this file is experimental and
+/// backward incompatible changes may be made. Backward compatible changes
+/// may be added together with the corresponding interface version bump.
+/// Backward incompatible changes are done by bumping the version number in
+/// the protocol and interface names and resetting the interface version.
+/// Once the protocol is to be declared stable, the 'z' prefix and the
+/// version number in the protocol and interface names are removed and the
+/// interface version number is reset.
+pub mod zxdg_decoration_manager_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1 {
+        const INTERFACE_NAME: &'static str = "zxdg_decoration_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZxdgDecorationManagerV1Id {
+        type Object = crate::wayland_objects::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the decoration manager object
+        ///
+        /// Destroy the decoration manager. This doesn't destroy objects created
+        /// with the manager.
+        Destroy,
+        /// Create a new toplevel decoration object
+        ///
+        /// Create a new decoration object associated with the given toplevel.
+        ///
+        /// Creating an xdg_toplevel_decoration from an xdg_toplevel which has a
+        /// buffer attached or committed is a client error, and any attempts by a
+        /// client to attach or manipulate a buffer prior to the first
+        /// xdg_toplevel_decoration.configure event must also be treated as
+        /// errors.
+        GetToplevelDecoration { id: ZxdgToplevelDecorationV1Id, toplevel: XdgToplevelId },
+    }
+    impl Parser for crate::wayland_objects::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetToplevelDecoration { id: req.id()?, toplevel: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
+/// Decoration object for a toplevel surface
+///
+/// The decoration object allows the compositor to toggle server-side window
+/// decorations for a toplevel surface. The client can request to switch to
+/// another mode.
+///
+/// The xdg_toplevel_decoration object must be destroyed before its
+/// xdg_toplevel.
+pub mod zxdg_toplevel_decoration_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1 {
+        const INTERFACE_NAME: &'static str = "zxdg_toplevel_decoration_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZxdgToplevelDecorationV1Id {
+        type Object = crate::wayland_objects::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the decoration object
+        ///
+        /// Switch back to a mode without any server-side decorations at the next
+        /// commit.
+        Destroy,
+        /// Set the decoration mode
+        ///
+        /// Set the toplevel surface decoration mode. This informs the compositor
+        /// that the client prefers the provided decoration mode.
+        ///
+        /// After requesting a decoration mode, the compositor will respond by
+        /// emitting an xdg_surface.configure event. The client should then update
+        /// its content, drawing it without decorations if the received mode is
+        /// server-side decorations. The client must also acknowledge the configure
+        /// when committing the new content (see xdg_surface.ack_configure).
+        ///
+        /// The compositor can decide not to use the client's mode and enforce a
+        /// different mode instead.
+        ///
+        /// Clients whose decoration mode depend on the xdg_toplevel state may send
+        /// a set_mode request in response to an xdg_surface.configure event and wait
+        /// for the next xdg_surface.configure event to prevent unwanted state.
+        /// Such clients are responsible for preventing configure loops and must
+        /// make sure not to send multiple successive set_mode requests with the
+        /// same decoration mode.
+        ///
+        /// If an invalid mode is supplied by the client, the invalid_mode protocol
+        /// error is raised by the compositor.
+        SetMode {
+            /// The decoration mode,
+            mode: u32,
+        },
+        /// Unset the decoration mode
+        ///
+        /// Unset the toplevel surface decoration mode. This informs the compositor
+        /// that the client doesn't prefer a particular decoration mode.
+        ///
+        /// This request has the same semantics as set_mode.
+        UnsetMode,
+    }
+    impl Parser for crate::wayland_objects::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => SetMode { mode: req.uint()? },
+                2 => UnsetMode,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Notify a decoration mode change
+        ///
+        /// The configure event configures the effective decoration mode. The
+        /// configured state should not be applied immediately. Clients must send an
+        /// ack_configure in response to this event. See xdg_surface.configure and
+        /// xdg_surface.ack_configure for details.
+        ///
+        /// A configure event can be sent at any time. The specified mode must be
+        /// obeyed by the client.
+        Configure {
+            /// The decoration mode,
+            mode: u32,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Configure { mode } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(mode);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Xdg_toplevel has a buffer attached before configure,
+        UnconfiguredBuffer = 0,
+        /// Xdg_toplevel already has a decoration object,
+        AlreadyConstructed = 1,
+        /// Xdg_toplevel destroyed before the decoration object,
+        Orphaned = 2,
+        /// Invalid mode,
+        InvalidMode = 3,
+    }
+    /// Window decoration modes
+    ///
+    /// These values describe window decoration modes.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Mode {
+        /// No server-side window decoration,
+        ClientSide = 1,
+        /// Server-side window decoration,
+        ServerSide = 2,
     }
 }
 

@@ -2051,9 +2051,9 @@ impl Model for Client {
                 self.reconfigure_mapped_toplevels(state, &mut dispatcher);
             }
             WorkspaceStateChanged => {
+                self.reconfigure_mapped_toplevels(state, &mut dispatcher);
                 self.refresh_surface_outputs(state, &mut dispatcher);
                 self.refresh_workspace_protocols(state, &mut dispatcher);
-                self.reconfigure_mapped_toplevels(state, &mut dispatcher);
             }
             RefreshSurfaceOutputs => {
                 self.refresh_surface_outputs(state, &mut dispatcher);

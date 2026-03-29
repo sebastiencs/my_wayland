@@ -11,6 +11,7 @@ use crate::{
         wp_presentation::WpPresentationGlobal, wp_viewporter::WpViewporterGlobal,
         xdg_activation_v1::XdgActivationV1Global, xdg_wm_base::XdgWmBaseGlobal,
         zwlr_layer_shell_v1::ZwlrLayerShellV1Global, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1Global,
+        zxdg_decoration_manager_v1::ZxdgDecorationManagerV1Global,
         zxdg_output_manager_v1::ZxdgOutputManagerV1Global,
     },
 };
@@ -72,6 +73,7 @@ impl Globals {
             WpCursorShapeManagerV1Global::new,
             XdgActivationV1Global::new,
             XdgWmBaseGlobal::new,
+            ZxdgDecorationManagerV1Global::new,
             ZwlrLayerShellV1Global::new,
             ZxdgOutputManagerV1Global::new,
             ExtWorkspaceManagerV1Global::new,

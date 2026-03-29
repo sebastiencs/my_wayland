@@ -46,8 +46,10 @@ pub mod zwlr_layer_shell_v1;
 pub mod zwlr_layer_surface_v1;
 pub mod zwp_linux_buffer_params_v1;
 pub mod zwp_linux_dmabuf_v1;
+pub mod zxdg_decoration_manager_v1;
 pub mod zxdg_output_manager_v1;
 pub mod zxdg_output_v1;
+pub mod zxdg_toplevel_decoration_v1;
 
 macro_rules! fake_obj {
     ($({$module:ident, $name:ident },)+) => ($(
