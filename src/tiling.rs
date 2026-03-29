@@ -1321,10 +1321,9 @@ pub(crate) fn effective_window_geometry_for_surface(
         .or(Some(surface_bounds))
 }
 
-/// Places the wl_surface root for a tiled layout.
-///
-/// With explicit xdg window geometry, we align the geometry rect to the tile's frame rect.
-/// Without explicit geometry, we fall back to placing the root buffer at the content rect.
+/// Places the wl_surface root for a tiled layout by aligning the committed surface tree to the
+/// tile's frame rect. This handles both same-buffer CSD (positive window-geometry origin) and
+/// subsurface CSD (negative tree offsets) without special-casing geometry semantics.
 pub(crate) fn tiled_root_position_for_layout(
     state: &State,
     surface_object_id: ObjectId,
@@ -1332,23 +1331,12 @@ pub(crate) fn tiled_root_position_for_layout(
     frame_rect: RectI,
     content_rect: RectI,
 ) -> (i32, i32) {
-    let Some((_, toplevel)) =
-        xdg_toplevel_for_surface_ids(state, surface.client_id(), surface.xdg_surface_id())
+    let Some(surface_bounds) =
+        WlSurface::local_surface_tree_bounds_with_surface(state, surface_object_id, surface)
     else {
         return (content_rect.x, content_rect.y);
     };
-    let Some(explicit_geometry) = toplevel.window_geometry() else {
-        return (content_rect.x, content_rect.y);
-    };
-    let Some(window_geometry) = effective_window_geometry_for_surface(
-        state,
-        surface_object_id,
-        surface,
-        Some(explicit_geometry),
-    ) else {
-        return (content_rect.x, content_rect.y);
-    };
-    (frame_rect.x.saturating_sub(window_geometry.x), frame_rect.y.saturating_sub(window_geometry.y))
+    (frame_rect.x.saturating_sub(surface_bounds.x), frame_rect.y.saturating_sub(surface_bounds.y))
 }
 
 fn clamp_window_geometry_to_surface_bounds(window_geometry: RectI, surface_bounds: RectI) -> RectI {
@@ -2580,7 +2568,7 @@ mod tests {
                 frame_rect,
                 content_rect,
             ),
-            (10, -12)
+            (10, 20)
         );
     }
 
