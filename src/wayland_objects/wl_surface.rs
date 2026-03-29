@@ -1855,12 +1855,16 @@ impl WlSurface {
         let is_mapped = self.global_logical_bounds().is_some();
         if was_mapped != is_mapped {
             if let Some(ShellSurfaceObject::XdgSurface(xdg_surface_id)) = self.shell_surface {
+                let surface_object_id = client.object_id(self.id);
                 let xdg_surface_object_id = client.object_id(xdg_surface_id);
                 if state
                     .objects
                     .try_ref_object::<XdgSurface>(xdg_surface_object_id)
                     .is_some_and(XdgSurface::is_toplevel_parent)
                 {
+                    if is_mapped {
+                        state.confirm_root_surface_mapped(surface_object_id);
+                    }
                     dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
                 }
             }
@@ -2640,7 +2644,7 @@ mod tests {
                 wp_fractional_scale_v1::WpFractionalScaleV1,
                 wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
                 wp_viewport::WpViewport,
-                xdg_surface::XdgSurface,
+                xdg_surface::{xdg_toplevel::XdgToplevel, XdgSurface},
             },
             xkb::Xkb,
         },
@@ -2800,6 +2804,71 @@ mod tests {
             .1
     }
 
+    fn create_root_xdg_toplevel(
+        state: &mut State,
+        client: &mut Client,
+        dispatcher: &mut Dispatcher,
+        surface_id: WlSurfaceId,
+        xdg_surface_id: XdgSurfaceId,
+        toplevel_id: XdgToplevelId,
+    ) -> ObjectId {
+        let mut client_dispatcher = client.test_dispatcher(dispatcher);
+        let ((_, surface_object_id), _) =
+            client.insert_object(state, WlSurface::new(surface_id, client.client_id(), 6));
+        state.register_root_surface(surface_object_id);
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            assert!(surface
+                .set_role(Role::XdgSurface, &mut client_dispatcher)
+                .is_ok());
+            surface.set_xdg_surface_impl(xdg_surface_id);
+        }
+        client.insert_object(
+            state,
+            XdgSurface::new(xdg_surface_id, XdgWmBaseId::from(1), surface_id, 7),
+        );
+        {
+            let mut xdg_surface = client.grab_object(xdg_surface_id, state);
+            xdg_surface.on(
+                client,
+                state,
+                get_toplevel_request(xdg_surface_id, toplevel_id),
+                &mut client_dispatcher,
+            );
+        }
+        surface_object_id
+    }
+
+    fn commit_initial_xdg_toplevel(
+        state: &mut State,
+        client: &mut Client,
+        dispatcher: &mut Dispatcher,
+        surface_object_id: ObjectId,
+        xdg_surface_id: XdgSurfaceId,
+    ) {
+        let mut client_dispatcher = client.test_dispatcher(dispatcher);
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(client, state, &mut client_dispatcher);
+        }
+        {
+            let xdg_surface_object_id = client.object_id(xdg_surface_id);
+            let mut xdg_surface = state
+                .objects
+                .grab_object::<XdgSurface>(xdg_surface_object_id);
+            xdg_surface.on(
+                client,
+                state,
+                ack_configure_request(xdg_surface_id, 1),
+                &mut client_dispatcher,
+            );
+        }
+    }
+
     #[test]
     fn cursor_role_conflicts_with_xdg_role() {
         let mut surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(3), 6);
@@ -2897,53 +2966,25 @@ mod tests {
         let backend = BackendOutputRef::new(DrmId::from(0usize));
         let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
         let (mut client, mut dispatcher) = make_client();
-        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let surface_id = WlSurfaceId::from(50);
         let xdg_surface_id = XdgSurfaceId::from(60);
         let toplevel_id = XdgToplevelId::from(70);
-        let ((_, surface_object_id), _) =
-            client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
-        state.register_root_surface(surface_object_id);
-        {
-            let surface = state
-                .objects
-                .get_mut(surface_object_id)
-                .downcast_mut::<WlSurface>()
-                .unwrap();
-            assert!(surface
-                .set_role(Role::XdgSurface, &mut client_dispatcher)
-                .is_ok());
-            surface.set_xdg_surface_impl(xdg_surface_id);
-        }
-        let ((_, xdg_surface_object_id), _) = client.insert_object(
+        let surface_object_id = create_root_xdg_toplevel(
             &mut state,
-            XdgSurface::new(xdg_surface_id, XdgWmBaseId::from(1), surface_id, 7),
+            &mut client,
+            &mut dispatcher,
+            surface_id,
+            xdg_surface_id,
+            toplevel_id,
         );
-        {
-            let mut xdg_surface = client.grab_object(xdg_surface_id, &mut state);
-            xdg_surface.on(
-                &mut client,
-                &mut state,
-                get_toplevel_request(xdg_surface_id, toplevel_id),
-                &mut client_dispatcher,
-            );
-        }
-        {
-            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
-            surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
-        }
-        {
-            let mut xdg_surface = state
-                .objects
-                .grab_object::<XdgSurface>(xdg_surface_object_id);
-            xdg_surface.on(
-                &mut client,
-                &mut state,
-                ack_configure_request(xdg_surface_id, 1),
-                &mut client_dispatcher,
-            );
-        }
+        commit_initial_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            surface_object_id,
+            xdg_surface_id,
+        );
         let buffer_object_id = insert_test_buffer(&mut state, client.client_id());
         {
             let surface = state
@@ -2955,6 +2996,7 @@ mod tests {
         }
 
         {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
         }
@@ -2962,6 +3004,172 @@ mod tests {
         assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
             matches!(action, ClientsAction::WorkspaceStateChanged)
         }));
+    }
+
+    #[test]
+    fn tiled_root_initial_configure_uses_tile_size() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(2usize));
+        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = make_client();
+
+        let surface_object_id = create_root_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            WlSurfaceId::from(80),
+            XdgSurfaceId::from(81),
+            XdgToplevelId::from(82),
+        );
+
+        commit_initial_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            surface_object_id,
+            XdgSurfaceId::from(81),
+        );
+
+        let toplevel = state
+            .objects
+            .try_ref_object::<XdgToplevel>(client.object_id(XdgToplevelId::from(82)))
+            .unwrap();
+        assert_eq!(toplevel.test_current_size(), (1280, 720));
+        let states = toplevel.test_current_states();
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledLeft as u32))
+        );
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledRight as u32))
+        );
+        assert!(states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledTop as u32)));
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledBottom as u32))
+        );
+        assert!(state
+            .managed_root_surface_state(surface_object_id)
+            .is_some_and(|managed| managed.pending_initial_layout));
+    }
+
+    #[test]
+    fn floating_root_initial_configure_stays_generic() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(3usize));
+        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = make_client();
+
+        let surface_object_id = create_root_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            WlSurfaceId::from(90),
+            XdgSurfaceId::from(91),
+            XdgToplevelId::from(92),
+        );
+        assert!(state.set_root_surface_floating(surface_object_id, true));
+
+        commit_initial_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            surface_object_id,
+            XdgSurfaceId::from(91),
+        );
+
+        let toplevel = state
+            .objects
+            .try_ref_object::<XdgToplevel>(client.object_id(XdgToplevelId::from(92)))
+            .unwrap();
+        assert_eq!(toplevel.test_current_size(), (0, 0));
+        let states = toplevel.test_current_states();
+        assert!(
+            !states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledLeft as u32))
+        );
+        assert!(!state
+            .managed_root_surface_state(surface_object_id)
+            .is_some_and(|managed| managed.pending_initial_layout));
+    }
+
+    #[test]
+    fn fullscreen_root_initial_configure_uses_fullscreen_layout() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(4usize));
+        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = make_client();
+
+        let surface_object_id = create_root_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            WlSurfaceId::from(100),
+            XdgSurfaceId::from(101),
+            XdgToplevelId::from(102),
+        );
+        assert!(state.set_root_surface_fullscreen(surface_object_id, true));
+
+        commit_initial_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            surface_object_id,
+            XdgSurfaceId::from(101),
+        );
+
+        let toplevel = state
+            .objects
+            .try_ref_object::<XdgToplevel>(client.object_id(XdgToplevelId::from(102)))
+            .unwrap();
+        assert_eq!(toplevel.test_current_size(), (1280, 720));
+        let states = toplevel.test_current_states();
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::Fullscreen as u32))
+        );
+    }
+
+    #[test]
+    fn first_map_clears_pending_initial_layout_state() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(5usize));
+        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = make_client();
+
+        let surface_object_id = create_root_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            WlSurfaceId::from(110),
+            XdgSurfaceId::from(111),
+            XdgToplevelId::from(112),
+        );
+        commit_initial_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            surface_object_id,
+            XdgSurfaceId::from(111),
+        );
+        assert!(state
+            .managed_root_surface_state(surface_object_id)
+            .is_some_and(|managed| managed.pending_initial_layout));
+
+        let buffer_object_id = insert_test_buffer(&mut state, client.client_id());
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.pending.buffer = Some(Some(buffer_object_id));
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
+        }
+
+        assert!(!state
+            .managed_root_surface_state(surface_object_id)
+            .is_some_and(|managed| managed.pending_initial_layout));
     }
 
     #[test]

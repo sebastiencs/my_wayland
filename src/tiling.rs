@@ -32,6 +32,13 @@ struct LayoutOperation {
     content_rect: RectI,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InitialLayoutConfigure {
+    pub rect: RectI,
+    pub tiled_edges: u32,
+    pub fullscreen: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TiledEdgeConstraints {
     left: Option<i32>,
@@ -925,6 +932,136 @@ pub fn tiled_edges_for_surface(state: &State, surface_object_id: ObjectId) -> Op
     })
 }
 
+pub fn initial_layout_configure_for_surface(
+    state: &mut State,
+    surface_object_id: ObjectId,
+    target_min_size: Option<(i32, i32)>,
+    configure_bounds: Option<(i32, i32)>,
+) -> Option<InitialLayoutConfigure> {
+    if !state.prepare_root_surface_initial_layout(surface_object_id) {
+        return None;
+    }
+    let workspace_id = state.root_surface_workspace(surface_object_id)?;
+    let workspace_surface_ids = state
+        .managed_root_surfaces
+        .iter()
+        .filter_map(|(object_id, managed)| {
+            (managed.workspace_id == workspace_id).then_some(*object_id)
+        })
+        .collect::<Vec<_>>();
+    let candidate_surfaces = workspace_surface_ids
+        .iter()
+        .copied()
+        .filter(|object_id| {
+            if *object_id == surface_object_id {
+                return state
+                    .managed_root_surface_state(*object_id)
+                    .is_some_and(|managed| managed.pending_initial_layout);
+            }
+            is_managed_root_surface_live(state, *object_id)
+                || state
+                    .managed_root_surface_state(*object_id)
+                    .is_some_and(|managed| managed.pending_initial_layout)
+        })
+        .collect::<Vec<_>>();
+    let candidate_set = candidate_surfaces.iter().copied().collect::<BTreeSet<_>>();
+    let candidate_modes = candidate_surfaces
+        .iter()
+        .filter_map(|object_id| {
+            state
+                .managed_root_surface_state(*object_id)
+                .map(|managed| (*object_id, managed.mode))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let fullscreen_surface = workspace_surface_ids.iter().find_map(|object_id| {
+        state
+            .managed_root_surface_state(*object_id)
+            .is_some_and(|managed| managed.fullscreen && candidate_set.contains(object_id))
+            .then_some(*object_id)
+    });
+    let fullscreen_bounds = state
+        .workspace_output_id(workspace_id)
+        .and_then(|output_id| state.output_bounds(output_id))
+        .map(|bounds| {
+            let (width, height) = configure_bounds.unwrap_or((bounds.width, bounds.height));
+            RectI { x: bounds.x, y: bounds.y, width, height }
+        })
+        .or_else(|| workspace_usable_bounds(state, workspace_id))?;
+    let tiling_bounds = workspace_tiling_bounds(state, workspace_id, fullscreen_bounds);
+    let min_sizes = state
+        .managed_root_surfaces
+        .iter()
+        .filter_map(|(object_id, managed)| {
+            (managed.workspace_id == workspace_id).then_some((
+                *object_id,
+                if *object_id == surface_object_id {
+                    target_min_size.unwrap_or((1, 1))
+                } else {
+                    minimum_size_for_surface(state, *object_id)
+                },
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let gap_policy = workspace_gap_policy(state, workspace_id);
+    let decoration_insets = state.config.general.decoration_insets;
+    let mut predictive_layout = state.workspaces.try_get(workspace_id)?.layout.clone();
+    sync_workspace_layout_candidates(
+        &mut predictive_layout,
+        &candidate_surfaces,
+        &candidate_set,
+        &candidate_modes,
+        fullscreen_surface,
+    );
+    apply_workspace_layout(
+        &mut predictive_layout,
+        tiling_bounds,
+        fullscreen_bounds,
+        gap_policy,
+        decoration_insets,
+        &min_sizes,
+    );
+    let rect = predictive_layout
+        .tiled_rect(surface_object_id)
+        .or_else(|| {
+            predictive_layout
+                .fullscreen
+                .as_ref()
+                .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id)
+                .then_some(fullscreen_bounds)
+        })
+        .map(|rect| {
+            if predictive_layout
+                .fullscreen
+                .as_ref()
+                .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id)
+            {
+                rect
+            } else {
+                content_rect_for_tiled_frame(
+                    rect,
+                    tiled_decoration_insets(state, surface_object_id),
+                )
+            }
+        })?;
+    Some(InitialLayoutConfigure {
+        rect,
+        tiled_edges: predictive_layout
+            .tiled_edges(surface_object_id)
+            .or_else(|| {
+                predictive_layout
+                    .fullscreen
+                    .as_ref()
+                    .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id)
+                    .then_some(EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT)
+            })
+            .unwrap_or_default(),
+        fullscreen: predictive_layout
+            .fullscreen
+            .as_ref()
+            .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id),
+    })
+}
+
 pub fn is_tiled_surface(state: &State, surface_object_id: ObjectId) -> bool {
     state
         .root_surface_workspace(surface_object_id)
@@ -1013,7 +1150,12 @@ pub fn managed_scene_order(state: &State) -> Vec<ObjectId> {
         let Some(workspace) = state.workspaces.try_get(workspace_id) else {
             continue;
         };
-        if let Some(fullscreen) = workspace.layout.fullscreen.as_ref() {
+        if let Some(fullscreen) = workspace
+            .layout
+            .fullscreen
+            .as_ref()
+            .filter(|fullscreen| state.root_surface_is_mapped(fullscreen.surface_object_id))
+        {
             if seen.insert(fullscreen.surface_object_id) {
                 ordered.push(fullscreen.surface_object_id);
             }
@@ -1120,25 +1262,21 @@ fn sync_workspace_layout(state: &mut State, workspace_id: WorkspaceId) {
         .filter(|object_id| is_managed_root_surface_live(state, *object_id))
         .collect::<Vec<_>>();
     let candidate_set = candidate_surfaces.iter().copied().collect::<BTreeSet<_>>();
+    let candidate_modes = candidate_surfaces
+        .iter()
+        .filter_map(|object_id| {
+            state
+                .managed_root_surfaces
+                .get(object_id)
+                .map(|managed| (*object_id, managed.mode))
+        })
+        .collect::<BTreeMap<_, _>>();
     for object_id in &workspace_surface_ids {
         if let Some(managed) = state.managed_root_surfaces.get_mut(object_id) {
             managed.mapped = candidate_set.contains(object_id);
         }
     }
 
-    let current_surfaces = state
-        .workspaces
-        .try_get(workspace_id)
-        .map(|workspace| {
-            workspace
-                .layout
-                .surface_leaves
-                .keys()
-                .copied()
-                .chain(workspace.layout.floating.stack.iter().copied())
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
     let fullscreen_surface = workspace_surface_ids.iter().find_map(|object_id| {
         state
             .managed_root_surfaces
@@ -1151,35 +1289,56 @@ fn sync_workspace_layout(state: &mut State, workspace_id: WorkspaceId) {
         return;
     };
 
+    sync_workspace_layout_candidates(
+        &mut workspace.layout,
+        &candidate_surfaces,
+        &candidate_set,
+        &candidate_modes,
+        fullscreen_surface,
+    );
+}
+
+fn sync_workspace_layout_candidates(
+    layout: &mut WorkspaceLayout,
+    candidate_surfaces: &[ObjectId],
+    candidate_set: &BTreeSet<ObjectId>,
+    candidate_modes: &BTreeMap<ObjectId, ManagedWindowMode>,
+    fullscreen_surface: Option<ObjectId>,
+) {
+    let current_surfaces = layout
+        .surface_leaves
+        .keys()
+        .copied()
+        .chain(layout.floating.stack.iter().copied())
+        .collect::<BTreeSet<_>>();
     for removed_surface in current_surfaces
         .difference(&candidate_set)
         .copied()
         .collect::<Vec<_>>()
     {
-        workspace.layout.remove_surface(removed_surface);
+        layout.remove_surface(removed_surface);
     }
-    for surface_object_id in candidate_surfaces {
-        let mode = state
-            .managed_root_surfaces
+    for surface_object_id in candidate_surfaces.iter().copied() {
+        let mode = candidate_modes
             .get(&surface_object_id)
-            .map(|managed| managed.mode)
+            .copied()
             .unwrap_or(ManagedWindowMode::Tiled);
         match mode {
             ManagedWindowMode::Tiled => {
-                if workspace.layout.is_floating_surface(surface_object_id) {
-                    workspace.layout.set_floating(surface_object_id, false);
-                } else if !workspace.layout.contains_surface(surface_object_id) {
-                    workspace.layout.insert_tiled(surface_object_id);
+                if layout.is_floating_surface(surface_object_id) {
+                    layout.set_floating(surface_object_id, false);
+                } else if !layout.contains_surface(surface_object_id) {
+                    layout.insert_tiled(surface_object_id);
                 }
             }
             ManagedWindowMode::Floating => {
-                if !workspace.layout.is_floating_surface(surface_object_id) {
-                    workspace.layout.set_floating(surface_object_id, true);
+                if !layout.is_floating_surface(surface_object_id) {
+                    layout.set_floating(surface_object_id, true);
                 }
             }
         }
     }
-    workspace.layout.set_fullscreen(fullscreen_surface);
+    layout.set_fullscreen(fullscreen_surface);
 }
 
 fn apply_workspace_layout(
@@ -1730,11 +1889,19 @@ fn is_managed_root_surface_live(state: &State, surface_object_id: ObjectId) -> b
     let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
         return false;
     };
+    is_managed_root_surface_candidate_common(state, surface_object_id, surface)
+        && surface.has_committed_buffer()
+}
+
+fn is_managed_root_surface_candidate_common(
+    state: &State,
+    surface_object_id: ObjectId,
+    surface: &WlSurface,
+) -> bool {
     surface.is_root()
         && surface.role() == Role::XdgSurface
         && !surface.has_cursor_role()
         && !surface.has_dnd_icon_role()
-        && surface.has_committed_buffer()
         && xdg_toplevel_for_xdg_surface(state, surface_object_id, surface.xdg_surface_id())
             .is_some()
 }

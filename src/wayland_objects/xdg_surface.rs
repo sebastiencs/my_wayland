@@ -309,8 +309,26 @@ impl XdgSurface {
                         );
                         return false;
                     }
+                    let surface_object_id = client.object_id(self.wl_surface_id());
+                    let toplevel_object_id = client.object_id(id);
+                    let target_min_size = state
+                        .objects
+                        .try_ref_object::<xdg_toplevel::XdgToplevel>(toplevel_object_id)
+                        .and_then(|toplevel| toplevel.minimum_size());
+                    let initial_layout_configure =
+                        crate::tiling::initial_layout_configure_for_surface(
+                            state,
+                            surface_object_id,
+                            target_min_size,
+                            configure_bounds,
+                        );
                     let mut xdg_toplevel = client.grab_object(id, state);
-                    xdg_toplevel.send_initial_configure(configure_bounds, self, dispatcher);
+                    xdg_toplevel.send_initial_configure(
+                        configure_bounds,
+                        initial_layout_configure,
+                        self,
+                        dispatcher,
+                    );
                     self.initial_commit_complete = true;
                     return true;
                 }
@@ -794,10 +812,24 @@ pub mod xdg_toplevel {
         pub fn send_initial_configure(
             &mut self,
             configure_bounds: Option<(i32, i32)>,
+            initial_layout_configure: Option<crate::tiling::InitialLayoutConfigure>,
             xdg_surface: &mut XdgSurface,
             dispatcher: &mut ClientDispatcher,
         ) {
-            self.schedule_configure(configure_bounds, xdg_surface, dispatcher);
+            if let Some(layout) = initial_layout_configure {
+                self.send_layout_configure(
+                    configure_bounds,
+                    xdg_surface,
+                    layout.rect.width,
+                    layout.rect.height,
+                    layout.tiled_edges,
+                    layout.fullscreen,
+                    false,
+                    dispatcher,
+                );
+            } else {
+                self.schedule_configure(configure_bounds, xdg_surface, dispatcher);
+            }
         }
 
         pub fn send_layout_configure(
@@ -937,6 +969,20 @@ pub mod xdg_toplevel {
         #[cfg(test)]
         pub(crate) fn test_set_fullscreen(&mut self, fullscreen: bool) {
             self.requested_fullscreen = fullscreen;
+        }
+
+        #[cfg(test)]
+        pub(crate) fn test_current_size(&self) -> (i32, i32) {
+            (self.current_width, self.current_height)
+        }
+
+        #[cfg(test)]
+        pub(crate) fn test_current_states(&self) -> Vec<u32> {
+            self.current_states
+                .iter()
+                .cloned()
+                .map(|state| state as u32)
+                .collect()
         }
 
         #[cfg(test)]

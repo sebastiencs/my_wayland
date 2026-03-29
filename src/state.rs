@@ -740,6 +740,7 @@ pub struct ManagedRootSurfaceState {
     pub mode: ManagedWindowMode,
     pub fullscreen: bool,
     pub mapped: bool,
+    pub pending_initial_layout: bool,
     pub last_floating_rect: Option<RectI>,
     pub pending_floating_rect_restore: Option<RectI>,
 }
@@ -1160,6 +1161,53 @@ impl State {
             .and_then(|managed| managed.pending_floating_rect_restore.take())
     }
 
+    pub fn root_surface_is_mapped(&self, object_id: ObjectId) -> bool {
+        self.managed_root_surfaces
+            .get(&object_id)
+            .is_some_and(|managed| managed.mapped)
+    }
+
+    pub fn prepare_root_surface_initial_layout(&mut self, object_id: ObjectId) -> bool {
+        let Some(workspace_id) = self
+            .managed_root_surfaces
+            .get(&object_id)
+            .map(|managed| managed.workspace_id)
+            .or_else(|| self.ensure_root_surface_workspace(object_id))
+        else {
+            return false;
+        };
+        let Some(managed) = self.managed_root_surfaces.get_mut(&object_id) else {
+            return false;
+        };
+        if managed.mode != ManagedWindowMode::Tiled || managed.mapped {
+            return false;
+        }
+        if managed.pending_initial_layout {
+            return true;
+        }
+        managed.pending_initial_layout = true;
+        tiling::mark_workspace_dirty(self, workspace_id);
+        true
+    }
+
+    pub fn confirm_root_surface_mapped(&mut self, object_id: ObjectId) {
+        let Some(workspace_id) = self
+            .managed_root_surfaces
+            .get(&object_id)
+            .map(|managed| managed.workspace_id)
+        else {
+            return;
+        };
+        let Some(managed) = self.managed_root_surfaces.get_mut(&object_id) else {
+            return;
+        };
+        if !managed.pending_initial_layout {
+            return;
+        }
+        managed.pending_initial_layout = false;
+        tiling::mark_workspace_dirty(self, workspace_id);
+    }
+
     pub fn register_xdg_toplevel_role(
         &mut self,
         client_id: ClientId,
@@ -1430,6 +1478,7 @@ impl State {
                 mode: ManagedWindowMode::Tiled,
                 fullscreen: false,
                 mapped: false,
+                pending_initial_layout: true,
                 last_floating_rect: None,
                 pending_floating_rect_restore: None,
             });
@@ -1520,6 +1569,7 @@ impl State {
                     .layout
                     .fullscreen
                     .as_ref()
+                    .filter(|fullscreen| self.root_surface_is_mapped(fullscreen.surface_object_id))
                     .map(|fullscreen| fullscreen.surface_object_id == object_id)
                     .unwrap_or(true)
             })
@@ -1590,6 +1640,7 @@ impl State {
             }
         }
         managed.mode = new_mode;
+        managed.pending_initial_layout = !floating && !managed.mapped;
         let restore_rect = floating.then_some(managed.last_floating_rect).flatten();
         managed.pending_floating_rect_restore = if floating { restore_rect } else { None };
         if floating {
@@ -1670,6 +1721,7 @@ impl State {
                     mode: ManagedWindowMode::Tiled,
                     fullscreen: true,
                     mapped: false,
+                    pending_initial_layout: true,
                     last_floating_rect: None,
                     pending_floating_rect_restore: None,
                 });
