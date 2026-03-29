@@ -127,22 +127,16 @@ macro_rules! cache {
     }};
 }
 
-use std::{
-    os::fd::{AsFd, AsRawFd},
-    time::Duration,
-};
+use std::time::Duration;
 
-use {
-    io_uring::model::IoUringAction,
-    nix::sys::timerfd::{self, TimerFd, TimerFlags, TimerSetTimeFlags},
-};
+use nix::sys::timerfd::{self, TimerFd, TimerFlags, TimerSetTimeFlags};
 
 use {globals::Globals, state::State};
 
 use crate::{
     clients::Clients,
     io_uring::model::IoUringState,
-    runner::{Dispatcher, Redispatcher, Runner},
+    runner::{Dispatcher, Runner},
     udev::Udev,
 };
 
@@ -257,6 +251,11 @@ fn main() {
         drm: Default::default(),
         outputs: Default::default(),
         active_output: None,
+        workspace_groups: Default::default(),
+        workspaces: Default::default(),
+        output_workspace_groups: Default::default(),
+        root_surface_workspaces: Default::default(),
+        next_workspace_serial: 1,
         backend_syncobj_globals: Default::default(),
         globals,
         activation_tokens: Default::default(),

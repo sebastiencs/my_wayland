@@ -17,7 +17,12 @@ use crate::{
 
 use {
     rand::{rngs::OsRng, RngCore},
-    std::{collections::BTreeMap, marker::PhantomData, ptr::NonNull, rc::Rc},
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        marker::PhantomData,
+        ptr::NonNull,
+        rc::Rc,
+    },
 };
 
 #[derive(Debug)]
@@ -703,6 +708,22 @@ impl Output {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct WorkspaceGroup {
+    pub outputs: BTreeSet<OutputId>,
+    pub workspaces: Vec<WorkspaceId>,
+    pub active_workspace: Option<WorkspaceId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Workspace {
+    pub stable_id: String,
+    pub name: String,
+    pub coordinates: Vec<u32>,
+    pub group: Option<WorkspaceGroupId>,
+    pub root_surfaces: BTreeSet<ObjectId>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutputLayoutEntry {
     pub output_id: OutputId,
@@ -1026,6 +1047,11 @@ pub struct State {
     pub drm: IndexMap<DrmId, Drm>,
     pub outputs: IndexMap<OutputId, Output>,
     pub active_output: Option<OutputId>,
+    pub workspace_groups: IndexMap<WorkspaceGroupId, WorkspaceGroup>,
+    pub workspaces: IndexMap<WorkspaceId, Workspace>,
+    pub output_workspace_groups: BTreeMap<OutputId, WorkspaceGroupId>,
+    pub root_surface_workspaces: BTreeMap<ObjectId, WorkspaceId>,
+    pub next_workspace_serial: u32,
     pub backend_syncobj_globals: BTreeMap<DrmId, GlobalName>,
     pub globals: Globals,
     pub activation_tokens: ActivationTokenStore,
@@ -1037,6 +1063,433 @@ pub struct State {
 }
 
 impl State {
+    fn next_workspace_stable_id(&mut self) -> String {
+        let serial = self.next_workspace_serial;
+        self.next_workspace_serial = self.next_workspace_serial.saturating_add(1);
+        format!("workspace-{serial}")
+    }
+
+    fn primary_output_for_workspace_group(&self, group_id: WorkspaceGroupId) -> Option<OutputId> {
+        self.workspace_groups
+            .try_get(group_id)
+            .and_then(|group| group.outputs.iter().copied().next())
+    }
+
+    fn default_workspace_name_for_group(&self, group_id: WorkspaceGroupId) -> String {
+        self.workspace_groups
+            .try_get(group_id)
+            .map(|group| group.workspaces.len() + 1)
+            .unwrap_or(1)
+            .to_string()
+    }
+
+    fn refresh_workspace_coordinates_for_group(&mut self, group_id: WorkspaceGroupId) {
+        let Some(workspace_ids) = self
+            .workspace_groups
+            .try_get(group_id)
+            .map(|group| group.workspaces.clone())
+        else {
+            return;
+        };
+        for (index, workspace_id) in workspace_ids.into_iter().enumerate() {
+            let Some(workspace) = self.workspaces.try_get_mut(workspace_id) else {
+                continue;
+            };
+            workspace.coordinates = vec![(index + 1) as u32];
+        }
+    }
+
+    fn clear_workspace_coordinates(&mut self, workspace_id: WorkspaceId) {
+        let Some(workspace) = self.workspaces.try_get_mut(workspace_id) else {
+            return;
+        };
+        workspace.coordinates.clear();
+    }
+
+    pub fn workspace_group_for_output(&self, output_id: OutputId) -> Option<WorkspaceGroupId> {
+        self.output_workspace_groups.get(&output_id).copied()
+    }
+
+    pub fn active_workspace_for_group(&self, group_id: WorkspaceGroupId) -> Option<WorkspaceId> {
+        self.workspace_groups
+            .try_get(group_id)
+            .and_then(|group| group.active_workspace)
+    }
+
+    pub fn active_workspace_for_output(&self, output_id: OutputId) -> Option<WorkspaceId> {
+        self.workspace_group_for_output(output_id)
+            .and_then(|group_id| self.active_workspace_for_group(group_id))
+    }
+
+    pub fn root_surface_workspace(&self, object_id: ObjectId) -> Option<WorkspaceId> {
+        self.root_surface_workspaces.get(&object_id).copied()
+    }
+
+    pub fn workspace_ids(&self) -> Vec<WorkspaceId> {
+        self.workspaces
+            .iter()
+            .map(|(workspace_id, _)| workspace_id)
+            .collect()
+    }
+
+    pub fn workspace_group_ids(&self) -> Vec<WorkspaceGroupId> {
+        self.workspace_groups
+            .iter()
+            .map(|(group_id, _)| group_id)
+            .collect()
+    }
+
+    pub fn create_workspace_group_for_output(&mut self, output_id: OutputId) -> WorkspaceGroupId {
+        if let Some(group_id) = self.workspace_group_for_output(output_id) {
+            return group_id;
+        }
+        let group_id = self.workspace_groups.insert(WorkspaceGroup {
+            outputs: BTreeSet::from([output_id]),
+            workspaces: Vec::new(),
+            active_workspace: None,
+        });
+        self.output_workspace_groups.insert(output_id, group_id);
+        let workspace_id = self.create_workspace(Some(group_id), None);
+        if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
+            group.active_workspace = Some(workspace_id);
+        }
+        group_id
+    }
+
+    pub fn create_workspace(
+        &mut self,
+        group_id: Option<WorkspaceGroupId>,
+        requested_name: Option<String>,
+    ) -> WorkspaceId {
+        let group_id =
+            group_id.filter(|group_id| self.workspace_groups.try_get(*group_id).is_some());
+        let name = requested_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| {
+                group_id
+                    .map(|group_id| self.default_workspace_name_for_group(group_id))
+                    .unwrap_or_else(|| "workspace".to_string())
+            });
+        let stable_id = self.next_workspace_stable_id();
+        let workspace_id = self.workspaces.insert(Workspace {
+            stable_id,
+            name,
+            coordinates: Vec::new(),
+            group: group_id,
+            root_surfaces: BTreeSet::new(),
+        });
+        if let Some(group_id) = group_id {
+            if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
+                group.workspaces.push(workspace_id);
+                if group.active_workspace.is_none() {
+                    group.active_workspace = Some(workspace_id);
+                }
+            }
+            self.refresh_workspace_coordinates_for_group(group_id);
+        }
+        workspace_id
+    }
+
+    fn ensure_group_has_active_workspace(&mut self, group_id: WorkspaceGroupId) {
+        let Some(group_snapshot) = self.workspace_groups.try_get(group_id).cloned() else {
+            return;
+        };
+        let still_valid = group_snapshot
+            .active_workspace
+            .is_some_and(|workspace_id| group_snapshot.workspaces.contains(&workspace_id));
+        if still_valid {
+            return;
+        }
+        if let Some(next_active) = group_snapshot.workspaces.first().copied() {
+            if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
+                group.active_workspace = Some(next_active);
+            }
+            return;
+        }
+        if group_snapshot.outputs.is_empty() {
+            if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
+                group.active_workspace = None;
+            }
+            return;
+        }
+        let workspace_id = self.create_workspace(Some(group_id), None);
+        if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
+            group.active_workspace = Some(workspace_id);
+        }
+    }
+
+    pub fn set_workspace_name(
+        &mut self,
+        workspace_id: WorkspaceId,
+        requested_name: impl Into<String>,
+    ) -> bool {
+        let Some(workspace) = self.workspaces.try_get_mut(workspace_id) else {
+            return false;
+        };
+        let name = requested_name.into();
+        if name.trim().is_empty() || workspace.name == name {
+            return false;
+        }
+        workspace.name = name;
+        true
+    }
+
+    pub fn assign_workspace_to_group(
+        &mut self,
+        workspace_id: WorkspaceId,
+        new_group_id: Option<WorkspaceGroupId>,
+    ) -> bool {
+        let new_group_id = match new_group_id {
+            Some(group_id) if self.workspace_groups.try_get(group_id).is_some() => Some(group_id),
+            Some(_) => return false,
+            None => None,
+        };
+        let Some(old_group_id) = self.workspaces.try_get(workspace_id).and_then(|w| w.group) else {
+            if let Some(workspace) = self.workspaces.try_get_mut(workspace_id) {
+                workspace.group = new_group_id;
+            }
+            if let Some(group_id) = new_group_id {
+                if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
+                    if !group.workspaces.contains(&workspace_id) {
+                        group.workspaces.push(workspace_id);
+                    }
+                    if group.active_workspace.is_none() {
+                        group.active_workspace = Some(workspace_id);
+                    }
+                }
+                self.refresh_workspace_coordinates_for_group(group_id);
+            } else {
+                self.clear_workspace_coordinates(workspace_id);
+            }
+            return true;
+        };
+        if Some(old_group_id) == new_group_id {
+            return false;
+        }
+        if let Some(old_group) = self.workspace_groups.try_get_mut(old_group_id) {
+            old_group
+                .workspaces
+                .retain(|candidate| *candidate != workspace_id);
+            if old_group.active_workspace == Some(workspace_id) {
+                old_group.active_workspace = old_group.workspaces.first().copied();
+            }
+        }
+        if let Some(workspace) = self.workspaces.try_get_mut(workspace_id) {
+            workspace.group = new_group_id;
+        }
+        if let Some(group_id) = new_group_id {
+            if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
+                if !group.workspaces.contains(&workspace_id) {
+                    group.workspaces.push(workspace_id);
+                }
+                if group.active_workspace.is_none() {
+                    group.active_workspace = Some(workspace_id);
+                }
+            }
+        }
+        self.refresh_workspace_coordinates_for_group(old_group_id);
+        self.ensure_group_has_active_workspace(old_group_id);
+        if let Some(group_id) = new_group_id {
+            self.refresh_workspace_coordinates_for_group(group_id);
+        } else {
+            self.clear_workspace_coordinates(workspace_id);
+        }
+        true
+    }
+
+    pub fn activate_workspace(&mut self, workspace_id: WorkspaceId) -> bool {
+        let Some(group_id) = self
+            .workspaces
+            .try_get(workspace_id)
+            .and_then(|workspace| workspace.group)
+        else {
+            return false;
+        };
+        let Some(group) = self.workspace_groups.try_get_mut(group_id) else {
+            return false;
+        };
+        if group.active_workspace == Some(workspace_id) {
+            return false;
+        }
+        group.active_workspace = Some(workspace_id);
+        true
+    }
+
+    pub fn assign_root_surface_to_workspace(
+        &mut self,
+        object_id: ObjectId,
+        workspace_id: WorkspaceId,
+    ) -> bool {
+        if self.root_surface_workspaces.get(&object_id).copied() == Some(workspace_id) {
+            return false;
+        }
+        if let Some(previous_workspace_id) =
+            self.root_surface_workspaces.insert(object_id, workspace_id)
+        {
+            if let Some(previous_workspace) = self.workspaces.try_get_mut(previous_workspace_id) {
+                previous_workspace.root_surfaces.remove(&object_id);
+            }
+        }
+        let Some(workspace) = self.workspaces.try_get_mut(workspace_id) else {
+            self.root_surface_workspaces.remove(&object_id);
+            return false;
+        };
+        workspace.root_surfaces.insert(object_id);
+        true
+    }
+
+    pub fn detach_root_surface_from_workspace(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Option<WorkspaceId> {
+        let workspace_id = self.root_surface_workspaces.remove(&object_id)?;
+        if let Some(workspace) = self.workspaces.try_get_mut(workspace_id) {
+            workspace.root_surfaces.remove(&object_id);
+        }
+        Some(workspace_id)
+    }
+
+    pub fn inherit_root_surface_workspace(
+        &mut self,
+        object_id: ObjectId,
+        parent_object_id: ObjectId,
+    ) -> Option<WorkspaceId> {
+        let workspace_id = self.root_surface_workspace(parent_object_id)?;
+        self.assign_root_surface_to_workspace(object_id, workspace_id);
+        Some(workspace_id)
+    }
+
+    pub fn ensure_root_surface_workspace(&mut self, object_id: ObjectId) -> Option<WorkspaceId> {
+        if let Some(workspace_id) = self.root_surface_workspace(object_id) {
+            return Some(workspace_id);
+        }
+        let workspace_id = self
+            .active_output_id()
+            .and_then(|output_id| self.active_workspace_for_output(output_id))
+            .or_else(|| {
+                self.workspace_groups
+                    .iter()
+                    .find_map(|(_, group)| group.active_workspace)
+            })?;
+        self.assign_root_surface_to_workspace(object_id, workspace_id);
+        Some(workspace_id)
+    }
+
+    pub fn workspace_output_id(&self, workspace_id: WorkspaceId) -> Option<OutputId> {
+        self.workspaces
+            .try_get(workspace_id)
+            .and_then(|workspace| workspace.group)
+            .and_then(|group_id| self.primary_output_for_workspace_group(group_id))
+    }
+
+    pub fn workspace_output_ids(&self, workspace_id: WorkspaceId) -> Vec<OutputId> {
+        self.workspaces
+            .try_get(workspace_id)
+            .and_then(|workspace| workspace.group)
+            .and_then(|group_id| self.workspace_groups.try_get(group_id))
+            .map(|group| group.outputs.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn workspace_is_active(&self, workspace_id: WorkspaceId) -> bool {
+        self.workspaces
+            .try_get(workspace_id)
+            .and_then(|workspace| workspace.group)
+            .and_then(|group_id| self.workspace_groups.try_get(group_id))
+            .is_some_and(|group| group.active_workspace == Some(workspace_id))
+    }
+
+    pub fn root_surface_is_visible(&self, object_id: ObjectId) -> bool {
+        self.root_surface_workspace(object_id)
+            .map(|workspace_id| self.workspace_is_active(workspace_id))
+            .unwrap_or(true)
+    }
+
+    pub fn move_workspace_to_group_output(
+        &mut self,
+        workspace_id: WorkspaceId,
+        new_group_id: WorkspaceGroupId,
+    ) {
+        let old_output = self.workspace_output_id(workspace_id);
+        if !self.assign_workspace_to_group(workspace_id, Some(new_group_id)) {
+            return;
+        }
+        let Some(new_output) = self.workspace_output_id(workspace_id) else {
+            return;
+        };
+        let Some(old_output) = old_output else {
+            return;
+        };
+        if old_output == new_output {
+            return;
+        }
+        let Some(old_bounds) = self.output_bounds(old_output) else {
+            return;
+        };
+        let Some(new_bounds) = self.output_bounds(new_output) else {
+            return;
+        };
+        let dx = new_bounds.x - old_bounds.x;
+        let dy = new_bounds.y - old_bounds.y;
+        if dx == 0 && dy == 0 {
+            return;
+        }
+        let Some(surface_ids) = self
+            .workspaces
+            .try_get(workspace_id)
+            .map(|workspace| workspace.root_surfaces.iter().copied().collect::<Vec<_>>())
+        else {
+            return;
+        };
+        for surface_object_id in surface_ids {
+            let Some(mut surface) = self.objects.try_grab_object::<WlSurface>(surface_object_id)
+            else {
+                continue;
+            };
+            let (x, y) = surface.root_position();
+            surface.set_root_position(x + dx, y + dy);
+        }
+    }
+
+    pub fn can_remove_workspace(&self, workspace_id: WorkspaceId) -> bool {
+        let Some(workspace) = self.workspaces.try_get(workspace_id) else {
+            return false;
+        };
+        if !workspace.root_surfaces.is_empty() {
+            return false;
+        }
+        let Some(group_id) = workspace.group else {
+            return true;
+        };
+        let Some(group) = self.workspace_groups.try_get(group_id) else {
+            return true;
+        };
+        group.workspaces.len() > 1 && group.active_workspace != Some(workspace_id)
+    }
+
+    pub fn remove_workspace(&mut self, workspace_id: WorkspaceId) -> bool {
+        if !self.can_remove_workspace(workspace_id) {
+            return false;
+        }
+        let old_group_id = self
+            .workspaces
+            .try_get(workspace_id)
+            .and_then(|workspace| workspace.group);
+        if let Some(group_id) = old_group_id {
+            if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
+                group
+                    .workspaces
+                    .retain(|candidate| *candidate != workspace_id);
+                if group.active_workspace == Some(workspace_id) {
+                    group.active_workspace = group.workspaces.first().copied();
+                }
+            }
+            self.refresh_workspace_coordinates_for_group(group_id);
+            self.ensure_group_has_active_workspace(group_id);
+        }
+        self.workspaces.remove(workspace_id).is_some()
+    }
+
     pub fn insert_object<O: Object + 'static>(&mut self, object: O) -> (WaylandId, ObjectId) {
         let wayland_id = object.id();
         let object_id = self.objects.insert(Box::new(object));
@@ -1052,6 +1505,7 @@ impl State {
     pub fn register_root_surface(&mut self, object_id: ObjectId) {
         self.unregister_root_surface(object_id);
         self.root_surfaces.push(object_id);
+        let _ = self.ensure_root_surface_workspace(object_id);
     }
 
     pub fn register_layer_surface_object(
@@ -1080,6 +1534,7 @@ impl State {
     pub fn unregister_root_surface(&mut self, object_id: ObjectId) {
         self.root_surfaces
             .retain(|candidate| *candidate != object_id);
+        self.detach_root_surface_from_workspace(object_id);
     }
 
     pub fn raise_root_surface(&mut self, object_id: ObjectId) -> bool {
@@ -1111,11 +1566,35 @@ impl State {
         output.scale = output.configured_scale(&self.config);
         let output_id = self.outputs.insert(output);
         self.active_output.get_or_insert(output_id);
+        self.create_workspace_group_for_output(output_id);
         output_id
     }
 
     pub fn remove_output(&mut self, output_id: OutputId) -> Option<Output> {
         let removed = self.outputs.remove(output_id)?;
+        if let Some(group_id) = self.output_workspace_groups.remove(&output_id) {
+            let fallback_group_id = self
+                .output_workspace_groups
+                .values()
+                .copied()
+                .find(|candidate| *candidate != group_id);
+            let workspace_ids = self
+                .workspace_groups
+                .try_get(group_id)
+                .map(|group| group.workspaces.clone())
+                .unwrap_or_default();
+            for workspace_id in workspace_ids {
+                match fallback_group_id {
+                    Some(fallback_group_id) => {
+                        self.move_workspace_to_group_output(workspace_id, fallback_group_id)
+                    }
+                    None => {
+                        let _ = self.assign_workspace_to_group(workspace_id, None);
+                    }
+                }
+            }
+            let _ = self.workspace_groups.remove(group_id);
+        }
         if self.active_output == Some(output_id) {
             self.active_output = self.outputs.iter().next().map(|(other_id, _)| other_id);
         }
@@ -1177,6 +1656,11 @@ impl State {
 
     pub fn output_id_for_surface(&self, surface: &WlSurface) -> Option<OutputId> {
         self.layout_output_id_for_surface(surface)
+            .or_else(|| {
+                self.surface_object_id(surface.surface_id())
+                    .and_then(|object_id| self.root_surface_workspace(object_id))
+                    .and_then(|workspace_id| self.workspace_output_id(workspace_id))
+            })
             .or_else(|| self.active_output_id())
     }
 
@@ -1419,7 +1903,7 @@ mod tests {
         super::*,
         crate::{
             clients::{Client, ClientDispatcher, RawRequest},
-            protocol_generated::WaylandId,
+            protocol_generated::{WaylandId, WlSurfaceId},
         },
     };
 
@@ -1436,6 +1920,11 @@ mod tests {
             drm: Default::default(),
             outputs: Default::default(),
             active_output: None,
+            workspace_groups: Default::default(),
+            workspaces: Default::default(),
+            output_workspace_groups: Default::default(),
+            root_surface_workspaces: Default::default(),
+            next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,
             activation_tokens: Default::default(),
@@ -1800,5 +2289,110 @@ mod tests {
         let surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(2), 6);
 
         assert_eq!(state.output_id_for_surface(&surface), Some(output_id));
+    }
+
+    #[test]
+    fn insert_output_creates_workspace_group_and_default_workspace() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+
+        let group_id = state.workspace_group_for_output(output_id).unwrap();
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let group = state.workspace_groups.try_get(group_id).unwrap();
+        let workspace = state.workspaces.try_get(workspace_id).unwrap();
+
+        assert_eq!(group.active_workspace, Some(workspace_id));
+        assert_eq!(group.workspaces, vec![workspace_id]);
+        assert_eq!(workspace.group, Some(group_id));
+        assert_eq!(workspace.coordinates, vec![1]);
+    }
+
+    #[test]
+    fn root_surface_visibility_tracks_active_workspace() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let group_id = state.workspace_group_for_output(output_id).unwrap();
+        let first_workspace = state.active_workspace_for_output(output_id).unwrap();
+        let second_workspace = state.create_workspace(Some(group_id), Some("2".to_string()));
+
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(10u32), ClientId::from_raw(1), 6));
+        state.register_root_surface(object_id);
+        state.assign_root_surface_to_workspace(object_id, second_workspace);
+
+        assert!(!state.root_surface_is_visible(object_id));
+        assert!(state.activate_workspace(second_workspace));
+        assert!(state.root_surface_is_visible(object_id));
+        assert!(!state.workspace_is_active(first_workspace));
+    }
+
+    #[test]
+    fn moving_workspace_between_outputs_translates_assigned_root_surfaces() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let left_output = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
+        let right_output = state.insert_output(make_output(backend, 2, 200, 0, 100, 100));
+        let left_workspace = state.active_workspace_for_output(left_output).unwrap();
+        let right_group = state.workspace_group_for_output(right_output).unwrap();
+
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(11u32), ClientId::from_raw(2), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(0usize), 10, 20, 50, 50);
+        }
+        state.register_root_surface(object_id);
+        state.assign_root_surface_to_workspace(object_id, left_workspace);
+
+        state.move_workspace_to_group_output(left_workspace, right_group);
+
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(object_id)
+            .unwrap();
+        assert_eq!(surface.root_position(), (210, 20));
+        assert_eq!(state.workspace_output_id(left_workspace), Some(right_output));
+    }
+
+    #[test]
+    fn create_workspace_with_missing_group_stays_unassigned() {
+        let mut state = make_state();
+
+        let workspace_id = state.create_workspace(Some(WorkspaceGroupId::from(999usize)), None);
+        let workspace = state.workspaces.try_get(workspace_id).unwrap();
+
+        assert_eq!(workspace.group, None);
+        assert!(workspace.coordinates.is_empty());
+    }
+
+    #[test]
+    fn assign_workspace_to_missing_group_is_rejected() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let original_group = state.workspaces.try_get(workspace_id).unwrap().group;
+
+        assert!(
+            !state.assign_workspace_to_group(workspace_id, Some(WorkspaceGroupId::from(999usize)))
+        );
+        assert_eq!(state.workspaces.try_get(workspace_id).unwrap().group, original_group);
+    }
+
+    #[test]
+    fn unassigning_workspace_clears_coordinates() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+
+        assert_eq!(state.workspaces.try_get(workspace_id).unwrap().coordinates, vec![1]);
+        assert!(state.assign_workspace_to_group(workspace_id, None));
+
+        let workspace = state.workspaces.try_get(workspace_id).unwrap();
+        assert_eq!(workspace.group, None);
+        assert!(workspace.coordinates.is_empty());
     }
 }

@@ -3,13 +3,14 @@ use crate::{
     protocol_generated::NewId,
     state::{Grab, IndexMap, State},
     wayland_objects::{
-        wl_compositor::WlCompositorGlobal, wl_data_device_manager::WlDataDeviceManagerGlobal,
-        wl_seat::WlSeatGlobal, wl_shm::WlShmGlobal, wl_subcompositor::WlSubcompositorGlobal,
+        ext_workspace_manager_v1::ExtWorkspaceManagerV1Global, wl_compositor::WlCompositorGlobal,
+        wl_data_device_manager::WlDataDeviceManagerGlobal, wl_seat::WlSeatGlobal,
+        wl_shm::WlShmGlobal, wl_subcompositor::WlSubcompositorGlobal,
         wp_cursor_shape_manager_v1::WpCursorShapeManagerV1Global,
         wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1Global,
         wp_presentation::WpPresentationGlobal, wp_viewporter::WpViewporterGlobal,
         xdg_activation_v1::XdgActivationV1Global, xdg_wm_base::XdgWmBaseGlobal,
-        zwlr_layer_shell_v1::ZwlrLayerShellV1Global,
+        zwlr_layer_shell_v1::ZwlrLayerShellV1Global, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1Global,
         zxdg_output_manager_v1::ZxdgOutputManagerV1Global,
     },
 };
@@ -67,12 +68,13 @@ impl Globals {
             WpPresentationGlobal::new,
             WpFractionalScaleManagerV1Global::new,
             WpViewporterGlobal::new,
-            // ZwpLinuxDmabufV1Global::new,
+            ZwpLinuxDmabufV1Global::new,
             WpCursorShapeManagerV1Global::new,
             XdgActivationV1Global::new,
             XdgWmBaseGlobal::new,
             ZwlrLayerShellV1Global::new,
             ZxdgOutputManagerV1Global::new,
+            ExtWorkspaceManagerV1Global::new,
         ] {
             self.insert(fun());
         }

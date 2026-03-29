@@ -505,6 +505,14 @@ impl Object for XdgSurface {
                 let popup =
                     XdgPopup::new(id, self.id, parent, positioner_state, self.wm_base_version);
                 client.insert_object(state, popup);
+                if let Some(parent_surface_id) = parent {
+                    let popup_surface_object_id = client.object_id(self.wl_surface_id());
+                    let parent_surface_object_id = client.object_id(parent_surface_id);
+                    let _ = state.inherit_root_surface_workspace(
+                        popup_surface_object_id,
+                        parent_surface_object_id,
+                    );
+                }
             }
             SetWindowGeometry { x, y, width, height } => {
                 let Some(window_geometry) = RectI::new(x, y, width, height) else {

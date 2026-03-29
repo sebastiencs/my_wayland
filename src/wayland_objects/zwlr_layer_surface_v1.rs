@@ -1113,6 +1113,9 @@ pub fn ordered_scene_root_surface_ids_with_snapshot(
         if surface.role() == crate::wayland_objects::wl_surface::Role::LayerSurface {
             continue;
         }
+        if !state.root_surface_is_visible(object_id) {
+            continue;
+        }
         ordered.push(object_id);
     }
     ordered.extend(layout.top_roots);
@@ -1419,6 +1422,11 @@ mod tests {
             drm: Default::default(),
             outputs: Default::default(),
             active_output: None,
+            workspace_groups: Default::default(),
+            workspaces: Default::default(),
+            output_workspace_groups: Default::default(),
+            root_surface_workspaces: Default::default(),
+            next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,
             activation_tokens: Default::default(),

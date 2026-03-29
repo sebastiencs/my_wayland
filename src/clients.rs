@@ -31,6 +31,7 @@ use crate::{
     sync::AcquireReadyWaiterId,
     udev::Udev,
     wayland_objects::{
+        ext_workspace_manager_v1::ExtWorkspaceManagerV1,
         hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1,
         wl_data_offer::WlDataOffer,
         wl_data_source::WlDataSource,
@@ -77,6 +78,7 @@ pub enum ClientsAction {
     OutputStateChanged { output_id: OutputId },
     OutputRemoved { output_id: OutputId },
     GammaControlFailed { output_id: OutputId },
+    WorkspaceStateChanged,
     LayerShellLayoutChanged,
     Close { id: ClientId },
 }
@@ -207,6 +209,11 @@ impl Model for Clients {
                         .dispatch_to(client_id, ClientAction::GammaControlFailed { output_id });
                 }
             }
+            WorkspaceStateChanged => {
+                for client_id in self.set.iter().copied() {
+                    dispatcher.dispatch_to(client_id, ClientAction::WorkspaceStateChanged);
+                }
+            }
             LayerShellLayoutChanged => {
                 for client_id in self.set.iter().copied() {
                     dispatcher.dispatch_to(client_id, ClientAction::RefreshLayerSurfaces);
@@ -306,6 +313,7 @@ pub enum ClientAction {
     GammaControlFailed {
         output_id: OutputId,
     },
+    WorkspaceStateChanged,
     RefreshLayerSurfaces,
     RefreshSurfaceOutputs,
     ReleaseBuffer {
@@ -1343,7 +1351,11 @@ impl Client {
         }
     }
 
-    fn output_object_ids_for_output(&self, state: &State, output_id: OutputId) -> Vec<WlOutputId> {
+    pub(crate) fn output_object_ids_for_output(
+        &self,
+        state: &State,
+        output_id: OutputId,
+    ) -> Vec<WlOutputId> {
         let mut output_object_ids = Vec::new();
         let object_ids = self
             .iter_object_ids_of::<WlOutput>(state)
@@ -1387,6 +1399,25 @@ impl Client {
             } else {
                 surface.send_output_leave(output_object_id, dispatcher);
             }
+        }
+    }
+
+    pub(crate) fn refresh_workspace_protocols(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let manager_object_ids = self
+            .iter_object_ids_of::<ExtWorkspaceManagerV1>(state)
+            .collect::<Vec<_>>();
+        for object_id in manager_object_ids {
+            let Some(mut manager) = state
+                .objects
+                .try_grab_object::<ExtWorkspaceManagerV1>(object_id)
+            else {
+                continue;
+            };
+            manager.sync(self, state, dispatcher, true);
         }
     }
 
@@ -1479,6 +1510,10 @@ impl Client {
                 } else {
                     clear_surface_tree_outputs(self, state, dispatcher, surface_object_id);
                 }
+                continue;
+            }
+            if !state.root_surface_is_visible(surface_object_id) {
+                clear_surface_tree_outputs(self, state, dispatcher, surface_object_id);
                 continue;
             }
             refresh_surface_tree_outputs(self, state, dispatcher, surface_object_id, 0, 0);
@@ -1956,11 +1991,13 @@ impl Model for Client {
             OutputStateChanged { output_id } => {
                 self.handle_output_state_changed(state, &mut dispatcher, output_id);
                 self.refresh_surface_outputs(state, &mut dispatcher);
+                self.refresh_workspace_protocols(state, &mut dispatcher);
                 self.reconfigure_mapped_toplevels(state, &mut dispatcher);
                 relayout_client_layer_surfaces(self, state, &mut dispatcher);
             }
             OutputRemoved { output_id } => {
                 self.handle_output_removed(state, &mut dispatcher, output_id);
+                self.refresh_workspace_protocols(state, &mut dispatcher);
             }
             GammaControlFailed { output_id } => {
                 if self.invalidate_gamma_control_for_output(state, &mut dispatcher, output_id)
@@ -1971,6 +2008,11 @@ impl Model for Client {
             }
             RefreshLayerSurfaces => {
                 relayout_client_layer_surfaces(self, state, &mut dispatcher);
+                self.reconfigure_mapped_toplevels(state, &mut dispatcher);
+            }
+            WorkspaceStateChanged => {
+                self.refresh_surface_outputs(state, &mut dispatcher);
+                self.refresh_workspace_protocols(state, &mut dispatcher);
                 self.reconfigure_mapped_toplevels(state, &mut dispatcher);
             }
             RefreshSurfaceOutputs => {
@@ -2681,6 +2723,11 @@ mod surface_output_refresh_tests {
             drm: Default::default(),
             outputs: Default::default(),
             active_output: None,
+            workspace_groups: Default::default(),
+            workspaces: Default::default(),
+            output_workspace_groups: Default::default(),
+            root_surface_workspaces: Default::default(),
+            next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,
             activation_tokens: Default::default(),

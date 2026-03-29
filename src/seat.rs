@@ -1305,6 +1305,17 @@ pub fn set_surface_focus(
     set_keyboard_focus(state, dispatcher, new_focus);
 }
 
+fn monotonic_time_msec() -> u32 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return 0;
+    }
+    let millis = (ts.tv_sec as u64)
+        .saturating_mul(1000)
+        .saturating_add((ts.tv_nsec as u64) / 1_000_000);
+    millis.min(u64::from(u32::MAX)) as u32
+}
+
 pub fn refresh_keyboard_focus(state: &mut State, dispatcher: &mut Dispatcher) {
     refresh_keyboard_focus_with_snapshot(state, dispatcher, None);
 }
@@ -1318,6 +1329,11 @@ pub fn refresh_keyboard_focus_with_snapshot(
         popup_keyboard_focus(state).or_else(|| state.seat.pointer_focus.map(|focus| focus.target));
     let new_focus = normalize_keyboard_focus_with_snapshot(state, preferred_focus, snapshot);
     set_keyboard_focus(state, dispatcher, new_focus);
+}
+
+pub fn refresh_scene_focus(state: &mut State, dispatcher: &mut Dispatcher) {
+    refresh_pointer_focus(state, dispatcher, monotonic_time_msec(), false);
+    refresh_keyboard_focus(state, dispatcher);
 }
 
 pub fn refresh_active_drag_focus(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {
@@ -2410,6 +2426,11 @@ mod surface_tree_hit_test_tests {
             drm: Default::default(),
             outputs: Default::default(),
             active_output: None,
+            workspace_groups: Default::default(),
+            workspaces: Default::default(),
+            output_workspace_groups: Default::default(),
+            root_surface_workspaces: Default::default(),
+            next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,
             activation_tokens: Default::default(),
@@ -2609,6 +2630,11 @@ mod xdg_seat_tests {
             drm: Default::default(),
             outputs: Default::default(),
             active_output: None,
+            workspace_groups: Default::default(),
+            workspaces: Default::default(),
+            output_workspace_groups: Default::default(),
+            root_surface_workspaces: Default::default(),
+            next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,
             activation_tokens: Default::default(),

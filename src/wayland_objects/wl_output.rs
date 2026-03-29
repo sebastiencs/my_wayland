@@ -41,6 +41,7 @@ impl Global for WlOutputGlobal {
         };
         wl_output.send_state(state, dispatcher);
         client.replay_surface_output_for_output(state, dispatcher, self.output_id);
+        client.refresh_workspace_protocols(state, dispatcher);
     }
 }
 

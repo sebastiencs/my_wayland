@@ -373,7 +373,7 @@ pub fn gen() -> std::io::Result<()> {
         // "/usr/share/wayland-protocols/unstable/xdg-shell/xdg-shell-unstable-v6.xml",
         // "/usr/share/wayland-protocols/unstable/xwayland-keyboard-grab/xwayland-keyboard-grab-unstable-v1.xml",
         // "/usr/share/wayland-protocols/staging/xdg-toplevel-drag/xdg-toplevel-drag-v1.xml",
-        // "/usr/share/wayland-protocols/staging/ext-workspace/ext-workspace-v1.xml",
+        "/usr/share/wayland-protocols/staging/ext-workspace/ext-workspace-v1.xml",
 
         // "/usr/share/wlr-protocols/unstable/wlr-data-control-unstable-v1.xml",
         // "/usr/share/wlr-protocols/unstable/wlr-foreign-toplevel-management-unstable-v1.xml",

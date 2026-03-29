@@ -1,5 +1,8 @@
 #![allow(unused)]
 
+pub mod ext_workspace_group_handle_v1;
+pub mod ext_workspace_handle_v1;
+pub mod ext_workspace_manager_v1;
 pub mod hyprland_ctm_control_manager_v1;
 pub mod wl_buffer;
 pub mod wl_callback;
@@ -91,9 +94,6 @@ fake_obj! {
     { ext_idle_notification_v1, ExtIdleNotificationV1 },
     { ext_session_lock_manager_v1, ExtSessionLockManagerV1 },
     { ext_session_lock_v1, ExtSessionLockV1 },
-    { ext_workspace_manager_v1, ExtWorkspaceManagerV1 },
-    { ext_workspace_group_handle_v1, ExtWorkspaceGroupHandleV1 },
-    { ext_workspace_handle_v1, ExtWorkspaceHandleV1 },
     { wp_single_pixel_buffer_manager_v1, WpSinglePixelBufferManagerV1 },
     { wp_tearing_control_manager_v1, WpTearingControlManagerV1 },
     { wp_tearing_control_v1, WpTearingControlV1 },
