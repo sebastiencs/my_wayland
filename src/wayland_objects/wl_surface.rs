@@ -635,10 +635,6 @@ impl WlSurface {
         self.send_event(wl_surface::Event::Leave { output }, dispatcher);
     }
 
-    pub fn preferred_output_id(&self, state: &State) -> Option<OutputId> {
-        state.output_id_for_surface(self)
-    }
-
     pub fn preferred_output_id_for_object(
         &self,
         state: &State,
@@ -647,26 +643,12 @@ impl WlSurface {
         state.output_id_for_surface_object(surface_object_id, self)
     }
 
-    pub fn configure_bounds(&self, state: &State) -> Option<(i32, i32)> {
-        self.configure_bounds_with_snapshot(state, None)
-    }
-
     pub fn configure_bounds_for_object(
         &self,
         state: &State,
         surface_object_id: ObjectId,
     ) -> Option<(i32, i32)> {
         self.configure_bounds_with_snapshot_for_object(state, surface_object_id, None)
-    }
-
-    pub fn configure_bounds_with_snapshot(
-        &self,
-        state: &State,
-        snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
-    ) -> Option<(i32, i32)> {
-        self.preferred_output_id(state)
-            .and_then(|output_id| output_usable_bounds_with_snapshot(state, output_id, snapshot))
-            .map(|bounds| (bounds.width, bounds.height))
     }
 
     pub fn configure_bounds_with_snapshot_for_object(
@@ -678,15 +660,6 @@ impl WlSurface {
         self.preferred_output_id_for_object(state, surface_object_id)
             .and_then(|output_id| output_usable_bounds_with_snapshot(state, output_id, snapshot))
             .map(|bounds| (bounds.width, bounds.height))
-    }
-
-    pub fn send_preferred_buffer_state(
-        &mut self,
-        state: &State,
-        dispatcher: &mut ClientDispatcher,
-    ) {
-        let preferred_output_id = self.preferred_output_id(state);
-        self.send_preferred_buffer_state_with_output(preferred_output_id, state, dispatcher);
     }
 
     pub fn send_preferred_buffer_state_for_object(
@@ -715,15 +688,6 @@ impl WlSurface {
             output.transform as u32,
             dispatcher,
         );
-    }
-
-    pub fn send_preferred_fractional_scale(
-        &mut self,
-        state: &State,
-        dispatcher: &mut ClientDispatcher,
-    ) {
-        let preferred_output_id = self.preferred_output_id(state);
-        self.send_preferred_fractional_scale_with_output(preferred_output_id, state, dispatcher);
     }
 
     pub fn send_preferred_fractional_scale_for_object(
@@ -3636,10 +3600,23 @@ mod tests {
             200,
             120,
         ));
-        let surface = WlSurface::new(WlSurfaceId::from(3), ClientId::from_raw(4), 6);
+        let surface_object_id = insert_surface(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(3), ClientId::from_raw(4), 6),
+        );
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(surface_object_id)
+            .unwrap();
 
-        assert_eq!(surface.preferred_output_id(&state), Some(output_id));
-        assert_eq!(surface.configure_bounds(&state), Some((200, 120)));
+        assert_eq!(
+            surface.preferred_output_id_for_object(&state, surface_object_id),
+            Some(output_id)
+        );
+        assert_eq!(
+            surface.configure_bounds_for_object(&state, surface_object_id),
+            Some((200, 120))
+        );
     }
 
     #[test]
@@ -3683,11 +3660,19 @@ mod tests {
             output.scale = FractionalScale::from_integer(2);
             output.transform = 3;
         }
+        let surface_object_id = insert_surface(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(9), ClientId::from_raw(6), 6),
+        );
         let mut surface = WlSurface::new(WlSurfaceId::from(9), ClientId::from_raw(6), 6);
         let (client, mut dispatcher) = make_client();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
-        surface.send_preferred_buffer_state(&state, &mut client_dispatcher);
+        surface.send_preferred_buffer_state_for_object(
+            &state,
+            surface_object_id,
+            &mut client_dispatcher,
+        );
         drop(client_dispatcher);
 
         assert_eq!(surface.preferred_buffer_scale_sent, Some(2));
@@ -3699,7 +3684,11 @@ mod tests {
 
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-        surface.send_preferred_buffer_state(&state, &mut client_dispatcher);
+        surface.send_preferred_buffer_state_for_object(
+            &state,
+            surface_object_id,
+            &mut client_dispatcher,
+        );
         drop(client_dispatcher);
 
         assert!(!dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
@@ -3734,7 +3723,11 @@ mod tests {
         let (client, mut dispatcher) = make_client();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
-        surface.send_preferred_fractional_scale(&state, &mut client_dispatcher);
+        surface.send_preferred_fractional_scale_for_object(
+            &state,
+            surface_object_id,
+            &mut client_dispatcher,
+        );
         drop(client_dispatcher);
 
         assert_eq!(
@@ -3748,7 +3741,11 @@ mod tests {
 
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-        surface.send_preferred_fractional_scale(&state, &mut client_dispatcher);
+        surface.send_preferred_fractional_scale_for_object(
+            &state,
+            surface_object_id,
+            &mut client_dispatcher,
+        );
         drop(client_dispatcher);
 
         assert!(!dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
@@ -3791,14 +3788,22 @@ mod tests {
 
         let (client, mut dispatcher) = make_client();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-        surface.send_preferred_fractional_scale(&state, &mut client_dispatcher);
+        surface.send_preferred_fractional_scale_for_object(
+            &state,
+            surface_object_id,
+            &mut client_dispatcher,
+        );
         drop(client_dispatcher);
         assert_eq!(surface.preferred_fractional_scale_sent, Some(FractionalScale::ONE.as_v120()));
 
         let mut dispatcher = Dispatcher::default();
         surface.update_output_membership(vec![right_output]);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-        surface.send_preferred_fractional_scale(&state, &mut client_dispatcher);
+        surface.send_preferred_fractional_scale_for_object(
+            &state,
+            surface_object_id,
+            &mut client_dispatcher,
+        );
         drop(client_dispatcher);
 
         assert_eq!(surface.preferred_fractional_scale_sent, Some(FractionalScale::TWO.as_v120()));

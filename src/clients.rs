@@ -1568,7 +1568,7 @@ impl Client {
             let resizing = tiled_resize_surfaces.contains(&wl_surface_object_id);
             let configure_bounds = tiled_rect
                 .map(|rect| (rect.width, rect.height))
-                .or_else(|| surface_ref.configure_bounds(state));
+                .or_else(|| surface_ref.configure_bounds_for_object(state, wl_surface_object_id));
             let pending_floating_restore = if tiled_rect.is_none() && !fullscreen {
                 state.take_pending_floating_rect_restore(wl_surface_object_id)
             } else {
@@ -1784,7 +1784,7 @@ fn refresh_surface_tree_outputs(
     let preferred_output = state
         .objects
         .try_ref_object::<WlSurface>(surface_object_id)
-        .and_then(|surface| surface.preferred_output_id(state))
+        .and_then(|surface| surface.preferred_output_id_for_object(state, surface_object_id))
         .and_then(|output_id| {
             state
                 .outputs
@@ -2147,7 +2147,7 @@ impl Model for Client {
                             let surface = state
                                 .objects
                                 .try_ref_object::<WlSurface>(wl_surface_object_id)?;
-                            surface.configure_bounds(state)
+                            surface.configure_bounds_for_object(state, wl_surface_object_id)
                         })
                 };
                 let mut xdg_surface = self.grab_object(xdg_surface_id, state);

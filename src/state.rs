@@ -2121,17 +2121,6 @@ impl State {
             .or_else(|| self.active_output_id())
     }
 
-    pub fn output_id_for_surface(&self, surface: &WlSurface) -> Option<OutputId> {
-        let surface_object_id = self.surface_object_id(surface.surface_id());
-        self.layout_output_id_for_surface(surface)
-            .or_else(|| {
-                surface_object_id
-                    .and_then(|object_id| self.root_surface_workspace(object_id))
-                    .and_then(|workspace_id| self.workspace_output_id(workspace_id))
-            })
-            .or_else(|| self.active_output_id())
-    }
-
     pub fn backend_for_output(&self, output_id: OutputId) -> Option<BackendOutputRef> {
         self.outputs
             .try_get(output_id)
@@ -2756,9 +2745,17 @@ mod tests {
             100,
             100,
         ));
-        let surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(2), 6);
+        let (_, surface_object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(2), 6));
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(surface_object_id)
+            .unwrap();
 
-        assert_eq!(state.output_id_for_surface(&surface), Some(output_id));
+        assert_eq!(
+            state.output_id_for_surface_object(surface_object_id, &surface),
+            Some(output_id)
+        );
     }
 
     #[test]

@@ -928,7 +928,9 @@ pub mod xdg_toplevel {
             state
                 .objects
                 .try_ref_object::<WlSurface>(wl_surface_object_id)
-                .and_then(|surface| surface.configure_bounds(state))
+                .and_then(|surface| {
+                    surface.configure_bounds_for_object(state, wl_surface_object_id)
+                })
         }
 
         fn send_configure_bounds(
