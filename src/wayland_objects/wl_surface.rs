@@ -3173,6 +3173,66 @@ mod tests {
     }
 
     #[test]
+    fn stale_pending_root_does_not_shrink_next_initial_configure() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(6usize));
+        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = make_client();
+
+        let first_surface_object_id = create_root_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            WlSurfaceId::from(120),
+            XdgSurfaceId::from(121),
+            XdgToplevelId::from(122),
+        );
+        commit_initial_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            first_surface_object_id,
+            XdgSurfaceId::from(121),
+        );
+        assert!(state
+            .managed_root_surface_state(first_surface_object_id)
+            .is_some_and(|managed| managed.pending_initial_layout));
+
+        let second_surface_object_id = create_root_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            WlSurfaceId::from(130),
+            XdgSurfaceId::from(131),
+            XdgToplevelId::from(132),
+        );
+        commit_initial_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            second_surface_object_id,
+            XdgSurfaceId::from(131),
+        );
+
+        let second_toplevel = state
+            .objects
+            .try_ref_object::<XdgToplevel>(client.object_id(XdgToplevelId::from(132)))
+            .unwrap();
+        assert_eq!(second_toplevel.test_current_size(), (1280, 720));
+        let states = second_toplevel.test_current_states();
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledLeft as u32))
+        );
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledRight as u32))
+        );
+        assert!(states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledTop as u32)));
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledBottom as u32))
+        );
+    }
+
+    #[test]
     fn surface_defaults_match_region_protocol_defaults() {
         let surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(1), 6);
         assert_eq!(surface.on_screen.input_region, RegionValue::infinite());

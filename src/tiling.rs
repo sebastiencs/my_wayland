@@ -959,9 +959,6 @@ pub fn initial_layout_configure_for_surface(
                     .is_some_and(|managed| managed.pending_initial_layout);
             }
             is_managed_root_surface_live(state, *object_id)
-                || state
-                    .managed_root_surface_state(*object_id)
-                    .is_some_and(|managed| managed.pending_initial_layout)
         })
         .collect::<Vec<_>>();
     let candidate_set = candidate_surfaces.iter().copied().collect::<BTreeSet<_>>();
