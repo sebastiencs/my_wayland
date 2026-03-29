@@ -1359,17 +1359,21 @@ fn debug_log_tiled_geometry_snapshot(
             })
             .unwrap_or((None, None, None));
 
-    let frame_anchor_ok = surface_bounds.is_some_and(|bounds| {
-        root_x.saturating_add(bounds.x) == frame_rect.x
-            && root_y.saturating_add(bounds.y) == frame_rect.y
+    let geometry_anchor_ok = effective_window_geometry.is_some_and(|geom| {
+        root_x.saturating_add(geom.x) == frame_rect.x
+            && root_y.saturating_add(geom.y) == frame_rect.y
     });
-    let content_anchor_ok = effective_window_geometry.is_some_and(|geom| {
-        root_x.saturating_add(geom.x) == content_rect.x
-            && root_y.saturating_add(geom.y) == content_rect.y
-    });
+    let shadow_outsets = surface_bounds
+        .zip(effective_window_geometry)
+        .map(|(bounds, geom)| DecorationInsets {
+            left: geom.x.saturating_sub(bounds.x).max(0),
+            top: geom.y.saturating_sub(bounds.y).max(0),
+            right: bounds.x2().saturating_sub(geom.x2()).max(0),
+            bottom: bounds.y2().saturating_sub(geom.y2()).max(0),
+        });
 
     log::debug!(
-        "[DEBUG_TILING] surface={:?} root=({}, {}) frame={:?} content={:?} insets={:?} logical_size={:?} logical_bounds={:?} surface_bounds={:?} decoration_mode={:?} explicit_window_geometry={:?} effective_window_geometry={:?} frame_anchor_ok={} content_anchor_ok={}",
+        "[DEBUG_TILING] surface={:?} root=({}, {}) frame={:?} content={:?} insets={:?} logical_size={:?} logical_bounds={:?} surface_bounds={:?} decoration_mode={:?} explicit_window_geometry={:?} effective_window_geometry={:?} shadow_outsets={:?} geometry_anchor_ok={}",
         surface_object_id,
         root_x,
         root_y,
@@ -1382,14 +1386,14 @@ fn debug_log_tiled_geometry_snapshot(
         decoration_mode,
         explicit_window_geometry,
         effective_window_geometry,
-        frame_anchor_ok,
-        content_anchor_ok,
+        shadow_outsets,
+        geometry_anchor_ok,
     );
 }
 
-/// Places the wl_surface root for a tiled layout by aligning the committed surface tree to the
-/// tile's frame rect. This handles both same-buffer CSD (positive window-geometry origin) and
-/// subsurface CSD (negative tree offsets) without special-casing geometry semantics.
+/// Places the wl_surface root so explicit xdg window geometry aligns with the tile frame.
+/// When the client never set window geometry, fall back to placing the root buffer at the
+/// content rect derived from configured decoration insets.
 pub(crate) fn tiled_root_position_for_layout(
     state: &State,
     surface_object_id: ObjectId,
@@ -1397,12 +1401,23 @@ pub(crate) fn tiled_root_position_for_layout(
     frame_rect: RectI,
     content_rect: RectI,
 ) -> (i32, i32) {
-    let Some(surface_bounds) =
-        WlSurface::local_surface_tree_bounds_with_surface(state, surface_object_id, surface)
+    let Some((_, toplevel)) =
+        xdg_toplevel_for_surface_ids(state, surface.client_id(), surface.xdg_surface_id())
     else {
         return (content_rect.x, content_rect.y);
     };
-    (frame_rect.x.saturating_sub(surface_bounds.x), frame_rect.y.saturating_sub(surface_bounds.y))
+    let Some(explicit_geometry) = toplevel.window_geometry() else {
+        return (content_rect.x, content_rect.y);
+    };
+    let Some(window_geometry) = effective_window_geometry_for_surface(
+        state,
+        surface_object_id,
+        surface,
+        Some(explicit_geometry),
+    ) else {
+        return (content_rect.x, content_rect.y);
+    };
+    (frame_rect.x.saturating_sub(window_geometry.x), frame_rect.y.saturating_sub(window_geometry.y))
 }
 
 fn clamp_window_geometry_to_surface_bounds(window_geometry: RectI, surface_bounds: RectI) -> RectI {
@@ -2634,7 +2649,7 @@ mod tests {
                 frame_rect,
                 content_rect,
             ),
-            (10, 20)
+            (10, -12)
         );
     }
 
