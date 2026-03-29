@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, ClientId, ClientsAction, EventWriter, RawRequest},
     drm::{schedule_active_output, schedule_outputs, schedule_outputs_for_rect},
     object::{Object, Parser},
     protocol_generated::{
@@ -1744,6 +1744,7 @@ impl WlSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
+        let was_mapped = self.global_logical_bounds().is_some();
         if let Some(shell_surface) = self.shell_surface {
             let surface_object_id = client.object_id(self.id);
             self.send_preferred_fractional_scale_for_object(state, surface_object_id, dispatcher);
@@ -1851,6 +1852,19 @@ impl WlSurface {
                 crate::clients::ClientAction::RefreshSurfaceOutputs,
             );
         }
+        let is_mapped = self.global_logical_bounds().is_some();
+        if was_mapped != is_mapped {
+            if let Some(ShellSurfaceObject::XdgSurface(xdg_surface_id)) = self.shell_surface {
+                let xdg_surface_object_id = client.object_id(xdg_surface_id);
+                if state
+                    .objects
+                    .try_ref_object::<XdgSurface>(xdg_surface_object_id)
+                    .is_some_and(XdgSurface::is_toplevel_parent)
+                {
+                    dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+                }
+            }
+        }
 
         if changed || needs_frame {
             if let Some(bounds) = self.global_logical_bounds() {
@@ -1863,7 +1877,7 @@ impl WlSurface {
         }
 
         if matches!(self.shell_surface, Some(ShellSurfaceObject::LayerSurface(_))) {
-            dispatcher.dispatch(crate::clients::ClientsAction::LayerShellLayoutChanged);
+            dispatcher.dispatch(ClientsAction::LayerShellLayoutChanged);
         }
     }
 
@@ -2601,14 +2615,17 @@ mod tests {
             WlSurface,
         },
         crate::{
-            clients::{Client, ClientId},
+            clients::{Client, ClientId, ClientsAction, RawEvent, RawRequest},
             cursor::CursorSourceRef,
+            drm::ARGB8888,
             egl::EGL,
             globals::Globals,
             io_uring::model::IoUringAction,
+            object::Object,
             protocol_generated::{
-                xdg_wm_base, WlSubsurfaceId, WlSurfaceId, WpFractionalScaleV1Id,
-                WpLinuxDrmSyncobjSurfaceV1Id, WpPresentationFeedbackId, WpViewportId,
+                xdg_wm_base, WlBufferId, WlSubsurfaceId, WlSurfaceId, WpFractionalScaleV1Id,
+                WpLinuxDrmSyncobjSurfaceV1Id, WpPresentationFeedbackId, WpViewportId, XdgSurfaceId,
+                XdgToplevelId, XdgWmBaseId,
             },
             region::{DamageRegion, RectI, RegionSpec, RegionValue},
             runner::Dispatcher,
@@ -2618,9 +2635,12 @@ mod tests {
             sync::SurfaceSyncState,
             transform::{self, BufferTransform, SizeI, SurfaceViewport},
             wayland_objects::{
+                wl_buffer::{NewWlBufferParams, WlBuffer},
+                wl_shm_pool::shared_memory_from_bytes,
                 wp_fractional_scale_v1::WpFractionalScaleV1,
                 wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
                 wp_viewport::WpViewport,
+                xdg_surface::XdgSurface,
             },
             xkb::Xkb,
         },
@@ -2746,6 +2766,40 @@ mod tests {
         }
     }
 
+    fn get_toplevel_request(
+        xdg_surface_id: XdgSurfaceId,
+        toplevel_id: XdgToplevelId,
+    ) -> RawRequest<'static> {
+        let mut event = RawEvent::new(xdg_surface_id.into(), 1, 1);
+        event.id(toplevel_id);
+        (&*event.into_bytes()).try_into().unwrap()
+    }
+
+    fn ack_configure_request(xdg_surface_id: XdgSurfaceId, serial: u32) -> RawRequest<'static> {
+        let mut event = RawEvent::new(xdg_surface_id.into(), 4, 1);
+        event.uint(serial);
+        (&*event.into_bytes()).try_into().unwrap()
+    }
+
+    fn insert_test_buffer(state: &mut State, client_id: ClientId) -> ObjectId {
+        let bytes = [0u8; 16];
+        state
+            .insert_object(
+                WlBuffer::new(NewWlBufferParams {
+                    id: WlBufferId::from(90),
+                    owner_client_id: client_id,
+                    offset: 0,
+                    width: 2,
+                    height: 2,
+                    stride: 8,
+                    format: &ARGB8888,
+                    mem: shared_memory_from_bytes(&bytes),
+                })
+                .unwrap(),
+            )
+            .1
+    }
+
     #[test]
     fn cursor_role_conflicts_with_xdg_role() {
         let mut surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(3), 6);
@@ -2835,6 +2889,79 @@ mod tests {
             .objects
             .try_ref_object::<WpLinuxDrmSyncobjSurfaceV1>(syncobj_surface_object_id)
             .is_none());
+    }
+
+    #[test]
+    fn mapping_root_xdg_toplevel_schedules_workspace_relayout() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let surface_id = WlSurfaceId::from(50);
+        let xdg_surface_id = XdgSurfaceId::from(60);
+        let toplevel_id = XdgToplevelId::from(70);
+        let ((_, surface_object_id), _) =
+            client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
+        state.register_root_surface(surface_object_id);
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            assert!(surface
+                .set_role(Role::XdgSurface, &mut client_dispatcher)
+                .is_ok());
+            surface.set_xdg_surface_impl(xdg_surface_id);
+        }
+        let ((_, xdg_surface_object_id), _) = client.insert_object(
+            &mut state,
+            XdgSurface::new(xdg_surface_id, XdgWmBaseId::from(1), surface_id, 7),
+        );
+        {
+            let mut xdg_surface = client.grab_object(xdg_surface_id, &mut state);
+            xdg_surface.on(
+                &mut client,
+                &mut state,
+                get_toplevel_request(xdg_surface_id, toplevel_id),
+                &mut client_dispatcher,
+            );
+        }
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
+        }
+        {
+            let mut xdg_surface = state
+                .objects
+                .grab_object::<XdgSurface>(xdg_surface_object_id);
+            xdg_surface.on(
+                &mut client,
+                &mut state,
+                ack_configure_request(xdg_surface_id, 1),
+                &mut client_dispatcher,
+            );
+        }
+        let buffer_object_id = insert_test_buffer(&mut state, client.client_id());
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.pending.buffer = Some(Some(buffer_object_id));
+        }
+
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
+        }
+
+        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
+            matches!(action, ClientsAction::WorkspaceStateChanged)
+        }));
     }
 
     #[test]
