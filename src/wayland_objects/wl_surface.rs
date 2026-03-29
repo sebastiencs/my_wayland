@@ -3426,10 +3426,17 @@ mod tests {
 
         assert_eq!(
             state
-                .tiled_root_surface_rect(surface_object_id)
+                .tiled_root_surface_content_rect(surface_object_id)
                 .unwrap()
                 .width,
             1278
+        );
+        assert_eq!(
+            state
+                .tiled_root_surface_frame_rect(surface_object_id)
+                .unwrap()
+                .width,
+            1280
         );
 
         let resized_buffer_object_id =
@@ -3454,7 +3461,14 @@ mod tests {
 
         assert_eq!(
             state
-                .tiled_root_surface_rect(surface_object_id)
+                .tiled_root_surface_content_rect(surface_object_id)
+                .unwrap()
+                .width,
+            1280
+        );
+        assert_eq!(
+            state
+                .tiled_root_surface_frame_rect(surface_object_id)
                 .unwrap()
                 .width,
             1280

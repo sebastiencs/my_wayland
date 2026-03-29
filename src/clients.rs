@@ -1560,7 +1560,7 @@ impl Client {
             if !state.root_surface_is_visible(wl_surface_object_id) {
                 continue;
             }
-            let tiled_rect = state.tiled_root_surface_rect(wl_surface_object_id);
+            let tiled_rect = state.tiled_root_surface_frame_rect(wl_surface_object_id);
             let tiled_edges = state
                 .tiled_root_surface_edges(wl_surface_object_id)
                 .unwrap_or_default();

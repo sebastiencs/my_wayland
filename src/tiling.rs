@@ -895,7 +895,7 @@ impl LayoutNode {
     }
 }
 
-pub fn tiled_rect_for_surface(state: &State, surface_object_id: ObjectId) -> Option<RectI> {
+pub fn tiled_content_rect_for_surface(state: &State, surface_object_id: ObjectId) -> Option<RectI> {
     let workspace_id = state.root_surface_workspace(surface_object_id)?;
     let workspace = state.workspaces.try_get(workspace_id)?;
     workspace
@@ -920,6 +920,20 @@ pub fn tiled_rect_for_surface(state: &State, surface_object_id: ObjectId) -> Opt
                 )
             }
         })
+}
+
+pub fn tiled_frame_rect_for_surface(state: &State, surface_object_id: ObjectId) -> Option<RectI> {
+    let workspace_id = state.root_surface_workspace(surface_object_id)?;
+    let workspace = state.workspaces.try_get(workspace_id)?;
+    workspace.layout.tiled_rect(surface_object_id).or_else(|| {
+        workspace
+            .layout
+            .fullscreen
+            .as_ref()
+            .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id)
+            .then(|| workspace_usable_bounds(state, workspace_id))
+            .flatten()
+    })
 }
 
 pub fn tiled_edges_for_surface(state: &State, surface_object_id: ObjectId) -> Option<u32> {

@@ -1584,8 +1584,12 @@ impl State {
         tiling::managed_scene_order(self)
     }
 
-    pub fn tiled_root_surface_rect(&self, object_id: ObjectId) -> Option<RectI> {
-        tiling::tiled_rect_for_surface(self, object_id)
+    pub fn tiled_root_surface_content_rect(&self, object_id: ObjectId) -> Option<RectI> {
+        tiling::tiled_content_rect_for_surface(self, object_id)
+    }
+
+    pub fn tiled_root_surface_frame_rect(&self, object_id: ObjectId) -> Option<RectI> {
+        tiling::tiled_frame_rect_for_surface(self, object_id)
     }
 
     pub fn tiled_root_surface_edges(&self, object_id: ObjectId) -> Option<u32> {
