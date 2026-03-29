@@ -54,6 +54,18 @@ pub struct RuntimeConfig {
 pub struct GeneralConfig {
     pub cursor_theme: String,
     pub cursor_size: u32,
+    pub outer_gap: i32,
+    pub inner_gap: i32,
+    pub decoration_insets: DecorationInsets,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DecorationInsets {
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub left: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,6 +180,9 @@ fn output_scale_setting_from_f64(scale: f64) -> anyhow::Result<OutputScaleSettin
 struct GeneralConfigFile {
     cursor_theme: String,
     cursor_size: u32,
+    outer_gap: i32,
+    inner_gap: i32,
+    decoration_insets: DecorationInsets,
 }
 
 impl RuntimeConfig {
@@ -239,6 +254,9 @@ impl RuntimeConfig {
             general: GeneralConfig {
                 cursor_theme: sanitize_cursor_theme(parsed.general.cursor_theme),
                 cursor_size: sanitize_cursor_size(parsed.general.cursor_size),
+                outer_gap: sanitize_non_negative_i32(parsed.general.outer_gap),
+                inner_gap: sanitize_non_negative_i32(parsed.general.inner_gap),
+                decoration_insets: sanitize_decoration_insets(parsed.general.decoration_insets),
             },
             bindings,
             mouse_bindings,
@@ -252,6 +270,9 @@ impl RuntimeConfig {
             general: GeneralConfig {
                 cursor_theme: DEFAULT_CURSOR_THEME.to_string(),
                 cursor_size: DEFAULT_CURSOR_SIZE,
+                outer_gap: 0,
+                inner_gap: 0,
+                decoration_insets: DecorationInsets::default(),
             },
             bindings: Vec::new(),
             mouse_bindings: Vec::new(),
@@ -312,6 +333,14 @@ impl GeneralConfig {
     pub fn default_cursor_size() -> u32 {
         DEFAULT_CURSOR_SIZE
     }
+
+    pub fn default_outer_gap() -> i32 {
+        0
+    }
+
+    pub fn default_inner_gap() -> i32 {
+        0
+    }
 }
 
 impl KeyBinding {
@@ -331,6 +360,9 @@ impl Default for GeneralConfigFile {
         Self {
             cursor_theme: GeneralConfig::default_cursor_theme(),
             cursor_size: GeneralConfig::default_cursor_size(),
+            outer_gap: GeneralConfig::default_outer_gap(),
+            inner_gap: GeneralConfig::default_inner_gap(),
+            decoration_insets: DecorationInsets::default(),
         }
     }
 }
@@ -681,6 +713,19 @@ fn sanitize_cursor_size(size: u32) -> u32 {
     size.max(1)
 }
 
+fn sanitize_non_negative_i32(value: i32) -> i32 {
+    value.max(0)
+}
+
+fn sanitize_decoration_insets(insets: DecorationInsets) -> DecorationInsets {
+    DecorationInsets {
+        top: sanitize_non_negative_i32(insets.top),
+        right: sanitize_non_negative_i32(insets.right),
+        bottom: sanitize_non_negative_i32(insets.bottom),
+        left: sanitize_non_negative_i32(insets.left),
+    }
+}
+
 fn event_targets_config(
     event: &inotify::Event<&std::ffi::OsStr>,
     watching_config_dir: bool,
@@ -775,6 +820,8 @@ mod tests {
             workspaces: Default::default(),
             output_workspace_groups: Default::default(),
             root_surface_workspaces: Default::default(),
+            managed_root_surfaces: Default::default(),
+            xdg_toplevel_roles: Default::default(),
             next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,
@@ -795,6 +842,14 @@ mod tests {
             [general]
             cursor_theme = "Adwaita"
             cursor_size = 32
+            outer_gap = 12
+            inner_gap = 6
+
+            [general.decoration_insets]
+            top = 3
+            right = 4
+            bottom = 5
+            left = 6
 
             [bindings]
             "Super+Enter" = { action = "spawn", command = "alacritty" }
@@ -806,6 +861,12 @@ mod tests {
         let config = RuntimeConfig::compile(PathBuf::from("config.toml"), parsed, &xkb).unwrap();
         assert_eq!(config.general.cursor_theme, "Adwaita");
         assert_eq!(config.general.cursor_size, 32);
+        assert_eq!(config.general.outer_gap, 12);
+        assert_eq!(config.general.inner_gap, 6);
+        assert_eq!(
+            config.general.decoration_insets,
+            DecorationInsets { top: 3, right: 4, bottom: 5, left: 6 }
+        );
         assert_eq!(config.bindings.len(), 2);
         let enter = config
             .bindings
@@ -819,6 +880,33 @@ mod tests {
             .unwrap();
         assert_eq!(enter.trigger.keysym, xkb::keysym_from_name("Return", 0));
         assert_eq!(escape.trigger.keysym, xkb::keysym_from_name("Escape", 0));
+    }
+
+    #[test]
+    fn negative_gap_and_inset_values_are_clamped_to_zero() {
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::parse_for_test(
+            r#"
+            [general]
+            outer_gap = -5
+            inner_gap = -7
+
+            [general.decoration_insets]
+            top = -1
+            right = 2
+            bottom = -3
+            left = 4
+            "#,
+            &xkb,
+        )
+        .unwrap();
+
+        assert_eq!(config.general.outer_gap, 0);
+        assert_eq!(config.general.inner_gap, 0);
+        assert_eq!(
+            config.general.decoration_insets,
+            DecorationInsets { top: 0, right: 2, bottom: 0, left: 4 }
+        );
     }
 
     #[test]

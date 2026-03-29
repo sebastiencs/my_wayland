@@ -1525,6 +1525,8 @@ impl Client {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
+        state.relayout_dirty_workspaces();
+        let tiled_resize_surfaces = crate::seat::tiled_resize_active_root_surfaces(state);
         let object_ids = self
             .iter_object_ids_of::<XdgToplevel>(state)
             .collect::<Vec<_>>();
@@ -1555,11 +1557,49 @@ impl Client {
             else {
                 continue;
             };
-            let configure_bounds = surface_ref.configure_bounds(state);
+            if !state.root_surface_is_visible(wl_surface_object_id) {
+                continue;
+            }
+            let tiled_rect = state.tiled_root_surface_rect(wl_surface_object_id);
+            let tiled_edges = state
+                .tiled_root_surface_edges(wl_surface_object_id)
+                .unwrap_or_default();
+            let fullscreen = state.root_surface_is_fullscreen(wl_surface_object_id);
+            let resizing = tiled_resize_surfaces.contains(&wl_surface_object_id);
+            let configure_bounds = tiled_rect
+                .map(|rect| (rect.width, rect.height))
+                .or_else(|| surface_ref.configure_bounds(state));
+            let pending_floating_restore = if tiled_rect.is_none() && !fullscreen {
+                state.take_pending_floating_rect_restore(wl_surface_object_id)
+            } else {
+                None
+            };
 
             let mut xdg_surface = self.grab_object(xdg_surface_id, state);
             let mut toplevel = self.grab_object(toplevel_id, state);
-            toplevel.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
+            if let Some(rect) = tiled_rect {
+                toplevel.send_layout_configure(
+                    Some((rect.width, rect.height)),
+                    &mut xdg_surface,
+                    rect.width,
+                    rect.height,
+                    tiled_edges,
+                    fullscreen,
+                    resizing,
+                    dispatcher,
+                );
+            } else if let Some(rect) = pending_floating_restore {
+                toplevel.send_interactive_resize_configure(
+                    configure_bounds,
+                    &mut xdg_surface,
+                    rect.width,
+                    rect.height,
+                    false,
+                    dispatcher,
+                );
+            } else {
+                toplevel.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
+            }
         }
     }
 
@@ -2727,6 +2767,8 @@ mod surface_output_refresh_tests {
             workspaces: Default::default(),
             output_workspace_groups: Default::default(),
             root_surface_workspaces: Default::default(),
+            managed_root_surfaces: Default::default(),
+            xdg_toplevel_roles: Default::default(),
             next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,

@@ -1106,7 +1106,17 @@ pub fn ordered_scene_root_surface_ids_with_snapshot(
     let mut ordered = Vec::new();
     ordered.extend(layout.background_roots);
     ordered.extend(layout.bottom_roots);
-    for object_id in state.root_surface_ids() {
+    let managed_roots = state.tiling_scene_root_surface_ids();
+    let managed_set = managed_roots
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    for object_id in managed_roots.into_iter().chain(
+        state
+            .root_surface_ids()
+            .into_iter()
+            .filter(|object_id| !managed_set.contains(object_id)),
+    ) {
         let Some(surface) = lookup_snapshot_surface(state, snapshot, object_id) else {
             continue;
         };
@@ -1426,6 +1436,8 @@ mod tests {
             workspaces: Default::default(),
             output_workspace_groups: Default::default(),
             root_surface_workspaces: Default::default(),
+            managed_root_surfaces: Default::default(),
+            xdg_toplevel_roles: Default::default(),
             next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,

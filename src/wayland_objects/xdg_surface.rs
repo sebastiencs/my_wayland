@@ -1,7 +1,8 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, ClientsAction, EventWriter, RawRequest},
+    drm::schedule_outputs,
     object::{Object, Parser},
     protocol_generated::{
         xdg_surface, xdg_wm_base, WaylandId, WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgToplevelId,
@@ -423,7 +424,8 @@ impl Object for XdgSurface {
                 let xdg_toplevel =
                     xdg_toplevel::XdgToplevel::new(id, self.id, self.wm_base_version);
                 xdg_toplevel.send_capabilities(dispatcher);
-                client.insert_object(state, xdg_toplevel);
+                let ((_, object_id), _) = client.insert_object(state, xdg_toplevel);
+                state.register_xdg_toplevel_role(client.client_id(), self.id, object_id);
             }
             GetPopup { id, parent, positioner } => {
                 if !client.object_is(positioner, state) {
@@ -577,7 +579,8 @@ pub mod xdg_toplevel {
     use std::collections::BTreeSet;
 
     use crate::{
-        clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+        clients::{Client, ClientDispatcher, ClientsAction, EventWriter, RawRequest},
+        drm::schedule_outputs,
         object::{Object, Parser},
         protocol_generated::{
             xdg_toplevel as proto_xdg_toplevel, Array, WaylandId, WlOutputId, WlSeatId,
@@ -685,7 +688,45 @@ pub mod xdg_toplevel {
             if self.requested_fullscreen {
                 states.insert(proto_xdg_toplevel::State::Fullscreen);
             }
-            states.extend(self.current_states.iter().cloned());
+            for state in self.current_states.iter().cloned() {
+                if matches!(
+                    state,
+                    proto_xdg_toplevel::State::Activated | proto_xdg_toplevel::State::Suspended
+                ) {
+                    states.insert(state);
+                }
+            }
+            states.into_iter().map(|state| state as u32).collect()
+        }
+
+        fn layout_states(&self, tiled_edges: u32, fullscreen: bool, resizing: bool) -> Vec<u32> {
+            let mut states = BTreeSet::default();
+            if fullscreen {
+                states.insert(proto_xdg_toplevel::State::Fullscreen);
+            }
+            for state in self.current_states.iter().cloned() {
+                if matches!(
+                    state,
+                    proto_xdg_toplevel::State::Activated | proto_xdg_toplevel::State::Suspended
+                ) {
+                    states.insert(state);
+                }
+            }
+            if resizing {
+                states.insert(proto_xdg_toplevel::State::Resizing);
+            }
+            if tiled_edges & crate::tiling::EDGE_LEFT != 0 {
+                states.insert(proto_xdg_toplevel::State::TiledLeft);
+            }
+            if tiled_edges & crate::tiling::EDGE_RIGHT != 0 {
+                states.insert(proto_xdg_toplevel::State::TiledRight);
+            }
+            if tiled_edges & crate::tiling::EDGE_TOP != 0 {
+                states.insert(proto_xdg_toplevel::State::TiledTop);
+            }
+            if tiled_edges & crate::tiling::EDGE_BOTTOM != 0 {
+                states.insert(proto_xdg_toplevel::State::TiledBottom);
+            }
             states.into_iter().map(|state| state as u32).collect()
         }
 
@@ -759,6 +800,30 @@ pub mod xdg_toplevel {
             self.schedule_configure(configure_bounds, xdg_surface, dispatcher);
         }
 
+        pub fn send_layout_configure(
+            &mut self,
+            configure_bounds: Option<(i32, i32)>,
+            xdg_surface: &mut XdgSurface,
+            width: i32,
+            height: i32,
+            tiled_edges: u32,
+            fullscreen: bool,
+            resizing: bool,
+            dispatcher: &mut ClientDispatcher,
+        ) {
+            let states = self.layout_states(tiled_edges, fullscreen, resizing);
+            self.send_configure_bounds(configure_bounds, dispatcher);
+            self.send_event(
+                proto_xdg_toplevel::Event::Configure {
+                    width,
+                    height,
+                    states: Array(states.clone()),
+                },
+                dispatcher,
+            );
+            xdg_surface.queue_toplevel_configure(width, height, states, dispatcher);
+        }
+
         pub fn apply_acked_configure(&mut self, width: i32, height: i32, states: Vec<u32>) {
             self.current_width = width;
             self.current_height = height;
@@ -781,6 +846,19 @@ pub mod xdg_toplevel {
             self.interactive_size_constraints().clamp(width, height)
         }
 
+        pub fn minimum_size(&self) -> Option<(i32, i32)> {
+            self.min_size.and_then(|(width, height)| {
+                let width = if width > 0 { width } else { 1 };
+                let height = if height > 0 { height } else { 1 };
+                ((width > 1) || (height > 1) || self.min_size == Some((1, 1)))
+                    .then_some((width, height))
+            })
+        }
+
+        pub fn set_requested_fullscreen(&mut self, fullscreen: bool) {
+            self.requested_fullscreen = fullscreen;
+        }
+
         pub fn is_maximized(&self) -> bool {
             self.requested_maximized
                 || self
@@ -793,6 +871,31 @@ pub mod xdg_toplevel {
                 || self
                     .current_states
                     .contains(&proto_xdg_toplevel::State::Fullscreen)
+        }
+
+        fn relayout_after_constraint_change(
+            &self,
+            client: &Client,
+            state: &mut State,
+            dispatcher: &mut ClientDispatcher,
+        ) {
+            let xdg_surface = client.ref_object(self.xdg_surface_id, state);
+            let surface_object_id = client.object_id(xdg_surface.wl_surface_id());
+            if !state.is_tiled_root_surface(surface_object_id)
+                && !state.root_surface_is_fullscreen(surface_object_id)
+            {
+                return;
+            }
+            let Some(workspace_id) = state.root_surface_workspace(surface_object_id) else {
+                return;
+            };
+            let affected_outputs = state.workspace_output_ids(workspace_id);
+            crate::tiling::mark_workspace_dirty(state, workspace_id);
+            state.relayout_dirty_workspaces();
+            if !affected_outputs.is_empty() {
+                schedule_outputs(state, affected_outputs.into_iter(), dispatcher);
+            }
+            dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
         }
 
         pub fn send_interactive_resize_configure(
@@ -1001,6 +1104,12 @@ pub mod xdg_toplevel {
 
             match client.parse::<Self>(req).unwrap() {
                 Destroy => {
+                    let object_id = client.object_id(self.id);
+                    state.unregister_xdg_toplevel_role(
+                        client.client_id(),
+                        self.xdg_surface_id,
+                        object_id,
+                    );
                     let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
                     xdg_surface.destroy_toplevel_role(self.id);
                     self.delete_self(client, state, dispatcher);
@@ -1139,11 +1248,13 @@ pub mod xdg_toplevel {
                     if !self.store_size_pair(client, dispatcher, width, height, false) {
                         return;
                     }
+                    self.relayout_after_constraint_change(client, state, dispatcher);
                 }
                 SetMinSize { width, height } => {
                     if !self.store_size_pair(client, dispatcher, width, height, true) {
                         return;
                     }
+                    self.relayout_after_constraint_change(client, state, dispatcher);
                 }
                 SetMaximized => {
                     self.requested_maximized = true;
@@ -1161,22 +1272,104 @@ pub mod xdg_toplevel {
                 }
                 SetFullscreen { output: _ } => {
                     self.requested_fullscreen = true;
-                    let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
-                    let configure_bounds =
-                        Self::configure_bounds_for_xdg_surface(client, state, self.xdg_surface_id);
-                    self.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
+                    let xdg_surface = client.ref_object(self.xdg_surface_id, state);
+                    let surface_object_id = client.object_id(xdg_surface.wl_surface_id());
+                    let affected_outputs = state
+                        .root_surface_workspace(surface_object_id)
+                        .map(|workspace_id| state.workspace_output_ids(workspace_id))
+                        .unwrap_or_default();
+                    if state.set_root_surface_fullscreen(surface_object_id, true) {
+                        if !affected_outputs.is_empty() {
+                            schedule_outputs(state, affected_outputs.into_iter(), dispatcher);
+                        }
+                        crate::seat::refresh_scene_focus(state, dispatcher);
+                        dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+                    }
                 }
                 UnsetFullscreen => {
                     self.requested_fullscreen = false;
-                    let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
-                    let configure_bounds =
-                        Self::configure_bounds_for_xdg_surface(client, state, self.xdg_surface_id);
-                    self.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
+                    let xdg_surface = client.ref_object(self.xdg_surface_id, state);
+                    let surface_object_id = client.object_id(xdg_surface.wl_surface_id());
+                    let affected_outputs = state
+                        .root_surface_workspace(surface_object_id)
+                        .map(|workspace_id| state.workspace_output_ids(workspace_id))
+                        .unwrap_or_default();
+                    if state.set_root_surface_fullscreen(surface_object_id, false) {
+                        if !affected_outputs.is_empty() {
+                            schedule_outputs(state, affected_outputs.into_iter(), dispatcher);
+                        }
+                        crate::seat::refresh_scene_focus(state, dispatcher);
+                        dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+                    }
                 }
                 SetMinimized => {
                     log::debug!("xdg_toplevel.set_minimized has no compositor integration yet");
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn layout_states_strip_maximized_from_tiled_configures() {
+            let mut toplevel =
+                XdgToplevel::new(XdgToplevelId::from(1), super::super::XdgSurfaceId::from(2), 7);
+            toplevel.test_set_maximized(true);
+
+            let states = toplevel.layout_states(
+                crate::tiling::EDGE_LEFT | crate::tiling::EDGE_RIGHT,
+                false,
+                false,
+            );
+
+            assert!(!states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
+            assert!(states.contains(&(proto_xdg_toplevel::State::TiledLeft as u32)));
+            assert!(states.contains(&(proto_xdg_toplevel::State::TiledRight as u32)));
+        }
+
+        #[test]
+        fn layout_states_strip_maximized_from_fullscreen_layout_configures() {
+            let mut toplevel =
+                XdgToplevel::new(XdgToplevelId::from(3), super::super::XdgSurfaceId::from(4), 7);
+            toplevel.test_set_maximized(true);
+
+            let states = toplevel.layout_states(0, true, false);
+
+            assert!(!states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
+            assert!(states.contains(&(proto_xdg_toplevel::State::Fullscreen as u32)));
+        }
+
+        #[test]
+        fn layout_states_include_resizing_for_interactive_tiled_resize() {
+            let toplevel =
+                XdgToplevel::new(XdgToplevelId::from(5), super::super::XdgSurfaceId::from(6), 7);
+
+            let states = toplevel.layout_states(crate::tiling::EDGE_RIGHT, false, true);
+
+            assert!(states.contains(&(proto_xdg_toplevel::State::Resizing as u32)));
+            assert!(states.contains(&(proto_xdg_toplevel::State::TiledRight as u32)));
+        }
+
+        #[test]
+        fn effective_states_drop_stale_fullscreen_from_acked_state() {
+            let mut toplevel =
+                XdgToplevel::new(XdgToplevelId::from(7), super::super::XdgSurfaceId::from(8), 7);
+            toplevel.apply_acked_configure(
+                800,
+                600,
+                vec![
+                    proto_xdg_toplevel::State::Activated as u32,
+                    proto_xdg_toplevel::State::Fullscreen as u32,
+                ],
+            );
+
+            let states = toplevel.effective_states();
+
+            assert!(states.contains(&(proto_xdg_toplevel::State::Activated as u32)));
+            assert!(!states.contains(&(proto_xdg_toplevel::State::Fullscreen as u32)));
         }
     }
 }

@@ -6,6 +6,19 @@
 cursor_theme = "default"
 cursor_size = 24
 
+# Tiling gaps (logical pixels). Outer gap shrinks the tiling region inside the usable area;
+# inner gap is space between sibling tiles. Fullscreen ignores gaps.
+outer_gap = 0
+inner_gap = 0
+
+# Decoration insets (logical pixels): frame rect minus these edges is the tiled client content
+# rect for configure and root position. Keep at zero until server-side decorations are drawn.
+[general.decoration_insets]
+top = 0
+right = 0
+bottom = 0
+left = 0
+
 [bindings]
 # Key names follow xkb (e.g. Super, Ctrl, Alt, Shift). Last segment is the key.
 "Super+Escape" = { action = "quit" }

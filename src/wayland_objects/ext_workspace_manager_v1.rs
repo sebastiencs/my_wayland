@@ -31,6 +31,7 @@ pub fn publish_workspace_state_changed(
     dispatcher: &mut ClientDispatcher,
     affected_outputs: impl IntoIterator<Item = OutputId>,
 ) {
+    state.relayout_dirty_workspaces();
     let mut affected_outputs = affected_outputs.into_iter().collect::<Vec<_>>();
     affected_outputs.sort_unstable();
     affected_outputs.dedup();

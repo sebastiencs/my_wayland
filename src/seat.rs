@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    clients::{ClientAction, ClientId},
+    clients::{ClientAction, ClientId, ClientsAction},
     config,
     cursor::{CursorSourceRef, CursorState},
     drm::{schedule_active_output, schedule_outputs_for_points, schedule_outputs_for_rects, Drm},
@@ -16,6 +16,7 @@ use crate::{
         DragNegotiationState, DragPhase, DragState, DragTargetState, DrmId, IndexMap, ObjectId,
         SelectionSourceState, State,
     },
+    tiling::TiledResizeState,
     wayland_objects::{
         wl_surface::{Role, StackEntry, WlSurface},
         xdg_surface::xdg_toplevel::{InteractiveSizeConstraints, XdgToplevel},
@@ -162,6 +163,13 @@ enum PointerInteractiveGrab {
         initial_root_pos: (i32, i32),
         initial_size: (i32, i32),
         last_size: (i32, i32),
+    },
+    ResizeTiled {
+        client_id: ClientId,
+        root_surface_object_id: ObjectId,
+        edges: u32,
+        initial_pointer_pos: (f64, f64),
+        resize_state: TiledResizeState,
     },
 }
 
@@ -587,6 +595,9 @@ impl SeatState {
                 | PointerInteractiveGrab::Resize { client_id: grab_client_id, .. } => {
                     grab_client_id == client_id
                 }
+                PointerInteractiveGrab::ResizeTiled { client_id: grab_client_id, .. } => {
+                    grab_client_id == client_id
+                }
             })
         {
             self.clear_pointer_interactive_grab();
@@ -884,6 +895,22 @@ impl SeatState {
             initial_root_pos,
             initial_size,
             last_size: initial_size,
+        });
+    }
+
+    fn start_toplevel_tiled_resize(
+        &mut self,
+        client_id: ClientId,
+        root_surface_object_id: ObjectId,
+        edges: u32,
+        resize_state: TiledResizeState,
+    ) {
+        self.pointer_interactive_grab = Some(PointerInteractiveGrab::ResizeTiled {
+            client_id,
+            root_surface_object_id,
+            edges,
+            initial_pointer_pos: self.pointer_pos,
+            resize_state,
         });
     }
 
@@ -1537,6 +1564,32 @@ fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher
                 last_size,
             });
         }
+        PointerInteractiveGrab::ResizeTiled {
+            client_id,
+            root_surface_object_id,
+            edges,
+            initial_pointer_pos,
+            resize_state,
+        } => {
+            let dx = (state.seat.pointer_pos.0 - initial_pointer_pos.0).round() as i32;
+            let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
+            if state.resize_tiled_root_surface_from_state(
+                root_surface_object_id,
+                resize_state,
+                dx,
+                dy,
+            ) {
+                dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+                schedule_active_output(state, dispatcher);
+            }
+            state.seat.pointer_interactive_grab = Some(PointerInteractiveGrab::ResizeTiled {
+                client_id,
+                root_surface_object_id,
+                edges,
+                initial_pointer_pos,
+                resize_state,
+            });
+        }
     }
     true
 }
@@ -1545,6 +1598,7 @@ fn finish_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatche
     let Some(grab) = state.seat.pointer_interactive_grab else {
         return;
     };
+    let was_tiled_resize = matches!(grab, PointerInteractiveGrab::ResizeTiled { .. });
     if let PointerInteractiveGrab::Resize { client_id, xdg_toplevel_id, last_size, .. } = grab {
         dispatch_client_action(
             dispatcher,
@@ -1558,6 +1612,9 @@ fn finish_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatche
         );
     }
     state.seat.clear_pointer_interactive_grab();
+    if was_tiled_resize {
+        dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+    }
     end_compositor_pointer_grab(state, dispatcher, time);
 }
 
@@ -1566,12 +1623,37 @@ pub(crate) fn abort_pointer_interactive_grab(
     dispatcher: &mut Dispatcher,
     time: u32,
 ) -> bool {
+    let was_tiled_resize = matches!(
+        state.seat.pointer_interactive_grab,
+        Some(PointerInteractiveGrab::ResizeTiled { .. })
+    );
     if state.seat.pointer_interactive_grab.is_none() {
         return false;
     }
     state.seat.clear_pointer_interactive_grab();
+    if was_tiled_resize {
+        dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+    }
     end_compositor_pointer_grab(state, dispatcher, time);
     true
+}
+
+pub(crate) fn tiled_resize_active_root_surfaces(state: &State) -> BTreeSet<ObjectId> {
+    let Some(PointerInteractiveGrab::ResizeTiled { root_surface_object_id, resize_state, .. }) =
+        state.seat.pointer_interactive_grab
+    else {
+        return BTreeSet::new();
+    };
+    let Some(workspace_id) = state.root_surface_workspace(root_surface_object_id) else {
+        return BTreeSet::new();
+    };
+    let Some(workspace) = state.workspaces.try_get(workspace_id) else {
+        return BTreeSet::new();
+    };
+    workspace
+        .layout
+        .resize_affected_surfaces(root_surface_object_id, resize_state)
+        .unwrap_or_default()
 }
 
 pub(crate) fn recover_pointer_after_interactive_grab_loss(
@@ -1680,27 +1762,48 @@ fn begin_pointer_binding(
     );
 
     match (action, target.role) {
-        (config::MouseBindingAction::MoveWindow, _) => start_interactive_move(
-            state,
-            dispatcher,
-            target.client_id,
-            target.root_surface_object_id,
-            target.initial_root_pos,
-        ),
+        (config::MouseBindingAction::MoveWindow, _) => {
+            if state.is_tiled_root_surface(target.root_surface_object_id) {
+                if state.set_root_surface_floating(target.root_surface_object_id, true) {
+                    dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+                    schedule_active_output(state, dispatcher);
+                }
+            }
+            start_interactive_move(
+                state,
+                dispatcher,
+                target.client_id,
+                target.root_surface_object_id,
+                target.initial_root_pos,
+            )
+        }
         (
             config::MouseBindingAction::ResizeWindow,
             WindowPointerRole::XdgToplevel { xdg_toplevel_id, size_constraints, .. },
-        ) => start_interactive_resize(
-            state,
-            dispatcher,
-            target.client_id,
-            target.root_surface_object_id,
-            xdg_toplevel_id,
-            size_constraints,
-            resize_edges_for_pointer(target.bounds, state.seat.pointer_position()),
-            target.initial_root_pos,
-            target.initial_size,
-        ),
+        ) => {
+            let edges = resize_edges_for_pointer(target.bounds, state.seat.pointer_position());
+            if state.is_tiled_root_surface(target.root_surface_object_id) {
+                start_interactive_tiled_resize(
+                    state,
+                    dispatcher,
+                    target.client_id,
+                    target.root_surface_object_id,
+                    edges,
+                )
+            } else {
+                start_interactive_resize(
+                    state,
+                    dispatcher,
+                    target.client_id,
+                    target.root_surface_object_id,
+                    xdg_toplevel_id,
+                    size_constraints,
+                    edges,
+                    target.initial_root_pos,
+                    target.initial_size,
+                )
+            }
+        }
         _ => return false,
     }
 
@@ -1739,7 +1842,9 @@ fn resolve_window_pointer_target(
     let role = match root_surface.role() {
         Role::XdgSurface => root_surface
             .xdg_surface_id()
-            .map(|xdg_surface_id| resolve_xdg_window_pointer_role(state, xdg_surface_id))
+            .map(|xdg_surface_id| {
+                resolve_xdg_window_pointer_role(state, root_surface_object_id, xdg_surface_id)
+            })
             .unwrap_or(WindowPointerRole::Unsupported),
         _ => WindowPointerRole::Unsupported,
     };
@@ -1759,6 +1864,7 @@ fn resolve_window_pointer_target(
 
 fn resolve_xdg_window_pointer_role(
     state: &State,
+    root_surface_object_id: ObjectId,
     xdg_surface_id: XdgSurfaceId,
 ) -> WindowPointerRole {
     state
@@ -1771,7 +1877,7 @@ fn resolve_xdg_window_pointer_role(
                         xdg_toplevel_id: toplevel.toplevel_id(),
                         size_constraints: toplevel.interactive_size_constraints(),
                         is_maximized: toplevel.is_maximized(),
-                        is_fullscreen: toplevel.is_fullscreen(),
+                        is_fullscreen: state.root_surface_is_fullscreen(root_surface_object_id),
                     },
                 )
             })
@@ -2361,6 +2467,34 @@ fn start_interactive_resize(
     );
 }
 
+fn start_interactive_tiled_resize(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    client_id: ClientId,
+    root_surface_object_id: ObjectId,
+    edges: u32,
+) {
+    let Some(resize_state) = state.begin_tiled_root_surface_resize(root_surface_object_id, edges)
+    else {
+        return;
+    };
+    let cursor_icons = match edges {
+        e if e == ResizeEdge::Top as u32 => POINTER_RESIZE_N_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::Bottom as u32 => POINTER_RESIZE_S_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::Left as u32 => POINTER_RESIZE_W_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::Right as u32 => POINTER_RESIZE_E_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::TopLeft as u32 => POINTER_RESIZE_NW_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::TopRight as u32 => POINTER_RESIZE_NE_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::BottomLeft as u32 => POINTER_RESIZE_SW_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::BottomRight as u32 => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
+        _ => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
+    };
+    begin_compositor_pointer_grab(state, dispatcher, cursor_icons);
+    state
+        .seat
+        .start_toplevel_tiled_resize(client_id, root_surface_object_id, edges, resize_state);
+}
+
 fn remove_resource<K, V>(map: &mut BTreeMap<K, Vec<V>>, key: K, value: V)
 where
     K: Ord + Copy,
@@ -2430,6 +2564,8 @@ mod surface_tree_hit_test_tests {
             workspaces: Default::default(),
             output_workspace_groups: Default::default(),
             root_surface_workspaces: Default::default(),
+            managed_root_surfaces: Default::default(),
+            xdg_toplevel_roles: Default::default(),
             next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,
@@ -2604,7 +2740,7 @@ mod xdg_seat_tests {
                 XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
             },
             runner::Dispatcher,
-            state::{DragPhase, DragState, DragTargetState, ObjectId, State},
+            state::{DragPhase, DragState, DragTargetState, ObjectId, State, WorkspaceGroup},
             wayland_objects::{
                 wl_seat::WlSeat,
                 wl_surface::{Role, WlSurface},
@@ -2634,6 +2770,8 @@ mod xdg_seat_tests {
             workspaces: Default::default(),
             output_workspace_groups: Default::default(),
             root_surface_workspaces: Default::default(),
+            managed_root_surfaces: Default::default(),
+            xdg_toplevel_roles: Default::default(),
             next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,
@@ -3281,7 +3419,16 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(904usize), 0, 0, 200, 150);
         }
+        let workspace_id = state.create_workspace(None, None);
+        let group_id = state.workspace_groups.insert(WorkspaceGroup {
+            outputs: Default::default(),
+            workspaces: vec![workspace_id],
+            active_workspace: Some(workspace_id),
+        });
+        state.workspaces.try_get_mut(workspace_id).unwrap().group = Some(group_id);
+        assert!(state.assign_root_surface_to_workspace(wl_surface_object_id, workspace_id));
         set_toplevel_window_state(&mut state, toplevel_object_id, false, true);
+        assert!(state.set_root_surface_fullscreen(wl_surface_object_id, true));
 
         state.config = RuntimeConfig::parse_for_test(
             r#"
@@ -3307,6 +3454,93 @@ mod xdg_seat_tests {
                     } if *button == 0x111 && *state == 1
                 )
             }
+        ));
+    }
+
+    #[test]
+    fn compositor_mouse_resize_binding_uses_compositor_fullscreen_state() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (first_surface_object_id, first_xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(320),
+            XdgSurfaceId::from(330),
+        );
+        let first_toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            first_xdg_surface_object_id,
+            XdgSurfaceId::from(330),
+            XdgToplevelId::from(340),
+        );
+        let (second_surface_object_id, second_xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(350),
+            XdgSurfaceId::from(360),
+        );
+        let second_toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            second_xdg_surface_object_id,
+            XdgSurfaceId::from(360),
+            XdgToplevelId::from(370),
+        );
+        {
+            let first_surface = state
+                .objects
+                .get_mut(first_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            first_surface.test_map(ObjectId::from(905usize), 0, 0, 200, 150);
+        }
+        {
+            let second_surface = state
+                .objects
+                .get_mut(second_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            second_surface.test_map(ObjectId::from(906usize), 240, 0, 200, 150);
+        }
+        let workspace_id = state.create_workspace(None, None);
+        let group_id = state.workspace_groups.insert(WorkspaceGroup {
+            outputs: Default::default(),
+            workspaces: vec![workspace_id],
+            active_workspace: Some(workspace_id),
+        });
+        state.workspaces.try_get_mut(workspace_id).unwrap().group = Some(group_id);
+        assert!(state.assign_root_surface_to_workspace(first_surface_object_id, workspace_id));
+        assert!(state.assign_root_surface_to_workspace(second_surface_object_id, workspace_id));
+        assert!(state.set_root_surface_floating(first_surface_object_id, true));
+        set_toplevel_window_state(&mut state, first_toplevel_object_id, false, true);
+        set_toplevel_window_state(&mut state, second_toplevel_object_id, false, false);
+        assert!(state.set_root_surface_fullscreen(first_surface_object_id, true));
+        assert!(state.set_root_surface_fullscreen(second_surface_object_id, true));
+        assert!(state.set_root_surface_fullscreen(second_surface_object_id, false));
+
+        state.config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:right" = { action = "resize-window" }
+            "#,
+            &state.xkb,
+        )
+        .unwrap();
+        state.keyboard.update_key(125, true);
+        state.seat.pointer_pos = (150.0, 100.0);
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x111, 1, 100);
+
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Resize { .. })
         ));
     }
 
@@ -3422,6 +3656,27 @@ mod xdg_seat_tests {
             state.seat.visible_cursor_source(),
             Some(CursorSourceRef::Named { owner_client_id: None, .. })
         ));
+    }
+
+    #[test]
+    fn tiled_resize_grab_is_cleared_on_client_removal() {
+        let mut state = make_state();
+        let (client, _dispatcher) = make_client();
+
+        state.seat.pointer_interactive_grab = Some(super::PointerInteractiveGrab::ResizeTiled {
+            client_id: client.client_id(),
+            root_surface_object_id: ObjectId::from(999usize),
+            edges: xdg_toplevel::ResizeEdge::Right as u32,
+            initial_pointer_pos: (10.0, 20.0),
+            resize_state: crate::tiling::test_tiled_resize_state(),
+        });
+        state.seat.intercepted_pointer_buttons.insert(0x111);
+
+        let removal = state.seat.remove_client(client.client_id());
+
+        assert!(removal.interactive_grab_cleared);
+        assert!(state.seat.pointer_interactive_grab.is_none());
+        assert!(state.seat.intercepted_pointer_buttons.is_empty());
     }
 
     #[test]

@@ -7,11 +7,13 @@ use crate::{
     input::Input,
     object::Object,
     protocol_generated::{
-        WaylandId, WlDataOfferId, WlDataSourceId, WlSeatId, WlSurfaceId, ZwlrLayerSurfaceV1Id,
+        WaylandId, WlDataOfferId, WlDataSourceId, WlSeatId, WlSurfaceId, XdgSurfaceId,
+        ZwlrLayerSurfaceV1Id,
     },
     region::RectI,
     seat::SeatState,
-    wayland_objects::wl_surface::WlSurface,
+    tiling::{self, TiledResizeState, WorkspaceLayout},
+    wayland_objects::{wl_surface::WlSurface, xdg_surface::xdg_toplevel::XdgToplevel},
     xkb::{KeyboardState, Xkb},
 };
 
@@ -715,13 +717,31 @@ pub struct WorkspaceGroup {
     pub active_workspace: Option<WorkspaceId>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Workspace {
     pub stable_id: String,
     pub name: String,
     pub coordinates: Vec<u32>,
     pub group: Option<WorkspaceGroupId>,
     pub root_surfaces: BTreeSet<ObjectId>,
+    pub layout: WorkspaceLayout,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ManagedWindowMode {
+    #[default]
+    Tiled,
+    Floating,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ManagedRootSurfaceState {
+    pub workspace_id: WorkspaceId,
+    pub mode: ManagedWindowMode,
+    pub fullscreen: bool,
+    pub mapped: bool,
+    pub last_floating_rect: Option<RectI>,
+    pub pending_floating_rect_restore: Option<RectI>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1051,6 +1071,8 @@ pub struct State {
     pub workspaces: IndexMap<WorkspaceId, Workspace>,
     pub output_workspace_groups: BTreeMap<OutputId, WorkspaceGroupId>,
     pub root_surface_workspaces: BTreeMap<ObjectId, WorkspaceId>,
+    pub managed_root_surfaces: BTreeMap<ObjectId, ManagedRootSurfaceState>,
+    pub xdg_toplevel_roles: BTreeMap<(ClientId, XdgSurfaceId), ObjectId>,
     pub next_workspace_serial: u32,
     pub backend_syncobj_globals: BTreeMap<DrmId, GlobalName>,
     pub globals: Globals,
@@ -1125,6 +1147,51 @@ impl State {
         self.root_surface_workspaces.get(&object_id).copied()
     }
 
+    pub fn managed_root_surface_state(
+        &self,
+        object_id: ObjectId,
+    ) -> Option<&ManagedRootSurfaceState> {
+        self.managed_root_surfaces.get(&object_id)
+    }
+
+    pub fn take_pending_floating_rect_restore(&mut self, object_id: ObjectId) -> Option<RectI> {
+        self.managed_root_surfaces
+            .get_mut(&object_id)
+            .and_then(|managed| managed.pending_floating_rect_restore.take())
+    }
+
+    pub fn register_xdg_toplevel_role(
+        &mut self,
+        client_id: ClientId,
+        xdg_surface_id: XdgSurfaceId,
+        object_id: ObjectId,
+    ) {
+        self.xdg_toplevel_roles
+            .insert((client_id, xdg_surface_id), object_id);
+    }
+
+    pub fn unregister_xdg_toplevel_role(
+        &mut self,
+        client_id: ClientId,
+        xdg_surface_id: XdgSurfaceId,
+        object_id: ObjectId,
+    ) {
+        if self.xdg_toplevel_roles.get(&(client_id, xdg_surface_id)) == Some(&object_id) {
+            self.xdg_toplevel_roles.remove(&(client_id, xdg_surface_id));
+        }
+    }
+
+    pub fn xdg_toplevel_object_id(
+        &self,
+        client_id: ClientId,
+        xdg_surface_id: XdgSurfaceId,
+    ) -> Option<ObjectId> {
+        self.xdg_toplevel_roles
+            .get(&(client_id, xdg_surface_id))
+            .copied()
+            .filter(|object_id| self.objects.contains(*object_id))
+    }
+
     pub fn workspace_ids(&self) -> Vec<WorkspaceId> {
         self.workspaces
             .iter()
@@ -1177,6 +1244,7 @@ impl State {
             coordinates: Vec::new(),
             group: group_id,
             root_surfaces: BTreeSet::new(),
+            layout: WorkspaceLayout::default(),
         });
         if let Some(group_id) = group_id {
             if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
@@ -1298,6 +1366,11 @@ impl State {
     }
 
     pub fn activate_workspace(&mut self, workspace_id: WorkspaceId) -> bool {
+        let previous_workspace = self
+            .workspaces
+            .try_get(workspace_id)
+            .and_then(|workspace| workspace.group)
+            .and_then(|group_id| self.active_workspace_for_group(group_id));
         let Some(group_id) = self
             .workspaces
             .try_get(workspace_id)
@@ -1312,6 +1385,10 @@ impl State {
             return false;
         }
         group.active_workspace = Some(workspace_id);
+        if let Some(previous_workspace) = previous_workspace {
+            tiling::mark_workspace_dirty(self, previous_workspace);
+        }
+        tiling::mark_workspace_dirty(self, workspace_id);
         true
     }
 
@@ -1328,13 +1405,34 @@ impl State {
         {
             if let Some(previous_workspace) = self.workspaces.try_get_mut(previous_workspace_id) {
                 previous_workspace.root_surfaces.remove(&object_id);
+                if previous_workspace
+                    .layout
+                    .fullscreen
+                    .as_ref()
+                    .is_some_and(|fullscreen| fullscreen.surface_object_id == object_id)
+                {
+                    previous_workspace.layout.set_fullscreen(None);
+                }
             }
+            tiling::mark_workspace_dirty(self, previous_workspace_id);
         }
         let Some(workspace) = self.workspaces.try_get_mut(workspace_id) else {
             self.root_surface_workspaces.remove(&object_id);
             return false;
         };
         workspace.root_surfaces.insert(object_id);
+        workspace.layout.mark_dirty();
+        self.managed_root_surfaces
+            .entry(object_id)
+            .and_modify(|managed| managed.workspace_id = workspace_id)
+            .or_insert(ManagedRootSurfaceState {
+                workspace_id,
+                mode: ManagedWindowMode::Tiled,
+                fullscreen: false,
+                mapped: false,
+                last_floating_rect: None,
+                pending_floating_rect_restore: None,
+            });
         true
     }
 
@@ -1345,7 +1443,17 @@ impl State {
         let workspace_id = self.root_surface_workspaces.remove(&object_id)?;
         if let Some(workspace) = self.workspaces.try_get_mut(workspace_id) {
             workspace.root_surfaces.remove(&object_id);
+            workspace.layout.remove_surface(object_id);
+            if workspace
+                .layout
+                .fullscreen
+                .as_ref()
+                .is_some_and(|fullscreen| fullscreen.surface_object_id == object_id)
+            {
+                workspace.layout.set_fullscreen(None);
+            }
         }
+        self.managed_root_surfaces.remove(&object_id);
         Some(workspace_id)
     }
 
@@ -1401,8 +1509,242 @@ impl State {
 
     pub fn root_surface_is_visible(&self, object_id: ObjectId) -> bool {
         self.root_surface_workspace(object_id)
-            .map(|workspace_id| self.workspace_is_active(workspace_id))
+            .map(|workspace_id| {
+                if !self.workspace_is_active(workspace_id) {
+                    return false;
+                }
+                let Some(workspace) = self.workspaces.try_get(workspace_id) else {
+                    return false;
+                };
+                workspace
+                    .layout
+                    .fullscreen
+                    .as_ref()
+                    .map(|fullscreen| fullscreen.surface_object_id == object_id)
+                    .unwrap_or(true)
+            })
             .unwrap_or(true)
+    }
+
+    pub fn relayout_dirty_workspaces(&mut self) {
+        tiling::relayout_dirty_workspaces(self);
+    }
+
+    pub fn tiling_scene_root_surface_ids(&self) -> Vec<ObjectId> {
+        tiling::managed_scene_order(self)
+    }
+
+    pub fn tiled_root_surface_rect(&self, object_id: ObjectId) -> Option<RectI> {
+        tiling::tiled_rect_for_surface(self, object_id)
+    }
+
+    pub fn tiled_root_surface_edges(&self, object_id: ObjectId) -> Option<u32> {
+        tiling::tiled_edges_for_surface(self, object_id)
+    }
+
+    pub fn root_surface_is_fullscreen(&self, object_id: ObjectId) -> bool {
+        let Some(workspace_id) = self.root_surface_workspace(object_id) else {
+            return false;
+        };
+        let Some(workspace) = self.workspaces.try_get(workspace_id) else {
+            return false;
+        };
+        workspace
+            .layout
+            .fullscreen
+            .as_ref()
+            .is_some_and(|fullscreen| fullscreen.surface_object_id == object_id)
+    }
+
+    pub fn is_tiled_root_surface(&self, object_id: ObjectId) -> bool {
+        tiling::is_tiled_surface(self, object_id)
+    }
+
+    pub fn is_floating_root_surface(&self, object_id: ObjectId) -> bool {
+        tiling::is_floating_surface(self, object_id)
+    }
+
+    pub fn set_root_surface_floating(&mut self, object_id: ObjectId, floating: bool) -> bool {
+        let Some(workspace_id) = self
+            .managed_root_surfaces
+            .get(&object_id)
+            .map(|managed| managed.workspace_id)
+            .or_else(|| self.root_surface_workspace(object_id))
+        else {
+            return false;
+        };
+        let current_bounds = self
+            .objects
+            .try_ref_object::<WlSurface>(object_id)
+            .and_then(|surface| surface.global_logical_bounds());
+        let Some(managed) = self.managed_root_surfaces.get_mut(&object_id) else {
+            return false;
+        };
+        let was_floating = managed.mode == ManagedWindowMode::Floating;
+        let new_mode =
+            if floating { ManagedWindowMode::Floating } else { ManagedWindowMode::Tiled };
+        let mut changed = managed.mode != new_mode;
+        if !floating && was_floating {
+            if let Some(bounds) = current_bounds {
+                managed.last_floating_rect = Some(bounds);
+            }
+        }
+        managed.mode = new_mode;
+        let restore_rect = floating.then_some(managed.last_floating_rect).flatten();
+        managed.pending_floating_rect_restore = if floating { restore_rect } else { None };
+        if floating {
+            managed.fullscreen = false;
+            if let Some(workspace) = self.workspaces.try_get_mut(workspace_id) {
+                if workspace
+                    .layout
+                    .fullscreen
+                    .as_ref()
+                    .is_some_and(|fullscreen| fullscreen.surface_object_id == object_id)
+                {
+                    changed = true;
+                    workspace.layout.set_fullscreen(None);
+                }
+            }
+        }
+        if changed {
+            tiling::mark_workspace_dirty(self, workspace_id);
+            self.relayout_dirty_workspaces();
+        }
+        if floating {
+            if let Some(rect) = restore_rect {
+                self.restore_root_surface_floating_rect(object_id, rect);
+            }
+        }
+        changed
+    }
+
+    pub fn set_root_surface_fullscreen(&mut self, object_id: ObjectId, fullscreen: bool) -> bool {
+        let Some(workspace_id) = self
+            .managed_root_surfaces
+            .get(&object_id)
+            .map(|managed| managed.workspace_id)
+            .or_else(|| self.root_surface_workspace(object_id))
+        else {
+            return false;
+        };
+        let current_bounds = self
+            .objects
+            .try_ref_object::<WlSurface>(object_id)
+            .and_then(|surface| surface.global_logical_bounds());
+        let mut restore_rect = None;
+        if fullscreen {
+            let managed_ids = self
+                .managed_root_surfaces
+                .iter()
+                .filter_map(|(candidate_object_id, managed)| {
+                    (managed.workspace_id == workspace_id && managed.fullscreen)
+                        .then_some(*candidate_object_id)
+                })
+                .collect::<Vec<_>>();
+            for candidate_object_id in managed_ids {
+                if let Some(managed) = self.managed_root_surfaces.get_mut(&candidate_object_id) {
+                    if candidate_object_id != object_id {
+                        if managed.mode == ManagedWindowMode::Floating {
+                            managed.pending_floating_rect_restore = managed.last_floating_rect;
+                        }
+                        managed.fullscreen = false;
+                    }
+                }
+                if candidate_object_id != object_id {
+                    self.sync_root_surface_requested_fullscreen(candidate_object_id, false);
+                }
+            }
+            self.managed_root_surfaces
+                .entry(object_id)
+                .and_modify(|managed| {
+                    if !managed.fullscreen && managed.mode == ManagedWindowMode::Floating {
+                        if let Some(bounds) = current_bounds {
+                            managed.last_floating_rect = Some(bounds);
+                        }
+                    }
+                    managed.pending_floating_rect_restore = None;
+                    managed.fullscreen = true;
+                })
+                .or_insert(ManagedRootSurfaceState {
+                    workspace_id,
+                    mode: ManagedWindowMode::Tiled,
+                    fullscreen: true,
+                    mapped: false,
+                    last_floating_rect: None,
+                    pending_floating_rect_restore: None,
+                });
+        } else {
+            {
+                let Some(managed) = self.managed_root_surfaces.get_mut(&object_id) else {
+                    return false;
+                };
+                if !managed.fullscreen {
+                    return false;
+                }
+                managed.fullscreen = false;
+                if managed.mode == ManagedWindowMode::Floating {
+                    restore_rect = managed.last_floating_rect;
+                    managed.pending_floating_rect_restore = restore_rect;
+                } else {
+                    managed.pending_floating_rect_restore = None;
+                }
+            }
+            self.sync_root_surface_requested_fullscreen(object_id, false);
+        }
+        tiling::mark_workspace_dirty(self, workspace_id);
+        self.relayout_dirty_workspaces();
+        if let Some(rect) = restore_rect {
+            self.restore_root_surface_floating_rect(object_id, rect);
+        }
+        true
+    }
+
+    pub fn resize_tiled_root_surface(
+        &mut self,
+        object_id: ObjectId,
+        edges: u32,
+        dx: i32,
+        dy: i32,
+    ) -> bool {
+        let changed = tiling::resize_tiled_surface(self, object_id, edges, dx, dy);
+        if changed {
+            self.relayout_dirty_workspaces();
+        }
+        changed
+    }
+
+    pub fn begin_tiled_root_surface_resize(
+        &mut self,
+        object_id: ObjectId,
+        edges: u32,
+    ) -> Option<TiledResizeState> {
+        self.relayout_dirty_workspaces();
+        let workspace_id = self.root_surface_workspace(object_id)?;
+        let workspace = self.workspaces.try_get(workspace_id)?;
+        workspace.layout.begin_tiled_resize(object_id, edges)
+    }
+
+    pub fn resize_tiled_root_surface_from_state(
+        &mut self,
+        object_id: ObjectId,
+        resize_state: TiledResizeState,
+        dx: i32,
+        dy: i32,
+    ) -> bool {
+        let Some(workspace_id) = self.root_surface_workspace(object_id) else {
+            return false;
+        };
+        let Some(workspace) = self.workspaces.try_get_mut(workspace_id) else {
+            return false;
+        };
+        let changed =
+            workspace
+                .layout
+                .resize_tiled_surface_from_state(object_id, resize_state, dx, dy);
+        if changed {
+            self.relayout_dirty_workspaces();
+        }
+        changed
     }
 
     pub fn move_workspace_to_group_output(
@@ -1434,6 +1776,17 @@ impl State {
         if dx == 0 && dy == 0 {
             return;
         }
+        for managed in self.managed_root_surfaces.values_mut() {
+            if managed.workspace_id != workspace_id {
+                continue;
+            }
+            managed.last_floating_rect = managed
+                .last_floating_rect
+                .map(|rect| rect.translate(dx, dy));
+            managed.pending_floating_rect_restore = managed
+                .pending_floating_rect_restore
+                .map(|rect| rect.translate(dx, dy));
+        }
         let Some(surface_ids) = self
             .workspaces
             .try_get(workspace_id)
@@ -1442,6 +1795,9 @@ impl State {
             return;
         };
         for surface_object_id in surface_ids {
+            if self.is_tiled_root_surface(surface_object_id) {
+                continue;
+            }
             let Some(mut surface) = self.objects.try_grab_object::<WlSurface>(surface_object_id)
             else {
                 continue;
@@ -1449,6 +1805,41 @@ impl State {
             let (x, y) = surface.root_position();
             surface.set_root_position(x + dx, y + dy);
         }
+        tiling::mark_workspace_dirty(self, workspace_id);
+        self.relayout_dirty_workspaces();
+    }
+
+    fn restore_root_surface_floating_rect(&mut self, object_id: ObjectId, rect: RectI) -> bool {
+        let Some(mut surface) = self.objects.try_grab_object::<WlSurface>(object_id) else {
+            return false;
+        };
+        surface.set_root_position(rect.x, rect.y);
+        true
+    }
+
+    fn sync_root_surface_requested_fullscreen(&mut self, object_id: ObjectId, fullscreen: bool) {
+        let Some((client_id, xdg_surface_id)) = self
+            .objects
+            .try_ref_object::<WlSurface>(object_id)
+            .and_then(|surface| {
+                surface
+                    .xdg_surface_id()
+                    .map(|xdg_surface_id| (surface.client_id(), xdg_surface_id))
+            })
+        else {
+            return;
+        };
+        let Some(toplevel_object_id) = self.xdg_toplevel_object_id(client_id, xdg_surface_id)
+        else {
+            return;
+        };
+        let Some(mut toplevel) = self
+            .objects
+            .try_grab_object::<XdgToplevel>(toplevel_object_id)
+        else {
+            return;
+        };
+        toplevel.set_requested_fullscreen(fullscreen);
     }
 
     pub fn can_remove_workspace(&self, workspace_id: WorkspaceId) -> bool {
@@ -1505,7 +1896,9 @@ impl State {
     pub fn register_root_surface(&mut self, object_id: ObjectId) {
         self.unregister_root_surface(object_id);
         self.root_surfaces.push(object_id);
-        let _ = self.ensure_root_surface_workspace(object_id);
+        if let Some(workspace_id) = self.ensure_root_surface_workspace(object_id) {
+            tiling::mark_workspace_dirty(self, workspace_id);
+        }
     }
 
     pub fn register_layer_surface_object(
@@ -1534,12 +1927,17 @@ impl State {
     pub fn unregister_root_surface(&mut self, object_id: ObjectId) {
         self.root_surfaces
             .retain(|candidate| *candidate != object_id);
-        self.detach_root_surface_from_workspace(object_id);
+        if let Some(workspace_id) = self.detach_root_surface_from_workspace(object_id) {
+            tiling::mark_workspace_dirty(self, workspace_id);
+        }
     }
 
     pub fn raise_root_surface(&mut self, object_id: ObjectId) -> bool {
         if !self.objects.contains(object_id) {
             return false;
+        }
+        if tiling::raise_surface(self, object_id) {
+            return true;
         }
         self.register_root_surface(object_id);
         true
@@ -1938,6 +2336,8 @@ mod tests {
             workspaces: Default::default(),
             output_workspace_groups: Default::default(),
             root_surface_workspaces: Default::default(),
+            managed_root_surfaces: Default::default(),
+            xdg_toplevel_roles: Default::default(),
             next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,
@@ -2343,6 +2743,158 @@ mod tests {
     }
 
     #[test]
+    fn assigning_root_surface_creates_persistent_managed_state() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(12u32), ClientId::from_raw(3), 6));
+        state.register_root_surface(object_id);
+        assert_eq!(state.root_surface_workspace(object_id), Some(workspace_id));
+
+        let managed = state.managed_root_surface_state(object_id).unwrap();
+        assert_eq!(managed.workspace_id, workspace_id);
+        assert_eq!(managed.mode, ManagedWindowMode::Tiled);
+        assert!(!managed.fullscreen);
+        assert_eq!(managed.pending_floating_rect_restore, None);
+
+        assert!(state.set_root_surface_floating(object_id, true));
+        assert_eq!(
+            state.managed_root_surface_state(object_id).unwrap().mode,
+            ManagedWindowMode::Floating
+        );
+    }
+
+    #[test]
+    fn floating_mode_restores_last_floating_rect_when_reenabled() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
+
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(15u32), ClientId::from_raw(6), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(0usize), 20, 30, 120, 90);
+        }
+        state.register_root_surface(object_id);
+
+        assert!(state.set_root_surface_floating(object_id, true));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.set_root_position(250, 180);
+        }
+
+        assert!(state.set_root_surface_floating(object_id, false));
+        assert_eq!(
+            state
+                .managed_root_surface_state(object_id)
+                .unwrap()
+                .last_floating_rect,
+            Some(RectI { x: 250, y: 180, width: 120, height: 90 })
+        );
+
+        assert!(state.set_root_surface_floating(object_id, true));
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(object_id)
+            .unwrap();
+        assert_eq!(surface.root_position(), (250, 180));
+        assert_eq!(
+            state
+                .managed_root_surface_state(object_id)
+                .unwrap()
+                .pending_floating_rect_restore,
+            Some(RectI { x: 250, y: 180, width: 120, height: 90 })
+        );
+    }
+
+    #[test]
+    fn fullscreen_state_is_workspace_scoped_and_replaced_cleanly() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+
+        let (_, first_object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(13u32), ClientId::from_raw(4), 6));
+        let (_, second_object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(14u32), ClientId::from_raw(5), 6));
+        state.register_root_surface(first_object_id);
+        state.register_root_surface(second_object_id);
+        assert_eq!(state.root_surface_workspace(first_object_id), Some(workspace_id));
+        assert_eq!(state.root_surface_workspace(second_object_id), Some(workspace_id));
+
+        assert!(state.set_root_surface_fullscreen(first_object_id, true));
+        assert!(
+            state
+                .managed_root_surface_state(first_object_id)
+                .unwrap()
+                .fullscreen
+        );
+        assert!(
+            !state
+                .managed_root_surface_state(second_object_id)
+                .unwrap()
+                .fullscreen
+        );
+
+        assert!(state.set_root_surface_fullscreen(second_object_id, true));
+        assert!(
+            !state
+                .managed_root_surface_state(first_object_id)
+                .unwrap()
+                .fullscreen
+        );
+        assert!(
+            state
+                .managed_root_surface_state(second_object_id)
+                .unwrap()
+                .fullscreen
+        );
+    }
+
+    #[test]
+    fn fullscreen_round_trip_restores_floating_rect() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
+
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(18u32), ClientId::from_raw(9), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(0usize), 30, 40, 160, 120);
+        }
+        state.register_root_surface(object_id);
+        assert!(state.set_root_surface_floating(object_id, true));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.set_root_position(320, 240);
+        }
+
+        assert!(state.set_root_surface_fullscreen(object_id, true));
+        assert!(state.set_root_surface_fullscreen(object_id, false));
+
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(object_id)
+            .unwrap();
+        assert_eq!(surface.root_position(), (320, 240));
+        assert_eq!(
+            state
+                .managed_root_surface_state(object_id)
+                .unwrap()
+                .pending_floating_rect_restore,
+            Some(RectI { x: 320, y: 240, width: 160, height: 120 })
+        );
+    }
+
+    #[test]
     fn moving_workspace_between_outputs_translates_assigned_root_surfaces() {
         let mut state = make_state();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
@@ -2368,6 +2920,66 @@ mod tests {
             .unwrap();
         assert_eq!(surface.root_position(), (210, 20));
         assert_eq!(state.workspace_output_id(left_workspace), Some(right_output));
+    }
+
+    #[test]
+    fn moving_workspace_between_outputs_translates_stored_floating_rects() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let left_output = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
+        let right_output = state.insert_output(make_output(backend, 2, 200, 0, 100, 100));
+        let left_workspace = state.active_workspace_for_output(left_output).unwrap();
+        let right_group = state.workspace_group_for_output(right_output).unwrap();
+
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(16u32), ClientId::from_raw(7), 6));
+        state.register_root_surface(object_id);
+        state.assign_root_surface_to_workspace(object_id, left_workspace);
+        state
+            .managed_root_surfaces
+            .get_mut(&object_id)
+            .unwrap()
+            .last_floating_rect = Some(RectI { x: 10, y: 20, width: 50, height: 50 });
+
+        state.move_workspace_to_group_output(left_workspace, right_group);
+
+        assert_eq!(
+            state
+                .managed_root_surface_state(object_id)
+                .unwrap()
+                .last_floating_rect,
+            Some(RectI { x: 210, y: 20, width: 50, height: 50 })
+        );
+    }
+
+    #[test]
+    fn moving_workspace_between_outputs_translates_pending_floating_restore_rects() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let left_output = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
+        let right_output = state.insert_output(make_output(backend, 2, 200, 0, 100, 100));
+        let left_workspace = state.active_workspace_for_output(left_output).unwrap();
+        let right_group = state.workspace_group_for_output(right_output).unwrap();
+
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(17u32), ClientId::from_raw(8), 6));
+        state.register_root_surface(object_id);
+        state.assign_root_surface_to_workspace(object_id, left_workspace);
+        state
+            .managed_root_surfaces
+            .get_mut(&object_id)
+            .unwrap()
+            .pending_floating_rect_restore = Some(RectI { x: 10, y: 20, width: 50, height: 50 });
+
+        state.move_workspace_to_group_output(left_workspace, right_group);
+
+        assert_eq!(
+            state
+                .managed_root_surface_state(object_id)
+                .unwrap()
+                .pending_floating_rect_restore,
+            Some(RectI { x: 210, y: 20, width: 50, height: 50 })
+        );
     }
 
     #[test]
