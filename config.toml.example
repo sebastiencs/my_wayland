@@ -28,8 +28,8 @@ left = 0
 [mouse_bindings]
 # Mouse bindings use modifier names plus `mouse:<button>`.
 # Supported button aliases: left, right, middle. Raw Linux button codes also work.
-"Super+mouse:left" = { action = "move-window" }
-"Super+mouse:right" = { action = "resize-window" }
+"Ctrl+mouse:left" = { action = "move-window" }
+"Ctrl+mouse:right" = { action = "resize-window" }
 
 # Optional: fixed scale per DRM output name, or "auto".
 # [output.scales]
