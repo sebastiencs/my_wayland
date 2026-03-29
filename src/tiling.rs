@@ -1220,7 +1220,13 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
             else {
                 continue;
             };
-            surface.set_root_position(operation.content_rect.x, operation.content_rect.y);
+            let (rx, ry) = tiled_root_position_from_content_rect(
+                state,
+                operation.surface_object_id,
+                &surface,
+                operation.content_rect,
+            );
+            surface.set_root_position(rx, ry);
         }
     }
 }
@@ -1287,11 +1293,14 @@ pub(crate) fn effective_decoration_insets_for_surface(
     if toplevel.decoration_mode() == ToplevelDecorationMode::ServerSide {
         return fallback;
     }
+    let Some(explicit_geometry) = toplevel.window_geometry() else {
+        return fallback;
+    };
     let Some(window_geometry) = effective_window_geometry_for_surface(
         state,
         surface_object_id,
         surface,
-        toplevel.window_geometry(),
+        Some(explicit_geometry),
     ) else {
         return fallback;
     };
@@ -1309,6 +1318,33 @@ pub(crate) fn effective_window_geometry_for_surface(
     window_geometry
         .map(|raw| clamp_window_geometry_to_surface_bounds(raw, surface_bounds))
         .or(Some(surface_bounds))
+}
+
+/// Places the wl_surface root so that `window_geometry` in surface-local coordinates lines up
+/// with the tiled `content_rect` (frame minus decoration insets).
+pub(crate) fn tiled_root_position_from_content_rect(
+    state: &State,
+    surface_object_id: ObjectId,
+    surface: &WlSurface,
+    content_rect: RectI,
+) -> (i32, i32) {
+    let Some((_, toplevel)) =
+        xdg_toplevel_for_surface_ids(state, surface.client_id(), surface.xdg_surface_id())
+    else {
+        return (content_rect.x, content_rect.y);
+    };
+    let Some(window_geometry) = effective_window_geometry_for_surface(
+        state,
+        surface_object_id,
+        surface,
+        toplevel.window_geometry(),
+    ) else {
+        return (content_rect.x, content_rect.y);
+    };
+    (
+        content_rect.x.saturating_sub(window_geometry.x),
+        content_rect.y.saturating_sub(window_geometry.y),
+    )
 }
 
 fn clamp_window_geometry_to_surface_bounds(window_geometry: RectI, surface_bounds: RectI) -> RectI {
@@ -1339,17 +1375,32 @@ pub(crate) fn decoration_insets_from_window_geometry_and_logical_size(
     logical_size: SizeI,
     window_geometry: RectI,
 ) -> Option<DecorationInsets> {
+    let w = logical_size.width;
+    let h = logical_size.height;
+    let gx2 = window_geometry.x2();
+    let gy2 = window_geometry.y2();
     Some(DecorationInsets {
-        left: window_geometry.x.saturating_neg().max(0),
-        top: window_geometry.y.saturating_neg().max(0),
-        right: window_geometry
-            .x2()
-            .saturating_sub(logical_size.width)
-            .max(0),
-        bottom: window_geometry
-            .y2()
-            .saturating_sub(logical_size.height)
-            .max(0),
+        // Padding between the surface buffer [0,w)×[0,h) and the window-geometry rectangle:
+        // negative origin (GTK-style subsurface CSD) and positive origin (content inset from
+        // buffer top-left, e.g. title bar above geometry) are both covered.
+        left: window_geometry
+            .x
+            .saturating_neg()
+            .max(0)
+            .saturating_add(window_geometry.x.max(0)),
+        top: window_geometry
+            .y
+            .saturating_neg()
+            .max(0)
+            .saturating_add(window_geometry.y.max(0)),
+        right: gx2
+            .saturating_sub(w)
+            .max(0)
+            .saturating_add(w.saturating_sub(gx2).max(0)),
+        bottom: gy2
+            .saturating_sub(h)
+            .max(0)
+            .saturating_add(h.saturating_sub(gy2).max(0)),
     })
 }
 
@@ -2399,6 +2450,16 @@ mod tests {
             .unwrap();
             assert_eq!(insets, DecorationInsets { top: 12, right: 6, bottom: 8, left: 4 });
         }
+    }
+
+    #[test]
+    fn window_geometry_positive_origin_derives_csd_title_bar_insets() {
+        let insets = decoration_insets_from_window_geometry_and_logical_size(
+            SizeI { width: 800, height: 600 },
+            RectI { x: 0, y: 32, width: 800, height: 568 },
+        )
+        .unwrap();
+        assert_eq!(insets, DecorationInsets { top: 32, right: 0, bottom: 0, left: 0 });
     }
 
     #[test]
