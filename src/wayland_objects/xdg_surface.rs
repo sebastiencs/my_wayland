@@ -362,6 +362,12 @@ impl XdgSurface {
                     toplevel.set_window_geometry(self.current_window_geometry);
                 }
             }
+            log::debug!(
+                "[DEBUG_TILING] xdg_surface_apply_window_geometry surface={:?} pending={:?} current={:?}",
+                client.object_id(self.wl_surface_id()),
+                self.pending_window_geometry,
+                self.current_window_geometry,
+            );
         }
         if role_changes.initial_commit_complete {
             self.initial_commit_complete = true;
@@ -680,6 +686,12 @@ impl Object for XdgSurface {
                     return;
                 }
                 self.pending_window_geometry = Some(window_geometry);
+                log::debug!(
+                    "[DEBUG_TILING] xdg_surface_set_window_geometry surface={:?} pending={:?} current={:?}",
+                    client.object_id(self.wl_surface_id()),
+                    self.pending_window_geometry,
+                    self.current_window_geometry,
+                );
             }
             AckConfigure { serial } => {
                 let Some(position) = self

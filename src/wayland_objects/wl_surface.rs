@@ -1939,6 +1939,41 @@ impl WlSurface {
                 }
             }
         }
+        if self.is_root()
+            && self.role == Role::XdgSurface
+            && !self.has_cursor_role()
+            && !self.has_dnd_icon_role()
+        {
+            let surface_bounds =
+                Self::local_surface_tree_bounds_with_surface(state, surface_object_id, self);
+            let window_geometry = self.xdg_surface_id().and_then(|xdg_surface_id| {
+                state
+                    .objects
+                    .try_ref_object::<XdgSurface>(client.object_id(xdg_surface_id))
+                    .map(|xdg_surface| {
+                        crate::tiling::effective_window_geometry_for_surface(
+                            state,
+                            surface_object_id,
+                            self,
+                            xdg_surface.current_window_geometry(),
+                        )
+                    })
+                    .flatten()
+            });
+            log::debug!(
+                "[DEBUG_TILING] wl_surface_commit surface={:?} root={:?} logical_size={:?} global_bounds={:?} surface_bounds={:?} window_geometry={:?} effective_insets={:?} mapped={} changed={} needs_frame={}",
+                surface_object_id,
+                self.root_position(),
+                self.logical_size(),
+                self.global_logical_bounds(),
+                surface_bounds,
+                window_geometry,
+                crate::tiling::effective_decoration_insets_for_surface(state, surface_object_id, self),
+                self.global_logical_bounds().is_some(),
+                changed,
+                needs_frame,
+            );
+        }
         let is_mapped = self.global_logical_bounds().is_some();
         if was_mapped != is_mapped {
             if let Some(ShellSurfaceObject::XdgSurface(xdg_surface_id)) = self.shell_surface {

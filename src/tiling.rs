@@ -1228,6 +1228,14 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
                 operation.content_rect,
             );
             surface.set_root_position(rx, ry);
+            debug_log_tiled_geometry_snapshot(
+                state,
+                operation.surface_object_id,
+                &surface,
+                operation.frame_rect,
+                operation.content_rect,
+                decoration_insets_for_surface(&decoration_insets, operation.surface_object_id),
+            );
         }
     }
 }
@@ -1319,6 +1327,64 @@ pub(crate) fn effective_window_geometry_for_surface(
     window_geometry
         .map(|raw| clamp_window_geometry_to_surface_bounds(raw, surface_bounds))
         .or(Some(surface_bounds))
+}
+
+fn debug_log_tiled_geometry_snapshot(
+    state: &State,
+    surface_object_id: ObjectId,
+    surface: &WlSurface,
+    frame_rect: RectI,
+    content_rect: RectI,
+    insets: DecorationInsets,
+) {
+    let (root_x, root_y) = surface.root_position();
+    let surface_bounds =
+        WlSurface::local_surface_tree_bounds_with_surface(state, surface_object_id, surface);
+    let logical_bounds = surface.global_logical_bounds();
+    let logical_size = surface.logical_size();
+    let (decoration_mode, explicit_window_geometry, effective_window_geometry) =
+        xdg_toplevel_for_surface_ids(state, surface.client_id(), surface.xdg_surface_id())
+            .map(|(_, toplevel)| {
+                let explicit = toplevel.window_geometry();
+                (
+                    Some(toplevel.decoration_mode()),
+                    explicit,
+                    effective_window_geometry_for_surface(
+                        state,
+                        surface_object_id,
+                        surface,
+                        explicit,
+                    ),
+                )
+            })
+            .unwrap_or((None, None, None));
+
+    let frame_anchor_ok = surface_bounds.is_some_and(|bounds| {
+        root_x.saturating_add(bounds.x) == frame_rect.x
+            && root_y.saturating_add(bounds.y) == frame_rect.y
+    });
+    let content_anchor_ok = effective_window_geometry.is_some_and(|geom| {
+        root_x.saturating_add(geom.x) == content_rect.x
+            && root_y.saturating_add(geom.y) == content_rect.y
+    });
+
+    log::debug!(
+        "[DEBUG_TILING] surface={:?} root=({}, {}) frame={:?} content={:?} insets={:?} logical_size={:?} logical_bounds={:?} surface_bounds={:?} decoration_mode={:?} explicit_window_geometry={:?} effective_window_geometry={:?} frame_anchor_ok={} content_anchor_ok={}",
+        surface_object_id,
+        root_x,
+        root_y,
+        frame_rect,
+        content_rect,
+        insets,
+        logical_size,
+        logical_bounds,
+        surface_bounds,
+        decoration_mode,
+        explicit_window_geometry,
+        effective_window_geometry,
+        frame_anchor_ok,
+        content_anchor_ok,
+    );
 }
 
 /// Places the wl_surface root for a tiled layout by aligning the committed surface tree to the
