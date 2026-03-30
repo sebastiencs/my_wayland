@@ -103,7 +103,7 @@ impl Object for WpFractionalScaleManagerV1 {
 #[cfg(test)]
 mod tests {
     use crate::{
-        clients::{Client, ClientsAction, EventWriter},
+        clients::{Client, ClientManagerAction, EventWriter},
         egl::EGL,
         globals::Globals,
         io_uring::model::IoUringAction,
@@ -183,8 +183,8 @@ mod tests {
         drop(client_dispatcher);
 
         assert!(!client.contains_object(fractional_id, &state));
-        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::Close { id } if *id == client.client_id())
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::Close { id } if *id == client.client_id())
         }));
         assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
             action,

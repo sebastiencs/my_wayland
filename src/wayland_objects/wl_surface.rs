@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    clients::{Client, ClientDispatcher, ClientId, ClientsAction, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, ClientId, ClientManagerAction, EventWriter, RawRequest},
     drm::{schedule_active_output, schedule_outputs, schedule_outputs_for_rect},
     object::{Object, Parser},
     protocol_generated::{
@@ -1899,7 +1899,7 @@ impl WlSurface {
             {
                 if let Some(workspace_id) = state.root_surface_workspace(surface_object_id) {
                     crate::tiling::mark_workspace_dirty(state, workspace_id);
-                    dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+                    dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
                 }
             }
         }
@@ -1951,7 +1951,7 @@ impl WlSurface {
                     if is_mapped {
                         state.confirm_root_surface_mapped(surface_object_id);
                     }
-                    dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+                    dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
                 }
             }
         }
@@ -1967,7 +1967,7 @@ impl WlSurface {
         }
 
         if matches!(self.shell_surface, Some(ShellSurfaceObject::LayerSurface(_))) {
-            dispatcher.dispatch(ClientsAction::LayerShellLayoutChanged);
+            dispatcher.dispatch(ClientManagerAction::LayerShellLayoutChanged);
         }
     }
 
@@ -2705,7 +2705,7 @@ mod tests {
             WlSurface,
         },
         crate::{
-            clients::{Client, ClientId, ClientsAction, RawEvent, RawRequest},
+            clients::{Client, ClientId, ClientManagerAction, RawEvent, RawRequest},
             cursor::CursorSourceRef,
             drm::ARGB8888,
             egl::EGL,
@@ -3101,8 +3101,8 @@ mod tests {
             surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
         }
 
-        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::WorkspaceStateChanged)
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::WorkspaceStateChanged)
         }));
     }
 
@@ -3394,8 +3394,8 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
         }
-        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::WorkspaceStateChanged)
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::WorkspaceStateChanged)
         }));
         state.relayout_dirty_workspaces();
 
@@ -3429,8 +3429,8 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
         }
-        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::WorkspaceStateChanged)
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::WorkspaceStateChanged)
         }));
         state.relayout_dirty_workspaces();
 

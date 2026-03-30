@@ -224,7 +224,7 @@ impl Object for ZwlrLayerShellV1 {
 #[cfg(test)]
 mod tests {
     use crate::{
-        clients::{Client, ClientId, ClientsAction, RawEvent},
+        clients::{Client, ClientId, ClientManagerAction, RawEvent},
         egl::EGL,
         globals::Globals,
         io_uring::model::IoUringAction,
@@ -299,8 +299,8 @@ mod tests {
         drop(client_dispatcher);
 
         assert!(client.object_is(manager_id, &state));
-        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::Close { id } if *id == client.client_id())
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::Close { id } if *id == client.client_id())
         }));
         assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
             action,
@@ -331,8 +331,8 @@ mod tests {
         }
         drop(client_dispatcher);
 
-        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::Close { id } if *id == client.client_id())
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::Close { id } if *id == client.client_id())
         }));
         assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
             action,

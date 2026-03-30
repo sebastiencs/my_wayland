@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    clients::{Client, ClientDispatcher, ClientsAction, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, ClientManagerAction, EventWriter, RawRequest},
     drm::schedule_outputs,
     globals::Global,
     object::{Object, Parser},
@@ -40,7 +40,7 @@ pub fn publish_workspace_state_changed(
         schedule_outputs(state, affected_outputs.iter().copied(), dispatcher);
     }
     seat::refresh_scene_focus(state, dispatcher);
-    dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+    dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
 }
 
 impl Global for ExtWorkspaceManagerV1Global {

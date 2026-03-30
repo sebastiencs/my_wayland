@@ -17,7 +17,7 @@ use nix::{
 };
 
 use crate::{
-    clients::ClientsAction,
+    clients::ClientManagerAction,
     dbus::DbusAction,
     drm::{discard_backend_presentation_feedbacks, sync_output_nodes_for_backend, Drm, DrmReader},
     globals::Global,
@@ -189,7 +189,7 @@ impl Udev {
         };
         sync_output_nodes_for_backend(state, drm_id);
         for output_id in state.output_ids_for_backend(BackendOutputRef::new(drm_id)) {
-            dispatcher.dispatch(ClientsAction::OutputStateChanged { output_id });
+            dispatcher.dispatch(ClientManagerAction::OutputStateChanged { output_id });
         }
         sync_color_control_globals(state, dispatcher);
     }
@@ -215,8 +215,9 @@ impl Udev {
 
         if let Some(global_name) = state.backend_syncobj_globals.remove(&drm_id) {
             let _ = state.remove_global(global_name);
-            dispatcher
-                .dispatch(ClientsAction::RegistryGlobalRemoved { name: global_name.as_u32() });
+            dispatcher.dispatch(ClientManagerAction::RegistryGlobalRemoved {
+                name: global_name.as_u32(),
+            });
         }
         sync_color_control_globals(state, dispatcher);
 
@@ -343,7 +344,7 @@ impl Udev {
             let (interface, version) = global.interface();
             let name = state.insert_global(global);
             state.backend_syncobj_globals.insert(drm_id, name);
-            dispatcher.dispatch(ClientsAction::RegistryGlobalAdded {
+            dispatcher.dispatch(ClientManagerAction::RegistryGlobalAdded {
                 name: name.as_u32(),
                 interface: interface.to_string(),
                 version,
@@ -364,7 +365,7 @@ impl Udev {
         if let Some(output) = state.outputs.try_get_mut(output_id) {
             output.global_name = Some(global_name);
         }
-        dispatcher.dispatch(ClientsAction::RegistryGlobalAdded {
+        dispatcher.dispatch(ClientManagerAction::RegistryGlobalAdded {
             name: global_name.as_u32(),
             interface: interface.to_string(),
             version,
@@ -378,15 +379,16 @@ impl Udev {
         dispatcher: &mut Dispatcher,
     ) {
         dispatcher.stop_model(output_id);
-        dispatcher.dispatch(ClientsAction::OutputRemoved { output_id });
+        dispatcher.dispatch(ClientManagerAction::OutputRemoved { output_id });
         let global_name = state
             .outputs
             .try_get(output_id)
             .and_then(|output| output.global_name);
         if let Some(global_name) = global_name {
             let _ = state.remove_global(global_name);
-            dispatcher
-                .dispatch(ClientsAction::RegistryGlobalRemoved { name: global_name.as_u32() });
+            dispatcher.dispatch(ClientManagerAction::RegistryGlobalRemoved {
+                name: global_name.as_u32(),
+            });
         }
         let _ = state.remove_output(output_id);
     }
@@ -427,7 +429,7 @@ fn sync_color_control_global(
             let global = make_global();
             let (interface, version) = global.interface();
             let name = state.insert_global(global);
-            dispatcher.dispatch(ClientsAction::RegistryGlobalAdded {
+            dispatcher.dispatch(ClientManagerAction::RegistryGlobalAdded {
                 name: name.as_u32(),
                 interface: interface.to_string(),
                 version,
@@ -435,7 +437,7 @@ fn sync_color_control_global(
         }
         (false, Some(name)) => {
             let _ = state.remove_global(name);
-            dispatcher.dispatch(ClientsAction::RegistryGlobalRemoved { name: name.as_u32() });
+            dispatcher.dispatch(ClientManagerAction::RegistryGlobalRemoved { name: name.as_u32() });
         }
         _ => {}
     }

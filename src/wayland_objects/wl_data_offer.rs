@@ -423,7 +423,8 @@ mod tests {
         super::WlDataOffer,
         crate::{
             clients::{
-                Client, ClientAction, ClientId, ClientsAction, DataSourceClientEvent, RawEvent,
+                Client, ClientAction, ClientId, ClientManagerAction, DataSourceClientEvent,
+                RawEvent,
             },
             egl::EGL,
             globals::Globals,
@@ -649,8 +650,8 @@ mod tests {
             &mut client_dispatcher,
         );
 
-        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::Close { id } if *id == client.client_id())
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::Close { id } if *id == client.client_id())
         }));
     }
 
@@ -769,8 +770,8 @@ mod tests {
             .active_drag()
             .expect("stale finish should be ignored");
         assert_eq!(drag.negotiation.offer_ids, vec![live_offer_id]);
-        assert!(!dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::Close { id } if *id == client.client_id())
+        assert!(!dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::Close { id } if *id == client.client_id())
         }));
     }
 
@@ -889,8 +890,8 @@ mod tests {
         let mut offer = state.objects.grab_object::<WlDataOffer>(offer_object_id);
         offer.on(&mut client, &mut state, finish_request(offer_id), &mut client_dispatcher);
 
-        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::Close { id } if *id == client.client_id())
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::Close { id } if *id == client.client_id())
         }));
     }
 
@@ -923,8 +924,8 @@ mod tests {
             &mut client_dispatcher,
         );
 
-        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::Close { id } if *id == client.client_id())
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::Close { id } if *id == client.client_id())
         }));
     }
 

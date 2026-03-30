@@ -99,7 +99,7 @@ mod tests {
     use {
         super::WlDataDeviceManager,
         crate::{
-            clients::{Client, ClientAction, ClientId, ClientsAction, RawEvent},
+            clients::{Client, ClientAction, ClientId, ClientManagerAction, RawEvent},
             egl::EGL,
             globals::Globals,
             object::Object,
@@ -216,8 +216,8 @@ mod tests {
             &mut client_dispatcher,
         );
 
-        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::Close { id } if *id == client.client_id())
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::Close { id } if *id == client.client_id())
         }));
     }
 }

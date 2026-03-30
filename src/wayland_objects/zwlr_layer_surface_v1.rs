@@ -651,7 +651,7 @@ impl ZwlrLayerSurfaceV1 {
         state.unregister_layer_surface_object(self.id);
         self.unregister_from_manager(client, state);
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
-        dispatcher.dispatch(crate::clients::ClientsAction::LayerShellLayoutChanged);
+        dispatcher.dispatch(crate::clients::ClientManagerAction::LayerShellLayoutChanged);
         refresh_keyboard_focus(state, dispatcher);
     }
 
@@ -675,7 +675,7 @@ impl ZwlrLayerSurfaceV1 {
                 surface.force_unmap_for_role_dismissal(client, state, dispatcher);
             }
             self.send_closed(dispatcher);
-            dispatcher.dispatch(crate::clients::ClientsAction::LayerShellLayoutChanged);
+            dispatcher.dispatch(crate::clients::ClientManagerAction::LayerShellLayoutChanged);
             refresh_keyboard_focus(state, dispatcher);
             return;
         }
@@ -1398,7 +1398,7 @@ impl Object for ZwlrLayerSurfaceV1 {
         }
         state.unregister_layer_surface_object(self.id);
         self.unregister_from_manager(client, state);
-        dispatcher.dispatch(crate::clients::ClientsAction::LayerShellLayoutChanged);
+        dispatcher.dispatch(crate::clients::ClientManagerAction::LayerShellLayoutChanged);
         refresh_keyboard_focus(state, dispatcher);
     }
 }
@@ -1408,7 +1408,7 @@ mod tests {
     use {
         super::*,
         crate::{
-            clients::{Client, ClientId, ClientsAction, RawEvent},
+            clients::{Client, ClientId, ClientManagerAction, RawEvent},
             egl::EGL,
             globals::Globals,
             io_uring::model::IoUringAction,
@@ -1831,8 +1831,8 @@ mod tests {
 
         assert_eq!(layer_surface.pending.layer, None);
         assert_eq!(layer_surface.layer(), LayerShellLayer::Bottom);
-        assert!(dispatcher.test_has_queued_action::<crate::clients::ClientsAction>(|action| {
-            matches!(action, crate::clients::ClientsAction::Close { id } if *id == client.client_id())
+        assert!(dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(|action| {
+            matches!(action, crate::clients::ClientManagerAction::Close { id } if *id == client.client_id())
         }));
         assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
             action,
@@ -1867,8 +1867,8 @@ mod tests {
         drop(client_dispatcher);
 
         assert_eq!(layer_surface.pending.anchor, None);
-        assert!(!dispatcher.test_has_queued_action::<crate::clients::ClientsAction>(|action| {
-            matches!(action, crate::clients::ClientsAction::Close { id } if *id == client.client_id())
+        assert!(!dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(|action| {
+            matches!(action, crate::clients::ClientManagerAction::Close { id } if *id == client.client_id())
         }));
         assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
             action,
@@ -1903,8 +1903,8 @@ mod tests {
         drop(client_dispatcher);
 
         assert_eq!(layer_surface.pending.keyboard_interactivity, None);
-        assert!(!dispatcher.test_has_queued_action::<crate::clients::ClientsAction>(|action| {
-            matches!(action, crate::clients::ClientsAction::Close { id } if *id == client.client_id())
+        assert!(!dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(|action| {
+            matches!(action, crate::clients::ClientManagerAction::Close { id } if *id == client.client_id())
         }));
         assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
             action,
@@ -1955,8 +1955,8 @@ mod tests {
         drop(client_dispatcher);
 
         assert_eq!(layer_surface.pending.exclusive_edge, None);
-        assert!(dispatcher.test_has_queued_action::<crate::clients::ClientsAction>(|action| {
-            matches!(action, crate::clients::ClientsAction::Close { id } if *id == client.client_id())
+        assert!(dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(|action| {
+            matches!(action, crate::clients::ClientManagerAction::Close { id } if *id == client.client_id())
         }));
         assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
             action,
@@ -1993,8 +1993,8 @@ mod tests {
         drop(client_dispatcher);
 
         assert!(!client.contains_object(layer_surface_id, &state));
-        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::LayerShellLayoutChanged)
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::LayerShellLayoutChanged)
         }));
     }
 
@@ -2031,8 +2031,8 @@ mod tests {
         }
         drop(client_dispatcher);
 
-        assert!(dispatcher.test_has_queued_action::<ClientsAction>(|action| {
-            matches!(action, ClientsAction::Close { id } if *id == client.client_id())
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::Close { id } if *id == client.client_id())
         }));
         assert!(dispatcher.test_has_queued_action::<IoUringAction>(|action| matches!(
             action,

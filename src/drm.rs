@@ -48,7 +48,7 @@ use crate::{
 };
 
 use crate::{
-    clients::{ClientAction, ClientId, ClientsAction},
+    clients::{ClientAction, ClientId, ClientManagerAction},
     protocol_generated::{WlSurfaceId, WpPresentationFeedbackId},
 };
 
@@ -2972,7 +2972,7 @@ fn dispatch_gamma_control_failed_if_pending(
         .output(drm_crtc_id)
         .is_some_and(|output| output.color_state.gamma_dirty)
     {
-        dispatcher.dispatch(ClientsAction::GammaControlFailed { output_id });
+        dispatcher.dispatch(ClientManagerAction::GammaControlFailed { output_id });
     }
 }
 

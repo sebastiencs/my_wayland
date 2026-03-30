@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    clients::{ClientAction, ClientId, ClientsAction},
+    clients::{ClientAction, ClientId, ClientManagerAction},
     cursor::CursorSourceRef,
     drm::{schedule_active_output, schedule_outputs_for_points, schedule_outputs_for_rects},
     protocol_generated::{xdg_toplevel::ResizeEdge, XdgToplevelId},
@@ -185,7 +185,7 @@ pub(crate) fn apply_pointer_interactive_grab(
                 dx,
                 dy,
             ) {
-                dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+                dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
                 schedule_active_output(state, dispatcher);
             }
             state.seat.pointer_interactive_grab = Some(ActiveGrabState::ResizeTiled {
@@ -223,7 +223,7 @@ pub(crate) fn finish_pointer_interactive_grab(
     }
     state.seat.clear_pointer_interactive_grab();
     if was_tiled_resize {
-        dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+        dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
     }
     end_compositor_pointer_grab(state, dispatcher, time);
 }
@@ -240,7 +240,7 @@ pub(crate) fn abort_pointer_interactive_grab(
     }
     state.seat.clear_pointer_interactive_grab();
     if was_tiled_resize {
-        dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+        dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
     }
     end_compositor_pointer_grab(state, dispatcher, time);
     true
@@ -298,7 +298,7 @@ fn prepare_window_for_pointer_grab(
         && state.is_tiled_root_surface(target.root_surface_object_id)
         && state.set_root_surface_floating(target.root_surface_object_id, true)
     {
-        dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+        dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
         schedule_active_output(state, dispatcher);
     }
 

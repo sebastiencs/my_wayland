@@ -134,7 +134,7 @@ use nix::sys::timerfd::{self, TimerFd, TimerFlags, TimerSetTimeFlags};
 use {globals::Globals, state::State};
 
 use crate::{
-    clients::Clients,
+    clients::ClientManager,
     io_uring::model::IoUringState,
     runner::{Dispatcher, Runner},
     udev::Udev,
@@ -281,7 +281,7 @@ fn main() {
     // return;
 
     let uring = Box::<IoUringState>::default();
-    let clients = Clients::new();
+    let client_manager = ClientManager::new();
     let config_watcher = Box::new(config::ConfigWatcher::new(&state.config));
 
     let mut runner = Runner::with_state(state);
@@ -289,11 +289,11 @@ fn main() {
     runner.add_model(dbus);
     runner.add_model(udev);
     runner.add_model(libinput);
-    runner.add_model(clients);
+    runner.add_model(client_manager);
     runner.add_model(config_watcher);
 
     let mut dispatcher = Dispatcher::default();
-    dispatcher.start::<Clients>();
+    dispatcher.start::<ClientManager>();
     dispatcher.start::<libinput::Libinput>();
     dispatcher.start::<config::ConfigWatcher>();
 

@@ -14,7 +14,7 @@ use {
 };
 
 use crate::{
-    clients::ClientsAction,
+    clients::ClientManagerAction,
     drm::{schedule_outputs, schedule_outputs_for_points},
     io_uring::{
         model::IoUringAction,
@@ -645,7 +645,7 @@ pub fn apply_output_settings(state: &mut State, dispatcher: &mut Dispatcher) {
 
     schedule_outputs(state, changed_outputs.iter().copied(), dispatcher);
     for output_id in changed_outputs {
-        dispatcher.dispatch(ClientsAction::OutputStateChanged { output_id });
+        dispatcher.dispatch(ClientManagerAction::OutputStateChanged { output_id });
     }
 }
 

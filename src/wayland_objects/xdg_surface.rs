@@ -767,7 +767,7 @@ pub mod xdg_toplevel {
     use std::collections::BTreeSet;
 
     use crate::{
-        clients::{Client, ClientDispatcher, ClientsAction, EventWriter, RawRequest},
+        clients::{Client, ClientDispatcher, ClientManagerAction, EventWriter, RawRequest},
         drm::schedule_outputs,
         object::{Object, Parser},
         protocol_generated::{
@@ -1249,7 +1249,7 @@ pub mod xdg_toplevel {
             if !affected_outputs.is_empty() {
                 schedule_outputs(state, affected_outputs.into_iter(), dispatcher);
             }
-            dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+            dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
         }
 
         pub fn send_interactive_resize_configure(
@@ -1695,7 +1695,7 @@ pub mod xdg_toplevel {
                             schedule_outputs(state, affected_outputs.into_iter(), dispatcher);
                         }
                         crate::seat::refresh_scene_focus(state, dispatcher);
-                        dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+                        dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
                     }
                 }
                 UnsetFullscreen => {
@@ -1711,7 +1711,7 @@ pub mod xdg_toplevel {
                             schedule_outputs(state, affected_outputs.into_iter(), dispatcher);
                         }
                         crate::seat::refresh_scene_focus(state, dispatcher);
-                        dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+                        dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
                     }
                 }
                 SetMinimized => {
@@ -2031,8 +2031,8 @@ mod tests {
 
         assert!(!client.contains_object(toplevel_id, &state));
         assert!(client.contains_object(decoration_id, &state));
-        assert!(dispatcher.test_has_queued_action::<crate::clients::ClientsAction>(
-            |action| matches!(action, crate::clients::ClientsAction::Close { id } if *id == client.client_id())
+        assert!(dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(
+            |action| matches!(action, crate::clients::ClientManagerAction::Close { id } if *id == client.client_id())
         ));
         assert!(dispatcher.test_has_queued_action::<crate::io_uring::model::IoUringAction>(
             |action| matches!(action, crate::io_uring::model::IoUringAction::Sendmsg { .. })

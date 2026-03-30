@@ -60,14 +60,14 @@ impl ClientId {
     }
 }
 
-pub struct Clients {
+pub struct ClientManager {
     current_id: u64,
     fd: UnixListener,
     set: BTreeSet<ClientId>,
 }
 
 #[derive(Debug)]
-pub enum ClientsAction {
+pub enum ClientManagerAction {
     Start,
     RearmAccept,
     NewClient { new_client: RawFd },
@@ -83,7 +83,7 @@ pub enum ClientsAction {
     Close { id: ClientId },
 }
 
-impl Clients {
+impl ClientManager {
     pub fn new() -> Box<Self> {
         let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
         let filename = PathBuf::from(runtime).join("my-wayland-0");
@@ -111,29 +111,29 @@ impl Clients {
             fd: self.fd.as_raw_fd(),
             dispatch_to: Redispatcher::to::<Self>(|result| match result {
                 Ok(AcceptCompleted { fd: _, new_client }) => {
-                    ClientsAction::NewClient { new_client }
+                    ClientManagerAction::NewClient { new_client }
                 }
                 Err(e) => {
                     log::error!("accept failed: {:?}", e);
-                    ClientsAction::RearmAccept
+                    ClientManagerAction::RearmAccept
                 }
             }),
         });
     }
 }
 
-impl Model for Clients {
-    type Action = ClientsAction;
+impl Model for ClientManager {
+    type Action = ClientManagerAction;
 
-    const START: Option<Self::Action> = Some(ClientsAction::Start);
+    const START: Option<Self::Action> = Some(ClientManagerAction::Start);
 
     fn process(
         &mut self,
         _state: &mut State,
-        action: ClientsAction,
+        action: ClientManagerAction,
         dispatcher: &mut Dispatcher,
     ) -> Result<(), ()> {
-        use ClientsAction::*;
+        use ClientManagerAction::*;
 
         match action {
             Start => {
@@ -1956,7 +1956,7 @@ impl<'a> ClientDispatcher<'a> {
     }
 
     pub fn disconnect_client(&mut self, client_id: ClientId) {
-        self.dispatch(ClientsAction::Close { id: client_id });
+        self.dispatch(ClientManagerAction::Close { id: client_id });
     }
 
     pub fn send_event(&mut self, mut event: RawEvent) {
@@ -2387,7 +2387,7 @@ impl ClientReader {
     }
 
     fn dispatch_close(&self, dispatcher: &mut Dispatcher) {
-        dispatcher.dispatch(ClientsAction::Close { id: self.client_id });
+        dispatcher.dispatch(ClientManagerAction::Close { id: self.client_id });
     }
 }
 

@@ -109,7 +109,7 @@ At startup:
    - `Udev`
    - `Libinput`
    - `Clients`
-3. `ClientsAction::Start` starts the Wayland socket accept loop and also starts D-Bus and udev.
+3. `ClientManagerAction::Start` starts the Wayland socket accept loop and also starts D-Bus and udev.
 
 At runtime:
 
