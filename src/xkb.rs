@@ -6,7 +6,7 @@ use std::{
 
 use xkbcommon::xkb;
 
-use crate::{input::ForeignStr, protocol_generated::Array, wayland_objects::wl_shm_pool::sys};
+use crate::{libinput::ForeignStr, protocol_generated::Array, wayland_objects::wl_shm_pool::sys};
 
 pub struct Xkb {
     ctx: xkb::Context,

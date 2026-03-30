@@ -4,7 +4,7 @@ use crate::{
     drm::Drm,
     egl::EGL,
     globals::{Global, GlobalName, Globals},
-    input::Input,
+    libinput::Input,
     object::Object,
     protocol_generated::{
         WaylandId, WlDataOfferId, WlDataSourceId, WlSeatId, WlSurfaceId, XdgSurfaceId,

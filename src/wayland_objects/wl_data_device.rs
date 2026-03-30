@@ -308,7 +308,7 @@ mod tests {
             object::Object,
             protocol_generated::{WlDataDeviceId, WlDataSourceId, WlSeatId, WlSurfaceId},
             runner::Dispatcher,
-            seat::{handle_keyboard_key, set_surface_focus, SurfaceFocus},
+            seat::{handle_keyboard_key, set_keyboard_focus_from_surface, SurfaceFocus},
             state::{
                 DataOfferRole, DragNegotiationState, DragPhase, DragState, DragTargetState, State,
             },
@@ -390,7 +390,7 @@ mod tests {
         let origin_id = WlSurfaceId::from(10);
 
         client.insert_object(&mut state, WlSurface::new(origin_id, client.client_id(), 6));
-        set_surface_focus(
+        set_keyboard_focus_from_surface(
             &mut state,
             &mut setup_dispatcher,
             Some(SurfaceFocus { client_id: client.client_id(), surface_id: origin_id }),
@@ -426,7 +426,7 @@ mod tests {
 
         client.insert_object(&mut state, WlDataSource::new(source_id, client.client_id(), 3));
         client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
-        set_surface_focus(
+        set_keyboard_focus_from_surface(
             &mut state,
             &mut setup_dispatcher,
             Some(SurfaceFocus { client_id: client.client_id(), surface_id }),

@@ -105,7 +105,7 @@ mod tests {
             object::Object,
             protocol_generated::{WlDataDeviceId, WlDataDeviceManagerId, WlDataSourceId, WlSeatId},
             runner::Dispatcher,
-            seat::{set_surface_focus, SurfaceFocus},
+            seat::{set_keyboard_focus_from_surface, SurfaceFocus},
             state::State,
             wayland_objects::{
                 wl_data_source::WlDataSource, wl_seat::WlSeat, wl_surface::WlSurface,
@@ -173,7 +173,7 @@ mod tests {
         insert_surface(&mut state, &mut client, 99);
         {
             let mut setup_dispatcher = client.test_dispatcher(&mut dispatcher);
-            set_surface_focus(
+            set_keyboard_focus_from_surface(
                 &mut state,
                 &mut setup_dispatcher,
                 Some(SurfaceFocus { client_id: client.client_id(), surface_id: 99u32.into() }),

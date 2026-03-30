@@ -1,33 +1,34 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    clients::{ClientAction, ClientId, ClientsAction},
+    clients::{ClientAction, ClientId},
     config,
     cursor::{CursorSourceRef, CursorState},
-    drm::{schedule_active_output, schedule_outputs_for_points, schedule_outputs_for_rects, Drm},
-    object::Object,
-    protocol_generated::{
-        xdg_toplevel::ResizeEdge, Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId,
-        WlKeyboardId, WlPointerId, WlSeatId, WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgToplevelId,
+    drm::schedule_outputs_for_points,
+    input::{
+        maybe_dismiss_popup_grab_on_button, popup_keyboard_focus, refresh_drag_focus,
+        set_keyboard_focus, surface_focus_pick_at, ActiveGrabState, HitSemantics, PointerFocus,
+        PointerInteractiveGrab, ScenePick, SurfaceFocusPick, WindowHit,
     },
-    region::RectI,
+    protocol_generated::{
+        Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlKeyboardId, WlPointerId, WlSeatId,
+        WlSurfaceId, XdgPopupId, XdgToplevelId,
+    },
     runner::Dispatcher,
     state::{
-        DragNegotiationState, DragPhase, DragState, DragTargetState, DrmId, IndexMap, ObjectId,
+        DragNegotiationState, DragPhase, DragState, DragTargetState, ObjectId,
         SelectionSourceState, State,
     },
     tiling::TiledResizeState,
     wayland_objects::{
-        wl_surface::{Role, StackEntry, WlSurface},
-        xdg_surface::xdg_toplevel::{InteractiveSizeConstraints, XdgToplevel},
-        zwlr_layer_surface_v1::{
-            layer_surface_keyboard_focus_with_snapshot, lookup_snapshot_surface,
-            ordered_scene_root_surface_ids, ordered_scene_root_surface_ids_with_snapshot,
-            LayerKeyboardFocus, LayerLayoutObjectSnapshot, LayerShellLayer,
-        },
+        xdg_surface::xdg_toplevel::InteractiveSizeConstraints,
+        zwlr_layer_surface_v1::LayerLayoutObjectSnapshot,
     },
     xkb::KeyboardModifiers,
 };
+
+pub use crate::input::SurfaceFocus;
+pub(crate) use crate::input::SurfaceRect;
 
 const POINTER_MOVE_CURSOR_ICON_NAMES: &[&str] = &["grab", "grabbing", "move"];
 const POINTER_RESIZE_NW_CURSOR_ICON_NAMES: &[&str] = &["nw-resize", "size_fdiag"];
@@ -38,26 +39,6 @@ const POINTER_RESIZE_N_CURSOR_ICON_NAMES: &[&str] = &["n-resize", "size_ver"];
 const POINTER_RESIZE_S_CURSOR_ICON_NAMES: &[&str] = &["s-resize", "size_ver"];
 const POINTER_RESIZE_W_CURSOR_ICON_NAMES: &[&str] = &["w-resize", "size_hor"];
 const POINTER_RESIZE_E_CURSOR_ICON_NAMES: &[&str] = &["e-resize", "size_hor"];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SurfaceFocus {
-    pub client_id: ClientId,
-    pub surface_id: WlSurfaceId,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SurfaceRect {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PointerFocus {
-    target: SurfaceFocus,
-    rect: SurfaceRect,
-}
 
 #[derive(Clone, Debug)]
 pub enum SeatClientEvent {
@@ -145,46 +126,18 @@ struct SerialRange {
 
 const MAX_TRACKED_SERIAL_RANGES: usize = 32;
 
-#[derive(Clone, Copy, Debug)]
-enum PointerInteractiveGrab {
-    Move {
-        client_id: ClientId,
-        root_surface_object_id: ObjectId,
-        initial_pointer_pos: (f64, f64),
-        initial_root_pos: (i32, i32),
-    },
-    Resize {
-        client_id: ClientId,
-        root_surface_object_id: ObjectId,
-        xdg_toplevel_id: XdgToplevelId,
-        size_constraints: InteractiveSizeConstraints,
-        edges: u32,
-        initial_pointer_pos: (f64, f64),
-        initial_root_pos: (i32, i32),
-        initial_size: (i32, i32),
-        last_size: (i32, i32),
-    },
-    ResizeTiled {
-        client_id: ClientId,
-        root_surface_object_id: ObjectId,
-        edges: u32,
-        initial_pointer_pos: (f64, f64),
-        resize_state: TiledResizeState,
-    },
-}
-
 pub struct SeatState {
     current_serial: u32,
-    pointer_pos: (f64, f64),
-    pointer_focus: Option<PointerFocus>,
+    pub(crate) pointer_pos: (f64, f64),
+    pub(crate) pointer_focus: Option<SurfaceFocusPick>,
     last_pointer_enter: Option<PointerEnterState>,
-    keyboard_focus: Option<SurfaceFocus>,
-    pointer_button_count: u32,
+    pub(crate) keyboard_focus: Option<SurfaceFocus>,
+    pub(crate) pointer_button_count: u32,
     last_pointer_press: Option<PointerPressState>,
     last_keyboard_trigger: Option<KeyboardTriggerState>,
     cursor: CursorState,
     popup_grab: Option<PopupGrabState>,
-    pointer_interactive_grab: Option<PointerInteractiveGrab>,
+    pub(crate) pointer_interactive_grab: Option<ActiveGrabState>,
     client_serials: BTreeMap<ClientId, VecDeque<SerialRange>>,
     data_device_resources: BTreeMap<ClientId, Vec<WlDataDeviceId>>,
     selection_source: Option<SelectionSourceState>,
@@ -623,7 +576,7 @@ impl SeatState {
         result
     }
 
-    fn next_serial(&mut self) -> u32 {
+    pub(crate) fn next_serial(&mut self) -> u32 {
         let serial = self.current_serial;
         self.current_serial = self.current_serial.wrapping_add(1).max(1);
         serial
@@ -662,11 +615,11 @@ impl SeatState {
         serials.push_back(SerialRange { lo: serial, hi: serial });
     }
 
-    fn record_pointer_enter(&mut self, client_id: ClientId, serial: u32) {
+    pub(crate) fn record_pointer_enter(&mut self, client_id: ClientId, serial: u32) {
         self.last_pointer_enter = Some(PointerEnterState { client_id, serial });
     }
 
-    fn clear_pointer_enter(&mut self) {
+    pub(crate) fn clear_pointer_enter(&mut self) {
         self.last_pointer_enter = None;
     }
 
@@ -775,7 +728,7 @@ impl SeatState {
         self.intercepted_pointer_buttons.remove(&button)
     }
 
-    fn validate_implicit_grab_serial(
+    pub(crate) fn validate_implicit_grab_serial(
         &self,
         client_id: ClientId,
         surface_id: WlSurfaceId,
@@ -794,7 +747,7 @@ impl SeatState {
             })
     }
 
-    fn validate_popup_grab_serial(
+    pub(crate) fn validate_popup_grab_serial(
         &self,
         client_id: ClientId,
         surface_id: WlSurfaceId,
@@ -803,18 +756,18 @@ impl SeatState {
         self.validate_implicit_grab_serial(client_id, surface_id, serial)
     }
 
-    fn popup_grab_client(&self) -> Option<ClientId> {
+    pub(crate) fn popup_grab_client(&self) -> Option<ClientId> {
         self.popup_grab.as_ref().map(|grab| grab.client_id)
     }
 
-    fn popup_keyboard_surface(&self) -> Option<WlSurfaceId> {
+    pub(crate) fn popup_keyboard_surface(&self) -> Option<WlSurfaceId> {
         self.popup_grab
             .as_ref()
             .and_then(|grab| grab.popup_stack.last())
             .map(|(_, surface_id)| *surface_id)
     }
 
-    fn popup_grab_contains_surface(&self, surface_id: WlSurfaceId) -> bool {
+    pub(crate) fn popup_grab_contains_surface(&self, surface_id: WlSurfaceId) -> bool {
         self.popup_grab.as_ref().is_some_and(|grab| {
             grab.popup_stack
                 .iter()
@@ -822,7 +775,7 @@ impl SeatState {
         })
     }
 
-    fn start_popup_grab(
+    pub(crate) fn start_popup_grab(
         &mut self,
         client_id: ClientId,
         popup_id: XdgPopupId,
@@ -839,7 +792,7 @@ impl SeatState {
         grab.popup_stack.push((popup_id, popup_surface_id));
     }
 
-    fn remove_popup_grab(&mut self, popup_id: XdgPopupId) {
+    pub(crate) fn remove_popup_grab(&mut self, popup_id: XdgPopupId) {
         let Some(grab) = self.popup_grab.as_mut() else {
             return;
         };
@@ -850,7 +803,7 @@ impl SeatState {
         }
     }
 
-    fn dismiss_popup_grab(&mut self) -> Option<(ClientId, Vec<XdgPopupId>)> {
+    pub(crate) fn dismiss_popup_grab(&mut self) -> Option<(ClientId, Vec<XdgPopupId>)> {
         let grab = self.popup_grab.take()?;
         Some((
             grab.client_id,
@@ -861,7 +814,7 @@ impl SeatState {
         ))
     }
 
-    fn start_toplevel_move(
+    pub(crate) fn start_toplevel_move(
         &mut self,
         client_id: ClientId,
         root_surface_object_id: ObjectId,
@@ -875,7 +828,7 @@ impl SeatState {
         });
     }
 
-    fn start_toplevel_resize(
+    pub(crate) fn start_toplevel_resize(
         &mut self,
         client_id: ClientId,
         root_surface_object_id: ObjectId,
@@ -898,7 +851,7 @@ impl SeatState {
         });
     }
 
-    fn start_toplevel_tiled_resize(
+    pub(crate) fn start_toplevel_tiled_resize(
         &mut self,
         client_id: ClientId,
         root_surface_object_id: ObjectId,
@@ -914,7 +867,7 @@ impl SeatState {
         });
     }
 
-    fn clear_pointer_interactive_grab(&mut self) {
+    pub(crate) fn clear_pointer_interactive_grab(&mut self) {
         self.pointer_interactive_grab = None;
         self.intercepted_pointer_buttons.clear();
     }
@@ -1159,157 +1112,18 @@ pub fn handle_keyboard_key(
     }
 }
 
-fn set_keyboard_focus(
-    state: &mut State,
-    dispatcher: &mut Dispatcher,
-    new_focus: Option<SurfaceFocus>,
-) {
-    let new_focus = normalize_keyboard_focus(state, new_focus);
-    if state.seat.keyboard_focus == new_focus {
-        return;
-    }
-
-    log::debug!(
-        "seat keyboard focus change old={:?} new={:?}",
-        state.seat.keyboard_focus,
-        new_focus
-    );
-
-    let serial = state.seat.next_serial();
-
-    if let Some(old_focus) = state.seat.keyboard_focus {
-        dispatch_client_event(
-            dispatcher,
-            old_focus.client_id,
-            SeatClientEvent::KeyboardLeave { serial, surface: old_focus.surface_id },
-        );
-    }
-
-    if let Some(new_focus) = new_focus {
-        let keys = state.keyboard.pressed_keys();
-        dispatch_client_event(
-            dispatcher,
-            new_focus.client_id,
-            SeatClientEvent::KeyboardEnter { serial, surface: new_focus.surface_id, keys },
-        );
-        dispatch_modifiers(dispatcher, new_focus.client_id, serial, state.keyboard.modifiers());
-    }
-
-    let old_focus = state.seat.keyboard_focus;
-    state.seat.keyboard_focus = new_focus;
-    refresh_selection_focus_clients(dispatcher, old_focus, new_focus);
-}
-
-fn normalize_keyboard_focus(
-    state: &State,
-    requested_focus: Option<SurfaceFocus>,
-) -> Option<SurfaceFocus> {
-    normalize_keyboard_focus_with_snapshot(state, requested_focus, None)
-}
-
-fn normalize_keyboard_focus_with_snapshot(
-    state: &State,
-    requested_focus: Option<SurfaceFocus>,
-    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
-) -> Option<SurfaceFocus> {
-    let requested_focus = requested_focus.and_then(|focus| {
-        let surface_object_id = surface_object_id_for_wayland_id(state, focus.surface_id)?;
-        match layer_surface_keyboard_focus_with_snapshot(state, surface_object_id, snapshot) {
-            Some(LayerKeyboardFocus::None) => None,
-            _ => Some(focus),
-        }
-    });
-
-    if let Some(popup_surface_id) = state.seat.popup_keyboard_surface() {
-        if requested_focus.is_some_and(|focus| focus.surface_id == popup_surface_id) {
-            return requested_focus;
-        }
-    }
-
-    topmost_exclusive_layer_focus_with_snapshot(state, snapshot).or(requested_focus)
-}
-
-fn topmost_exclusive_layer_focus(state: &State) -> Option<SurfaceFocus> {
-    topmost_exclusive_layer_focus_with_snapshot(state, None)
-}
-
-fn topmost_exclusive_layer_focus_with_snapshot(
-    state: &State,
-    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
-) -> Option<SurfaceFocus> {
-    for object_id in ordered_scene_root_surface_ids_with_snapshot(state, snapshot)
-        .into_iter()
-        .rev()
-    {
-        let Some(surface) = lookup_snapshot_surface(state, snapshot, object_id) else {
-            continue;
-        };
-        let Some(LayerKeyboardFocus::Exclusive { layer }) =
-            layer_surface_keyboard_focus_with_snapshot(state, object_id, snapshot)
-        else {
-            continue;
-        };
-        if !matches!(layer, LayerShellLayer::Top | LayerShellLayer::Overlay) {
-            continue;
-        }
-        return Some(SurfaceFocus {
-            client_id: surface.client_id(),
-            surface_id: surface.surface_id(),
-        });
-    }
-
-    None
-}
-
-fn surface_object_id_for_wayland_id(state: &State, surface_id: WlSurfaceId) -> Option<ObjectId> {
-    for (object_id, object) in state.objects.iter() {
-        let Some(surface) = object.downcast_ref::<WlSurface>() else {
-            continue;
-        };
-        if surface.surface_id() == surface_id {
-            return Some(object_id);
-        }
-    }
-    None
-}
-
 pub fn surface_focus_for_wayland_id(
     state: &State,
     surface_id: WlSurfaceId,
 ) -> Option<SurfaceFocus> {
-    let object_id = surface_object_id_for_wayland_id(state, surface_id)?;
-    let surface = state.objects.try_ref_object::<WlSurface>(object_id)?;
-    Some(SurfaceFocus {
-        client_id: surface.client_id(),
-        surface_id: surface.surface_id(),
-    })
+    crate::input::surface_focus_for_wayland_id(state, surface_id)
 }
 
 pub fn resolve_activation_target(
     state: &State,
     surface_id: WlSurfaceId,
 ) -> Option<(ObjectId, SurfaceFocus)> {
-    let mut current_object_id = surface_object_id_for_wayland_id(state, surface_id)?;
-    loop {
-        let surface = state
-            .objects
-            .try_ref_object::<WlSurface>(current_object_id)?;
-        match surface.parent_surface_object_id() {
-            Some(parent_object_id) => current_object_id = parent_object_id,
-            None => {
-                if !surface.has_committed_buffer() {
-                    return None;
-                }
-                return Some((
-                    current_object_id,
-                    SurfaceFocus {
-                        client_id: surface.client_id(),
-                        surface_id: surface.surface_id(),
-                    },
-                ));
-            }
-        }
-    }
+    crate::input::resolve_activation_target(state, surface_id)
 }
 
 pub fn validate_activation_serial(
@@ -1319,22 +1133,36 @@ pub fn validate_activation_serial(
     surface_id: WlSurfaceId,
     serial: u32,
 ) -> bool {
-    state.objects.iter().any(|(_, object)| {
-        let Some(seat) = object.downcast_ref::<crate::wayland_objects::wl_seat::WlSeat>() else {
-            return false;
-        };
-        seat.id() == seat_id.into()
-    }) && state
-        .seat
-        .validate_implicit_grab_serial(client_id, surface_id, serial)
+    crate::input::validate_activation_serial(state, client_id, seat_id, surface_id, serial)
 }
 
-pub fn set_surface_focus(
+pub fn set_keyboard_focus_from_surface(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     new_focus: Option<SurfaceFocus>,
 ) {
-    set_keyboard_focus(state, dispatcher, new_focus);
+    crate::input::set_keyboard_focus_from_surface(state, dispatcher, new_focus);
+}
+
+pub fn refresh_keyboard_focus(state: &mut State, dispatcher: &mut Dispatcher) {
+    crate::input::refresh_keyboard_focus(state, dispatcher);
+}
+
+pub fn refresh_keyboard_focus_with_snapshot(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+) {
+    crate::input::refresh_keyboard_focus_with_snapshot(state, dispatcher, snapshot);
+}
+
+pub fn refresh_scene_focus(state: &mut State, dispatcher: &mut Dispatcher) {
+    refresh_pointer_focus(state, dispatcher, monotonic_time_msec(), false);
+    refresh_keyboard_focus(state, dispatcher);
+}
+
+pub fn refresh_active_drag_focus(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {
+    crate::input::refresh_active_drag_focus(state, dispatcher, time);
 }
 
 fn monotonic_time_msec() -> u32 {
@@ -1346,30 +1174,6 @@ fn monotonic_time_msec() -> u32 {
         .saturating_mul(1000)
         .saturating_add((ts.tv_nsec as u64) / 1_000_000);
     millis.min(u64::from(u32::MAX)) as u32
-}
-
-pub fn refresh_keyboard_focus(state: &mut State, dispatcher: &mut Dispatcher) {
-    refresh_keyboard_focus_with_snapshot(state, dispatcher, None);
-}
-
-pub fn refresh_keyboard_focus_with_snapshot(
-    state: &mut State,
-    dispatcher: &mut Dispatcher,
-    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
-) {
-    let preferred_focus =
-        popup_keyboard_focus(state).or_else(|| state.seat.pointer_focus.map(|focus| focus.target));
-    let new_focus = normalize_keyboard_focus_with_snapshot(state, preferred_focus, snapshot);
-    set_keyboard_focus(state, dispatcher, new_focus);
-}
-
-pub fn refresh_scene_focus(state: &mut State, dispatcher: &mut Dispatcher) {
-    refresh_pointer_focus(state, dispatcher, monotonic_time_msec(), false);
-    refresh_keyboard_focus(state, dispatcher);
-}
-
-pub fn refresh_active_drag_focus(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {
-    let _ = refresh_drag_focus(state, dispatcher, time, true);
 }
 
 pub fn finish_active_drag(state: &mut State, dispatcher: &mut Dispatcher) {
@@ -1423,204 +1227,12 @@ pub fn cancel_active_drag(
     }
 }
 
-fn popup_keyboard_focus(state: &State) -> Option<SurfaceFocus> {
-    let surface_id = state.seat.popup_keyboard_surface()?;
-    surface_focus_for_wayland_id(state, surface_id)
-}
-
-fn maybe_dismiss_popup_grab_on_button(
-    state: &mut State,
-    dispatcher: &mut Dispatcher,
-    button_state: u32,
-    time: u32,
-) -> bool {
-    if button_state != 1 {
-        return false;
-    }
-    let Some(_grab_client_id) = state.seat.popup_grab_client() else {
-        return false;
-    };
-    let inside_popup_stack = state.seat.pointer_focus.is_some_and(|focus| {
-        state
-            .seat
-            .popup_grab_contains_surface(focus.target.surface_id)
-    });
-    if inside_popup_stack {
-        return false;
-    }
-    let Some((client_id, popup_ids)) = state.seat.dismiss_popup_grab() else {
-        return false;
-    };
-    dispatch_client_action(dispatcher, client_id, ClientAction::DismissPopupGrab { popup_ids });
-    refresh_pointer_focus(state, dispatcher, time, false);
-    set_keyboard_focus(state, dispatcher, state.seat.pointer_focus.map(|focus| focus.target));
-    true
-}
-
 fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher) -> bool {
-    let Some(grab) = state.seat.pointer_interactive_grab else {
-        return false;
-    };
-    match grab {
-        PointerInteractiveGrab::Move {
-            client_id,
-            root_surface_object_id,
-            initial_pointer_pos,
-            initial_root_pos,
-            ..
-        } => {
-            let dx = (state.seat.pointer_pos.0 - initial_pointer_pos.0).round() as i32;
-            let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
-            let Some(mut surface) = state
-                .objects
-                .try_grab_object::<WlSurface>(root_surface_object_id)
-            else {
-                abort_pointer_interactive_grab(state, dispatcher, 0);
-                return true;
-            };
-            let old_bounds = surface.global_logical_bounds();
-            surface.set_root_position(initial_root_pos.0 + dx, initial_root_pos.1 + dy);
-            let new_bounds = surface.global_logical_bounds();
-            dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
-            if let Some(new_bounds) = new_bounds {
-                let rects = old_bounds.into_iter().chain(std::iter::once(new_bounds));
-                schedule_outputs_for_rects(state, rects, dispatcher);
-            } else {
-                schedule_active_output(state, dispatcher);
-            }
-        }
-        PointerInteractiveGrab::Resize {
-            client_id,
-            root_surface_object_id,
-            xdg_toplevel_id,
-            size_constraints,
-            edges,
-            initial_pointer_pos,
-            initial_root_pos,
-            initial_size,
-            mut last_size,
-        } => {
-            let dx = (state.seat.pointer_pos.0 - initial_pointer_pos.0).round() as i32;
-            let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
-            let (mut width, mut height) = initial_size;
-            let (mut x, mut y) = initial_root_pos;
-
-            if edges & 4 != 0 {
-                width = initial_size.0 - dx;
-            }
-            if edges & 8 != 0 {
-                width = initial_size.0 + dx;
-            }
-            if edges & 1 != 0 {
-                height = initial_size.1 - dy;
-            }
-            if edges & 2 != 0 {
-                height = initial_size.1 + dy;
-            }
-            (width, height) = size_constraints.clamp(width, height);
-            if edges & 4 != 0 {
-                x = initial_root_pos.0 + (initial_size.0 - width);
-            }
-            if edges & 1 != 0 {
-                y = initial_root_pos.1 + (initial_size.1 - height);
-            }
-
-            let Some(mut surface) = state
-                .objects
-                .try_grab_object::<WlSurface>(root_surface_object_id)
-            else {
-                abort_pointer_interactive_grab(state, dispatcher, 0);
-                return true;
-            };
-            let old_bounds = surface.global_logical_bounds();
-            surface.set_root_position(x, y);
-            let new_bounds = surface.global_logical_bounds();
-            dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
-            if let Some(new_bounds) = new_bounds {
-                let rects = old_bounds.into_iter().chain(std::iter::once(new_bounds));
-                schedule_outputs_for_rects(state, rects, dispatcher);
-            } else {
-                schedule_active_output(state, dispatcher);
-            }
-
-            if last_size != (width, height) {
-                dispatch_client_action(
-                    dispatcher,
-                    client_id,
-                    ClientAction::InteractiveResizeConfigure {
-                        xdg_toplevel_id,
-                        width,
-                        height,
-                        resizing: true,
-                    },
-                );
-                last_size = (width, height);
-            }
-
-            state.seat.pointer_interactive_grab = Some(PointerInteractiveGrab::Resize {
-                client_id,
-                root_surface_object_id,
-                xdg_toplevel_id,
-                size_constraints,
-                edges,
-                initial_pointer_pos,
-                initial_root_pos,
-                initial_size,
-                last_size,
-            });
-        }
-        PointerInteractiveGrab::ResizeTiled {
-            client_id,
-            root_surface_object_id,
-            edges,
-            initial_pointer_pos,
-            resize_state,
-        } => {
-            let dx = (state.seat.pointer_pos.0 - initial_pointer_pos.0).round() as i32;
-            let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
-            if state.resize_tiled_root_surface_from_state(
-                root_surface_object_id,
-                resize_state,
-                dx,
-                dy,
-            ) {
-                dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
-                schedule_active_output(state, dispatcher);
-            }
-            state.seat.pointer_interactive_grab = Some(PointerInteractiveGrab::ResizeTiled {
-                client_id,
-                root_surface_object_id,
-                edges,
-                initial_pointer_pos,
-                resize_state,
-            });
-        }
-    }
-    true
+    crate::input::apply_pointer_interactive_grab(state, dispatcher)
 }
 
 fn finish_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {
-    let Some(grab) = state.seat.pointer_interactive_grab else {
-        return;
-    };
-    let was_tiled_resize = matches!(grab, PointerInteractiveGrab::ResizeTiled { .. });
-    if let PointerInteractiveGrab::Resize { client_id, xdg_toplevel_id, last_size, .. } = grab {
-        dispatch_client_action(
-            dispatcher,
-            client_id,
-            ClientAction::InteractiveResizeConfigure {
-                xdg_toplevel_id,
-                width: last_size.0,
-                height: last_size.1,
-                resizing: false,
-            },
-        );
-    }
-    state.seat.clear_pointer_interactive_grab();
-    if was_tiled_resize {
-        dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
-    }
-    end_compositor_pointer_grab(state, dispatcher, time);
+    crate::input::finish_pointer_interactive_grab(state, dispatcher, time);
 }
 
 pub(crate) fn abort_pointer_interactive_grab(
@@ -1628,37 +1240,11 @@ pub(crate) fn abort_pointer_interactive_grab(
     dispatcher: &mut Dispatcher,
     time: u32,
 ) -> bool {
-    let was_tiled_resize = matches!(
-        state.seat.pointer_interactive_grab,
-        Some(PointerInteractiveGrab::ResizeTiled { .. })
-    );
-    if state.seat.pointer_interactive_grab.is_none() {
-        return false;
-    }
-    state.seat.clear_pointer_interactive_grab();
-    if was_tiled_resize {
-        dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
-    }
-    end_compositor_pointer_grab(state, dispatcher, time);
-    true
+    crate::input::abort_pointer_interactive_grab(state, dispatcher, time)
 }
 
 pub(crate) fn tiled_resize_active_root_surfaces(state: &State) -> BTreeSet<ObjectId> {
-    let Some(PointerInteractiveGrab::ResizeTiled { root_surface_object_id, resize_state, .. }) =
-        state.seat.pointer_interactive_grab
-    else {
-        return BTreeSet::new();
-    };
-    let Some(workspace_id) = state.root_surface_workspace(root_surface_object_id) else {
-        return BTreeSet::new();
-    };
-    let Some(workspace) = state.workspaces.try_get(workspace_id) else {
-        return BTreeSet::new();
-    };
-    workspace
-        .layout
-        .resize_affected_surfaces(root_surface_object_id, resize_state)
-        .unwrap_or_default()
+    crate::input::tiled_resize_active_root_surfaces(state)
 }
 
 pub(crate) fn recover_pointer_after_interactive_grab_loss(
@@ -1666,95 +1252,7 @@ pub(crate) fn recover_pointer_after_interactive_grab_loss(
     dispatcher: &mut Dispatcher,
     time: u32,
 ) {
-    end_compositor_pointer_grab(state, dispatcher, time);
-}
-
-fn clear_pointer_focus_for_compositor_grab(state: &mut State, dispatcher: &mut Dispatcher) {
-    let Some(old_focus) = state.seat.pointer_focus.take() else {
-        state.seat.clear_pointer_enter();
-        return;
-    };
-    let serial = state.seat.next_serial();
-    dispatch_client_event(
-        dispatcher,
-        old_focus.target.client_id,
-        SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface_id },
-    );
-    dispatch_client_event(dispatcher, old_focus.target.client_id, SeatClientEvent::PointerFrame);
-    state.seat.clear_pointer_enter();
-}
-
-fn update_visible_cursor_for_grab_change(
-    state: &mut State,
-    dispatcher: &mut Dispatcher,
-    update: impl FnOnce(&mut SeatState) -> bool,
-) {
-    let previous_cursor_owner = visible_cursor_owner_client(state);
-    if !update(&mut state.seat) {
-        return;
-    }
-    if let Some(client_id) = previous_cursor_owner {
-        dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
-    }
-    refresh_visible_cursor_surface_outputs(state, dispatcher);
-    schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
-}
-
-fn begin_compositor_pointer_grab(
-    state: &mut State,
-    dispatcher: &mut Dispatcher,
-    cursor_icons: &[&'static str],
-) {
-    clear_pointer_focus_for_compositor_grab(state, dispatcher);
-    update_visible_cursor_for_grab_change(state, dispatcher, |seat| {
-        seat.set_compositor_named_cursor(cursor_icons)
-    });
-}
-
-fn end_compositor_pointer_grab(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {
-    update_visible_cursor_for_grab_change(state, dispatcher, SeatState::clear_cursor);
-    refresh_pointer_focus(state, dispatcher, time, false);
-    update_visible_cursor_for_grab_change(state, dispatcher, SeatState::set_default_cursor);
-}
-
-#[derive(Clone, Copy, Debug)]
-enum WindowPointerRole {
-    XdgToplevel {
-        xdg_toplevel_id: XdgToplevelId,
-        size_constraints: InteractiveSizeConstraints,
-        is_maximized: bool,
-        is_fullscreen: bool,
-    },
-    Unsupported, // TODO: Handle other window types like XWayland
-}
-
-#[derive(Clone, Copy, Debug)]
-struct WindowPointerTarget {
-    client_id: ClientId,
-    surface_id: WlSurfaceId,
-    root_surface_object_id: ObjectId,
-    role: WindowPointerRole,
-    initial_root_pos: (i32, i32),
-    initial_size: (i32, i32),
-    interactive_rect: RectI,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WindowDecorationHit {
-    Titlebar,
-    Resize(u32),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WindowHitZone {
-    Content,
-    Decoration(WindowDecorationHit),
-}
-
-#[derive(Clone, Copy, Debug)]
-struct WindowPointerHit {
-    target: WindowPointerTarget,
-    zone: WindowHitZone,
+    crate::input::recover_pointer_after_interactive_grab_loss(state, dispatcher, time);
 }
 
 fn begin_pointer_binding(
@@ -1762,373 +1260,23 @@ fn begin_pointer_binding(
     dispatcher: &mut Dispatcher,
     action: config::MouseBindingAction,
 ) -> bool {
-    let Some(hit) = window_pointer_hit_at(state, state.seat.pointer_position()) else {
-        return false;
-    };
-
-    match (action, hit.target.role) {
-        (
-            _,
-            WindowPointerRole::XdgToplevel { is_maximized: true, .. }
-            | WindowPointerRole::XdgToplevel { is_fullscreen: true, .. },
-        )
-        | (_, WindowPointerRole::Unsupported) => return false,
-        _ => {}
-    }
-
-    state.raise_root_surface(hit.target.root_surface_object_id);
-    schedule_outputs_for_rects(state, [hit.target.interactive_rect], dispatcher);
-    set_keyboard_focus(
-        state,
-        dispatcher,
-        Some(SurfaceFocus {
-            client_id: hit.target.client_id,
-            surface_id: hit.target.surface_id,
-        }),
-    );
-
-    match (action, hit.target.role) {
-        (config::MouseBindingAction::MoveWindow, _) => {
-            if state.is_tiled_root_surface(hit.target.root_surface_object_id) {
-                if state.set_root_surface_floating(hit.target.root_surface_object_id, true) {
-                    dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
-                    schedule_active_output(state, dispatcher);
-                }
-            }
-            start_interactive_move(
-                state,
-                dispatcher,
-                hit.target.client_id,
-                hit.target.root_surface_object_id,
-                hit.target.initial_root_pos,
-            )
-        }
-        (
-            config::MouseBindingAction::ResizeWindow,
-            WindowPointerRole::XdgToplevel { xdg_toplevel_id, size_constraints, .. },
-        ) => {
-            let edges = resize_edges_for_pointer(
-                hit.target.interactive_rect,
-                state.seat.pointer_position(),
-            );
-            if state.is_tiled_root_surface(hit.target.root_surface_object_id) {
-                start_interactive_tiled_resize(
-                    state,
-                    dispatcher,
-                    hit.target.client_id,
-                    hit.target.root_surface_object_id,
-                    edges,
-                )
-            } else {
-                start_interactive_resize(
-                    state,
-                    dispatcher,
-                    hit.target.client_id,
-                    hit.target.root_surface_object_id,
-                    xdg_toplevel_id,
-                    size_constraints,
-                    edges,
-                    hit.target.initial_root_pos,
-                    hit.target.initial_size,
-                )
-            }
-        }
-        _ => return false,
-    }
-
-    true
+    crate::input::begin_pointer_binding(state, dispatcher, action)
 }
 
 fn begin_ssd_pointer_action(state: &mut State, dispatcher: &mut Dispatcher) -> bool {
-    let pointer_pos = state.seat.pointer_position();
-    let Some(hit) = window_pointer_hit_at(state, pointer_pos) else {
-        return false;
-    };
-    let WindowHitZone::Decoration(decoration_hit) = hit.zone else {
-        return false;
-    };
-
-    match (decoration_hit, hit.target.role) {
-        (
-            _,
-            WindowPointerRole::XdgToplevel { is_maximized: true, .. }
-            | WindowPointerRole::XdgToplevel { is_fullscreen: true, .. },
-        )
-        | (_, WindowPointerRole::Unsupported) => return false,
-        _ => {}
-    }
-
-    state.raise_root_surface(hit.target.root_surface_object_id);
-    schedule_outputs_for_rects(state, [hit.target.interactive_rect], dispatcher);
-    set_keyboard_focus(
-        state,
-        dispatcher,
-        Some(SurfaceFocus {
-            client_id: hit.target.client_id,
-            surface_id: hit.target.surface_id,
-        }),
-    );
-
-    match (decoration_hit, hit.target.role) {
-        (WindowDecorationHit::Titlebar, _) => {
-            if state.is_tiled_root_surface(hit.target.root_surface_object_id) {
-                if state.set_root_surface_floating(hit.target.root_surface_object_id, true) {
-                    dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
-                    schedule_active_output(state, dispatcher);
-                }
-            }
-            start_interactive_move(
-                state,
-                dispatcher,
-                hit.target.client_id,
-                hit.target.root_surface_object_id,
-                hit.target.initial_root_pos,
-            );
-        }
-        (
-            WindowDecorationHit::Resize(edges),
-            WindowPointerRole::XdgToplevel { xdg_toplevel_id, size_constraints, .. },
-        ) => {
-            if state.is_tiled_root_surface(hit.target.root_surface_object_id) {
-                start_interactive_tiled_resize(
-                    state,
-                    dispatcher,
-                    hit.target.client_id,
-                    hit.target.root_surface_object_id,
-                    edges,
-                );
-            } else {
-                start_interactive_resize(
-                    state,
-                    dispatcher,
-                    hit.target.client_id,
-                    hit.target.root_surface_object_id,
-                    xdg_toplevel_id,
-                    size_constraints,
-                    edges,
-                    hit.target.initial_root_pos,
-                    hit.target.initial_size,
-                );
-            }
-        }
-        _ => return false,
-    }
-
-    true
+    crate::input::begin_ssd_pointer_action(state, dispatcher)
 }
 
-fn classify_window_hit_zone(
-    state: &State,
-    target: &WindowPointerTarget,
-    pointer_pos: (f64, f64),
-) -> WindowHitZone {
-    let Some(layout) = state.root_surface_ssd_layout(target.root_surface_object_id) else {
-        return WindowHitZone::Content;
-    };
-    if !rect_contains_point(layout.frame_rect, pointer_pos)
-        || rect_contains_point(layout.content_rect, pointer_pos)
-    {
-        return WindowHitZone::Content;
-    }
-
-    let x = pointer_pos.0.round() as i32;
-    let y = pointer_pos.1.round() as i32;
-    let border_resize_height = state
-        .root_surface_ssd_insets(target.root_surface_object_id)
-        .map(|insets| insets.left.max(insets.right).max(insets.bottom).max(6))
-        .unwrap_or(6);
-    let top_resize_height =
-        (layout.content_rect.y - layout.frame_rect.y).clamp(1, border_resize_height);
-    let top_resize_limit = layout.frame_rect.y.saturating_add(top_resize_height);
-
-    if x < layout.content_rect.x {
-        return WindowHitZone::Decoration(WindowDecorationHit::Resize(
-            if y < layout.content_rect.y {
-                ResizeEdge::TopLeft as u32
-            } else if y >= layout.content_rect.y2() {
-                ResizeEdge::BottomLeft as u32
-            } else {
-                ResizeEdge::Left as u32
-            },
-        ));
-    }
-    if x >= layout.content_rect.x2() {
-        return WindowHitZone::Decoration(WindowDecorationHit::Resize(
-            if y < layout.content_rect.y {
-                ResizeEdge::TopRight as u32
-            } else if y >= layout.content_rect.y2() {
-                ResizeEdge::BottomRight as u32
-            } else {
-                ResizeEdge::Right as u32
-            },
-        ));
-    }
-    if y >= layout.content_rect.y2() {
-        return WindowHitZone::Decoration(WindowDecorationHit::Resize(ResizeEdge::Bottom as u32));
-    }
-    if y < layout.content_rect.y {
-        if y < top_resize_limit {
-            return WindowHitZone::Decoration(WindowDecorationHit::Resize(ResizeEdge::Top as u32));
-        }
-        return WindowHitZone::Decoration(WindowDecorationHit::Titlebar);
-    }
-
-    WindowHitZone::Content
+fn scene_pick_at(state: &State, pointer_pos: (f64, f64)) -> ScenePick {
+    crate::input::scene_pick_at(state, pointer_pos)
 }
 
-fn window_target_at(state: &State, pointer_pos: (f64, f64)) -> Option<WindowPointerTarget> {
-    let mut hit = None;
-
-    for object_id in ordered_scene_root_surface_ids(state) {
-        let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
-            continue;
-        };
-        if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
-            continue;
-        }
-        let Some(interactive_rect) = state.root_surface_interactive_rect(object_id) else {
-            continue;
-        };
-        if rect_contains_point(interactive_rect, pointer_pos) {
-            hit = build_window_target(state, object_id, interactive_rect);
-        }
-    }
-
-    hit
-}
-
-fn window_pointer_hit_at(state: &State, pointer_pos: (f64, f64)) -> Option<WindowPointerHit> {
-    let target = window_target_at(state, pointer_pos)?;
-    let zone = classify_window_hit_zone(state, &target, pointer_pos);
-    Some(WindowPointerHit { target, zone })
-}
-
-fn build_window_target(
-    state: &State,
-    root_surface_object_id: ObjectId,
-    interactive_rect: RectI,
-) -> Option<WindowPointerTarget> {
-    let root_surface = state
-        .objects
-        .try_ref_object::<WlSurface>(root_surface_object_id)?;
-    let role = match root_surface.role() {
-        Role::XdgSurface => root_surface
-            .xdg_surface_id()
-            .map(|xdg_surface_id| {
-                resolve_xdg_window_pointer_role(state, root_surface_object_id, xdg_surface_id)
-            })
-            .unwrap_or(WindowPointerRole::Unsupported),
-        _ => WindowPointerRole::Unsupported,
-    };
-
-    Some(WindowPointerTarget {
-        client_id: root_surface.client_id(),
-        surface_id: root_surface.surface_id(),
-        root_surface_object_id,
-        role,
-        initial_root_pos: root_surface.root_position(),
-        initial_size: root_surface
-            .logical_size()
-            .map(|size| (size.width, size.height))?,
-        interactive_rect,
-    })
-}
-
-fn resolve_xdg_window_pointer_role(
-    state: &State,
-    root_surface_object_id: ObjectId,
-    xdg_surface_id: XdgSurfaceId,
-) -> WindowPointerRole {
-    state
-        .objects
-        .iter()
-        .find_map(|(_object_id, object)| {
-            object.downcast_ref::<XdgToplevel>().and_then(|toplevel| {
-                (toplevel.xdg_surface_id() == xdg_surface_id).then_some(
-                    WindowPointerRole::XdgToplevel {
-                        xdg_toplevel_id: toplevel.toplevel_id(),
-                        size_constraints: toplevel.interactive_size_constraints(),
-                        is_maximized: toplevel.is_maximized(),
-                        is_fullscreen: state.root_surface_is_fullscreen(root_surface_object_id),
-                    },
-                )
-            })
-        })
-        .unwrap_or(WindowPointerRole::Unsupported)
-}
-
-fn rect_contains_point(bounds: RectI, pointer_pos: (f64, f64)) -> bool {
-    pointer_pos.0 >= bounds.x as f64
-        && pointer_pos.0 < (bounds.x + bounds.width) as f64
-        && pointer_pos.1 >= bounds.y as f64
-        && pointer_pos.1 < (bounds.y + bounds.height) as f64
-}
-
-fn resize_edges_for_pointer(bounds: RectI, pointer_pos: (f64, f64)) -> u32 {
-    let left_boundary = bounds.x as f64 + (bounds.width as f64 / 3.0);
-    let right_boundary = bounds.x as f64 + ((bounds.width as f64 * 2.0) / 3.0);
-    let top_boundary = bounds.y as f64 + (bounds.height as f64 / 3.0);
-    let bottom_boundary = bounds.y as f64 + ((bounds.height as f64 * 2.0) / 3.0);
-
-    let horizontal = if pointer_pos.0 < left_boundary {
-        Some(ResizeEdge::Left as u32)
-    } else if pointer_pos.0 >= right_boundary {
-        Some(ResizeEdge::Right as u32)
-    } else {
-        None
-    };
-    let vertical = if pointer_pos.1 < top_boundary {
-        Some(ResizeEdge::Top as u32)
-    } else if pointer_pos.1 >= bottom_boundary {
-        Some(ResizeEdge::Bottom as u32)
-    } else {
-        None
-    };
-
-    match (vertical, horizontal) {
-        (Some(vertical), Some(horizontal)) => vertical | horizontal,
-        (Some(vertical), None) => vertical,
-        (None, Some(horizontal)) => horizontal,
-        (None, None) => {
-            let left_distance = pointer_pos.0 - bounds.x as f64;
-            let right_distance = (bounds.x + bounds.width) as f64 - pointer_pos.0;
-            let top_distance = pointer_pos.1 - bounds.y as f64;
-            let bottom_distance = (bounds.y + bounds.height) as f64 - pointer_pos.1;
-
-            let mut best_edge = ResizeEdge::Left as u32;
-            let mut best_distance = left_distance;
-            for (distance, edge) in [
-                (right_distance, ResizeEdge::Right as u32),
-                (top_distance, ResizeEdge::Top as u32),
-                (bottom_distance, ResizeEdge::Bottom as u32),
-            ] {
-                if distance < best_distance {
-                    best_distance = distance;
-                    best_edge = edge;
-                }
-            }
-            best_edge
-        }
-    }
+fn window_hit_at(state: &State, pointer_pos: (f64, f64)) -> Option<WindowHit> {
+    crate::input::window_hit_at(state, pointer_pos)
 }
 
 fn ssd_hover_cursor_icon_names(state: &State) -> Option<&'static [&'static str]> {
-    let pointer_pos = state.seat.pointer_position();
-    let hit = window_pointer_hit_at(state, pointer_pos)?;
-    match hit.target.role {
-        WindowPointerRole::XdgToplevel { is_maximized: true, .. }
-        | WindowPointerRole::XdgToplevel { is_fullscreen: true, .. }
-        | WindowPointerRole::Unsupported => None,
-        _ => Some(match hit.zone {
-            WindowHitZone::Content => return None,
-            WindowHitZone::Decoration(WindowDecorationHit::Titlebar) => {
-                POINTER_MOVE_CURSOR_ICON_NAMES
-            }
-            WindowHitZone::Decoration(WindowDecorationHit::Resize(edges)) => {
-                resize_cursor_icon_names(edges)
-            }
-        }),
-    }
+    crate::input::ssd_hover_cursor_icon_names(state)
 }
 
 fn update_idle_pointer_cursor(state: &mut State, dispatcher: &mut Dispatcher) {
@@ -2152,180 +1300,14 @@ fn update_idle_pointer_cursor(state: &mut State, dispatcher: &mut Dispatcher) {
     schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
 }
 
-fn hit_test_subtree(
-    objects: &IndexMap<ObjectId, Box<dyn Object>>,
-    surface_object_id: ObjectId,
-    base_x: i32,
-    base_y: i32,
-    x: f64,
-    y: f64,
-) -> Option<PointerFocus> {
-    let surface = objects.try_ref_object::<WlSurface>(surface_object_id)?;
-    let surface_state = surface.render_state_at(base_x, base_y)?;
-    let stack = surface.current_stack().to_vec();
-
-    for entry in stack.iter().rev() {
-        match *entry {
-            StackEntry::Parent => {
-                let rect = SurfaceRect {
-                    x: surface_state.x,
-                    y: surface_state.y,
-                    width: surface_state.width,
-                    height: surface_state.height,
-                };
-                if surface.accepts_input_at_with_origin(x, y, base_x, base_y) {
-                    return Some(PointerFocus {
-                        target: SurfaceFocus {
-                            client_id: surface.client_id(),
-                            surface_id: surface.surface_id(),
-                        },
-                        rect,
-                    });
-                }
-            }
-            StackEntry::Child(child_surface_object_id) => {
-                let Some(child_surface) =
-                    objects.try_ref_object::<WlSurface>(child_surface_object_id)
-                else {
-                    continue;
-                };
-                let (child_x, child_y) = child_surface.current_subsurface_position();
-                if let Some(hit) = hit_test_subtree(
-                    objects,
-                    child_surface_object_id,
-                    surface_state.x + child_x,
-                    surface_state.y + child_y,
-                    x,
-                    y,
-                ) {
-                    return Some(hit);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn hit_test_surface(
-    state: &State,
-    _drm: &IndexMap<DrmId, Drm>,
-    x: f64,
-    y: f64,
-) -> Option<PointerFocus> {
-    let mut hit = None;
-
-    for object_id in ordered_scene_root_surface_ids(state) {
-        let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
-            continue;
-        };
-        if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
-            continue;
-        }
-        if let Some(root_hit) = hit_test_subtree(&state.objects, object_id, 0, 0, x, y) {
-            hit = Some(root_hit);
-        }
-    }
-
-    if let Some(grab_client_id) = state.seat.popup_grab_client() {
-        if hit.is_some_and(|focus| focus.target.client_id != grab_client_id) {
-            hit = None;
-        }
-    }
-
-    hit
-}
-
-fn refresh_pointer_focus(
+pub(crate) fn refresh_pointer_focus(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     time: u32,
     send_motion: bool,
 ) {
-    let old_focus = state.seat.pointer_focus;
-    let new_focus =
-        hit_test_surface(state, &state.drm, state.seat.pointer_pos.0, state.seat.pointer_pos.1);
-
-    if old_focus.map(|focus| focus.target) != new_focus.map(|focus| focus.target) {
-        log::debug!(
-            "seat pointer focus change pos=({:.1}, {:.1}) old={:?} new={:?}",
-            state.seat.pointer_pos.0,
-            state.seat.pointer_pos.1,
-            old_focus.map(|focus| focus.target),
-            new_focus.map(|focus| focus.target)
-        );
-    }
-
-    if old_focus.map(|focus| focus.target) != new_focus.map(|focus| focus.target) {
-        let serial = state.seat.next_serial();
-
-        if let Some(old_focus) = old_focus {
-            dispatch_client_event(
-                dispatcher,
-                old_focus.target.client_id,
-                SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface_id },
-            );
-            dispatch_client_event(
-                dispatcher,
-                old_focus.target.client_id,
-                SeatClientEvent::PointerFrame,
-            );
-        }
-
-        if let Some(new_focus) = new_focus {
-            let (x, y) = local_coords(new_focus.rect, state.seat.pointer_pos);
-            state
-                .seat
-                .record_pointer_enter(new_focus.target.client_id, serial);
-            dispatch_client_event(
-                dispatcher,
-                new_focus.target.client_id,
-                SeatClientEvent::PointerEnter {
-                    serial,
-                    surface: new_focus.target.surface_id,
-                    x,
-                    y,
-                },
-            );
-            if send_motion {
-                dispatch_client_event(
-                    dispatcher,
-                    new_focus.target.client_id,
-                    SeatClientEvent::PointerMotion { time, x, y },
-                );
-            }
-            dispatch_client_event(
-                dispatcher,
-                new_focus.target.client_id,
-                SeatClientEvent::PointerFrame,
-            );
-        } else {
-            state.seat.clear_pointer_enter();
-        }
-
-        state.seat.pointer_focus = new_focus;
-        update_idle_pointer_cursor(state, dispatcher);
-        return;
-    }
-
-    state.seat.pointer_focus = new_focus;
+    crate::input::refresh_pointer_focus(state, dispatcher, time, send_motion);
     update_idle_pointer_cursor(state, dispatcher);
-
-    if send_motion {
-        if let Some(focus) = new_focus {
-            let (x, y) = local_coords(focus.rect, state.seat.pointer_pos);
-            dispatch_client_event(
-                dispatcher,
-                focus.target.client_id,
-                SeatClientEvent::PointerMotion { time, x, y },
-            );
-            dispatch_client_event(
-                dispatcher,
-                focus.target.client_id,
-                SeatClientEvent::PointerFrame,
-            );
-        }
-    }
 }
 
 fn clamp_pointer_to_outputs(state: &mut State) {
@@ -2340,111 +1322,6 @@ fn clamp_pointer_to_outputs(state: &mut State) {
 
 fn output_bounds(state: &State) -> Option<crate::region::RectI> {
     state.output_layout_bounds()
-}
-
-fn local_coords(rect: SurfaceRect, pointer_pos: (f64, f64)) -> (f32, f32) {
-    ((pointer_pos.0 - rect.x as f64) as f32, (pointer_pos.1 - rect.y as f64) as f32)
-}
-
-fn refresh_selection_focus_clients(
-    dispatcher: &mut Dispatcher,
-    old_focus: Option<SurfaceFocus>,
-    new_focus: Option<SurfaceFocus>,
-) {
-    let old_client = old_focus.map(|focus| focus.client_id);
-    let new_client = new_focus.map(|focus| focus.client_id);
-    if old_client == new_client {
-        return;
-    }
-    if let Some(client_id) = old_client {
-        dispatcher.dispatch_to(client_id, ClientAction::RefreshDataDeviceSelection);
-    }
-    if let Some(client_id) = new_client {
-        dispatcher.dispatch_to(client_id, ClientAction::RefreshDataDeviceSelection);
-    }
-}
-
-fn refresh_drag_focus(
-    state: &mut State,
-    dispatcher: &mut Dispatcher,
-    time: u32,
-    send_motion: bool,
-) -> bool {
-    let Some(active_drag) = state.seat.active_drag() else {
-        return false;
-    };
-    if active_drag.phase != DragPhase::Dragging {
-        return true;
-    }
-
-    let hit =
-        hit_test_surface(state, &state.drm, state.seat.pointer_pos.0, state.seat.pointer_pos.1);
-    let mut new_target = hit.map(|focus| DragTargetState {
-        client_id: focus.target.client_id,
-        surface_id: focus.target.surface_id,
-    });
-    if active_drag.source_object_id.is_none()
-        && new_target.is_some_and(|target| target.client_id != active_drag.source_client_id)
-    {
-        new_target = None;
-    }
-
-    let old_target = active_drag.target;
-    if old_target != new_target {
-        if let Some(old_target) = old_target {
-            dispatcher.dispatch_to(old_target.client_id, ClientAction::DataDeviceDragLeave);
-        }
-        if let Some(source_id) = active_drag.source_id {
-            dispatcher.dispatch_to(
-                active_drag.source_client_id,
-                ClientAction::DataSourceEvent {
-                    source_id,
-                    event: crate::clients::DataSourceClientEvent::Target(None),
-                },
-            );
-            dispatcher.dispatch_to(
-                active_drag.source_client_id,
-                ClientAction::DataSourceEvent {
-                    source_id,
-                    event: crate::clients::DataSourceClientEvent::Action { dnd_action: 0 },
-                },
-            );
-        }
-
-        if let (Some(hit), Some(new_target)) = (hit, new_target) {
-            let serial = state.seat.next_serial();
-            let (x, y) = local_coords(hit.rect, state.seat.pointer_pos);
-            dispatcher.dispatch_to(
-                new_target.client_id,
-                ClientAction::DataDeviceDragEnter {
-                    serial,
-                    surface: new_target.surface_id,
-                    x,
-                    y,
-                    source_object_id: active_drag.source_object_id,
-                },
-            );
-            if send_motion {
-                dispatcher.dispatch_to(
-                    new_target.client_id,
-                    ClientAction::DataDeviceDragMotion { time, x, y },
-                );
-            }
-        }
-
-        state.seat.set_active_drag_target(new_target);
-        return true;
-    }
-
-    if send_motion {
-        if let (Some(hit), Some(target)) = (hit, new_target) {
-            let (x, y) = local_coords(hit.rect, state.seat.pointer_pos);
-            dispatcher
-                .dispatch_to(target.client_id, ClientAction::DataDeviceDragMotion { time, x, y });
-        }
-    }
-
-    true
 }
 
 fn complete_drag_drop(state: &mut State, dispatcher: &mut Dispatcher) {
@@ -2471,11 +1348,19 @@ fn complete_drag_drop(state: &mut State, dispatcher: &mut Dispatcher) {
     }
 }
 
-fn dispatch_client_event(dispatcher: &mut Dispatcher, client_id: ClientId, event: SeatClientEvent) {
+pub(crate) fn dispatch_client_event(
+    dispatcher: &mut Dispatcher,
+    client_id: ClientId,
+    event: SeatClientEvent,
+) {
     dispatcher.dispatch_to(client_id, ClientAction::SeatEvent { event });
 }
 
-fn dispatch_client_action(dispatcher: &mut Dispatcher, client_id: ClientId, action: ClientAction) {
+pub(crate) fn dispatch_client_action(
+    dispatcher: &mut Dispatcher,
+    client_id: ClientId,
+    action: ClientAction,
+) {
     dispatcher.dispatch_to(client_id, action);
 }
 
@@ -2566,16 +1451,19 @@ pub fn request_toplevel_move(
     surface_id: WlSurfaceId,
     serial: u32,
     root_surface_object_id: ObjectId,
-    initial_root_pos: (i32, i32),
+    is_maximized: bool,
+    is_fullscreen: bool,
 ) -> bool {
-    if !state
-        .seat
-        .validate_implicit_grab_serial(client_id, surface_id, serial)
-    {
-        return false;
-    }
-    start_interactive_move(state, dispatcher, client_id, root_surface_object_id, initial_root_pos);
-    true
+    crate::input::request_toplevel_move(
+        state,
+        dispatcher,
+        client_id,
+        surface_id,
+        serial,
+        root_surface_object_id,
+        is_maximized,
+        is_fullscreen,
+    )
 }
 
 pub fn request_toplevel_resize(
@@ -2587,95 +1475,23 @@ pub fn request_toplevel_resize(
     root_surface_object_id: ObjectId,
     xdg_toplevel_id: XdgToplevelId,
     size_constraints: InteractiveSizeConstraints,
+    is_maximized: bool,
+    is_fullscreen: bool,
     edges: u32,
-    initial_root_pos: (i32, i32),
-    initial_size: (i32, i32),
 ) -> bool {
-    if !state
-        .seat
-        .validate_implicit_grab_serial(client_id, surface_id, serial)
-    {
-        return false;
-    }
-    start_interactive_resize(
+    crate::input::request_toplevel_resize(
         state,
         dispatcher,
         client_id,
+        surface_id,
+        serial,
         root_surface_object_id,
         xdg_toplevel_id,
         size_constraints,
+        is_maximized,
+        is_fullscreen,
         edges,
-        initial_root_pos,
-        initial_size,
-    );
-    true
-}
-
-fn start_interactive_move(
-    state: &mut State,
-    dispatcher: &mut Dispatcher,
-    client_id: ClientId,
-    root_surface_object_id: ObjectId,
-    initial_root_pos: (i32, i32),
-) {
-    begin_compositor_pointer_grab(state, dispatcher, POINTER_MOVE_CURSOR_ICON_NAMES);
-    state
-        .seat
-        .start_toplevel_move(client_id, root_surface_object_id, initial_root_pos);
-}
-
-fn resize_cursor_icon_names(edges: u32) -> &'static [&'static str] {
-    match edges {
-        e if e == ResizeEdge::Top as u32 => POINTER_RESIZE_N_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::Bottom as u32 => POINTER_RESIZE_S_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::Left as u32 => POINTER_RESIZE_W_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::Right as u32 => POINTER_RESIZE_E_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::TopLeft as u32 => POINTER_RESIZE_NW_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::TopRight as u32 => POINTER_RESIZE_NE_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::BottomLeft as u32 => POINTER_RESIZE_SW_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::BottomRight as u32 => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
-        _ => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
-    }
-}
-
-fn start_interactive_resize(
-    state: &mut State,
-    dispatcher: &mut Dispatcher,
-    client_id: ClientId,
-    root_surface_object_id: ObjectId,
-    xdg_toplevel_id: XdgToplevelId,
-    size_constraints: InteractiveSizeConstraints,
-    edges: u32,
-    initial_root_pos: (i32, i32),
-    initial_size: (i32, i32),
-) {
-    begin_compositor_pointer_grab(state, dispatcher, resize_cursor_icon_names(edges));
-    state.seat.start_toplevel_resize(
-        client_id,
-        root_surface_object_id,
-        xdg_toplevel_id,
-        size_constraints,
-        edges,
-        initial_root_pos,
-        initial_size,
-    );
-}
-
-fn start_interactive_tiled_resize(
-    state: &mut State,
-    dispatcher: &mut Dispatcher,
-    client_id: ClientId,
-    root_surface_object_id: ObjectId,
-    edges: u32,
-) {
-    let Some(resize_state) = state.begin_tiled_root_surface_resize(root_surface_object_id, edges)
-    else {
-        return;
-    };
-    begin_compositor_pointer_grab(state, dispatcher, resize_cursor_icon_names(edges));
-    state
-        .seat
-        .start_toplevel_tiled_resize(client_id, root_surface_object_id, edges, resize_state);
+    )
 }
 
 fn remove_resource<K, V>(map: &mut BTreeMap<K, Vec<V>>, key: K, value: V)
@@ -2718,7 +1534,7 @@ fn dispatch_modifiers(
 #[cfg(test)]
 mod surface_tree_hit_test_tests {
     use {
-        super::hit_test_surface,
+        super::surface_focus_pick_at,
         crate::{
             clients::ClientId,
             egl::EGL,
@@ -2813,7 +1629,7 @@ mod surface_tree_hit_test_tests {
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
 
-        let hit = hit_test_surface(&state, &state.drm, 5.0, 5.0).unwrap();
+        let hit = surface_focus_pick_at(&state, (5.0, 5.0)).unwrap();
         assert_eq!(hit.target.surface_id, WlSurfaceId::from(3));
     }
 
@@ -2865,10 +1681,10 @@ mod surface_tree_hit_test_tests {
             assert!(child_surface.apply_pending_tree_state(&mut state));
         }
 
-        let fallback_hit = hit_test_surface(&state, &state.drm, 66.0, 77.0).unwrap();
+        let fallback_hit = surface_focus_pick_at(&state, (66.0, 77.0)).unwrap();
         assert_eq!(fallback_hit.target.surface_id, WlSurfaceId::from(2));
 
-        let parent_hit = hit_test_surface(&state, &state.drm, 145.0, 145.0).unwrap();
+        let parent_hit = surface_focus_pick_at(&state, (145.0, 145.0)).unwrap();
         assert_eq!(parent_hit.target.surface_id, WlSurfaceId::from(1));
     }
 
@@ -2897,7 +1713,7 @@ mod surface_tree_hit_test_tests {
 
         state.register_root_surface(root_a);
 
-        let hit = hit_test_surface(&state, &state.drm, 5.0, 5.0).unwrap();
+        let hit = surface_focus_pick_at(&state, (5.0, 5.0)).unwrap();
         assert_eq!(hit.target.surface_id, WlSurfaceId::from(1));
     }
 }
@@ -2908,8 +1724,8 @@ mod xdg_seat_tests {
         super::{
             begin_popup_grab, cancel_active_drag, complete_drag_drop, handle_keyboard_key,
             handle_pointer_button, handle_pointer_motion, handle_pointer_motion_absolute,
-            recover_pointer_after_interactive_grab_loss, remove_popup_grab, window_pointer_hit_at,
-            window_target_at, SeatClientEvent, SeatState, SurfaceFocus,
+            recover_pointer_after_interactive_grab_loss, remove_popup_grab, scene_pick_at,
+            window_hit_at, HitSemantics, SeatClientEvent, SeatState, SurfaceFocus,
         },
         crate::{
             clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent},
@@ -3029,6 +1845,17 @@ mod xdg_seat_tests {
         serial: u32,
     ) -> crate::clients::RawRequest<'static> {
         let mut event = RawEvent::new(popup_id.into(), 1, 2);
+        event.id(seat_id);
+        event.uint(serial);
+        (&*event.into_bytes()).try_into().unwrap()
+    }
+
+    fn toplevel_move_request(
+        toplevel_id: XdgToplevelId,
+        seat_id: WlSeatId,
+        serial: u32,
+    ) -> crate::clients::RawRequest<'static> {
+        let mut event = RawEvent::new(toplevel_id.into(), 5, 2);
         event.id(seat_id);
         event.uint(serial);
         (&*event.into_bytes()).try_into().unwrap()
@@ -3663,7 +2490,9 @@ mod xdg_seat_tests {
             }));
         }
 
-        let target = window_target_at(&state, (36.0, 44.0)).expect("target on CSD chrome");
+        let target = scene_pick_at(&state, (36.0, 44.0))
+            .window_target
+            .expect("target on CSD chrome");
         assert_eq!(target.root_surface_object_id, wl_surface_object_id);
         assert_eq!(target.interactive_rect, RectI::new(34, 38, 126, 92).unwrap());
     }
@@ -3698,9 +2527,44 @@ mod xdg_seat_tests {
             surface.test_map(ObjectId::from(955usize), 40, 50, 120, 80);
         }
 
-        let hit = window_pointer_hit_at(&state, (80.0, 90.0)).expect("content hit");
+        let hit = window_hit_at(&state, (80.0, 90.0)).expect("content hit");
         assert_eq!(hit.target.root_surface_object_id, wl_surface_object_id);
-        assert_eq!(hit.zone, super::WindowHitZone::Content);
+        assert_eq!(hit.semantics, HitSemantics::SurfaceContent);
+    }
+
+    #[test]
+    fn window_hit_caches_binding_resize_edges_for_content_hits() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(246),
+            XdgSurfaceId::from(256),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(256),
+            XdgToplevelId::from(266),
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(957usize), 10, 20, 90, 60);
+        }
+
+        let hit = window_hit_at(&state, (85.0, 50.0)).expect("content hit");
+        assert_eq!(hit.semantics, HitSemantics::SurfaceContent);
+        assert_eq!(hit.binding_resize_edges, xdg_toplevel::ResizeEdge::Right as u32);
     }
 
     #[test]
@@ -3749,18 +2613,13 @@ mod xdg_seat_tests {
             surface.test_map(ObjectId::from(956usize), 40, 50, 120, 80);
         }
 
-        let titlebar_hit = window_pointer_hit_at(&state, (80.0, 44.0)).expect("titlebar hit");
-        assert_eq!(
-            titlebar_hit.zone,
-            super::WindowHitZone::Decoration(super::WindowDecorationHit::Titlebar)
-        );
+        let titlebar_hit = window_hit_at(&state, (80.0, 44.0)).expect("titlebar hit");
+        assert_eq!(titlebar_hit.semantics, HitSemantics::CompositorMove);
 
-        let resize_hit = window_pointer_hit_at(&state, (35.0, 90.0)).expect("resize hit");
+        let resize_hit = window_hit_at(&state, (35.0, 90.0)).expect("resize hit");
         assert_eq!(
-            resize_hit.zone,
-            super::WindowHitZone::Decoration(super::WindowDecorationHit::Resize(
-                xdg_toplevel::ResizeEdge::Left as u32
-            ))
+            resize_hit.semantics,
+            HitSemantics::CompositorResize(xdg_toplevel::ResizeEdge::Left as u32)
         );
     }
 
@@ -4431,6 +3290,62 @@ mod xdg_seat_tests {
             state.seat.pointer_interactive_grab,
             Some(super::PointerInteractiveGrab::Resize { edges, .. })
                 if edges == xdg_toplevel::ResizeEdge::BottomRight as u32
+        ));
+    }
+
+    #[test]
+    fn toplevel_move_accepts_pointer_trigger_serial() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        client.insert_object(&mut state, WlSeat::new(WlSeatId::from(6)));
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(101),
+            XdgSurfaceId::from(111),
+        );
+        let toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(111),
+            XdgToplevelId::from(121),
+        );
+
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(701usize), 20, 30, 90, 70);
+        }
+
+        let focus = SurfaceFocus {
+            client_id: client.client_id(),
+            surface_id: WlSurfaceId::from(101),
+        };
+        let serial = state.seat.next_serial();
+        state.seat.record_pointer_button(1, serial, Some(focus));
+
+        {
+            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
+            toplevel.on(
+                &mut client,
+                &mut state,
+                toplevel_move_request(XdgToplevelId::from(121), WlSeatId::from(6), serial),
+                &mut client_dispatcher,
+            );
+        }
+
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Move { .. })
         ));
     }
 

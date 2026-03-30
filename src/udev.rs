@@ -21,11 +21,11 @@ use crate::{
     dbus::DbusAction,
     drm::{discard_backend_presentation_feedbacks, sync_output_nodes_for_backend, Drm, DrmReader},
     globals::Global,
-    input::LibinputAction,
     io_uring::{
         model::IoUringAction,
         ring::{PollCompleted, RingId},
     },
+    libinput::LibinputAction,
     runner::{Dispatcher, Model, Redispatcher},
     state::{BackendOutputRef, DrmId, Output, OutputId, State},
     wayland_objects::{

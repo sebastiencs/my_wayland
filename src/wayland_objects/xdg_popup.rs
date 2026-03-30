@@ -282,7 +282,7 @@ impl Object for XdgPopup {
                             );
                             return;
                         }
-                        fallback_focus = Some(crate::seat::SurfaceFocus {
+                        fallback_focus = Some(crate::input::SurfaceFocus {
                             client_id: client.client_id(),
                             surface_id: parent_surface.wl_surface_id(),
                         });
@@ -299,7 +299,7 @@ impl Object for XdgPopup {
                             );
                             return;
                         }
-                        fallback_focus = Some(crate::seat::SurfaceFocus {
+                        fallback_focus = Some(crate::input::SurfaceFocus {
                             client_id: client.client_id(),
                             surface_id: parent_surface.surface_id(),
                         });

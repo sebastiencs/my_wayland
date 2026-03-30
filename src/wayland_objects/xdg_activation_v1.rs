@@ -6,7 +6,7 @@ use crate::{
     protocol_generated::{
         wl_display, xdg_activation_v1, Constants, NewId, WaylandId, XdgActivationV1Id,
     },
-    seat::{resolve_activation_target, set_surface_focus},
+    seat::{resolve_activation_target, set_keyboard_focus_from_surface},
     state::State,
     wayland_objects::{wl_display::WlDisplay, xdg_activation_token_v1::XdgActivationTokenV1},
 };
@@ -98,7 +98,7 @@ impl Object for XdgActivationV1 {
                 if !state.raise_root_surface(root_surface_object_id) {
                     return;
                 }
-                set_surface_focus(state, dispatcher, Some(focus));
+                set_keyboard_focus_from_surface(state, dispatcher, Some(focus));
                 if let Some(bounds) = state
                     .objects
                     .try_ref_object::<crate::wayland_objects::wl_surface::WlSurface>(
@@ -128,7 +128,7 @@ mod tests {
                 Constants, WlSeatId, WlSurfaceId, XdgActivationTokenV1Id, XdgActivationV1Id,
             },
             runner::Dispatcher,
-            seat::{handle_keyboard_key, set_surface_focus, SurfaceFocus},
+            seat::{handle_keyboard_key, set_keyboard_focus_from_surface, SurfaceFocus},
             state::{ObjectId, State},
             wayland_objects::{wl_seat::WlSeat, wl_surface::WlSurface},
             xkb::Xkb,
@@ -264,7 +264,7 @@ mod tests {
         insert_seat(&mut state, &mut client, seat_id);
         {
             let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-            set_surface_focus(
+            set_keyboard_focus_from_surface(
                 &mut state,
                 &mut client_dispatcher,
                 Some(SurfaceFocus {
@@ -395,7 +395,7 @@ mod tests {
         insert_seat(&mut state, &mut client, seat_id);
         {
             let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-            set_surface_focus(
+            set_keyboard_focus_from_surface(
                 &mut state,
                 &mut client_dispatcher,
                 Some(SurfaceFocus { client_id: client.client_id(), surface_id }),
@@ -460,7 +460,7 @@ mod tests {
         insert_seat(&mut state, &mut client, seat_id);
         {
             let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-            set_surface_focus(
+            set_keyboard_focus_from_surface(
                 &mut state,
                 &mut client_dispatcher,
                 Some(SurfaceFocus {
@@ -546,7 +546,7 @@ mod tests {
         insert_manager(&mut state, &mut client, manager_id);
         {
             let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-            set_surface_focus(
+            set_keyboard_focus_from_surface(
                 &mut state,
                 &mut client_dispatcher,
                 Some(SurfaceFocus {

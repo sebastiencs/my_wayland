@@ -151,6 +151,7 @@ mod gbm;
 mod globals;
 mod input;
 mod io_uring;
+mod libinput;
 mod logger;
 mod object;
 mod protocol;
@@ -274,7 +275,7 @@ fn main() {
     let dbus = dbus::Dbus::new().unwrap();
 
     let udev = Udev::new().unwrap();
-    let libinput = input::Libinput::new();
+    let libinput = libinput::Libinput::new();
 
     // protocol::gen().unwrap();
     // return;
@@ -293,7 +294,7 @@ fn main() {
 
     let mut dispatcher = Dispatcher::default();
     dispatcher.start::<Clients>();
-    dispatcher.start::<input::Libinput>();
+    dispatcher.start::<libinput::Libinput>();
     dispatcher.start::<config::ConfigWatcher>();
 
     // let timer = make_timer(Duration::from_secs(10));

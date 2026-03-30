@@ -1569,14 +1569,15 @@ pub mod xdg_toplevel {
                     else {
                         return;
                     };
-                    if !crate::seat::request_toplevel_move(
+                    if !crate::input::request_toplevel_move(
                         state,
                         dispatcher,
                         client.client_id(),
                         surface_id,
                         serial,
                         surface_object_id,
-                        surface.root_position(),
+                        self.is_maximized(),
+                        state.root_surface_is_fullscreen(surface_object_id),
                     ) {
                         log::debug!(
                             "xdg_toplevel.move ignored due to invalid pointer grab serial {}",
@@ -1620,12 +1621,11 @@ pub mod xdg_toplevel {
                     else {
                         return;
                     };
-                    let initial_size = surface.logical_size().map(|size| (size.width, size.height));
-                    let Some(initial_size) = initial_size else {
+                    if surface.logical_size().is_none() {
                         log::debug!("xdg_toplevel.resize ignored for unmapped surface");
                         return;
-                    };
-                    if !crate::seat::request_toplevel_resize(
+                    }
+                    if !crate::input::request_toplevel_resize(
                         state,
                         dispatcher,
                         client.client_id(),
@@ -1634,9 +1634,9 @@ pub mod xdg_toplevel {
                         surface_object_id,
                         self.id,
                         self.interactive_size_constraints(),
+                        self.is_maximized(),
+                        state.root_surface_is_fullscreen(surface_object_id),
                         edges,
-                        surface.root_position(),
-                        initial_size,
                     ) {
                         log::debug!(
                             "xdg_toplevel.resize ignored due to invalid pointer grab serial {}",

@@ -228,7 +228,7 @@ mod tests {
             globals::Globals,
             protocol_generated::WlDataSourceId,
             runner::Dispatcher,
-            seat::{set_surface_focus, SurfaceFocus},
+            seat::{set_keyboard_focus_from_surface, SurfaceFocus},
             state::{DragPhase, DragState, DragTargetState, SelectionSourceState, State},
             wayland_objects::wl_surface::WlSurface,
             xkb::Xkb,
@@ -284,7 +284,7 @@ mod tests {
         {
             let mut setup_dispatcher = Dispatcher::default();
             let mut setup_client_dispatcher = owner.test_dispatcher(&mut setup_dispatcher);
-            set_surface_focus(
+            set_keyboard_focus_from_surface(
                 &mut state,
                 &mut setup_client_dispatcher,
                 Some(SurfaceFocus { client_id: focused_client_id, surface_id: 55u32.into() }),
