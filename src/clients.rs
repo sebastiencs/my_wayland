@@ -1574,11 +1574,26 @@ impl Client {
             } else {
                 None
             };
+            let desired_decoration_mode = state
+                .objects
+                .try_ref_object::<XdgToplevel>(object_id)
+                .map(|toplevel| {
+                    state.xdg_decoration_mode_for_surface(
+                        Some(wl_surface_object_id),
+                        toplevel.has_decoration_object(),
+                        toplevel.requested_decoration_mode(state),
+                    )
+                });
 
             let mut xdg_surface = self.grab_object(xdg_surface_id, state);
             let mut toplevel = self.grab_object(toplevel_id, state);
+            if let Some(mode) = desired_decoration_mode {
+                toplevel.schedule_decoration_mode(mode);
+            }
             if let Some(rect) = tiled_rect {
                 toplevel.send_layout_configure(
+                    self,
+                    state,
                     Some((rect.width, rect.height)),
                     &mut xdg_surface,
                     rect.width,
@@ -1590,6 +1605,8 @@ impl Client {
                 );
             } else if let Some(rect) = pending_floating_restore {
                 toplevel.send_interactive_resize_configure(
+                    self,
+                    state,
                     configure_bounds,
                     &mut xdg_surface,
                     rect.width,
@@ -1598,7 +1615,13 @@ impl Client {
                     dispatcher,
                 );
             } else {
-                toplevel.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
+                toplevel.schedule_configure(
+                    self,
+                    state,
+                    configure_bounds,
+                    &mut xdg_surface,
+                    dispatcher,
+                );
             }
         }
     }
@@ -2153,6 +2176,8 @@ impl Model for Client {
                 let mut xdg_surface = self.grab_object(xdg_surface_id, state);
                 let mut toplevel = self.grab_object(xdg_toplevel_id, state);
                 toplevel.send_interactive_resize_configure(
+                    self,
+                    state,
                     configure_bounds,
                     &mut xdg_surface,
                     width,

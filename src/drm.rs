@@ -33,7 +33,10 @@ use crate::{
     },
     region::{DamageRegion, RectI},
     runner::{Dispatcher, Model, ModelInstanceId},
-    state::{BackendOutputRef, ColorTransformMatrix, DrmId, ObjectId, OutputId, OutputMode, State},
+    state::{
+        BackendOutputRef, ColorTransformMatrix, DrmId, ObjectId, OutputId, OutputMode,
+        SsdFrameLayout, State,
+    },
     sync::{DeferredRelease, RetiredBufferCandidate},
     transform::{self, OutputPresentationTransform},
     wayland_objects::{
@@ -212,7 +215,16 @@ struct SurfaceKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum SceneItemKey {
     Surface(SurfaceKey),
+    SsdFrame { root_surface_object_id: ObjectId, segment: SsdFrameSegment },
     Cursor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum SsdFrameSegment {
+    Top,
+    Left,
+    Right,
+    Bottom,
 }
 
 #[derive(Clone, Debug)]
@@ -4224,6 +4236,69 @@ fn push_scene_items_from_snapshots(
     }
 }
 
+fn ssd_frame_segments(layout: SsdFrameLayout) -> impl Iterator<Item = (SsdFrameSegment, RectI)> {
+    let top = RectI::from_extents(
+        layout.frame_rect.x,
+        layout.frame_rect.y,
+        layout.frame_rect.x2(),
+        layout.content_rect.y,
+    )
+    .map(|rect| (SsdFrameSegment::Top, rect));
+    let left = RectI::from_extents(
+        layout.frame_rect.x,
+        layout.content_rect.y,
+        layout.content_rect.x,
+        layout.content_rect.y2(),
+    )
+    .map(|rect| (SsdFrameSegment::Left, rect));
+    let right = RectI::from_extents(
+        layout.content_rect.x2(),
+        layout.content_rect.y,
+        layout.frame_rect.x2(),
+        layout.content_rect.y2(),
+    )
+    .map(|rect| (SsdFrameSegment::Right, rect));
+    let bottom = RectI::from_extents(
+        layout.frame_rect.x,
+        layout.content_rect.y2(),
+        layout.frame_rect.x2(),
+        layout.frame_rect.y2(),
+    )
+    .map(|rect| (SsdFrameSegment::Bottom, rect));
+
+    [top, left, right, bottom].into_iter().flatten()
+}
+
+fn push_ssd_frame_scene_items(
+    items: &mut Vec<SceneItem>,
+    root_surface_object_id: ObjectId,
+    layout: SsdFrameLayout,
+    texture_id: gl::Uint,
+    owned_texture: &mut Option<GlTexture>,
+) {
+    for (index, (segment, bounds)) in ssd_frame_segments(layout).enumerate() {
+        items.push(SceneItem {
+            state: SceneItemState {
+                key: SceneItemKey::SsdFrame { root_surface_object_id, segment },
+                surface_key: None,
+                buffer_object_id: root_surface_object_id,
+                bounds,
+                tex_transform: transform::Mat3::identity(),
+            },
+            texture: texture_id,
+            owned_texture: (index == 0).then(|| owned_texture.take()).flatten(),
+            damage: DamageRegion::from_rect(bounds),
+            sample_damage_padding: 0,
+            state_has_alpha: false,
+            opaque_region: DamageRegion::from_rect(bounds),
+            opaque: true,
+            sync: crate::sync::SurfaceSyncState::default(),
+            direct_scanout: None,
+            presentation_feedbacks: Vec::new(),
+        });
+    }
+}
+
 fn collect_cursor_surface_snapshots(
     state: &mut crate::state::State,
     retired_candidates: &mut Vec<RetiredBufferCandidate>,
@@ -4375,6 +4450,7 @@ fn collect_render_items(
     let mut deferred_releases = Vec::new();
     let mut retired_candidates = Vec::new();
     let mut cursor_animation_delay_msec = None;
+    let focused_root_surface_object_id = state.focused_root_surface_object_id();
     let root_surface_oids: Vec<_> = ordered_scene_root_surface_ids(state)
         .into_iter()
         .filter(|object_id| {
@@ -4384,20 +4460,31 @@ fn collect_render_items(
             surface.is_root() && !surface.has_cursor_role()
         })
         .collect();
-    let snapshots = {
-        let mut snapshots = Vec::new();
-        for object_id in root_surface_oids {
-            collect_surface_snapshots(
-                state,
-                object_id,
-                0,
-                0,
-                &mut retired_candidates,
-                &mut snapshots,
-            );
+    let mut focused_frame_texture = GlTexture::from_rgba(&[0x50, 0x78, 0xc8, 0xff], 1, 1).ok();
+    let mut unfocused_frame_texture = GlTexture::from_rgba(&[0x33, 0x38, 0x44, 0xff], 1, 1).ok();
+    let focused_frame_texture_id = focused_frame_texture.as_ref().map(GlTexture::texture_id);
+    let unfocused_frame_texture_id = unfocused_frame_texture.as_ref().map(GlTexture::texture_id);
+    let mut snapshots = Vec::new();
+    for object_id in root_surface_oids {
+        if let Some(layout) = state.root_surface_ssd_layout(object_id) {
+            let focused = focused_root_surface_object_id == Some(object_id);
+            let (texture_id, owned_texture) = if focused {
+                (focused_frame_texture_id, &mut focused_frame_texture)
+            } else {
+                (unfocused_frame_texture_id, &mut unfocused_frame_texture)
+            };
+            if let Some(texture_id) = texture_id {
+                push_ssd_frame_scene_items(
+                    &mut items,
+                    object_id,
+                    layout,
+                    texture_id,
+                    owned_texture,
+                );
+            }
         }
-        snapshots
-    };
+        collect_surface_snapshots(state, object_id, 0, 0, &mut retired_candidates, &mut snapshots);
+    }
 
     let cursor_plane = {
         let cursor_request = build_cursor_plane_request(state, frame_time_msec);
@@ -4554,6 +4641,35 @@ mod cursor_policy_tests {
         assert_eq!(
             state,
             CursorPlaneState::Backoff { remaining_frames: 2, consecutive_failures: 2 }
+        );
+    }
+}
+
+#[cfg(test)]
+mod ssd_render_tests {
+    use {
+        super::{ssd_frame_segments, SsdFrameSegment},
+        crate::{region::RectI, state::SsdFrameLayout},
+    };
+
+    #[test]
+    fn ssd_frame_segments_cover_each_non_content_edge() {
+        let layout = SsdFrameLayout {
+            frame_rect: RectI::new(10, 20, 120, 90).unwrap(),
+            content_rect: RectI::new(14, 32, 112, 74).unwrap(),
+            titlebar_rect: RectI::new(14, 20, 112, 12),
+        };
+
+        let segments = ssd_frame_segments(layout).collect::<Vec<_>>();
+
+        assert_eq!(
+            segments,
+            vec![
+                (SsdFrameSegment::Top, RectI::new(10, 20, 120, 12).unwrap()),
+                (SsdFrameSegment::Left, RectI::new(10, 32, 4, 74).unwrap()),
+                (SsdFrameSegment::Right, RectI::new(126, 32, 4, 74).unwrap()),
+                (SsdFrameSegment::Bottom, RectI::new(10, 106, 120, 4).unwrap()),
+            ]
         );
     }
 }

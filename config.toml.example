@@ -19,6 +19,18 @@ right = 0
 bottom = 0
 left = 0
 
+# XDG decoration mode when the client uses zxdg_toplevel_decoration_v1 (or not).
+# Each key sets policy for: no CSD protocol, tiled, floating, fullscreen, or unset mode.
+# Values: "server" (SSD), "client" (CSD), "honor-client" (prefer client preference).
+# Defaults if this table is omitted: no_protocol=client, tiled=server, floating=honor-client,
+# fullscreen=server, unset_mode=server.
+[decorations.xdg]
+no_protocol = "client"
+tiled = "server"
+floating = "honor-client"
+fullscreen = "server"
+unset_mode = "server"
+
 [bindings]
 # Key names follow xkb (e.g. Super, Ctrl, Alt, Shift). Last segment is the key.
 "Super+Escape" = { action = "quit" }

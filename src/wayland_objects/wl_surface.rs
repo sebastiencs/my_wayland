@@ -2730,7 +2730,10 @@ mod tests {
                 wp_fractional_scale_v1::WpFractionalScaleV1,
                 wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
                 wp_viewport::WpViewport,
-                xdg_surface::{xdg_toplevel::XdgToplevel, XdgSurface},
+                xdg_surface::{
+                    xdg_toplevel::{ToplevelDecorationMode, XdgToplevel},
+                    XdgSurface,
+                },
             },
             xkb::Xkb,
         },
@@ -3364,6 +3367,14 @@ mod tests {
                 .downcast_mut::<WlSurface>()
                 .unwrap();
             surface.pending.buffer = Some(Some(initial_buffer_object_id));
+        }
+        {
+            let toplevel = state
+                .objects
+                .get_mut(client.object_id(XdgToplevelId::from(142)))
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.set_decoration_mode(ToplevelDecorationMode::ClientSide);
         }
         {
             let xdg_surface = state

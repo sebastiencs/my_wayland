@@ -1,6 +1,6 @@
 use crate::{
     clients::ClientId,
-    config::{OutputScaleSetting, RuntimeConfig},
+    config::{DecorationInsets, OutputScaleSetting, RuntimeConfig, XdgDecorationModePolicy},
     drm::Drm,
     egl::EGL,
     globals::{Global, GlobalName, Globals},
@@ -13,7 +13,10 @@ use crate::{
     region::RectI,
     seat::SeatState,
     tiling::{self, TiledResizeState, WorkspaceLayout},
-    wayland_objects::{wl_surface::WlSurface, xdg_surface::xdg_toplevel::XdgToplevel},
+    wayland_objects::{
+        wl_surface::WlSurface,
+        xdg_surface::xdg_toplevel::{ToplevelDecorationMode, XdgToplevel},
+    },
     xkb::{KeyboardState, Xkb},
 };
 
@@ -26,6 +29,22 @@ use {
         rc::Rc,
     },
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SsdFrameLayout {
+    pub frame_rect: RectI,
+    pub content_rect: RectI,
+    pub titlebar_rect: Option<RectI>,
+}
+
+fn inflate_rect_with_insets(rect: RectI, insets: DecorationInsets) -> Option<RectI> {
+    RectI::from_extents(
+        rect.x.saturating_sub(insets.left.max(0)),
+        rect.y.saturating_sub(insets.top.max(0)),
+        rect.x2().saturating_add(insets.right.max(0)),
+        rect.y2().saturating_add(insets.bottom.max(0)),
+    )
+}
 
 #[derive(Debug)]
 enum ValueOrEmpty<V> {
@@ -1596,6 +1615,146 @@ impl State {
         tiling::tiled_edges_for_surface(self, object_id)
     }
 
+    fn root_surface_xdg_toplevel(&self, object_id: ObjectId) -> Option<&XdgToplevel> {
+        let surface = self.objects.try_ref_object::<WlSurface>(object_id)?;
+        let xdg_surface_id = surface.xdg_surface_id()?;
+        let toplevel_object_id =
+            self.xdg_toplevel_object_id(surface.client_id(), xdg_surface_id)?;
+        self.objects
+            .try_ref_object::<XdgToplevel>(toplevel_object_id)
+    }
+
+    fn resolve_xdg_decoration_mode_policy(
+        policy: XdgDecorationModePolicy,
+        requested_mode: Option<ToplevelDecorationMode>,
+    ) -> ToplevelDecorationMode {
+        match policy {
+            XdgDecorationModePolicy::Server => ToplevelDecorationMode::ServerSide,
+            XdgDecorationModePolicy::Client => ToplevelDecorationMode::ClientSide,
+            XdgDecorationModePolicy::HonorClient => {
+                requested_mode.unwrap_or(ToplevelDecorationMode::ClientSide)
+            }
+        }
+    }
+
+    pub fn xdg_decoration_mode_for_surface(
+        &self,
+        root_surface_object_id: Option<ObjectId>,
+        has_decoration_object: bool,
+        requested_mode: Option<ToplevelDecorationMode>,
+    ) -> ToplevelDecorationMode {
+        let policy = &self.config.decorations.xdg;
+        if !has_decoration_object {
+            return Self::resolve_xdg_decoration_mode_policy(policy.no_protocol, None);
+        }
+
+        let managed_state =
+            root_surface_object_id.and_then(|object_id| self.managed_root_surface_state(object_id));
+        let selected_policy = if requested_mode.is_none() {
+            policy.unset_mode
+        } else if managed_state.is_some_and(|managed| managed.fullscreen)
+            || root_surface_object_id
+                .is_some_and(|object_id| self.root_surface_is_fullscreen(object_id))
+        {
+            policy.fullscreen
+        } else if managed_state.is_some_and(|managed| managed.mode == ManagedWindowMode::Tiled) {
+            policy.tiled
+        } else if managed_state.is_some_and(|managed| managed.mode == ManagedWindowMode::Floating) {
+            policy.floating
+        } else {
+            policy.floating
+        };
+
+        Self::resolve_xdg_decoration_mode_policy(selected_policy, requested_mode)
+    }
+
+    pub fn root_surface_content_rect(&self, object_id: ObjectId) -> Option<RectI> {
+        self.tiled_root_surface_content_rect(object_id).or_else(|| {
+            self.objects
+                .try_ref_object::<WlSurface>(object_id)
+                .and_then(WlSurface::global_logical_bounds)
+        })
+    }
+
+    pub fn root_surface_interactive_rect(&self, object_id: ObjectId) -> Option<RectI> {
+        if let Some(layout) = self.root_surface_ssd_layout(object_id) {
+            return Some(layout.frame_rect);
+        }
+        if let Some(frame_rect) = self.tiled_root_surface_frame_rect(object_id) {
+            return Some(frame_rect);
+        }
+
+        let surface = self.objects.try_ref_object::<WlSurface>(object_id)?;
+        let xdg_surface_id = surface.xdg_surface_id()?;
+        let xdg_surface = self.objects.iter().find_map(|(_object_id, object)| {
+            object
+                .downcast_ref::<crate::wayland_objects::xdg_surface::XdgSurface>()
+                .filter(|xdg_surface| xdg_surface.wl_surface_id() == surface.surface_id())
+        })?;
+        debug_assert_eq!(xdg_surface.wl_surface_id(), surface.surface_id());
+        let _ = xdg_surface_id;
+        let window_geometry = xdg_surface.window_geometry_rect_for_surface(object_id, self);
+        let (root_x, root_y) = surface.root_position();
+        RectI::new(
+            root_x.saturating_add(window_geometry.x),
+            root_y.saturating_add(window_geometry.y),
+            window_geometry.width,
+            window_geometry.height,
+        )
+        .or_else(|| surface.global_logical_bounds())
+    }
+
+    pub fn root_surface_ssd_insets(&self, object_id: ObjectId) -> Option<DecorationInsets> {
+        let toplevel = self.root_surface_xdg_toplevel(object_id)?;
+        if toplevel.decoration_mode()
+            != crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode::ServerSide
+            || self.root_surface_is_fullscreen(object_id)
+        {
+            return None;
+        }
+
+        let insets = self.config.general.decoration_insets;
+        (insets.top > 0 || insets.right > 0 || insets.bottom > 0 || insets.left > 0)
+            .then_some(insets)
+    }
+
+    pub fn root_surface_ssd_layout(&self, object_id: ObjectId) -> Option<SsdFrameLayout> {
+        let insets = self.root_surface_ssd_insets(object_id)?;
+        let content_rect = self.root_surface_content_rect(object_id)?;
+        let frame_rect = self
+            .tiled_root_surface_frame_rect(object_id)
+            .or_else(|| inflate_rect_with_insets(content_rect, insets))?;
+        let titlebar_height = insets.top.max(0);
+        let titlebar_rect = (titlebar_height > 0)
+            .then(|| RectI::new(content_rect.x, frame_rect.y, content_rect.width, titlebar_height))
+            .flatten();
+
+        Some(SsdFrameLayout { frame_rect, content_rect, titlebar_rect })
+    }
+
+    pub fn root_surface_outer_rect(&self, object_id: ObjectId) -> Option<RectI> {
+        self.root_surface_ssd_layout(object_id)
+            .map(|layout| layout.frame_rect)
+            .or_else(|| self.tiled_root_surface_frame_rect(object_id))
+            .or_else(|| self.root_surface_content_rect(object_id))
+    }
+
+    pub fn root_surface_for_surface_object(&self, mut object_id: ObjectId) -> Option<ObjectId> {
+        loop {
+            let surface = self.objects.try_ref_object::<WlSurface>(object_id)?;
+            if surface.is_root() {
+                return Some(object_id);
+            }
+            object_id = surface.parent_surface_object_id()?;
+        }
+    }
+
+    pub fn focused_root_surface_object_id(&self) -> Option<ObjectId> {
+        let focus = self.seat.keyboard_focus()?;
+        let surface_object_id = self.surface_object_id(focus.surface_id)?;
+        self.root_surface_for_surface_object(surface_object_id)
+    }
+
     pub fn root_surface_is_fullscreen(&self, object_id: ObjectId) -> bool {
         let Some(workspace_id) = self.root_surface_workspace(object_id) else {
             return false;
@@ -2817,6 +2976,91 @@ mod tests {
         assert_eq!(
             state.managed_root_surface_state(object_id).unwrap().mode,
             ManagedWindowMode::Floating
+        );
+    }
+
+    #[test]
+    fn xdg_decoration_policy_defaults_to_client_without_protocol() {
+        let state = make_state();
+
+        assert_eq!(
+            state.xdg_decoration_mode_for_surface(None, false, None),
+            ToplevelDecorationMode::ClientSide
+        );
+    }
+
+    #[test]
+    fn xdg_decoration_policy_forces_server_side_for_tiled_windows() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let (_, object_id) = state.insert_object(WlSurface::new(
+            WlSurfaceId::from(50u32),
+            ClientId::from_raw(50),
+            6,
+        ));
+        state.register_root_surface(object_id);
+
+        assert_eq!(
+            state.xdg_decoration_mode_for_surface(
+                Some(object_id),
+                true,
+                Some(ToplevelDecorationMode::ClientSide)
+            ),
+            ToplevelDecorationMode::ServerSide
+        );
+    }
+
+    #[test]
+    fn xdg_decoration_policy_honors_client_for_floating_windows() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let (_, object_id) = state.insert_object(WlSurface::new(
+            WlSurfaceId::from(51u32),
+            ClientId::from_raw(51),
+            6,
+        ));
+        state.register_root_surface(object_id);
+        assert!(state.set_root_surface_floating(object_id, true));
+
+        assert_eq!(
+            state.xdg_decoration_mode_for_surface(
+                Some(object_id),
+                true,
+                Some(ToplevelDecorationMode::ClientSide)
+            ),
+            ToplevelDecorationMode::ClientSide
+        );
+        assert_eq!(
+            state.xdg_decoration_mode_for_surface(
+                Some(object_id),
+                true,
+                Some(ToplevelDecorationMode::ServerSide)
+            ),
+            ToplevelDecorationMode::ServerSide
+        );
+    }
+
+    #[test]
+    fn xdg_decoration_policy_uses_unset_mode_for_unset_requests() {
+        let mut state = make_state();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let (_, object_id) = state.insert_object(WlSurface::new(
+            WlSurfaceId::from(52u32),
+            ClientId::from_raw(52),
+            6,
+        ));
+        state.register_root_surface(object_id);
+        assert!(state.set_root_surface_floating(object_id, true));
+
+        assert_eq!(
+            state.xdg_decoration_mode_for_surface(Some(object_id), true, None),
+            ToplevelDecorationMode::ServerSide
         );
     }
 

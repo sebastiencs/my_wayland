@@ -19,10 +19,7 @@ use crate::{
     tiling::TiledResizeState,
     wayland_objects::{
         wl_surface::{Role, StackEntry, WlSurface},
-        xdg_surface::{
-            xdg_toplevel::{InteractiveSizeConstraints, XdgToplevel},
-            XdgSurface,
-        },
+        xdg_surface::xdg_toplevel::{InteractiveSizeConstraints, XdgToplevel},
         zwlr_layer_surface_v1::{
             layer_surface_keyboard_focus_with_snapshot, lookup_snapshot_surface,
             ordered_scene_root_surface_ids, ordered_scene_root_surface_ids_with_snapshot,
@@ -1015,6 +1012,11 @@ pub fn handle_pointer_button(
         return;
     }
 
+    if button_state == 1 && button == 0x110 && begin_ssd_pointer_action(state, dispatcher) {
+        state.seat.intercept_pointer_button(button);
+        return;
+    }
+
     if button_state == 1 {
         set_keyboard_focus(state, dispatcher, pointer_focus.map(|focus| focus.target));
     }
@@ -1734,7 +1736,25 @@ struct WindowPointerTarget {
     role: WindowPointerRole,
     initial_root_pos: (i32, i32),
     initial_size: (i32, i32),
-    bounds: RectI,
+    interactive_rect: RectI,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowDecorationHit {
+    Titlebar,
+    Resize(u32),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowHitZone {
+    Content,
+    Decoration(WindowDecorationHit),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WindowPointerHit {
+    target: WindowPointerTarget,
+    zone: WindowHitZone,
 }
 
 fn begin_pointer_binding(
@@ -1742,11 +1762,11 @@ fn begin_pointer_binding(
     dispatcher: &mut Dispatcher,
     action: config::MouseBindingAction,
 ) -> bool {
-    let Some(target) = window_pointer_target_at(state, state.seat.pointer_position()) else {
+    let Some(hit) = window_pointer_hit_at(state, state.seat.pointer_position()) else {
         return false;
     };
 
-    match (action, target.role) {
+    match (action, hit.target.role) {
         (
             _,
             WindowPointerRole::XdgToplevel { is_maximized: true, .. }
@@ -1756,18 +1776,21 @@ fn begin_pointer_binding(
         _ => {}
     }
 
-    state.raise_root_surface(target.root_surface_object_id);
-    schedule_outputs_for_rects(state, [target.bounds], dispatcher);
+    state.raise_root_surface(hit.target.root_surface_object_id);
+    schedule_outputs_for_rects(state, [hit.target.interactive_rect], dispatcher);
     set_keyboard_focus(
         state,
         dispatcher,
-        Some(SurfaceFocus { client_id: target.client_id, surface_id: target.surface_id }),
+        Some(SurfaceFocus {
+            client_id: hit.target.client_id,
+            surface_id: hit.target.surface_id,
+        }),
     );
 
-    match (action, target.role) {
+    match (action, hit.target.role) {
         (config::MouseBindingAction::MoveWindow, _) => {
-            if state.is_tiled_root_surface(target.root_surface_object_id) {
-                if state.set_root_surface_floating(target.root_surface_object_id, true) {
+            if state.is_tiled_root_surface(hit.target.root_surface_object_id) {
+                if state.set_root_surface_floating(hit.target.root_surface_object_id, true) {
                     dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
                     schedule_active_output(state, dispatcher);
                 }
@@ -1775,35 +1798,38 @@ fn begin_pointer_binding(
             start_interactive_move(
                 state,
                 dispatcher,
-                target.client_id,
-                target.root_surface_object_id,
-                target.initial_root_pos,
+                hit.target.client_id,
+                hit.target.root_surface_object_id,
+                hit.target.initial_root_pos,
             )
         }
         (
             config::MouseBindingAction::ResizeWindow,
             WindowPointerRole::XdgToplevel { xdg_toplevel_id, size_constraints, .. },
         ) => {
-            let edges = resize_edges_for_pointer(target.bounds, state.seat.pointer_position());
-            if state.is_tiled_root_surface(target.root_surface_object_id) {
+            let edges = resize_edges_for_pointer(
+                hit.target.interactive_rect,
+                state.seat.pointer_position(),
+            );
+            if state.is_tiled_root_surface(hit.target.root_surface_object_id) {
                 start_interactive_tiled_resize(
                     state,
                     dispatcher,
-                    target.client_id,
-                    target.root_surface_object_id,
+                    hit.target.client_id,
+                    hit.target.root_surface_object_id,
                     edges,
                 )
             } else {
                 start_interactive_resize(
                     state,
                     dispatcher,
-                    target.client_id,
-                    target.root_surface_object_id,
+                    hit.target.client_id,
+                    hit.target.root_surface_object_id,
                     xdg_toplevel_id,
                     size_constraints,
                     edges,
-                    target.initial_root_pos,
-                    target.initial_size,
+                    hit.target.initial_root_pos,
+                    hit.target.initial_size,
                 )
             }
         }
@@ -1813,33 +1839,144 @@ fn begin_pointer_binding(
     true
 }
 
-fn xdg_surface_for_wl_surface<'a>(state: &'a State, surface: &WlSurface) -> Option<&'a XdgSurface> {
-    let wl_id = surface.surface_id();
-    state.objects.iter().find_map(|(_oid, obj)| {
-        obj.downcast_ref::<XdgSurface>()
-            .filter(|xdg| xdg.wl_surface_id() == wl_id)
-    })
-}
+fn begin_ssd_pointer_action(state: &mut State, dispatcher: &mut Dispatcher) -> bool {
+    let pointer_pos = state.seat.pointer_position();
+    let Some(hit) = window_pointer_hit_at(state, pointer_pos) else {
+        return false;
+    };
+    let WindowHitZone::Decoration(decoration_hit) = hit.zone else {
+        return false;
+    };
 
-/// Hit target for compositor pointer bindings (move/resize). Uses xdg window geometry when set so
-/// client-side decorations drawn on subsurfaces (outside the root buffer rect) still count.
-fn root_surface_pointer_bounds(state: &State, root_surface_object_id: ObjectId) -> Option<RectI> {
-    let surface = state
-        .objects
-        .try_ref_object::<WlSurface>(root_surface_object_id)?;
-    let (rx, ry) = surface.root_position();
-    if surface.role() == Role::XdgSurface {
-        if let Some(xdg) = xdg_surface_for_wl_surface(state, surface) {
-            let geom = xdg.window_geometry_rect_for_surface(root_surface_object_id, state);
-            if let Some(global) = RectI::new(rx + geom.x, ry + geom.y, geom.width, geom.height) {
-                return Some(global);
+    match (decoration_hit, hit.target.role) {
+        (
+            _,
+            WindowPointerRole::XdgToplevel { is_maximized: true, .. }
+            | WindowPointerRole::XdgToplevel { is_fullscreen: true, .. },
+        )
+        | (_, WindowPointerRole::Unsupported) => return false,
+        _ => {}
+    }
+
+    state.raise_root_surface(hit.target.root_surface_object_id);
+    schedule_outputs_for_rects(state, [hit.target.interactive_rect], dispatcher);
+    set_keyboard_focus(
+        state,
+        dispatcher,
+        Some(SurfaceFocus {
+            client_id: hit.target.client_id,
+            surface_id: hit.target.surface_id,
+        }),
+    );
+
+    match (decoration_hit, hit.target.role) {
+        (WindowDecorationHit::Titlebar, _) => {
+            if state.is_tiled_root_surface(hit.target.root_surface_object_id) {
+                if state.set_root_surface_floating(hit.target.root_surface_object_id, true) {
+                    dispatcher.dispatch(ClientsAction::WorkspaceStateChanged);
+                    schedule_active_output(state, dispatcher);
+                }
+            }
+            start_interactive_move(
+                state,
+                dispatcher,
+                hit.target.client_id,
+                hit.target.root_surface_object_id,
+                hit.target.initial_root_pos,
+            );
+        }
+        (
+            WindowDecorationHit::Resize(edges),
+            WindowPointerRole::XdgToplevel { xdg_toplevel_id, size_constraints, .. },
+        ) => {
+            if state.is_tiled_root_surface(hit.target.root_surface_object_id) {
+                start_interactive_tiled_resize(
+                    state,
+                    dispatcher,
+                    hit.target.client_id,
+                    hit.target.root_surface_object_id,
+                    edges,
+                );
+            } else {
+                start_interactive_resize(
+                    state,
+                    dispatcher,
+                    hit.target.client_id,
+                    hit.target.root_surface_object_id,
+                    xdg_toplevel_id,
+                    size_constraints,
+                    edges,
+                    hit.target.initial_root_pos,
+                    hit.target.initial_size,
+                );
             }
         }
+        _ => return false,
     }
-    surface.global_logical_bounds()
+
+    true
 }
 
-fn window_pointer_target_at(state: &State, pointer_pos: (f64, f64)) -> Option<WindowPointerTarget> {
+fn classify_window_hit_zone(
+    state: &State,
+    target: &WindowPointerTarget,
+    pointer_pos: (f64, f64),
+) -> WindowHitZone {
+    let Some(layout) = state.root_surface_ssd_layout(target.root_surface_object_id) else {
+        return WindowHitZone::Content;
+    };
+    if !rect_contains_point(layout.frame_rect, pointer_pos)
+        || rect_contains_point(layout.content_rect, pointer_pos)
+    {
+        return WindowHitZone::Content;
+    }
+
+    let x = pointer_pos.0.round() as i32;
+    let y = pointer_pos.1.round() as i32;
+    let border_resize_height = state
+        .root_surface_ssd_insets(target.root_surface_object_id)
+        .map(|insets| insets.left.max(insets.right).max(insets.bottom).max(6))
+        .unwrap_or(6);
+    let top_resize_height =
+        (layout.content_rect.y - layout.frame_rect.y).clamp(1, border_resize_height);
+    let top_resize_limit = layout.frame_rect.y.saturating_add(top_resize_height);
+
+    if x < layout.content_rect.x {
+        return WindowHitZone::Decoration(WindowDecorationHit::Resize(
+            if y < layout.content_rect.y {
+                ResizeEdge::TopLeft as u32
+            } else if y >= layout.content_rect.y2() {
+                ResizeEdge::BottomLeft as u32
+            } else {
+                ResizeEdge::Left as u32
+            },
+        ));
+    }
+    if x >= layout.content_rect.x2() {
+        return WindowHitZone::Decoration(WindowDecorationHit::Resize(
+            if y < layout.content_rect.y {
+                ResizeEdge::TopRight as u32
+            } else if y >= layout.content_rect.y2() {
+                ResizeEdge::BottomRight as u32
+            } else {
+                ResizeEdge::Right as u32
+            },
+        ));
+    }
+    if y >= layout.content_rect.y2() {
+        return WindowHitZone::Decoration(WindowDecorationHit::Resize(ResizeEdge::Bottom as u32));
+    }
+    if y < layout.content_rect.y {
+        if y < top_resize_limit {
+            return WindowHitZone::Decoration(WindowDecorationHit::Resize(ResizeEdge::Top as u32));
+        }
+        return WindowHitZone::Decoration(WindowDecorationHit::Titlebar);
+    }
+
+    WindowHitZone::Content
+}
+
+fn window_target_at(state: &State, pointer_pos: (f64, f64)) -> Option<WindowPointerTarget> {
     let mut hit = None;
 
     for object_id in ordered_scene_root_surface_ids(state) {
@@ -1849,21 +1986,27 @@ fn window_pointer_target_at(state: &State, pointer_pos: (f64, f64)) -> Option<Wi
         if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
             continue;
         }
-        let Some(bounds) = root_surface_pointer_bounds(state, object_id) else {
+        let Some(interactive_rect) = state.root_surface_interactive_rect(object_id) else {
             continue;
         };
-        if rect_contains_point(bounds, pointer_pos) {
-            hit = resolve_window_pointer_target(state, object_id, bounds);
+        if rect_contains_point(interactive_rect, pointer_pos) {
+            hit = build_window_target(state, object_id, interactive_rect);
         }
     }
 
     hit
 }
 
-fn resolve_window_pointer_target(
+fn window_pointer_hit_at(state: &State, pointer_pos: (f64, f64)) -> Option<WindowPointerHit> {
+    let target = window_target_at(state, pointer_pos)?;
+    let zone = classify_window_hit_zone(state, &target, pointer_pos);
+    Some(WindowPointerHit { target, zone })
+}
+
+fn build_window_target(
     state: &State,
     root_surface_object_id: ObjectId,
-    bounds: RectI,
+    interactive_rect: RectI,
 ) -> Option<WindowPointerTarget> {
     let root_surface = state
         .objects
@@ -1887,7 +2030,7 @@ fn resolve_window_pointer_target(
         initial_size: root_surface
             .logical_size()
             .map(|size| (size.width, size.height))?,
-        bounds,
+        interactive_rect,
     })
 }
 
@@ -1967,6 +2110,46 @@ fn resize_edges_for_pointer(bounds: RectI, pointer_pos: (f64, f64)) -> u32 {
             best_edge
         }
     }
+}
+
+fn ssd_hover_cursor_icon_names(state: &State) -> Option<&'static [&'static str]> {
+    let pointer_pos = state.seat.pointer_position();
+    let hit = window_pointer_hit_at(state, pointer_pos)?;
+    match hit.target.role {
+        WindowPointerRole::XdgToplevel { is_maximized: true, .. }
+        | WindowPointerRole::XdgToplevel { is_fullscreen: true, .. }
+        | WindowPointerRole::Unsupported => None,
+        _ => Some(match hit.zone {
+            WindowHitZone::Content => return None,
+            WindowHitZone::Decoration(WindowDecorationHit::Titlebar) => {
+                POINTER_MOVE_CURSOR_ICON_NAMES
+            }
+            WindowHitZone::Decoration(WindowDecorationHit::Resize(edges)) => {
+                resize_cursor_icon_names(edges)
+            }
+        }),
+    }
+}
+
+fn update_idle_pointer_cursor(state: &mut State, dispatcher: &mut Dispatcher) {
+    if state.seat.pointer_focus.is_some() {
+        return;
+    }
+
+    let previous_cursor_owner = visible_cursor_owner_client(state);
+    let changed = if let Some(icon_names) = ssd_hover_cursor_icon_names(state) {
+        state.seat.set_compositor_named_cursor(icon_names)
+    } else {
+        state.seat.set_default_cursor()
+    };
+    if !changed {
+        return;
+    }
+
+    if let Some(client_id) = previous_cursor_owner {
+        dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
+    }
+    schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
 }
 
 fn hit_test_subtree(
@@ -2121,33 +2304,12 @@ fn refresh_pointer_focus(
         }
 
         state.seat.pointer_focus = new_focus;
-        if state.seat.pointer_focus.is_none() {
-            let previous_cursor_owner = visible_cursor_owner_client(state);
-            if state.seat.set_default_cursor() {
-                if let Some(client_id) = previous_cursor_owner {
-                    dispatch_client_action(
-                        dispatcher,
-                        client_id,
-                        ClientAction::RefreshSurfaceOutputs,
-                    );
-                }
-                schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
-            }
-        }
+        update_idle_pointer_cursor(state, dispatcher);
         return;
     }
 
     state.seat.pointer_focus = new_focus;
-
-    if state.seat.pointer_focus.is_none() {
-        let previous_cursor_owner = visible_cursor_owner_client(state);
-        if state.seat.set_default_cursor() {
-            if let Some(client_id) = previous_cursor_owner {
-                dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
-            }
-            schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
-        }
-    }
+    update_idle_pointer_cursor(state, dispatcher);
 
     if send_motion {
         if let Some(focus) = new_focus {
@@ -2462,6 +2624,20 @@ fn start_interactive_move(
         .start_toplevel_move(client_id, root_surface_object_id, initial_root_pos);
 }
 
+fn resize_cursor_icon_names(edges: u32) -> &'static [&'static str] {
+    match edges {
+        e if e == ResizeEdge::Top as u32 => POINTER_RESIZE_N_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::Bottom as u32 => POINTER_RESIZE_S_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::Left as u32 => POINTER_RESIZE_W_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::Right as u32 => POINTER_RESIZE_E_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::TopLeft as u32 => POINTER_RESIZE_NW_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::TopRight as u32 => POINTER_RESIZE_NE_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::BottomLeft as u32 => POINTER_RESIZE_SW_CURSOR_ICON_NAMES,
+        e if e == ResizeEdge::BottomRight as u32 => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
+        _ => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
+    }
+}
+
 fn start_interactive_resize(
     state: &mut State,
     dispatcher: &mut Dispatcher,
@@ -2473,18 +2649,7 @@ fn start_interactive_resize(
     initial_root_pos: (i32, i32),
     initial_size: (i32, i32),
 ) {
-    let cursor_icons = match edges {
-        e if e == ResizeEdge::Top as u32 => POINTER_RESIZE_N_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::Bottom as u32 => POINTER_RESIZE_S_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::Left as u32 => POINTER_RESIZE_W_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::Right as u32 => POINTER_RESIZE_E_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::TopLeft as u32 => POINTER_RESIZE_NW_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::TopRight as u32 => POINTER_RESIZE_NE_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::BottomLeft as u32 => POINTER_RESIZE_SW_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::BottomRight as u32 => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
-        _ => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
-    };
-    begin_compositor_pointer_grab(state, dispatcher, cursor_icons);
+    begin_compositor_pointer_grab(state, dispatcher, resize_cursor_icon_names(edges));
     state.seat.start_toplevel_resize(
         client_id,
         root_surface_object_id,
@@ -2507,18 +2672,7 @@ fn start_interactive_tiled_resize(
     else {
         return;
     };
-    let cursor_icons = match edges {
-        e if e == ResizeEdge::Top as u32 => POINTER_RESIZE_N_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::Bottom as u32 => POINTER_RESIZE_S_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::Left as u32 => POINTER_RESIZE_W_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::Right as u32 => POINTER_RESIZE_E_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::TopLeft as u32 => POINTER_RESIZE_NW_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::TopRight as u32 => POINTER_RESIZE_NE_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::BottomLeft as u32 => POINTER_RESIZE_SW_CURSOR_ICON_NAMES,
-        e if e == ResizeEdge::BottomRight as u32 => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
-        _ => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
-    };
-    begin_compositor_pointer_grab(state, dispatcher, cursor_icons);
+    begin_compositor_pointer_grab(state, dispatcher, resize_cursor_icon_names(edges));
     state
         .seat
         .start_toplevel_tiled_resize(client_id, root_surface_object_id, edges, resize_state);
@@ -2753,9 +2907,9 @@ mod xdg_seat_tests {
     use {
         super::{
             begin_popup_grab, cancel_active_drag, complete_drag_drop, handle_keyboard_key,
-            handle_pointer_button, handle_pointer_motion,
-            recover_pointer_after_interactive_grab_loss, remove_popup_grab, SeatClientEvent,
-            SeatState, SurfaceFocus,
+            handle_pointer_button, handle_pointer_motion, handle_pointer_motion_absolute,
+            recover_pointer_after_interactive_grab_loss, remove_popup_grab, window_pointer_hit_at,
+            window_target_at, SeatClientEvent, SeatState, SurfaceFocus,
         },
         crate::{
             clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent},
@@ -2765,9 +2919,10 @@ mod xdg_seat_tests {
             globals::Globals,
             object::Object,
             protocol_generated::{
-                xdg_toplevel, Constants, WlSeatId, WlSurfaceId, XdgPopupId, XdgPositionerId,
-                XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
+                xdg_toplevel, Constants, WlSeatId, WlSubsurfaceId, WlSurfaceId, XdgPopupId,
+                XdgPositionerId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
             },
+            region::RectI,
             runner::Dispatcher,
             state::{DragPhase, DragState, DragTargetState, ObjectId, State, WorkspaceGroup},
             wayland_objects::{
@@ -2775,7 +2930,10 @@ mod xdg_seat_tests {
                 wl_surface::{Role, WlSurface},
                 xdg_popup::XdgPopup,
                 xdg_positioner::{PositionerState, XdgPositioner},
-                xdg_surface::{xdg_toplevel::XdgToplevel, XdgSurface},
+                xdg_surface::{
+                    xdg_toplevel::{ToplevelDecorationMode, XdgToplevel},
+                    XdgSurface,
+                },
                 xdg_wm_base::XdgWmBase,
             },
             xkb::Xkb,
@@ -2815,6 +2973,14 @@ mod xdg_seat_tests {
 
     fn make_client() -> (Client, Dispatcher) {
         (Client::new_for_tests(ClientId::from_raw(7)), Dispatcher::default())
+    }
+
+    fn assert_named_cursor_matches_any(seat: &SeatState, expected_names: &[&str]) {
+        assert!(matches!(
+            seat.visible_cursor_source(),
+            Some(CursorSourceRef::Named { owner_client_id: None, name, .. })
+                if expected_names.contains(&name)
+        ));
     }
 
     fn insert_surface(state: &mut State, client: &mut Client, surface_id: WlSurfaceId) -> ObjectId {
@@ -3259,6 +3425,67 @@ mod xdg_seat_tests {
     }
 
     #[test]
+    fn ssd_titlebar_press_starts_move_without_client_pointer_focus() {
+        let mut state = make_state();
+        state.config.general.decoration_insets.top = 12;
+        state.config.general.decoration_insets.left = 4;
+        state.config.general.decoration_insets.right = 4;
+        state.config.general.decoration_insets.bottom = 4;
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(171),
+            XdgSurfaceId::from(181),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(181),
+            XdgToplevelId::from(191),
+        );
+        {
+            let toplevel = state
+                .objects
+                .get_mut(
+                    state
+                        .xdg_toplevel_object_id(client.client_id(), XdgSurfaceId::from(181))
+                        .unwrap(),
+                )
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.test_set_decoration_mode(ToplevelDecorationMode::ServerSide);
+        }
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(950usize), 40, 50, 120, 80);
+        }
+
+        state.seat.pointer_pos = (80.0, 44.0);
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Move { .. })
+        ));
+        assert_eq!(
+            state.seat.keyboard_focus.map(|focus| focus.surface_id),
+            Some(WlSurfaceId::from(171))
+        );
+        assert!(state.seat.pointer_focus.is_none());
+        assert!(state.seat.intercepted_pointer_buttons.contains(&0x110));
+    }
+
+    #[test]
     fn compositor_mouse_resize_binding_uses_pointer_thirds_for_edges() {
         let mut state = make_state();
         let (mut client, mut dispatcher) = make_client();
@@ -3307,6 +3534,297 @@ mod xdg_seat_tests {
             Some(super::PointerInteractiveGrab::Resize { edges, .. })
                 if edges == xdg_toplevel::ResizeEdge::Right as u32
         ));
+    }
+
+    #[test]
+    fn ssd_left_border_press_starts_resize_with_left_edge() {
+        let mut state = make_state();
+        state.config.general.decoration_insets.top = 12;
+        state.config.general.decoration_insets.left = 6;
+        state.config.general.decoration_insets.right = 4;
+        state.config.general.decoration_insets.bottom = 4;
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(201),
+            XdgSurfaceId::from(211),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(211),
+            XdgToplevelId::from(221),
+        );
+        {
+            let toplevel = state
+                .objects
+                .get_mut(
+                    state
+                        .xdg_toplevel_object_id(client.client_id(), XdgSurfaceId::from(211))
+                        .unwrap(),
+                )
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.test_set_decoration_mode(ToplevelDecorationMode::ServerSide);
+        }
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(951usize), 40, 50, 120, 80);
+        }
+
+        state.seat.pointer_pos = (35.0, 90.0);
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Resize { edges, .. })
+                if edges == xdg_toplevel::ResizeEdge::Left as u32
+        ));
+        assert!(state.seat.intercepted_pointer_buttons.contains(&0x110));
+    }
+
+    #[test]
+    fn csd_window_geometry_extends_window_pointer_target_bounds() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(230),
+            XdgSurfaceId::from(240),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(240),
+            XdgToplevelId::from(250),
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(952usize), 40, 50, 120, 80);
+        }
+        let ((_, child_object_id), _) = client.insert_object(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(231), client.client_id(), 6),
+        );
+        {
+            let root_surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            root_surface.add_pending_child(child_object_id);
+            assert!(root_surface.restack_child_relative(child_object_id, None, true));
+        }
+        {
+            let child_surface = state
+                .objects
+                .get_mut(child_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            child_surface.assign_subsurface(WlSubsurfaceId::from(232), wl_surface_object_id);
+            child_surface.set_subsurface_position(-6, -12);
+            child_surface.test_map(ObjectId::from(954usize), 0, 0, 126, 92);
+        }
+        {
+            let mut root_surface = state.objects.grab_object::<WlSurface>(wl_surface_object_id);
+            assert!(root_surface.apply_pending_tree_state(&mut state));
+        }
+        {
+            let xdg_surface = state
+                .objects
+                .get_mut(xdg_surface_object_id)
+                .downcast_mut::<XdgSurface>()
+                .unwrap();
+            xdg_surface.test_set_current_window_geometry(Some(RectI {
+                x: -6,
+                y: -12,
+                width: 126,
+                height: 92,
+            }));
+        }
+
+        let target = window_target_at(&state, (36.0, 44.0)).expect("target on CSD chrome");
+        assert_eq!(target.root_surface_object_id, wl_surface_object_id);
+        assert_eq!(target.interactive_rect, RectI::new(34, 38, 126, 92).unwrap());
+    }
+
+    #[test]
+    fn window_pointer_hit_classifies_content_hits() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(245),
+            XdgSurfaceId::from(255),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(255),
+            XdgToplevelId::from(265),
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(955usize), 40, 50, 120, 80);
+        }
+
+        let hit = window_pointer_hit_at(&state, (80.0, 90.0)).expect("content hit");
+        assert_eq!(hit.target.root_surface_object_id, wl_surface_object_id);
+        assert_eq!(hit.zone, super::WindowHitZone::Content);
+    }
+
+    #[test]
+    fn window_pointer_hit_classifies_ssd_titlebar_and_resize_hits() {
+        let mut state = make_state();
+        state.config.general.decoration_insets.top = 12;
+        state.config.general.decoration_insets.left = 6;
+        state.config.general.decoration_insets.right = 4;
+        state.config.general.decoration_insets.bottom = 4;
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(266),
+            XdgSurfaceId::from(276),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(276),
+            XdgToplevelId::from(286),
+        );
+        {
+            let toplevel = state
+                .objects
+                .get_mut(
+                    state
+                        .xdg_toplevel_object_id(client.client_id(), XdgSurfaceId::from(276))
+                        .unwrap(),
+                )
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.test_set_decoration_mode(ToplevelDecorationMode::ServerSide);
+        }
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(956usize), 40, 50, 120, 80);
+        }
+
+        let titlebar_hit = window_pointer_hit_at(&state, (80.0, 44.0)).expect("titlebar hit");
+        assert_eq!(
+            titlebar_hit.zone,
+            super::WindowHitZone::Decoration(super::WindowDecorationHit::Titlebar)
+        );
+
+        let resize_hit = window_pointer_hit_at(&state, (35.0, 90.0)).expect("resize hit");
+        assert_eq!(
+            resize_hit.zone,
+            super::WindowHitZone::Decoration(super::WindowDecorationHit::Resize(
+                xdg_toplevel::ResizeEdge::Left as u32
+            ))
+        );
+    }
+
+    #[test]
+    fn ssd_hover_uses_resize_and_move_cursors_before_click() {
+        let mut state = make_state();
+        state.config.general.decoration_insets.top = 12;
+        state.config.general.decoration_insets.left = 6;
+        state.config.general.decoration_insets.right = 4;
+        state.config.general.decoration_insets.bottom = 4;
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(260),
+            XdgSurfaceId::from(270),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(270),
+            XdgToplevelId::from(280),
+        );
+        {
+            let toplevel = state
+                .objects
+                .get_mut(
+                    state
+                        .xdg_toplevel_object_id(client.client_id(), XdgSurfaceId::from(270))
+                        .unwrap(),
+                )
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.test_set_decoration_mode(ToplevelDecorationMode::ServerSide);
+        }
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(953usize), 40, 50, 120, 80);
+        }
+
+        handle_pointer_motion_absolute(&mut state, &mut dispatcher, 35.0, 90.0, 100);
+        assert_named_cursor_matches_any(&state.seat, super::POINTER_RESIZE_W_CURSOR_ICON_NAMES);
+
+        handle_pointer_motion_absolute(&mut state, &mut dispatcher, 80.0, 40.0, 110);
+        assert_named_cursor_matches_any(&state.seat, super::POINTER_RESIZE_N_CURSOR_ICON_NAMES);
+
+        handle_pointer_motion_absolute(&mut state, &mut dispatcher, 162.0, 90.0, 120);
+        assert_named_cursor_matches_any(&state.seat, super::POINTER_RESIZE_E_CURSOR_ICON_NAMES);
+
+        handle_pointer_motion_absolute(&mut state, &mut dispatcher, 80.0, 132.0, 130);
+        assert_named_cursor_matches_any(&state.seat, super::POINTER_RESIZE_S_CURSOR_ICON_NAMES);
+
+        handle_pointer_motion_absolute(&mut state, &mut dispatcher, 80.0, 44.0, 140);
+        assert_named_cursor_matches_any(&state.seat, super::POINTER_MOVE_CURSOR_ICON_NAMES);
+        assert!(state.seat.pointer_focus.is_none());
     }
 
     #[test]

@@ -26,30 +26,31 @@ impl ZxdgToplevelDecorationV1 {
         Self { id, toplevel_object_id, requested_mode: None }
     }
 
-    fn effective_mode(&self) -> ToplevelDecorationMode {
-        match self.requested_mode {
-            // Until compositor-drawn SSD exists, always keep clients in CSD mode.
-            Some(ToplevelDecorationMode::ClientSide)
-            | Some(ToplevelDecorationMode::ServerSide)
-            | None => ToplevelDecorationMode::ClientSide,
-        }
+    pub fn requested_mode(&self) -> Option<ToplevelDecorationMode> {
+        self.requested_mode
     }
 
-    fn send_configure_mode(&self, mode: ToplevelDecorationMode, dispatcher: &mut ClientDispatcher) {
+    pub(crate) fn send_configure_mode(
+        &self,
+        mode: ToplevelDecorationMode,
+        dispatcher: &mut ClientDispatcher,
+    ) {
         self.send_event(
             zxdg_toplevel_decoration_v1::Event::Configure { mode: encode_mode(mode) as u32 },
             dispatcher,
         );
     }
 
-    pub fn send_current_configure(&self, state: &State, dispatcher: &mut ClientDispatcher) {
-        let Some(toplevel) = state
+    fn root_surface_object_id(&self, client: &Client, state: &State) -> Option<ObjectId> {
+        let toplevel = state
             .objects
-            .try_ref_object::<XdgToplevel>(self.toplevel_object_id)
-        else {
-            return;
-        };
-        self.send_configure_mode(toplevel.decoration_mode(), dispatcher);
+            .try_ref_object::<XdgToplevel>(self.toplevel_object_id)?;
+        let xdg_surface_object_id =
+            client.object_id_for_wayland(toplevel.xdg_surface_id().into())?;
+        let xdg_surface = state
+            .objects
+            .try_ref_object::<XdgSurface>(xdg_surface_object_id)?;
+        client.object_id_for_wayland(xdg_surface.wl_surface_id().into())
     }
 
     fn update_effective_mode(
@@ -57,18 +58,23 @@ impl ZxdgToplevelDecorationV1 {
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
+        force_xdg_configure: bool,
         send_xdg_configure: bool,
     ) {
+        let root_surface_object_id = self.root_surface_object_id(client, state);
         let Some(mut toplevel) = state
             .objects
             .try_grab_object::<XdgToplevel>(self.toplevel_object_id)
         else {
             return;
         };
-        let effective_mode = self.effective_mode();
-        toplevel.set_decoration_mode(effective_mode);
+        let effective_mode = state.xdg_decoration_mode_for_surface(
+            root_surface_object_id,
+            true,
+            self.requested_mode,
+        );
+        toplevel.schedule_decoration_mode(effective_mode);
         let xdg_surface_id = toplevel.xdg_surface_id();
-        self.send_configure_mode(effective_mode, dispatcher);
         if !send_xdg_configure {
             return;
         }
@@ -78,7 +84,57 @@ impl ZxdgToplevelDecorationV1 {
         if !xdg_surface.initial_commit_complete() {
             return;
         }
-        toplevel.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
+        if !force_xdg_configure
+            && toplevel.decoration_mode_for_configure() == toplevel.decoration_mode()
+        {
+            return;
+        }
+        toplevel.schedule_configure_with_known_decoration(
+            self,
+            configure_bounds,
+            &mut xdg_surface,
+            dispatcher,
+        );
+    }
+
+    pub fn initialize_negotiation(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.update_effective_mode(client, state, dispatcher, true, true);
+    }
+
+    fn revert_to_unnegotiated_mode(
+        &self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let target_mode = state.xdg_decoration_mode_for_surface(
+            self.root_surface_object_id(client, state),
+            false,
+            None,
+        );
+        let Some(mut toplevel) = state
+            .objects
+            .try_grab_object::<XdgToplevel>(self.toplevel_object_id)
+        else {
+            return;
+        };
+        let changed = toplevel.schedule_decoration_mode(target_mode);
+        let xdg_surface_id = toplevel.xdg_surface_id();
+        if !changed {
+            return;
+        }
+        let configure_bounds =
+            XdgToplevel::configure_bounds_for_xdg_surface(client, state, xdg_surface_id);
+        let mut xdg_surface = client.grab_object(xdg_surface_id, state);
+        if !xdg_surface.initial_commit_complete() {
+            return;
+        }
+        toplevel.schedule_configure(client, state, configure_bounds, &mut xdg_surface, dispatcher);
     }
 }
 
@@ -124,6 +180,7 @@ impl Object for ZxdgToplevelDecorationV1 {
                     let object_id = client.object_id(self.id);
                     toplevel.clear_decoration_object(object_id);
                 }
+                self.revert_to_unnegotiated_mode(client, state, dispatcher);
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
             SetMode { mode } => {
@@ -137,11 +194,11 @@ impl Object for ZxdgToplevelDecorationV1 {
                     return;
                 };
                 self.requested_mode = Some(mode);
-                self.update_effective_mode(client, state, dispatcher, true);
+                self.update_effective_mode(client, state, dispatcher, true, true);
             }
             UnsetMode => {
                 self.requested_mode = None;
-                self.update_effective_mode(client, state, dispatcher, true);
+                self.update_effective_mode(client, state, dispatcher, true, true);
             }
         }
     }
@@ -221,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn set_mode_after_initial_configure_queues_xdg_configure_even_without_policy_change() {
+    fn set_mode_after_initial_configure_queues_xdg_configure_when_policy_is_unchanged() {
         let mut state = make_state();
         let mut client = Client::new_for_tests(ClientId::from_raw(90));
         let mut dispatcher = Dispatcher::default();
@@ -274,7 +331,75 @@ mod tests {
             decoration.on(
                 &mut client,
                 &mut state,
-                set_mode_request(decoration_id, zxdg_toplevel_decoration_v1::Mode::ServerSide),
+                set_mode_request(decoration_id, zxdg_toplevel_decoration_v1::Mode::ClientSide),
+                &mut client_dispatcher,
+            );
+        }
+
+        let xdg_surface = state
+            .objects
+            .try_ref_object::<XdgSurface>(xdg_surface_object_id)
+            .unwrap();
+        assert_eq!(xdg_surface.test_pending_configure_count(), 1);
+    }
+
+    #[test]
+    fn unset_mode_after_initial_configure_queues_xdg_configure_when_policy_is_unchanged() {
+        let mut state = make_state();
+        let mut client = Client::new_for_tests(ClientId::from_raw(91));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let wl_surface_id = WlSurfaceId::from(20u32);
+        let xdg_surface_id = XdgSurfaceId::from(21u32);
+        let toplevel_id = XdgToplevelId::from(22u32);
+        let decoration_id = ZxdgToplevelDecorationV1Id::from(23u32);
+
+        let ((_, surface_object_id), _) =
+            client.insert_object(&mut state, WlSurface::new(wl_surface_id, client.client_id(), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            assert!(surface
+                .set_role(Role::XdgSurface, &mut client_dispatcher)
+                .is_ok());
+            surface.set_xdg_surface_impl(xdg_surface_id);
+        }
+        let ((_, xdg_surface_object_id), _) = client.insert_object(
+            &mut state,
+            XdgSurface::new(xdg_surface_id, XdgWmBaseId::from(1), wl_surface_id, 7),
+        );
+        {
+            let xdg_surface = state
+                .objects
+                .get_mut(xdg_surface_object_id)
+                .downcast_mut::<XdgSurface>()
+                .unwrap();
+            xdg_surface.test_set_initial_commit_complete(true);
+        }
+        let ((_, toplevel_object_id), _) =
+            client.insert_object(&mut state, XdgToplevel::new(toplevel_id, xdg_surface_id, 7));
+        state.register_xdg_toplevel_role(client.client_id(), xdg_surface_id, toplevel_object_id);
+        let ((_, decoration_object_id), _) = client.insert_object(
+            &mut state,
+            ZxdgToplevelDecorationV1::new(decoration_id, toplevel_object_id),
+        );
+        {
+            let toplevel = state
+                .objects
+                .get_mut(toplevel_object_id)
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            assert!(toplevel.set_decoration_object(decoration_object_id));
+        }
+
+        {
+            let mut decoration = client.grab_object(decoration_id, &mut state);
+            decoration.on(
+                &mut client,
+                &mut state,
+                (&*RawEvent::new(decoration_id.into(), 2, 0).into_bytes())
+                    .try_into()
+                    .unwrap(),
                 &mut client_dispatcher,
             );
         }

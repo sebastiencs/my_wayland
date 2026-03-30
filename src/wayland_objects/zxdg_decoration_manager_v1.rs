@@ -135,8 +135,8 @@ impl Object for ZxdgDecorationManagerV1 {
                     let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
                     assert!(toplevel.set_decoration_object(decoration_object_id));
                 }
-                let decoration = client.ref_object(id, state);
-                decoration.send_current_configure(state, dispatcher);
+                let mut decoration = client.grab_object(id, state);
+                decoration.initialize_negotiation(client, state, dispatcher);
             }
         }
     }

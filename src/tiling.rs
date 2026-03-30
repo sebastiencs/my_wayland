@@ -1405,9 +1405,9 @@ fn debug_log_tiled_geometry_snapshot(
     );
 }
 
-/// Places the wl_surface root so explicit xdg window geometry aligns with the tile frame.
-/// When the client never set window geometry, fall back to placing the root buffer at the
-/// content rect derived from configured decoration insets.
+/// Places the wl_surface root so explicit xdg window geometry aligns with the compositor-owned
+/// content rect. For server-side decorations, the outer frame is compositor-owned and must remain
+/// outside the client's window geometry.
 pub(crate) fn tiled_root_position_for_layout(
     state: &State,
     surface_object_id: ObjectId,
@@ -1431,7 +1431,12 @@ pub(crate) fn tiled_root_position_for_layout(
     ) else {
         return (content_rect.x, content_rect.y);
     };
-    (frame_rect.x.saturating_sub(window_geometry.x), frame_rect.y.saturating_sub(window_geometry.y))
+    let anchor = if toplevel.decoration_mode() == ToplevelDecorationMode::ServerSide {
+        content_rect
+    } else {
+        frame_rect
+    };
+    (anchor.x.saturating_sub(window_geometry.x), anchor.y.saturating_sub(window_geometry.y))
 }
 
 fn clamp_window_geometry_to_surface_bounds(window_geometry: RectI, surface_bounds: RectI) -> RectI {
@@ -2601,6 +2606,7 @@ mod tests {
                 .get_mut(toplevel_object_id)
                 .downcast_mut::<XdgToplevel>()
                 .unwrap();
+            toplevel.set_decoration_mode(ToplevelDecorationMode::ClientSide);
             toplevel.set_window_geometry(Some(RectI { x: -4, y: -12, width: 90, height: 80 }));
         }
 
@@ -2645,6 +2651,7 @@ mod tests {
                 .get_mut(toplevel_object_id)
                 .downcast_mut::<XdgToplevel>()
                 .unwrap();
+            toplevel.set_decoration_mode(ToplevelDecorationMode::ClientSide);
             toplevel.set_window_geometry(Some(RectI { x: 0, y: 32, width: 800, height: 568 }));
         }
 
@@ -2745,6 +2752,7 @@ mod tests {
                 .get_mut(toplevel_object_id)
                 .downcast_mut::<XdgToplevel>()
                 .unwrap();
+            toplevel.set_decoration_mode(ToplevelDecorationMode::ClientSide);
             toplevel.set_window_geometry(Some(RectI { x: -4, y: -12, width: 90, height: 80 }));
         }
 
@@ -2807,6 +2815,7 @@ mod tests {
                 .get_mut(toplevel_object_id)
                 .downcast_mut::<XdgToplevel>()
                 .unwrap();
+            toplevel.set_decoration_mode(ToplevelDecorationMode::ClientSide);
             toplevel.set_window_geometry(Some(RectI { x: -10, y: -20, width: 120, height: 100 }));
         }
 

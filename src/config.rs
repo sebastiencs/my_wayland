@@ -45,6 +45,7 @@ pub enum OutputScaleSetting {
 pub struct RuntimeConfig {
     path: PathBuf,
     pub general: GeneralConfig,
+    pub decorations: DecorationsConfig,
     pub bindings: Vec<Binding>,
     pub mouse_bindings: Vec<MouseBinding>,
     output_scales: BTreeMap<String, OutputScaleSetting>,
@@ -57,6 +58,28 @@ pub struct GeneralConfig {
     pub outer_gap: i32,
     pub inner_gap: i32,
     pub decoration_insets: DecorationInsets,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum XdgDecorationModePolicy {
+    Server,
+    Client,
+    HonorClient,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecorationsConfig {
+    pub xdg: XdgDecorationConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct XdgDecorationConfig {
+    pub no_protocol: XdgDecorationModePolicy,
+    pub tiled: XdgDecorationModePolicy,
+    pub floating: XdgDecorationModePolicy,
+    pub fullscreen: XdgDecorationModePolicy,
+    pub unset_mode: XdgDecorationModePolicy,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -131,9 +154,26 @@ pub enum ConfigWatcherAction {
 #[serde(default, deny_unknown_fields)]
 struct ConfigFile {
     general: GeneralConfigFile,
+    decorations: DecorationsConfigFile,
     bindings: BTreeMap<String, CompositorAction>,
     mouse_bindings: BTreeMap<String, MouseBindingAction>,
     output: OutputConfigFile,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DecorationsConfigFile {
+    xdg: XdgDecorationConfigFile,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct XdgDecorationConfigFile {
+    no_protocol: XdgDecorationModePolicy,
+    tiled: XdgDecorationModePolicy,
+    floating: XdgDecorationModePolicy,
+    fullscreen: XdgDecorationModePolicy,
+    unset_mode: XdgDecorationModePolicy,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -258,6 +298,15 @@ impl RuntimeConfig {
                 inner_gap: sanitize_non_negative_i32(parsed.general.inner_gap),
                 decoration_insets: sanitize_decoration_insets(parsed.general.decoration_insets),
             },
+            decorations: DecorationsConfig {
+                xdg: XdgDecorationConfig {
+                    no_protocol: parsed.decorations.xdg.no_protocol,
+                    tiled: parsed.decorations.xdg.tiled,
+                    floating: parsed.decorations.xdg.floating,
+                    fullscreen: parsed.decorations.xdg.fullscreen,
+                    unset_mode: parsed.decorations.xdg.unset_mode,
+                },
+            },
             bindings,
             mouse_bindings,
             output_scales,
@@ -274,6 +323,7 @@ impl RuntimeConfig {
                 inner_gap: 0,
                 decoration_insets: DecorationInsets::default(),
             },
+            decorations: DecorationsConfig::default(),
             bindings: Vec::new(),
             mouse_bindings: Vec::new(),
             output_scales: BTreeMap::new(),
@@ -343,6 +393,30 @@ impl GeneralConfig {
     }
 }
 
+impl Default for DecorationsConfig {
+    fn default() -> Self {
+        Self { xdg: XdgDecorationConfig::default() }
+    }
+}
+
+impl Default for XdgDecorationConfig {
+    fn default() -> Self {
+        Self {
+            no_protocol: XdgDecorationModePolicy::Client,
+            tiled: XdgDecorationModePolicy::Server,
+            floating: XdgDecorationModePolicy::HonorClient,
+            fullscreen: XdgDecorationModePolicy::Server,
+            unset_mode: XdgDecorationModePolicy::Server,
+        }
+    }
+}
+
+impl Default for XdgDecorationModePolicy {
+    fn default() -> Self {
+        Self::HonorClient
+    }
+}
+
 impl KeyBinding {
     fn matches(&self, keysym: xkb::Keysym, modifiers: u32) -> bool {
         self.keysym == keysym && self.modifiers == modifiers
@@ -363,6 +437,19 @@ impl Default for GeneralConfigFile {
             outer_gap: GeneralConfig::default_outer_gap(),
             inner_gap: GeneralConfig::default_inner_gap(),
             decoration_insets: DecorationInsets::default(),
+        }
+    }
+}
+
+impl Default for XdgDecorationConfigFile {
+    fn default() -> Self {
+        let defaults = XdgDecorationConfig::default();
+        Self {
+            no_protocol: defaults.no_protocol,
+            tiled: defaults.tiled,
+            floating: defaults.floating,
+            fullscreen: defaults.fullscreen,
+            unset_mode: defaults.unset_mode,
         }
     }
 }
@@ -851,6 +938,13 @@ mod tests {
             bottom = 5
             left = 6
 
+            [decorations.xdg]
+            no_protocol = "server"
+            tiled = "server"
+            floating = "honor-client"
+            fullscreen = "client"
+            unset_mode = "client"
+
             [bindings]
             "Super+Enter" = { action = "spawn", command = "alacritty" }
             "Ctrl+Shift+Esc" = { action = "reload-config" }
@@ -867,6 +961,11 @@ mod tests {
             config.general.decoration_insets,
             DecorationInsets { top: 3, right: 4, bottom: 5, left: 6 }
         );
+        assert_eq!(config.decorations.xdg.no_protocol, XdgDecorationModePolicy::Server);
+        assert_eq!(config.decorations.xdg.tiled, XdgDecorationModePolicy::Server);
+        assert_eq!(config.decorations.xdg.floating, XdgDecorationModePolicy::HonorClient);
+        assert_eq!(config.decorations.xdg.fullscreen, XdgDecorationModePolicy::Client);
+        assert_eq!(config.decorations.xdg.unset_mode, XdgDecorationModePolicy::Client);
         assert_eq!(config.bindings.len(), 2);
         let enter = config
             .bindings
@@ -907,6 +1006,17 @@ mod tests {
             config.general.decoration_insets,
             DecorationInsets { top: 0, right: 2, bottom: 0, left: 4 }
         );
+    }
+
+    #[test]
+    fn xdg_decoration_policy_defaults_match_tiling_first_behavior() {
+        let config = RuntimeConfig::default();
+
+        assert_eq!(config.decorations.xdg.no_protocol, XdgDecorationModePolicy::Client);
+        assert_eq!(config.decorations.xdg.tiled, XdgDecorationModePolicy::Server);
+        assert_eq!(config.decorations.xdg.floating, XdgDecorationModePolicy::HonorClient);
+        assert_eq!(config.decorations.xdg.fullscreen, XdgDecorationModePolicy::Server);
+        assert_eq!(config.decorations.xdg.unset_mode, XdgDecorationModePolicy::Server);
     }
 
     #[test]

@@ -40,6 +40,7 @@ struct ToplevelConfigureState {
     width: i32,
     height: i32,
     states: Vec<u32>,
+    decoration_mode: xdg_toplevel::ToplevelDecorationMode,
 }
 
 #[derive(Clone, Debug)]
@@ -260,12 +261,18 @@ impl XdgSurface {
         width: i32,
         height: i32,
         states: Vec<u32>,
+        decoration_mode: xdg_toplevel::ToplevelDecorationMode,
         dispatcher: &mut ClientDispatcher,
     ) -> u32 {
         let serial = self.next_serial();
         self.pending_configures.push_back(PendingConfigure {
             serial,
-            state: ConfigureState::Toplevel(ToplevelConfigureState { width, height, states }),
+            state: ConfigureState::Toplevel(ToplevelConfigureState {
+                width,
+                height,
+                states,
+                decoration_mode,
+            }),
         });
         self.send_event(xdg_surface::Event::Configure { serial }, dispatcher);
         serial
@@ -433,13 +440,31 @@ impl XdgSurface {
                         return None;
                     }
                     let toplevel_object_id = client.object_id(id);
+                    let desired_decoration_mode = state
+                        .objects
+                        .try_ref_object::<xdg_toplevel::XdgToplevel>(toplevel_object_id)
+                        .map(|toplevel| {
+                            state.xdg_decoration_mode_for_surface(
+                                Some(surface_object_id),
+                                toplevel.has_decoration_object(),
+                                toplevel.requested_decoration_mode(state),
+                            )
+                        });
+                    if let Some(mode) = desired_decoration_mode {
+                        if let Some(mut toplevel) = state
+                            .objects
+                            .try_grab_object::<xdg_toplevel::XdgToplevel>(toplevel_object_id)
+                        {
+                            toplevel.schedule_decoration_mode(mode);
+                        }
+                    }
                     let fallback_decoration_insets = state.config.general.decoration_insets;
                     let committed_window_geometry = self.geometry_after_this_commit();
                     let (target_min_size, surface_decoration_insets) = state
                         .objects
                         .try_ref_object::<xdg_toplevel::XdgToplevel>(toplevel_object_id)
                         .map(|toplevel| {
-                            let insets = if toplevel.decoration_mode()
+                            let insets = if toplevel.decoration_mode_for_configure()
                                 == xdg_toplevel::ToplevelDecorationMode::ServerSide
                             {
                                 fallback_decoration_insets
@@ -468,6 +493,8 @@ impl XdgSurface {
                         );
                     let mut xdg_toplevel = client.grab_object(id, state);
                     xdg_toplevel.send_initial_configure(
+                        client,
+                        state,
                         configure_bounds,
                         initial_layout_configure,
                         self,
@@ -713,10 +740,15 @@ impl Object for XdgSurface {
                 self.last_acked = Some(acked.clone());
 
                 match acked.state {
-                    ConfigureState::Toplevel(ToplevelConfigureState { width, height, states }) => {
+                    ConfigureState::Toplevel(ToplevelConfigureState {
+                        width,
+                        height,
+                        states,
+                        decoration_mode,
+                    }) => {
                         if let RoleObject::Toplevel(id) = self.role_object {
                             let mut toplevel = client.grab_object(id, state);
-                            toplevel.apply_acked_configure(width, height, states);
+                            toplevel.apply_acked_configure(width, height, states, decoration_mode);
                         }
                     }
                     ConfigureState::Popup(PopupConfigureState { geometry }) => {
@@ -768,6 +800,7 @@ pub mod xdg_toplevel {
         current_height: i32,
         current_states: BTreeSet<proto_xdg_toplevel::State>,
         decoration_mode: ToplevelDecorationMode,
+        pending_decoration_mode: Option<ToplevelDecorationMode>,
         window_geometry: Option<RectI>,
         decoration_object_id: Option<ObjectId>,
     }
@@ -829,6 +862,7 @@ pub mod xdg_toplevel {
                 current_height: 0,
                 current_states: BTreeSet::default(),
                 decoration_mode: ToplevelDecorationMode::ClientSide,
+                pending_decoration_mode: None,
                 window_geometry: None,
                 decoration_object_id: None,
             }
@@ -952,22 +986,47 @@ pub mod xdg_toplevel {
 
         pub(crate) fn schedule_configure(
             &mut self,
+            client: &Client,
+            state: &State,
             configure_bounds: Option<(i32, i32)>,
             xdg_surface: &mut XdgSurface,
             dispatcher: &mut ClientDispatcher,
         ) {
             self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_configure(dispatcher);
+            self.send_decoration_configure_if_needed(state, dispatcher);
             xdg_surface.queue_toplevel_configure(
                 self.current_width,
                 self.current_height,
                 self.effective_states(),
+                self.decoration_mode_for_configure(),
+                dispatcher,
+            );
+        }
+
+        pub(crate) fn schedule_configure_with_known_decoration(
+            &mut self,
+            decoration: &ZxdgToplevelDecorationV1,
+            configure_bounds: Option<(i32, i32)>,
+            xdg_surface: &mut XdgSurface,
+            dispatcher: &mut ClientDispatcher,
+        ) {
+            self.send_configure_bounds(configure_bounds, dispatcher);
+            self.send_configure(dispatcher);
+            decoration.send_configure_mode(self.decoration_mode_for_configure(), dispatcher);
+            xdg_surface.queue_toplevel_configure(
+                self.current_width,
+                self.current_height,
+                self.effective_states(),
+                self.decoration_mode_for_configure(),
                 dispatcher,
             );
         }
 
         pub fn send_initial_configure(
             &mut self,
+            client: &Client,
+            state: &State,
             configure_bounds: Option<(i32, i32)>,
             initial_layout_configure: Option<crate::tiling::InitialLayoutConfigure>,
             xdg_surface: &mut XdgSurface,
@@ -975,6 +1034,8 @@ pub mod xdg_toplevel {
         ) {
             if let Some(layout) = initial_layout_configure {
                 self.send_layout_configure(
+                    client,
+                    state,
                     configure_bounds,
                     xdg_surface,
                     layout.frame_rect.width,
@@ -985,12 +1046,14 @@ pub mod xdg_toplevel {
                     dispatcher,
                 );
             } else {
-                self.schedule_configure(configure_bounds, xdg_surface, dispatcher);
+                self.schedule_configure(client, state, configure_bounds, xdg_surface, dispatcher);
             }
         }
 
         pub fn send_layout_configure(
             &mut self,
+            client: &Client,
+            state: &State,
             configure_bounds: Option<(i32, i32)>,
             xdg_surface: &mut XdgSurface,
             width: i32,
@@ -1010,13 +1073,28 @@ pub mod xdg_toplevel {
                 },
                 dispatcher,
             );
-            xdg_surface.queue_toplevel_configure(width, height, states, dispatcher);
+            self.send_decoration_configure_if_needed(state, dispatcher);
+            xdg_surface.queue_toplevel_configure(
+                width,
+                height,
+                states,
+                self.decoration_mode_for_configure(),
+                dispatcher,
+            );
         }
 
-        pub fn apply_acked_configure(&mut self, width: i32, height: i32, states: Vec<u32>) {
+        pub fn apply_acked_configure(
+            &mut self,
+            width: i32,
+            height: i32,
+            states: Vec<u32>,
+            decoration_mode: ToplevelDecorationMode,
+        ) {
             self.current_width = width;
             self.current_height = height;
             self.current_states = states.into_iter().filter_map(decode_state).collect();
+            self.decoration_mode = decoration_mode;
+            self.pending_decoration_mode = None;
         }
 
         pub fn xdg_surface_id(&self) -> super::XdgSurfaceId {
@@ -1048,8 +1126,28 @@ pub mod xdg_toplevel {
             self.decoration_mode
         }
 
+        pub fn decoration_mode_for_configure(&self) -> ToplevelDecorationMode {
+            self.pending_decoration_mode.unwrap_or(self.decoration_mode)
+        }
+
+        pub fn requested_decoration_mode(&self, state: &State) -> Option<ToplevelDecorationMode> {
+            let decoration_object_id = self.decoration_object_id?;
+            state
+                .objects
+                .try_ref_object::<ZxdgToplevelDecorationV1>(decoration_object_id)
+                .and_then(ZxdgToplevelDecorationV1::requested_mode)
+        }
+
         pub fn window_geometry(&self) -> Option<RectI> {
             self.window_geometry
+        }
+
+        pub fn title(&self) -> &str {
+            &self.title
+        }
+
+        pub fn app_id(&self) -> &str {
+            &self.app_id
         }
 
         pub fn set_decoration_mode(&mut self, mode: ToplevelDecorationMode) -> bool {
@@ -1057,6 +1155,14 @@ pub mod xdg_toplevel {
                 return false;
             }
             self.decoration_mode = mode;
+            true
+        }
+
+        pub fn schedule_decoration_mode(&mut self, mode: ToplevelDecorationMode) -> bool {
+            if self.decoration_mode_for_configure() == mode {
+                return false;
+            }
+            self.pending_decoration_mode = Some(mode);
             true
         }
 
@@ -1084,6 +1190,23 @@ pub mod xdg_toplevel {
             if self.decoration_object_id == Some(object_id) {
                 self.decoration_object_id = None;
             }
+        }
+
+        fn send_decoration_configure_if_needed(
+            &self,
+            state: &State,
+            dispatcher: &mut ClientDispatcher,
+        ) {
+            let Some(decoration_object_id) = self.decoration_object_id else {
+                return;
+            };
+            let Some(decoration) = state
+                .objects
+                .try_ref_object::<ZxdgToplevelDecorationV1>(decoration_object_id)
+            else {
+                return;
+            };
+            decoration.send_configure_mode(self.decoration_mode_for_configure(), dispatcher);
         }
 
         pub fn set_requested_fullscreen(&mut self, fullscreen: bool) {
@@ -1131,6 +1254,8 @@ pub mod xdg_toplevel {
 
         pub fn send_interactive_resize_configure(
             &mut self,
+            client: &Client,
+            state: &State,
             configure_bounds: Option<(i32, i32)>,
             xdg_surface: &mut XdgSurface,
             width: i32,
@@ -1157,7 +1282,14 @@ pub mod xdg_toplevel {
                 },
                 dispatcher,
             );
-            xdg_surface.queue_toplevel_configure(width, height, states, dispatcher);
+            self.send_decoration_configure_if_needed(state, dispatcher);
+            xdg_surface.queue_toplevel_configure(
+                width,
+                height,
+                states,
+                self.decoration_mode_for_configure(),
+                dispatcher,
+            );
         }
 
         #[cfg(test)]
@@ -1207,6 +1339,7 @@ pub mod xdg_toplevel {
             self.current_height = 0;
             self.current_states.clear();
             self.decoration_mode = ToplevelDecorationMode::ClientSide;
+            self.pending_decoration_mode = None;
             self.window_geometry = None;
         }
 
@@ -1357,17 +1490,17 @@ pub mod xdg_toplevel {
             match client.parse::<Self>(req).unwrap() {
                 Destroy => {
                     if let Some(decoration_object_id) = self.decoration_object_id() {
-                        if let Some(decoration) = state
+                        let decoration_id = state
                             .objects
                             .try_ref_object::<ZxdgToplevelDecorationV1>(decoration_object_id)
-                        {
+                            .map(|decoration| decoration.id());
+                        if let Some(decoration_id) = decoration_id {
                             client.protocol_violation_disconnect(
                                 dispatcher,
-                                decoration.id(),
+                                decoration_id,
                                 zxdg_toplevel_decoration_v1::Error::Orphaned as u32,
-                                "The xdg_toplevel_decoration object must be destroyed before its xdg_toplevel.",
+                                "xdg_toplevel destroyed before xdg_toplevel_decoration",
                             );
-                            return;
                         }
                         self.decoration_object_id = None;
                     }
@@ -1528,14 +1661,26 @@ pub mod xdg_toplevel {
                     let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
                     let configure_bounds =
                         Self::configure_bounds_for_xdg_surface(client, state, self.xdg_surface_id);
-                    self.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
+                    self.schedule_configure(
+                        client,
+                        state,
+                        configure_bounds,
+                        &mut xdg_surface,
+                        dispatcher,
+                    );
                 }
                 UnsetMaximized => {
                     self.requested_maximized = false;
                     let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
                     let configure_bounds =
                         Self::configure_bounds_for_xdg_surface(client, state, self.xdg_surface_id);
-                    self.schedule_configure(configure_bounds, &mut xdg_surface, dispatcher);
+                    self.schedule_configure(
+                        client,
+                        state,
+                        configure_bounds,
+                        &mut xdg_surface,
+                        dispatcher,
+                    );
                 }
                 SetFullscreen { output: _ } => {
                     self.requested_fullscreen = true;
@@ -1631,6 +1776,7 @@ pub mod xdg_toplevel {
                     proto_xdg_toplevel::State::Activated as u32,
                     proto_xdg_toplevel::State::Fullscreen as u32,
                 ],
+                ToplevelDecorationMode::ClientSide,
             );
 
             let states = toplevel.effective_states();
@@ -1643,7 +1789,7 @@ pub mod xdg_toplevel {
         fn reset_on_unmap_restores_default_decoration_mode() {
             let mut toplevel =
                 XdgToplevel::new(XdgToplevelId::from(9), super::super::XdgSurfaceId::from(10), 7);
-            toplevel.set_decoration_mode(ToplevelDecorationMode::ServerSide);
+            toplevel.set_decoration_mode(ToplevelDecorationMode::ClientSide);
             toplevel.set_window_geometry(Some(RectI { x: 1, y: 2, width: 3, height: 4 }));
 
             toplevel.reset_on_unmap();
@@ -1833,7 +1979,7 @@ mod tests {
     }
 
     #[test]
-    fn destroying_toplevel_before_decoration_posts_orphaned_error() {
+    fn destroying_toplevel_before_decoration_disconnects_client_with_orphaned_error() {
         let mut state = make_state();
         let mut client = Client::new_for_tests(ClientId::from_raw(88));
         let mut dispatcher = Dispatcher::default();
@@ -1883,7 +2029,11 @@ mod tests {
         }
         drop(client_dispatcher);
 
-        assert!(client.contains_object(toplevel_id, &state));
+        assert!(!client.contains_object(toplevel_id, &state));
+        assert!(client.contains_object(decoration_id, &state));
+        assert!(dispatcher.test_has_queued_action::<crate::clients::ClientsAction>(
+            |action| matches!(action, crate::clients::ClientsAction::Close { id } if *id == client.client_id())
+        ));
         assert!(dispatcher.test_has_queued_action::<crate::io_uring::model::IoUringAction>(
             |action| matches!(action, crate::io_uring::model::IoUringAction::Sendmsg { .. })
         ));
