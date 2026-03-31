@@ -77,9 +77,9 @@ impl ZxdgToplevelDecorationV1 {
         if !send_xdg_configure {
             return;
         }
-        let configure_bounds =
-            XdgToplevel::configure_bounds_for_xdg_surface(client, state, xdg_surface_id);
         let mut xdg_surface = client.grab_object(xdg_surface_id, state);
+        let configure_bounds =
+            XdgToplevel::configure_bounds_for_xdg_surface(client, state, &*xdg_surface);
         if !xdg_surface.initial_commit_complete() {
             return;
         }
@@ -127,9 +127,9 @@ impl ZxdgToplevelDecorationV1 {
         if !changed {
             return;
         }
-        let configure_bounds =
-            XdgToplevel::configure_bounds_for_xdg_surface(client, state, xdg_surface_id);
         let mut xdg_surface = client.grab_object(xdg_surface_id, state);
+        let configure_bounds =
+            XdgToplevel::configure_bounds_for_xdg_surface(client, state, &*xdg_surface);
         if !xdg_surface.initial_commit_complete() {
             return;
         }

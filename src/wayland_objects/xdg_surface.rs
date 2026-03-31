@@ -951,12 +951,8 @@ pub mod xdg_toplevel {
         pub(crate) fn configure_bounds_for_xdg_surface(
             client: &Client,
             state: &State,
-            xdg_surface_id: super::XdgSurfaceId,
+            xdg_surface: &XdgSurface,
         ) -> Option<(i32, i32)> {
-            let xdg_surface_object_id = client.object_id_for_wayland(xdg_surface_id)?;
-            let xdg_surface = state
-                .objects
-                .try_ref_object::<XdgSurface>(xdg_surface_object_id)?;
             let wl_surface_object_id = client.object_id_for_wayland(xdg_surface.wl_surface_id())?;
             state
                 .objects
@@ -1659,7 +1655,7 @@ pub mod xdg_toplevel {
                     self.requested_maximized = true;
                     let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
                     let configure_bounds =
-                        Self::configure_bounds_for_xdg_surface(client, state, self.xdg_surface_id);
+                        Self::configure_bounds_for_xdg_surface(client, state, &xdg_surface);
                     self.schedule_configure(
                         client,
                         state,
@@ -1672,7 +1668,7 @@ pub mod xdg_toplevel {
                     self.requested_maximized = false;
                     let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
                     let configure_bounds =
-                        Self::configure_bounds_for_xdg_surface(client, state, self.xdg_surface_id);
+                        Self::configure_bounds_for_xdg_surface(client, state, &xdg_surface);
                     self.schedule_configure(
                         client,
                         state,
