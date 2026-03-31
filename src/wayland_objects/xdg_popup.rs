@@ -156,8 +156,7 @@ impl XdgPopup {
     fn computed_geometry(&self, client: &Client, state: &State) -> RectI {
         match self.parent {
             PopupParent::XdgSurface(parent_surface_id) => {
-                let Some(parent_object_id) = client.object_id_for_wayland(parent_surface_id.into())
-                else {
+                let Some(parent_object_id) = client.object_id_for_wayland(parent_surface_id) else {
                     return self.positioner.geometry().unwrap_or(self.current_geometry);
                 };
                 let Some(parent_surface) =

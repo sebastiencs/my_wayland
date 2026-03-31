@@ -97,7 +97,7 @@ impl ExtWorkspaceGroupHandleV1 {
         }
 
         self.known_output_objects
-            .retain(|output_id| client.object_id_for_wayland((*output_id).into()).is_some());
+            .retain(|output_id| client.object_id_for_wayland(*output_id).is_some());
         let current_output_objects = group
             .outputs
             .iter()
@@ -162,8 +162,7 @@ impl Object for ExtWorkspaceGroupHandleV1 {
                 if self.removed {
                     return;
                 }
-                let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id.into())
-                else {
+                let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
                     return;
                 };
                 let Some(mut manager) = state
@@ -178,9 +177,7 @@ impl Object for ExtWorkspaceGroupHandleV1 {
                 });
             }
             Destroy => {
-                if let Some(manager_object_id) =
-                    client.object_id_for_wayland(self.manager_id.into())
-                {
+                if let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) {
                     if let Some(mut manager) = state
                         .objects
                         .try_grab_object::<ExtWorkspaceManagerV1>(manager_object_id)

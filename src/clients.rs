@@ -524,12 +524,12 @@ impl Client {
         self.objects[&id].object_id
     }
 
-    pub fn object_id_for_wayland(&self, id: WaylandId) -> Option<ObjectId> {
-        self.objects.get(&id).map(|entry| entry.object_id)
+    pub fn object_id_for_wayland<K: Into<WaylandId>>(&self, id: K) -> Option<ObjectId> {
+        self.objects.get(&id.into()).map(|entry| entry.object_id)
     }
 
-    pub fn remove_wayland_object(&mut self, id: WaylandId) -> Option<ObjectId> {
-        self.objects.remove(&id).map(|entry| entry.object_id)
+    pub fn remove_wayland_object<K: Into<WaylandId>>(&mut self, id: K) -> Option<ObjectId> {
+        self.objects.remove(&id.into()).map(|entry| entry.object_id)
     }
 
     pub fn allocate_server_object_id<I>(&mut self) -> I
@@ -781,7 +781,7 @@ impl Client {
         if !self.contains_object(offer_id, state) {
             return;
         }
-        let Some(object_id) = self.object_id_for_wayland(offer_id.into()) else {
+        let Some(object_id) = self.object_id_for_wayland(offer_id) else {
             return;
         };
         if let Some(mut offer) = state.objects.try_grab_object::<WlDataOffer>(object_id) {
@@ -1120,7 +1120,7 @@ impl Client {
     ) {
         let display = WlDisplay::default();
         for surface_id in surface_ids {
-            let Some(object_id) = self.object_id_for_wayland(surface_id.into()) else {
+            let Some(object_id) = self.object_id_for_wayland(surface_id) else {
                 continue;
             };
             let callbacks = {
@@ -1536,8 +1536,7 @@ impl Client {
             };
             let xdg_surface_id = toplevel_ref.xdg_surface_id();
             let toplevel_id = toplevel_ref.toplevel_id();
-            let Some(xdg_surface_object_id) = self.object_id_for_wayland(xdg_surface_id.into())
-            else {
+            let Some(xdg_surface_object_id) = self.object_id_for_wayland(xdg_surface_id) else {
                 continue;
             };
             let Some(xdg_surface_ref) = state
@@ -1547,8 +1546,7 @@ impl Client {
                 continue;
             };
             let wl_surface_id = xdg_surface_ref.wl_surface_id();
-            let Some(wl_surface_object_id) = self.object_id_for_wayland(wl_surface_id.into())
-            else {
+            let Some(wl_surface_object_id) = self.object_id_for_wayland(wl_surface_id) else {
                 continue;
             };
             let Some(surface_ref) = state
@@ -2166,7 +2164,7 @@ impl Model for Client {
                         .try_ref_object::<XdgSurface>(xdg_surface_object_id)
                         .and_then(|xdg_surface| {
                             let wl_surface_object_id =
-                                self.object_id_for_wayland(xdg_surface.wl_surface_id().into())?;
+                                self.object_id_for_wayland(xdg_surface.wl_surface_id())?;
                             let surface = state
                                 .objects
                                 .try_ref_object::<WlSurface>(wl_surface_object_id)?;

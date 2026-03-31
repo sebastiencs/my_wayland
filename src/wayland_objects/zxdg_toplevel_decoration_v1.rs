@@ -45,12 +45,11 @@ impl ZxdgToplevelDecorationV1 {
         let toplevel = state
             .objects
             .try_ref_object::<XdgToplevel>(self.toplevel_object_id)?;
-        let xdg_surface_object_id =
-            client.object_id_for_wayland(toplevel.xdg_surface_id().into())?;
+        let xdg_surface_object_id = client.object_id_for_wayland(toplevel.xdg_surface_id())?;
         let xdg_surface = state
             .objects
             .try_ref_object::<XdgSurface>(xdg_surface_object_id)?;
-        client.object_id_for_wayland(xdg_surface.wl_surface_id().into())
+        client.object_id_for_wayland(xdg_surface.wl_surface_id())
     }
 
     fn update_effective_mode(

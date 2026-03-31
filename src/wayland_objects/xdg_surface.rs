@@ -139,7 +139,7 @@ impl XdgSurface {
         let Some(popup_id) = self.popup_role_id() else {
             return false;
         };
-        let Some(popup_object_id) = client.object_id_for_wayland(popup_id.into()) else {
+        let Some(popup_object_id) = client.object_id_for_wayland(popup_id) else {
             return false;
         };
         state
@@ -153,7 +153,7 @@ impl XdgSurface {
     }
 
     pub(crate) fn parent_geometry(&self, client: &Client, state: &State) -> RectI {
-        let Some(surface_object_id) = client.object_id_for_wayland(self.wl_surface.into()) else {
+        let Some(surface_object_id) = client.object_id_for_wayland(self.wl_surface) else {
             return RectI { x: 0, y: 0, width: 0, height: 0 };
         };
         self.effective_window_geometry(surface_object_id, state)
@@ -953,12 +953,11 @@ pub mod xdg_toplevel {
             state: &State,
             xdg_surface_id: super::XdgSurfaceId,
         ) -> Option<(i32, i32)> {
-            let xdg_surface_object_id = client.object_id_for_wayland(xdg_surface_id.into())?;
+            let xdg_surface_object_id = client.object_id_for_wayland(xdg_surface_id)?;
             let xdg_surface = state
                 .objects
                 .try_ref_object::<XdgSurface>(xdg_surface_object_id)?;
-            let wl_surface_object_id =
-                client.object_id_for_wayland(xdg_surface.wl_surface_id().into())?;
+            let wl_surface_object_id = client.object_id_for_wayland(xdg_surface.wl_surface_id())?;
             state
                 .objects
                 .try_ref_object::<WlSurface>(wl_surface_object_id)
@@ -1376,7 +1375,7 @@ pub mod xdg_toplevel {
                 if current == self.id {
                     return false;
                 }
-                let Some(object_id) = client.object_id_for_wayland(current.into()) else {
+                let Some(object_id) = client.object_id_for_wayland(current) else {
                     return true;
                 };
                 let Some(toplevel) = state.objects.try_ref_object::<Self>(object_id) else {

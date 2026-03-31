@@ -143,9 +143,7 @@ impl Object for ExtWorkspaceHandleV1 {
 
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
-                if let Some(manager_object_id) =
-                    client.object_id_for_wayland(self.manager_id.into())
-                {
+                if let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) {
                     if let Some(mut manager) = state
                         .objects
                         .try_grab_object::<ExtWorkspaceManagerV1>(manager_object_id)
@@ -159,8 +157,7 @@ impl Object for ExtWorkspaceHandleV1 {
                 if self.removed {
                     return;
                 }
-                let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id.into())
-                else {
+                let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
                     return;
                 };
                 let Some(mut manager) = state
@@ -178,8 +175,7 @@ impl Object for ExtWorkspaceHandleV1 {
                 if self.removed {
                     return;
                 }
-                let Some(group_object_id) = client.object_id_for_wayland(workspace_group.into())
-                else {
+                let Some(group_object_id) = client.object_id_for_wayland(workspace_group) else {
                     client.protocol_violation_disconnect(
                         dispatcher,
                         self.id.into(),
@@ -201,8 +197,7 @@ impl Object for ExtWorkspaceHandleV1 {
                     return;
                 };
                 let group_id = group.group_id();
-                let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id.into())
-                else {
+                let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
                     return;
                 };
                 let Some(mut manager) = state
@@ -220,8 +215,7 @@ impl Object for ExtWorkspaceHandleV1 {
                 if self.removed {
                     return;
                 }
-                let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id.into())
-                else {
+                let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
                     return;
                 };
                 let Some(mut manager) = state

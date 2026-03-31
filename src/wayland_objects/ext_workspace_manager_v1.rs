@@ -195,7 +195,7 @@ impl ExtWorkspaceManagerV1 {
         let workspace_handles = self.workspace_handles.clone();
         let group_object_ids = self.group_handles.values().copied().collect::<Vec<_>>();
         for resource_id in group_object_ids {
-            let Some(object_id) = client.object_id_for_wayland(resource_id.into()) else {
+            let Some(object_id) = client.object_id_for_wayland(resource_id) else {
                 continue;
             };
             let Some(mut group) = state
@@ -209,7 +209,7 @@ impl ExtWorkspaceManagerV1 {
 
         let workspace_object_ids = self.workspace_handles.values().copied().collect::<Vec<_>>();
         for resource_id in workspace_object_ids {
-            let Some(object_id) = client.object_id_for_wayland(resource_id.into()) else {
+            let Some(object_id) = client.object_id_for_wayland(resource_id) else {
                 continue;
             };
             let Some(mut workspace) = state

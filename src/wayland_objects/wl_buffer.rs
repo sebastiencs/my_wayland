@@ -323,7 +323,7 @@ impl Object for WlBuffer {
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
                 self.destroyed = true;
-                client.remove_wayland_object(self.id.into());
+                client.remove_wayland_object(self.id);
             }
         }
     }
