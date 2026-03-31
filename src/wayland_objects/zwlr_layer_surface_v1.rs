@@ -303,6 +303,10 @@ impl ZwlrLayerSurfaceV1 {
             .retain(|candidate| *candidate != popup_id);
     }
 
+    pub fn has_popup_child(&self, popup_id: XdgPopupId) -> bool {
+        self.popup_children.contains(&popup_id)
+    }
+
     pub fn is_topmost_popup(&self, popup_id: XdgPopupId) -> bool {
         self.popup_children.last().copied() == Some(popup_id)
     }

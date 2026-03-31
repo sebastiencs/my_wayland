@@ -747,15 +747,6 @@ impl SeatState {
             })
     }
 
-    pub(crate) fn validate_popup_grab_serial(
-        &self,
-        client_id: ClientId,
-        surface_id: WlSurfaceId,
-        serial: u32,
-    ) -> bool {
-        self.validate_implicit_grab_serial(client_id, surface_id, serial)
-    }
-
     pub(crate) fn popup_grab_client(&self) -> Option<ClientId> {
         self.popup_grab.as_ref().map(|grab| grab.client_id)
     }
@@ -1411,17 +1402,11 @@ pub fn request_popup_grab(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     client_id: ClientId,
-    parent_surface_id: WlSurfaceId,
-    serial: u32,
+    _parent_surface_id: WlSurfaceId,
+    _serial: u32,
     popup_id: XdgPopupId,
     popup_surface_id: WlSurfaceId,
 ) -> bool {
-    if !state
-        .seat
-        .validate_popup_grab_serial(client_id, parent_surface_id, serial)
-    {
-        return false;
-    }
     begin_popup_grab(state, dispatcher, client_id, popup_id, popup_surface_id);
     true
 }
@@ -1850,6 +1835,11 @@ mod xdg_seat_tests {
         (&*event.into_bytes()).try_into().unwrap()
     }
 
+    fn popup_destroy_request(popup_id: XdgPopupId) -> crate::clients::RawRequest<'static> {
+        let event = RawEvent::new(popup_id.into(), 0, 0);
+        (&*event.into_bytes()).try_into().unwrap()
+    }
+
     fn toplevel_move_request(
         toplevel_id: XdgToplevelId,
         seat_id: WlSeatId,
@@ -1950,7 +1940,7 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn popup_grab_dismisses_popup_when_serial_is_invalid() {
+    fn popup_grab_accepts_untracked_serial() {
         let mut state = make_state();
         let (mut client, mut dispatcher) = make_client();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -2001,14 +1991,27 @@ mod xdg_seat_tests {
             );
         }
 
-        assert!(!state.objects.contains(popup_object_id));
-        assert!(!client.contains_object(XdgPopupId::from(40), &state));
-        assert!(state.seat.popup_grab.is_none());
-        assert_eq!(state.seat.keyboard_focus, None);
+        let popup = state
+            .objects
+            .get(popup_object_id)
+            .downcast_ref::<XdgPopup>()
+            .unwrap();
+        assert!(popup.has_explicit_grab());
+        assert_eq!(
+            state.seat.popup_grab.as_ref().unwrap().popup_stack,
+            vec![(XdgPopupId::from(40), WlSurfaceId::from(11))]
+        );
+        assert_eq!(
+            state.seat.keyboard_focus,
+            Some(SurfaceFocus {
+                client_id: client.client_id(),
+                surface_id: WlSurfaceId::from(11)
+            })
+        );
     }
 
     #[test]
-    fn popup_grab_requires_matching_implicit_serial() {
+    fn popup_grab_accepts_matching_serial() {
         let mut state = make_state();
         let (mut client, mut dispatcher) = make_client();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -2096,6 +2099,107 @@ mod xdg_seat_tests {
             .downcast_ref::<XdgSurface>()
             .unwrap();
         assert_eq!(popup_xdg_surface.wl_surface_id(), WlSurfaceId::from(11));
+    }
+
+    #[test]
+    fn dismissed_popup_stays_alive_until_client_destroy() {
+        let mut state = make_state();
+        let (mut client, mut dispatcher) = make_client();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (_parent_wl_surface_object_id, parent_xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(10),
+            XdgSurfaceId::from(20),
+        );
+        let (_popup_wl_surface_object_id, popup_xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(11),
+            XdgSurfaceId::from(21),
+        );
+        assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            parent_xdg_surface_object_id,
+            XdgSurfaceId::from(20),
+            XdgToplevelId::from(30),
+        );
+
+        let ((_, positioner_object_id), _) =
+            client.insert_object(&mut state, XdgPositioner::new(XdgPositionerId::from(50)));
+        {
+            let mut positioner = state
+                .objects
+                .grab_object::<XdgPositioner>(positioner_object_id);
+            positioner.on(
+                &mut client,
+                &mut state,
+                positioner_set_size_request(XdgPositionerId::from(50), 40, 30),
+                &mut client_dispatcher,
+            );
+            positioner.on(
+                &mut client,
+                &mut state,
+                positioner_set_anchor_rect_request(XdgPositionerId::from(50), 0, 0, 10, 10),
+                &mut client_dispatcher,
+            );
+        }
+
+        {
+            let mut xdg_surface = state
+                .objects
+                .grab_object::<XdgSurface>(popup_xdg_surface_object_id);
+            xdg_surface.on(
+                &mut client,
+                &mut state,
+                get_popup_request(
+                    XdgSurfaceId::from(21),
+                    XdgPopupId::from(40),
+                    XdgSurfaceId::from(20),
+                    XdgPositionerId::from(50),
+                ),
+                &mut client_dispatcher,
+            );
+        }
+
+        client.dismiss_popup_ids(
+            &mut state,
+            &mut client_dispatcher,
+            vec![XdgPopupId::from(40)],
+            None,
+        );
+
+        assert!(client.contains_object(XdgPopupId::from(40), &state));
+        let popup_xdg_surface = state
+            .objects
+            .get(popup_xdg_surface_object_id)
+            .downcast_ref::<XdgSurface>()
+            .unwrap();
+        assert_eq!(popup_xdg_surface.popup_role_id(), Some(XdgPopupId::from(40)));
+
+        {
+            let popup_object_id = client.object_id(XdgPopupId::from(40));
+            let mut popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
+            popup.on(
+                &mut client,
+                &mut state,
+                popup_destroy_request(XdgPopupId::from(40)),
+                &mut client_dispatcher,
+            );
+        }
+
+        assert!(!client.contains_object(XdgPopupId::from(40), &state));
+        let popup_xdg_surface = state
+            .objects
+            .get(popup_xdg_surface_object_id)
+            .downcast_ref::<XdgSurface>()
+            .unwrap();
+        assert_eq!(popup_xdg_surface.popup_role_id(), None);
     }
 
     #[test]

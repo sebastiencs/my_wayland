@@ -236,17 +236,10 @@ impl XdgPopup {
         self.send_configure_sequence(xdg_surface, client, state, dispatcher);
     }
 
-    fn dismiss(
-        &mut self,
-        xdg_surface: &mut XdgSurface,
-        client: &mut Client,
-        state: &mut State,
-        dispatcher: &mut ClientDispatcher,
-    ) {
+    pub fn dismiss(&mut self, dispatcher: &mut ClientDispatcher) {
         self.mapped = false;
-        xdg_surface.destroy_popup_role(self.id);
+        self.explicit_grab = false;
         self.send_event(xdg_popup::Event::PopupDone, dispatcher);
-        self.delete_self(client, state, dispatcher);
     }
 }
 
@@ -271,7 +264,9 @@ impl Object for XdgPopup {
                 match self.parent {
                     PopupParent::XdgSurface(parent_surface_id) => {
                         let mut parent_surface = client.grab_object(parent_surface_id, state);
-                        if !parent_surface.is_topmost_popup(self.id) {
+                        if parent_surface.has_popup_child(self.id)
+                            && !parent_surface.is_topmost_popup(self.id)
+                        {
                             self.send_wm_base_error(
                                 &xdg_surface,
                                 client,
@@ -289,7 +284,9 @@ impl Object for XdgPopup {
                     }
                     PopupParent::LayerSurface(parent_surface_id) => {
                         let mut parent_surface = client.grab_object(parent_surface_id, state);
-                        if !parent_surface.is_topmost_popup(self.id) {
+                        if parent_surface.has_popup_child(self.id)
+                            && !parent_surface.is_topmost_popup(self.id)
+                        {
                             self.send_error(
                                 client,
                                 dispatcher,
@@ -407,8 +404,7 @@ impl Object for XdgPopup {
                         }
                         PopupParent::None => {}
                     }
-                    let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
-                    self.dismiss(&mut xdg_surface, client, state, dispatcher);
+                    self.dismiss(dispatcher);
                 }
             }
             Reposition { positioner, token } => {

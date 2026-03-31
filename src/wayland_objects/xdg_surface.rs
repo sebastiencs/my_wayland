@@ -543,6 +543,10 @@ impl XdgSurface {
             .retain(|candidate| *candidate != popup_id);
     }
 
+    pub(crate) fn has_popup_child(&self, popup_id: XdgPopupId) -> bool {
+        self.popup_children.contains(&popup_id)
+    }
+
     pub(crate) fn is_topmost_popup(&self, popup_id: XdgPopupId) -> bool {
         self.popup_children.last().copied() == Some(popup_id)
     }

@@ -643,15 +643,12 @@ impl Client {
                     let mut wl_surface = self.grab_object(wl_surface_id, state);
                     wl_surface.force_unmap_for_role_dismissal(self, state, dispatcher);
                 }
-                let mut xdg_surface = self.grab_object(xdg_surface_id, state);
-                xdg_surface.destroy_popup_role(popup_id);
             }
 
             {
-                let popup = self.ref_object(popup_id, state);
-                popup.send_popup_done(dispatcher);
+                let mut popup = self.grab_object(popup_id, state);
+                popup.dismiss(dispatcher);
             }
-            self.delete_id(&WlDisplay::default(), state, dispatcher, popup_id.into());
         }
     }
 
