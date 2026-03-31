@@ -31,7 +31,7 @@ use crate::{
     sync::AcquireReadyWaiterId,
     udev::Udev,
     wayland_objects::{
-        ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+        ext_workspace_manager_v1::{publish_workspace_state_changed, ExtWorkspaceManagerV1},
         hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1,
         wl_data_offer::WlDataOffer,
         wl_data_source::WlDataSource,
@@ -78,6 +78,7 @@ pub enum ClientManagerAction {
     OutputStateChanged { output_id: OutputId },
     OutputRemoved { output_id: OutputId },
     GammaControlFailed { output_id: OutputId },
+    PublishWorkspaceStateChanged { affected_outputs: Vec<OutputId> },
     WorkspaceStateChanged,
     LayerShellLayoutChanged,
     Close { id: ClientId },
@@ -129,7 +130,7 @@ impl Model for ClientManager {
 
     fn process(
         &mut self,
-        _state: &mut State,
+        state: &mut State,
         action: ClientManagerAction,
         dispatcher: &mut Dispatcher,
     ) -> Result<(), ()> {
@@ -208,6 +209,9 @@ impl Model for ClientManager {
                     dispatcher
                         .dispatch_to(client_id, ClientAction::GammaControlFailed { output_id });
                 }
+            }
+            PublishWorkspaceStateChanged { affected_outputs } => {
+                publish_workspace_state_changed(state, dispatcher, affected_outputs);
             }
             WorkspaceStateChanged => {
                 for client_id in self.set.iter().copied() {

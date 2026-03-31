@@ -9,6 +9,7 @@ use crate::{
         ext_workspace_manager_v1, Constants, ExtWorkspaceGroupHandleV1Id, ExtWorkspaceHandleV1Id,
         ExtWorkspaceManagerV1Id, NewId, WaylandId,
     },
+    runner::Dispatcher,
     seat,
     state::{OutputId, State, WorkspaceGroupId, WorkspaceId},
     wayland_objects::{
@@ -28,7 +29,7 @@ impl ExtWorkspaceManagerV1Global {
 
 pub fn publish_workspace_state_changed(
     state: &mut State,
-    dispatcher: &mut ClientDispatcher,
+    dispatcher: &mut Dispatcher,
     affected_outputs: impl IntoIterator<Item = OutputId>,
 ) {
     state.relayout_dirty_workspaces();

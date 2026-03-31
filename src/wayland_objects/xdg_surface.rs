@@ -1240,11 +1240,8 @@ pub mod xdg_toplevel {
             };
             let affected_outputs = state.workspace_output_ids(workspace_id);
             crate::tiling::mark_workspace_dirty(state, workspace_id);
-            state.relayout_dirty_workspaces();
-            if !affected_outputs.is_empty() {
-                schedule_outputs(state, affected_outputs.into_iter(), dispatcher);
-            }
-            dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
+            dispatcher
+                .dispatch(ClientManagerAction::PublishWorkspaceStateChanged { affected_outputs });
         }
 
         pub fn send_interactive_resize_configure(
@@ -1800,7 +1797,7 @@ mod tests {
     use {
         super::*,
         crate::{
-            clients::{Client, ClientId},
+            clients::{Client, ClientId, ClientManagerAction, RawEvent},
             egl::EGL,
             globals::Globals,
             protocol_generated::{WaylandId, WlSurfaceId, XdgToplevelId},
@@ -2032,5 +2029,77 @@ mod tests {
         assert!(dispatcher.test_has_queued_action::<crate::io_uring::model::IoUringAction>(
             |action| matches!(action, crate::io_uring::model::IoUringAction::Sendmsg { .. })
         ));
+    }
+
+    #[test]
+    fn set_min_size_defers_workspace_relayout_to_client_manager() {
+        let mut state = make_state();
+        let output_id = state.insert_output(make_output(120, 80));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let mut client = Client::new_for_tests(ClientId::from_raw(89));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let wl_surface_id = WlSurfaceId::from(40u32);
+        let xdg_surface_id = XdgSurfaceId::from(41u32);
+        let toplevel_id = XdgToplevelId::from(42u32);
+
+        let ((_, surface_object_id), _) =
+            client.insert_object(&mut state, WlSurface::new(wl_surface_id, client.client_id(), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            assert!(surface
+                .set_role(Role::XdgSurface, &mut client_dispatcher)
+                .is_ok());
+            surface.set_xdg_surface_impl(xdg_surface_id);
+            surface.test_map(ObjectId::from(951usize), 0, 0, 80, 60);
+        }
+        state.register_root_surface(surface_object_id);
+
+        client.insert_object(
+            &mut state,
+            XdgSurface {
+                id: xdg_surface_id,
+                wm_base_id: XdgWmBaseId::from(1),
+                wl_surface: wl_surface_id,
+                wm_base_version: 7,
+                role_kind: Some(RoleKind::Toplevel),
+                role_object: RoleObject::Toplevel(toplevel_id),
+                initial_commit_complete: true,
+                next_configure_serial: 1,
+                pending_configures: VecDeque::new(),
+                last_acked: None,
+                pending_window_geometry: None,
+                current_window_geometry: None,
+                popup_children: Vec::new(),
+            },
+        );
+        let ((_, toplevel_object_id), _) =
+            client.insert_object(&mut state, XdgToplevel::new(toplevel_id, xdg_surface_id, 7));
+        state.register_xdg_toplevel_role(client.client_id(), xdg_surface_id, toplevel_object_id);
+
+        assert_eq!(state.root_surface_workspace(surface_object_id), Some(workspace_id));
+        state.relayout_dirty_workspaces();
+        assert!(state.is_tiled_root_surface(surface_object_id));
+
+        let set_min_size_request: RawRequest<'static> = (&*{
+            let mut event = RawEvent::new(toplevel_id.into(), 8, 2);
+            event.int(120);
+            event.int(90);
+            event.into_bytes()
+        })
+            .try_into()
+            .unwrap();
+
+        {
+            let mut toplevel = client.grab_object(toplevel_id, &mut state);
+            toplevel.on(&mut client, &mut state, set_min_size_request, &mut client_dispatcher);
+        }
+
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| matches!(
+            action,
+            ClientManagerAction::PublishWorkspaceStateChanged { affected_outputs }
+                if affected_outputs == &vec![output_id]
+        )));
     }
 }
