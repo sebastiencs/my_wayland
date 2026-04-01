@@ -1921,6 +1921,7 @@ mod xdg_seat_tests {
             dispatcher,
         );
         drop(xdg_surface);
+        dispatcher.drain_post_actions(client, state);
         client.object_id(toplevel_id)
     }
 
@@ -1990,6 +1991,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         let popup = state
             .objects
@@ -2068,6 +2070,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         let popup = state
             .objects
@@ -2149,6 +2152,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         {
             let mut xdg_surface = state
@@ -2166,6 +2170,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         client.dismiss_popup_ids(
             &mut state,
@@ -2192,6 +2197,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         assert!(!client.contains_object(XdgPopupId::from(40), &state));
         let popup_xdg_surface = state
@@ -3310,6 +3316,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         assert!(state.seat.pointer_interactive_grab.is_none());
 
@@ -3327,6 +3334,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         assert!(matches!(
             state.seat.pointer_interactive_grab,
@@ -3389,6 +3397,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         assert!(matches!(
             state.seat.pointer_interactive_grab,
@@ -3446,6 +3455,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         assert!(matches!(
             state.seat.pointer_interactive_grab,
@@ -3513,6 +3523,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         handle_pointer_motion(&mut state, &mut dispatcher, 60.0, 0.0, 110);
 
@@ -3574,6 +3585,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         {
             let mut xdg_surface = state
@@ -3591,6 +3603,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         assert!(client.contains_object(XdgPopupId::from(160), &state));
 
@@ -3605,6 +3618,7 @@ mod xdg_seat_tests {
                 &mut client_dispatcher,
             );
         }
+        client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         assert!(!client.contains_object(XdgToplevelId::from(170), &state));
     }

@@ -18,7 +18,7 @@ use crate::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted, RingId},
     },
-    object::{IdToObject, Object, Parser, ParserError},
+    object::{IdToObject, Object, Parser, ParserError, PostAction},
     protocol_generated::{
         wl_display, Array, Constants, HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId,
         WlDataSourceId, WlOutputId, WlSurfaceId, WpPresentationFeedbackId, XdgPopupId,
@@ -1926,6 +1926,9 @@ pub struct ClientDispatcher<'a> {
     client_fd: RawFd,
     client_id: ClientId,
     command: Option<Rc<ProcessInfo>>,
+    /// Deferred work to run after the current `Object::on` handler returns and its grabbed object
+    /// is released (see `MsgReceived` in `Client::process`).
+    post_actions: VecDeque<Box<dyn PostAction>>,
 }
 
 impl<'a> ClientDispatcher<'a> {
@@ -1937,6 +1940,21 @@ impl<'a> ClientDispatcher<'a> {
             client_fd: client.fd.as_raw_fd(),
             client_id: client.id,
             command,
+            post_actions: VecDeque::new(),
+        }
+    }
+
+    /// Enqueue work to run after the current `Object::on` handler returns and its grabbed object
+    /// is released.
+    pub fn dispatch_post_action<P: PostAction>(&mut self, action: P) {
+        self.post_actions.push_back(Box::new(action));
+    }
+
+    /// Run all queued post-actions until the queue is empty (later actions may enqueue more).
+    #[cfg(test)]
+    pub fn drain_post_actions(&mut self, client: &mut Client, state: &mut State) {
+        while let Some(action) = self.post_actions.pop_front() {
+            action.execute(client, state, self);
         }
     }
 
@@ -2208,8 +2226,13 @@ impl Model for Client {
                 let mut pending_fds = std::mem::take(&mut self.pending_fds);
                 request.fds = Some(&mut pending_fds);
 
-                let mut obj = state.objects.grab(obj_id);
-                obj.on(self, state, request, &mut dispatcher);
+                () = {
+                    let mut obj = state.objects.grab(obj_id);
+                    obj.on(self, state, request, &mut dispatcher)
+                };
+                while let Some(action) = dispatcher.post_actions.pop_front() {
+                    action.execute(self, state, &mut dispatcher);
+                }
 
                 self.pending_fds = pending_fds;
             }

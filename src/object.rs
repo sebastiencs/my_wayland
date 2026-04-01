@@ -30,6 +30,15 @@ where
     }
 }
 
+pub trait PostAction: 'static {
+    fn execute(
+        self: Box<Self>,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    );
+}
+
 impl dyn Object {
     pub fn downcast_ref<T: Object>(&self) -> Option<&T> {
         self.as_any().downcast_ref::<T>()
