@@ -118,15 +118,6 @@ impl XdgPopup {
         Ok(())
     }
 
-    fn delete_self(
-        &self,
-        client: &mut Client,
-        state: &mut State,
-        dispatcher: &mut ClientDispatcher,
-    ) {
-        client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
-    }
-
     fn send_error(
         &self,
         client: &Client,
@@ -303,9 +294,12 @@ impl Object for XdgPopup {
                     }
                     PopupParent::None => {}
                 }
-                crate::seat::remove_popup_grab(state, dispatcher, self.id, fallback_focus);
-                xdg_surface.destroy_popup_role(self.id);
-                self.delete_self(client, state, dispatcher);
+                drop(xdg_surface);
+                dispatcher.dispatch_post_action(PostXdgPopup::DestroyPopup {
+                    popup_id: self.id,
+                    xdg_surface_id: self.xdg_surface_id,
+                    fallback_focus,
+                });
             }
             Grab { seat, serial } => {
                 if self.mapped {
@@ -422,6 +416,11 @@ impl Object for XdgPopup {
 }
 
 enum PostXdgPopup {
+    DestroyPopup {
+        popup_id: XdgPopupId,
+        xdg_surface_id: XdgSurfaceId,
+        fallback_focus: Option<crate::input::SurfaceFocus>,
+    },
     RequestPopupGrab {
         popup_id: XdgPopupId,
         client_id: crate::clients::ClientId,
@@ -439,6 +438,14 @@ impl PostAction for PostXdgPopup {
         dispatcher: &mut ClientDispatcher,
     ) {
         match *self {
+            PostXdgPopup::DestroyPopup { popup_id, xdg_surface_id, fallback_focus } => {
+                crate::seat::remove_popup_grab(state, dispatcher, popup_id, fallback_focus);
+                if client.contains_object(xdg_surface_id, state) {
+                    let mut xdg_surface = client.grab_object(xdg_surface_id, state);
+                    xdg_surface.destroy_popup_role(popup_id);
+                }
+                client.delete_id(&WlDisplay::default(), state, dispatcher, popup_id.into());
+            }
             PostXdgPopup::RequestPopupGrab {
                 popup_id,
                 client_id,
