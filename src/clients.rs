@@ -1276,6 +1276,12 @@ impl Client {
         };
         let id = dispatcher.client_id;
         let s = format!("out {:?}-{}-{}", proc, pid, id.0);
+        let skip = (!crate::logger::ENABLE_NOISY_LOG)
+            .then(|| ["wl_pointer"].contains(&E::INTERFACE_NAME))
+            .unwrap_or(false);
+        if skip {
+            return;
+        }
         log::trace!(target: &s, "[{}] {}::{:?}", u32::from(writer.object_id()), E::INTERFACE_NAME, event);
     }
 
