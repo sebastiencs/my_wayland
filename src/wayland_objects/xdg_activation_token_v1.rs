@@ -108,13 +108,9 @@ impl Object for XdgActivationTokenV1 {
                 self.committed = true;
 
                 let tracked = match (self.seat_id, self.serial, self.surface_id) {
-                    (Some(seat_id), Some(serial), Some(surface_id)) => validate_activation_serial(
-                        state,
-                        client.client_id(),
-                        seat_id,
-                        surface_id,
-                        serial,
-                    ),
+                    (Some(seat_id), Some(serial), Some(surface_id)) => {
+                        validate_activation_serial(state, client, seat_id, surface_id, serial)
+                    }
                     _ => false,
                 };
 

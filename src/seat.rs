@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    clients::{ClientAction, ClientId},
+    clients::{Client, ClientAction, ClientId},
     config,
     cursor::{CursorSourceRef, CursorState},
     drm::schedule_outputs_for_points,
@@ -1119,12 +1119,12 @@ pub fn resolve_activation_target(
 
 pub fn validate_activation_serial(
     state: &State,
-    client_id: ClientId,
+    client: &Client,
     seat_id: WlSeatId,
     surface_id: WlSurfaceId,
     serial: u32,
 ) -> bool {
-    crate::input::validate_activation_serial(state, client_id, seat_id, surface_id, serial)
+    crate::input::validate_activation_serial(state, client, seat_id, surface_id, serial)
 }
 
 pub fn set_keyboard_focus_from_surface(

@@ -1,6 +1,5 @@
 use crate::{
-    clients::{ClientAction, ClientId},
-    object::Object,
+    clients::{Client, ClientAction, ClientId},
     protocol_generated::{WlSeatId, WlSurfaceId},
     runner::Dispatcher,
     seat::{dispatch_client_event, SeatClientEvent},
@@ -107,19 +106,15 @@ pub(crate) fn resolve_activation_target(
 
 pub(crate) fn validate_activation_serial(
     state: &State,
-    client_id: ClientId,
+    client: &Client,
     seat_id: WlSeatId,
     surface_id: WlSurfaceId,
     serial: u32,
 ) -> bool {
-    state.objects.iter().any(|(_, object)| {
-        let Some(seat) = object.downcast_ref::<crate::wayland_objects::wl_seat::WlSeat>() else {
-            return false;
-        };
-        seat.id() == seat_id.into()
-    }) && state
-        .seat
-        .validate_implicit_grab_serial(client_id, surface_id, serial)
+    client.object_is(seat_id, state)
+        && state
+            .seat
+            .validate_implicit_grab_serial(client.client_id(), surface_id, serial)
 }
 
 pub(crate) fn refresh_keyboard_focus(state: &mut State, dispatcher: &mut Dispatcher) {
