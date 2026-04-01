@@ -1302,7 +1302,8 @@ impl Drm {
             .cursor_slot_index_for_content_key(request.content_key)
         {
             let cached = self.output(drm_crtc_id)?.cursor_slot(slot).unwrap();
-            log::debug!(
+            if crate::logger::ENABLE_NOISY_LOG {
+                log::debug!(
                 "Reusing cached DRM cursor plane buffer: slot={} visible_size={}x{} fb_size={}x{} pos=({}, {}) hotspot=({}, {}) fb={:?}",
                 slot,
                 request.width,
@@ -1314,13 +1315,15 @@ impl Drm {
                 request.hotspot_x,
                 request.hotspot_y,
                 cached.buffer.framebuffer.id()
-            );
+                );
+            }
             slot
         } else {
             let slot = self.output(drm_crtc_id)?.preferred_upload_cursor_slot()?;
             self.upload_cursor_plane_slot(drm_crtc_id, slot, request)?;
             let cached = self.output(drm_crtc_id)?.cursor_slot(slot).unwrap();
-            log::debug!(
+            if crate::logger::ENABLE_NOISY_LOG {
+                log::debug!(
                 "Prepared DRM cursor plane candidate: slot={} visible_size={}x{} fb_size={}x{} pos=({}, {}) hotspot=({}, {}) fb={:?}",
                 slot,
                 request.width,
@@ -1332,7 +1335,8 @@ impl Drm {
                 request.hotspot_x,
                 request.hotspot_y,
                 cached.buffer.framebuffer.id()
-            );
+                );
+            }
             slot
         };
         Some(CursorPlaneCandidate { x, y, slot })
@@ -3419,7 +3423,7 @@ impl DrmOutputModel {
                     drm.render_output(drm_crtc_id, &render_items, &damage, preserve_contents);
                 let callback_surfaces = frame_callback_surfaces.clone();
                 let submit_had_cursor_plane = cursor_plane.is_some();
-                if submit_had_cursor_plane {
+                if submit_had_cursor_plane && crate::logger::ENABLE_NOISY_LOG {
                     log::debug!("Submitting DRM frame with cursor plane enabled");
                 }
                 let submit_result = drm.submit_render_buffer(

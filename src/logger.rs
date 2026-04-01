@@ -1,5 +1,10 @@
 use std::os::unix::prelude::OpenOptionsExt;
 
+/// When false, suppresses high-frequency logs: seat events,
+/// Wayland protocol trace (in/out), per-frame EGL fence,
+/// DRM cursor plane chatter.
+pub const ENABLE_NOISY_LOG: bool = false;
+
 struct MyLogger {
     file: Option<std::fs::File>,
 }

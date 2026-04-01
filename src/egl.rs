@@ -825,10 +825,12 @@ impl EglFrameBuffer {
         match render_sync_mode {
             RenderSyncMode::ExplicitInFence => match self.export_native_render_fence() {
                 Ok(in_fence_fd) => {
-                    log::debug!(
-                        "egl finish_render: exported explicit render fence fd={}",
-                        in_fence_fd.as_raw_fd()
-                    );
+                    if crate::logger::ENABLE_NOISY_LOG {
+                        log::debug!(
+                            "egl finish_render: exported explicit render fence fd={}",
+                            in_fence_fd.as_raw_fd()
+                        );
+                    }
                     RenderCompletion::explicit(in_fence_fd)
                 }
                 Err(error) => {

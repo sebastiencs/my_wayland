@@ -658,7 +658,9 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
         event: SeatClientEvent,
     ) {
-        log::debug!("client {:?} seat event {:?}", self.id, event);
+        if crate::logger::ENABLE_NOISY_LOG {
+            log::debug!("client {:?} seat event {:?}", self.id, event);
+        }
         match event {
             SeatClientEvent::PointerEnter { serial, surface, x, y } => {
                 let pointers = state.seat.pointer_resources(self.id);
