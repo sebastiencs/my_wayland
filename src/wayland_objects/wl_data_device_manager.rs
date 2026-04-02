@@ -74,7 +74,7 @@ impl Object for WlDataDeviceManager {
                 if state
                     .seat
                     .keyboard_focus()
-                    .is_some_and(|focus| focus.client_id == client.client_id())
+                    .is_some_and(|focus| focus.client_id() == client.client_id())
                 {
                     dispatcher
                         .dispatch_to(client.client_id(), ClientAction::RefreshDataDeviceSelection);
@@ -90,7 +90,7 @@ mod tests {
     use {
         super::WlDataDeviceManager,
         crate::{
-            clients::{Client, ClientAction, ClientId, ClientManagerAction, RawEvent},
+            clients::{Client, ClientAction, ClientId, ClientManagerAction, RawEvent, Resolved},
             egl::EGL,
             globals::Globals,
             object::Object,
@@ -167,7 +167,11 @@ mod tests {
             set_keyboard_focus_from_surface(
                 &mut state,
                 &mut setup_dispatcher,
-                Some(SurfaceFocus { client_id: client.client_id(), surface_id: 99u32.into() }),
+                Some(SurfaceFocus::new(Resolved::new(
+                    client.client_id(),
+                    crate::protocol_generated::WlSurfaceId::from(99u32),
+                    client.object_id(crate::protocol_generated::WlSurfaceId::from(99u32)),
+                ))),
             );
         }
         let mut dispatcher = Dispatcher::default();

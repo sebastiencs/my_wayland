@@ -974,7 +974,7 @@ impl Client {
         let has_keyboard_focus = state
             .seat
             .keyboard_focus()
-            .is_some_and(|focus| focus.client_id == self.id);
+            .is_some_and(|focus| focus.client_id() == self.id);
         let selection_source = has_keyboard_focus
             .then(|| state.seat.selection_source())
             .flatten();

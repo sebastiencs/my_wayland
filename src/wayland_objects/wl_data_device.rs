@@ -138,7 +138,7 @@ fn set_selection(
     if !state
         .seat
         .keyboard_focus()
-        .is_some_and(|focus| focus.client_id == client.client_id())
+        .is_some_and(|focus| focus.client_id() == client.client_id())
     {
         return Ok(());
     }
@@ -186,7 +186,7 @@ fn set_selection(
     }
 
     if let Some(focus) = state.seat.keyboard_focus() {
-        dispatcher.dispatch_to(focus.client_id, ClientAction::RefreshDataDeviceSelection);
+        dispatcher.dispatch_to(focus.client_id(), ClientAction::RefreshDataDeviceSelection);
     }
 
     Ok(())
@@ -364,7 +364,11 @@ mod tests {
         set_keyboard_focus_from_surface(
             &mut state,
             &mut setup_dispatcher,
-            Some(SurfaceFocus { client_id: client.client_id(), surface_id: origin_id }),
+            Some(SurfaceFocus::new(Resolved::new(
+                client.client_id(),
+                origin_id,
+                client.object_id(origin_id),
+            ))),
         );
         drop(setup_dispatcher);
 
@@ -400,7 +404,11 @@ mod tests {
         set_keyboard_focus_from_surface(
             &mut state,
             &mut setup_dispatcher,
-            Some(SurfaceFocus { client_id: client.client_id(), surface_id }),
+            Some(SurfaceFocus::new(Resolved::new(
+                client.client_id(),
+                surface_id,
+                client.object_id(surface_id),
+            ))),
         );
         drop(setup_dispatcher);
 

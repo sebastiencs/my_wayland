@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    clients::{ClientAction, ClientId, ClientManagerAction},
+    clients::{ClientAction, ClientId, ClientManagerAction, Resolved},
     cursor::CursorSourceRef,
     drm::{schedule_active_output, schedule_outputs_for_points, schedule_outputs_for_rects},
     protocol_generated::{xdg_toplevel::ResizeEdge, XdgToplevelId},
@@ -307,7 +307,11 @@ fn prepare_window_for_pointer_grab(
     set_keyboard_focus(
         state,
         dispatcher,
-        Some(SurfaceFocus { client_id: target.client_id, surface_id: target.surface_id }),
+        Some(SurfaceFocus::new(Resolved::new(
+            target.client_id,
+            target.surface_id,
+            target.root_surface_object_id,
+        ))),
     );
 }
 
@@ -419,10 +423,10 @@ fn clear_pointer_focus_for_compositor_grab(state: &mut State, dispatcher: &mut D
     let serial = state.seat.next_serial();
     dispatch_client_event(
         dispatcher,
-        old_focus.target.client_id,
-        SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface_id },
+        old_focus.target.client_id(),
+        SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface_id() },
     );
-    dispatch_client_event(dispatcher, old_focus.target.client_id, SeatClientEvent::PointerFrame);
+    dispatch_client_event(dispatcher, old_focus.target.client_id(), SeatClientEvent::PointerFrame);
     state.seat.clear_pointer_enter();
 }
 

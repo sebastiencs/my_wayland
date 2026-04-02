@@ -267,9 +267,15 @@ impl Object for XdgPopup {
                             );
                             return Ok(());
                         }
-                        fallback_focus = Some(crate::input::SurfaceFocus {
-                            client_id: client.client_id(),
-                            surface_id: parent_surface.wl_surface_id(),
+                        let parent_surface_id = parent_surface.wl_surface_id();
+                        let parent_surface_object_id = state
+                            .surface_object_id_for_client(client.client_id(), parent_surface_id);
+                        fallback_focus = parent_surface_object_id.map(|object_id| {
+                            crate::input::SurfaceFocus::new(crate::clients::Resolved::new(
+                                client.client_id(),
+                                parent_surface_id,
+                                object_id,
+                            ))
                         });
                         parent_surface.remove_popup_child(self.id);
                     }
@@ -286,9 +292,15 @@ impl Object for XdgPopup {
                             );
                             return Ok(());
                         }
-                        fallback_focus = Some(crate::input::SurfaceFocus {
-                            client_id: client.client_id(),
-                            surface_id: parent_surface.surface_id(),
+                        let parent_surface_id = parent_surface.surface_id();
+                        let parent_surface_object_id = state
+                            .surface_object_id_for_client(client.client_id(), parent_surface_id);
+                        fallback_focus = parent_surface_object_id.map(|object_id| {
+                            crate::input::SurfaceFocus::new(crate::clients::Resolved::new(
+                                client.client_id(),
+                                parent_surface_id,
+                                object_id,
+                            ))
                         });
                         parent_surface.remove_popup_child(self.id);
                     }

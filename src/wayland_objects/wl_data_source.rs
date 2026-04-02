@@ -205,7 +205,7 @@ fn destroy_source(
             .seat
             .replace_selection_source(None, state.seat.selection_serial());
         if let Some(focus) = state.seat.keyboard_focus() {
-            dispatcher.dispatch_to(focus.client_id, ClientAction::RefreshDataDeviceSelection);
+            dispatcher.dispatch_to(focus.client_id(), ClientAction::RefreshDataDeviceSelection);
         }
     }
 
@@ -288,10 +288,17 @@ mod tests {
         {
             let mut setup_dispatcher = Dispatcher::default();
             let mut setup_client_dispatcher = owner.test_dispatcher(&mut setup_dispatcher);
+            let focus_object_id = state
+                .surface_object_id_for_client(focused_client_id, 55u32.into())
+                .unwrap();
             set_keyboard_focus_from_surface(
                 &mut state,
                 &mut setup_client_dispatcher,
-                Some(SurfaceFocus { client_id: focused_client_id, surface_id: 55u32.into() }),
+                Some(SurfaceFocus::new(Resolved::new(
+                    focused_client_id,
+                    55u32.into(),
+                    focus_object_id,
+                ))),
             );
         }
         state.seat.replace_selection_source(

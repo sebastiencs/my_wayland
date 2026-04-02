@@ -1,4 +1,5 @@
 use crate::{
+    clients::Resolved,
     object::Object,
     protocol_generated::{xdg_toplevel::ResizeEdge, XdgSurfaceId},
     region::RectI,
@@ -52,7 +53,7 @@ pub(crate) fn surface_focus_pick_at(
 ) -> Option<SurfaceFocusPick> {
     let mut focus = scene_pick_at(state, pointer_pos).surface_focus;
     if let Some(grab_client_id) = state.seat.popup_grab_client() {
-        if focus.is_some_and(|pick| pick.target.client_id != grab_client_id) {
+        if focus.is_some_and(|pick| pick.target.client_id() != grab_client_id) {
             focus = None;
         }
     }
@@ -234,10 +235,11 @@ fn hit_test_subtree(
                 };
                 if surface.accepts_input_at_with_origin(x, y, base_x, base_y) {
                     return Some(SurfaceFocusPick {
-                        target: SurfaceFocus {
-                            client_id: surface.client_id(),
-                            surface_id: surface.surface_id(),
-                        },
+                        target: SurfaceFocus::new(Resolved::new(
+                            surface.client_id(),
+                            surface.surface_id(),
+                            surface_object_id,
+                        )),
                         rect,
                     });
                 }

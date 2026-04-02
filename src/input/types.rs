@@ -1,5 +1,5 @@
 use crate::{
-    clients::ClientId,
+    clients::{ClientId, Resolved},
     protocol_generated::{WlSurfaceId, XdgToplevelId},
     region::RectI,
     state::ObjectId,
@@ -9,11 +9,31 @@ use crate::{
     },
 };
 
-// TODO: Use Resolved<WlSurfaceId> instead
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SurfaceFocus {
-    pub client_id: ClientId,
-    pub surface_id: WlSurfaceId,
+    pub surface: Resolved<WlSurfaceId>,
+}
+
+impl SurfaceFocus {
+    pub fn new(surface: Resolved<WlSurfaceId>) -> Self {
+        Self { surface }
+    }
+
+    pub fn client_id(self) -> ClientId {
+        self.surface.client_id()
+    }
+
+    pub fn surface_id(self) -> WlSurfaceId {
+        self.surface.wayland_id()
+    }
+
+    pub fn object_id(self) -> ObjectId {
+        self.surface.object_id()
+    }
+
+    pub fn resolved(self) -> Resolved<WlSurfaceId> {
+        self.surface
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

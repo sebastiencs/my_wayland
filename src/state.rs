@@ -1076,6 +1076,7 @@ impl DragSource {
     }
 }
 
+// TODO: Use resolved
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DragTargetState {
     pub client_id: ClientId,
@@ -1785,8 +1786,8 @@ impl State {
 
     pub fn focused_root_surface_object_id(&self) -> Option<ObjectId> {
         let focus = self.seat.keyboard_focus()?;
-        let surface_object_id = self.surface_object_id(focus.surface_id)?;
-        self.root_surface_for_surface_object(surface_object_id)
+        focus.resolved().exists(self).then_some(())?;
+        self.root_surface_for_surface_object(focus.object_id())
     }
 
     pub fn root_surface_is_fullscreen(&self, object_id: ObjectId) -> bool {
@@ -2257,8 +2258,9 @@ impl State {
             })
             .or_else(|| {
                 self.seat.keyboard_focus().and_then(|focus| {
-                    self.surface_object_id(focus.surface_id)
-                        .and_then(|object_id| self.objects.try_ref_object::<WlSurface>(object_id))
+                    focus
+                        .resolved()
+                        .try_ref(self)
                         .and_then(|surface| self.layout_output_id_for_surface(surface))
                 })
             })
@@ -2482,6 +2484,21 @@ impl State {
             object
                 .downcast_ref::<WlSurface>()
                 .is_some_and(|surface| surface.surface_id() == surface_id)
+                .then_some(object_id)
+        })
+    }
+
+    pub(crate) fn surface_object_id_for_client(
+        &self,
+        client_id: ClientId,
+        surface_id: WlSurfaceId,
+    ) -> Option<ObjectId> {
+        self.objects.iter().find_map(|(object_id, object)| {
+            object
+                .downcast_ref::<WlSurface>()
+                .is_some_and(|surface| {
+                    surface.client_id() == client_id && surface.surface_id() == surface_id
+                })
                 .then_some(object_id)
         })
     }

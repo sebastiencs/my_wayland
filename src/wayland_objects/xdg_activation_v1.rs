@@ -194,6 +194,14 @@ mod tests {
         client.insert_object(state, WlSeat::new(seat_id));
     }
 
+    fn focus_for_surface(
+        client_id: ClientId,
+        surface_id: WlSurfaceId,
+        object_id: ObjectId,
+    ) -> SurfaceFocus {
+        SurfaceFocus::new(crate::clients::Resolved::new(client_id, surface_id, object_id))
+    }
+
     fn get_activation_token_request(
         manager_id: XdgActivationV1Id,
         token_id: XdgActivationTokenV1Id,
@@ -260,10 +268,11 @@ mod tests {
             set_keyboard_focus_from_surface(
                 &mut state,
                 &mut client_dispatcher,
-                Some(SurfaceFocus {
-                    client_id: client.client_id(),
-                    surface_id: requester_surface_id,
-                }),
+                Some(focus_for_surface(
+                    client.client_id(),
+                    requester_surface_id,
+                    requester_object_id,
+                )),
             );
             handle_keyboard_key(&mut state, &mut client_dispatcher, 30, 1, 100);
         }
@@ -321,7 +330,7 @@ mod tests {
         assert_eq!(state.root_surface_ids(), vec![requester_object_id, target_object_id]);
         assert_eq!(
             state.seat.keyboard_focus(),
-            Some(SurfaceFocus { client_id: client.client_id(), surface_id: target_surface_id })
+            Some(focus_for_surface(client.client_id(), target_surface_id, target_object_id,))
         );
     }
 
@@ -391,7 +400,11 @@ mod tests {
             set_keyboard_focus_from_surface(
                 &mut state,
                 &mut client_dispatcher,
-                Some(SurfaceFocus { client_id: client.client_id(), surface_id }),
+                Some(focus_for_surface(
+                    client.client_id(),
+                    surface_id,
+                    client.object_id(surface_id),
+                )),
             );
             handle_keyboard_key(&mut state, &mut client_dispatcher, 30, 1, 100);
         }
@@ -456,10 +469,11 @@ mod tests {
             set_keyboard_focus_from_surface(
                 &mut state,
                 &mut client_dispatcher,
-                Some(SurfaceFocus {
-                    client_id: client.client_id(),
-                    surface_id: requester_surface_id,
-                }),
+                Some(focus_for_surface(
+                    client.client_id(),
+                    requester_surface_id,
+                    requester_object_id,
+                )),
             );
             handle_keyboard_key(&mut state, &mut client_dispatcher, 30, 1, 100);
         }
@@ -517,10 +531,7 @@ mod tests {
         assert_eq!(state.root_surface_ids(), vec![requester_object_id, target_object_id]);
         assert_eq!(
             state.seat.keyboard_focus(),
-            Some(SurfaceFocus {
-                client_id: client.client_id(),
-                surface_id: requester_surface_id
-            })
+            Some(focus_for_surface(client.client_id(), requester_surface_id, requester_object_id,))
         );
     }
 
@@ -542,10 +553,11 @@ mod tests {
             set_keyboard_focus_from_surface(
                 &mut state,
                 &mut client_dispatcher,
-                Some(SurfaceFocus {
-                    client_id: client.client_id(),
-                    surface_id: requester_surface_id,
-                }),
+                Some(focus_for_surface(
+                    client.client_id(),
+                    requester_surface_id,
+                    requester_object_id,
+                )),
             );
         }
         {
@@ -564,10 +576,7 @@ mod tests {
         assert_eq!(state.root_surface_ids(), vec![requester_object_id, target_object_id]);
         assert_eq!(
             state.seat.keyboard_focus(),
-            Some(SurfaceFocus {
-                client_id: client.client_id(),
-                surface_id: requester_surface_id
-            })
+            Some(focus_for_surface(client.client_id(), requester_surface_id, requester_object_id,))
         );
     }
 

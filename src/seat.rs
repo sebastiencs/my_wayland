@@ -40,6 +40,7 @@ const POINTER_RESIZE_S_CURSOR_ICON_NAMES: &[&str] = &["s-resize", "size_ver"];
 const POINTER_RESIZE_W_CURSOR_ICON_NAMES: &[&str] = &["w-resize", "size_hor"];
 const POINTER_RESIZE_E_CURSOR_ICON_NAMES: &[&str] = &["e-resize", "size_hor"];
 
+// TODO: Use Resolved
 #[derive(Clone, Debug)]
 pub enum SeatClientEvent {
     PointerEnter {
@@ -264,8 +265,8 @@ impl SeatState {
         self.pointer_button_count > 0
             && self.last_pointer_press.is_some_and(|press| {
                 press.serial == serial
-                    && press.focus.client_id == client_id
-                    && press.focus.surface_id == surface_id
+                    && press.focus.client_id() == client_id
+                    && press.focus.surface_id() == surface_id
             })
     }
 
@@ -518,7 +519,7 @@ impl SeatState {
         }
         if self
             .pointer_focus
-            .is_some_and(|focus| focus.target.client_id == client_id)
+            .is_some_and(|focus| focus.target.client_id() == client_id)
         {
             self.pointer_focus = None;
         }
@@ -530,7 +531,7 @@ impl SeatState {
         }
         if self
             .keyboard_focus
-            .is_some_and(|focus| focus.client_id == client_id)
+            .is_some_and(|focus| focus.client_id() == client_id)
         {
             self.keyboard_focus = None;
         }
@@ -626,7 +627,7 @@ impl SeatState {
     pub fn pointer_cursor_request_allowed(&self, client_id: ClientId, serial: u32) -> bool {
         if !self
             .pointer_focus
-            .is_some_and(|focus| focus.target.client_id == client_id)
+            .is_some_and(|focus| focus.target.client_id() == client_id)
         {
             return false;
         }
@@ -634,7 +635,7 @@ impl SeatState {
             .is_some_and(|enter| enter.client_id == client_id && enter.serial == serial)
             || (self.pointer_button_count > 0
                 && self.last_pointer_press.is_some_and(|press| {
-                    press.focus.client_id == client_id && press.serial == serial
+                    press.focus.client_id() == client_id && press.serial == serial
                 }))
     }
 
@@ -735,13 +736,13 @@ impl SeatState {
         (self.pointer_button_count > 0
             && self.last_pointer_press.is_some_and(|press| {
                 press.serial == serial
-                    && press.focus.client_id == client_id
-                    && press.focus.surface_id == surface_id
+                    && press.focus.client_id() == client_id
+                    && press.focus.surface_id() == surface_id
             }))
             || self.last_keyboard_trigger.is_some_and(|trigger| {
                 trigger.serial == serial
-                    && trigger.focus.client_id == client_id
-                    && trigger.focus.surface_id == surface_id
+                    && trigger.focus.client_id() == client_id
+                    && trigger.focus.surface_id() == surface_id
             })
     }
 
@@ -756,11 +757,13 @@ impl SeatState {
             .map(|(_, surface_id)| *surface_id)
     }
 
-    pub(crate) fn popup_grab_contains_surface(&self, surface_id: WlSurfaceId) -> bool {
+    pub(crate) fn popup_grab_contains_surface(&self, surface: Resolved<WlSurfaceId>) -> bool {
         self.popup_grab.as_ref().is_some_and(|grab| {
-            grab.popup_stack
-                .iter()
-                .any(|(_, candidate)| *candidate == surface_id)
+            grab.client_id == surface.client_id()
+                && grab
+                    .popup_stack
+                    .iter()
+                    .any(|(_, candidate)| *candidate == surface.wayland_id())
         })
     }
 
@@ -984,12 +987,12 @@ pub fn handle_pointer_button(
 
     dispatch_client_event(
         dispatcher,
-        pointer_focus.target.client_id,
+        pointer_focus.target.client_id(),
         SeatClientEvent::PointerButton { serial, time, button, state: button_state },
     );
     dispatch_client_event(
         dispatcher,
-        pointer_focus.target.client_id,
+        pointer_focus.target.client_id(),
         SeatClientEvent::PointerFrame,
     );
 
@@ -1076,28 +1079,28 @@ pub fn handle_keyboard_key(
     state.seat.record_keyboard_trigger(serial, focus);
     log::debug!(
         "seat dispatch keyboard key client={:?} serial={} key={} state={}",
-        focus.client_id,
+        focus.client_id(),
         serial,
         key,
         key_state
     );
     dispatch_client_event(
         dispatcher,
-        focus.client_id,
+        focus.client_id(),
         SeatClientEvent::KeyboardKey { serial, time, key, state: key_state },
     );
 
     if let Some(modifiers) = changed_modifiers {
         log::debug!(
             "seat modifiers changed client={:?} serial={} depressed={} latched={} locked={} group={}",
-            focus.client_id,
+            focus.client_id(),
             state.seat.current_serial,
             modifiers.mods_depressed,
             modifiers.mods_latched,
             modifiers.mods_locked,
             modifiers.group
         );
-        dispatch_modifiers(dispatcher, focus.client_id, state.seat.next_serial(), modifiers);
+        dispatch_modifiers(dispatcher, focus.client_id(), state.seat.next_serial(), modifiers);
     }
 }
 
@@ -1611,7 +1614,7 @@ mod surface_tree_hit_test_tests {
         }
 
         let hit = surface_focus_pick_at(&state, (5.0, 5.0)).unwrap();
-        assert_eq!(hit.target.surface_id, WlSurfaceId::from(3));
+        assert_eq!(hit.target.surface_id(), WlSurfaceId::from(3));
     }
 
     #[test]
@@ -1669,10 +1672,10 @@ mod surface_tree_hit_test_tests {
         }
 
         let fallback_hit = surface_focus_pick_at(&state, (66.0, 77.0)).unwrap();
-        assert_eq!(fallback_hit.target.surface_id, WlSurfaceId::from(2));
+        assert_eq!(fallback_hit.target.surface_id(), WlSurfaceId::from(2));
 
         let parent_hit = surface_focus_pick_at(&state, (145.0, 145.0)).unwrap();
-        assert_eq!(parent_hit.target.surface_id, WlSurfaceId::from(1));
+        assert_eq!(parent_hit.target.surface_id(), WlSurfaceId::from(1));
     }
 
     #[test]
@@ -1701,7 +1704,7 @@ mod surface_tree_hit_test_tests {
         state.register_root_surface(root_a);
 
         let hit = surface_focus_pick_at(&state, (5.0, 5.0)).unwrap();
-        assert_eq!(hit.target.surface_id, WlSurfaceId::from(1));
+        assert_eq!(hit.target.surface_id(), WlSurfaceId::from(1));
     }
 }
 
@@ -1793,6 +1796,18 @@ mod xdg_seat_tests {
             client.insert_object(state, WlSurface::new(surface_id, client.client_id(), 6));
         state.register_root_surface(object_id);
         object_id
+    }
+
+    fn focus_for_surface(
+        client_id: ClientId,
+        surface_id: WlSurfaceId,
+        object_id: ObjectId,
+    ) -> SurfaceFocus {
+        SurfaceFocus::new(crate::clients::Resolved::new(client_id, surface_id, object_id))
+    }
+
+    fn fake_focus(client_id: ClientId, surface_id: WlSurfaceId) -> SurfaceFocus {
+        focus_for_surface(client_id, surface_id, ObjectId::from(0usize))
     }
 
     fn insert_xdg_surface(
@@ -1967,7 +1982,7 @@ mod xdg_seat_tests {
             XdgSurfaceId::from(20),
             XdgToplevelId::from(30),
         );
-        let (_popup_wl_surface_object_id, _popup_xdg_surface_object_id) = insert_xdg_surface(
+        let (popup_wl_surface_object_id, _popup_xdg_surface_object_id) = insert_xdg_surface(
             &mut state,
             &mut client,
             &mut client_dispatcher,
@@ -2009,10 +2024,11 @@ mod xdg_seat_tests {
         );
         assert_eq!(
             state.seat.keyboard_focus,
-            Some(SurfaceFocus {
-                client_id: client.client_id(),
-                surface_id: WlSurfaceId::from(11)
-            })
+            Some(focus_for_surface(
+                client.client_id(),
+                WlSurfaceId::from(11),
+                popup_wl_surface_object_id,
+            ))
         );
     }
 
@@ -2039,7 +2055,7 @@ mod xdg_seat_tests {
             XdgSurfaceId::from(20),
             XdgToplevelId::from(30),
         );
-        let (_popup_wl_surface_object_id, popup_xdg_surface_object_id) = insert_xdg_surface(
+        let (popup_wl_surface_object_id, popup_xdg_surface_object_id) = insert_xdg_surface(
             &mut state,
             &mut client,
             &mut client_dispatcher,
@@ -2058,10 +2074,11 @@ mod xdg_seat_tests {
             ),
         );
 
-        let parent_focus = SurfaceFocus {
-            client_id: client.client_id(),
-            surface_id: WlSurfaceId::from(10),
-        };
+        let parent_focus = focus_for_surface(
+            client.client_id(),
+            WlSurfaceId::from(10),
+            parent_wl_surface_object_id,
+        );
         let serial = state.seat.next_serial();
         state.seat.record_keyboard_trigger(serial, parent_focus);
 
@@ -2088,10 +2105,11 @@ mod xdg_seat_tests {
         );
         assert_eq!(
             state.seat.keyboard_focus,
-            Some(SurfaceFocus {
-                client_id: client.client_id(),
-                surface_id: WlSurfaceId::from(11)
-            })
+            Some(focus_for_surface(
+                client.client_id(),
+                WlSurfaceId::from(11),
+                popup_wl_surface_object_id,
+            ))
         );
 
         let parent_surface = state
@@ -2217,21 +2235,15 @@ mod xdg_seat_tests {
         let mut state = make_state();
         let (_client, mut dispatcher) = make_client();
 
-        let parent_focus = SurfaceFocus {
-            client_id: ClientId::from_raw(7),
-            surface_id: WlSurfaceId::from(50),
-        };
-        let popup_focus = SurfaceFocus {
-            client_id: ClientId::from_raw(7),
-            surface_id: WlSurfaceId::from(51),
-        };
+        let parent_focus = fake_focus(ClientId::from_raw(7), WlSurfaceId::from(50));
+        let popup_focus = fake_focus(ClientId::from_raw(7), WlSurfaceId::from(51));
 
         begin_popup_grab(
             &mut state,
             &mut dispatcher,
-            parent_focus.client_id,
+            parent_focus.client_id(),
             XdgPopupId::from(60),
-            popup_focus.surface_id,
+            popup_focus.surface_id(),
         );
         state.seat.pointer_focus = Some(super::PointerFocus {
             target: parent_focus,
@@ -2301,10 +2313,11 @@ mod xdg_seat_tests {
         ));
         assert_eq!(
             state.seat.keyboard_focus,
-            Some(SurfaceFocus {
-                client_id: client.client_id(),
-                surface_id: WlSurfaceId::from(170)
-            })
+            Some(focus_for_surface(
+                client.client_id(),
+                WlSurfaceId::from(170),
+                wl_surface_object_id,
+            ))
         );
         assert!(state.seat.pointer_focus.is_none());
         assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
@@ -2421,7 +2434,7 @@ mod xdg_seat_tests {
             Some(super::PointerInteractiveGrab::Move { .. })
         ));
         assert_eq!(
-            state.seat.keyboard_focus.map(|focus| focus.surface_id),
+            state.seat.keyboard_focus.map(|focus| focus.surface_id()),
             Some(WlSurfaceId::from(171))
         );
         assert!(state.seat.pointer_focus.is_none());
@@ -3221,10 +3234,7 @@ mod xdg_seat_tests {
             &state.xkb,
         )
         .unwrap();
-        state.seat.keyboard_focus = Some(SurfaceFocus {
-            client_id: ClientId::from_raw(7),
-            surface_id: WlSurfaceId::from(10),
-        });
+        state.seat.keyboard_focus = Some(fake_focus(ClientId::from_raw(7), WlSurfaceId::from(10)));
 
         handle_keyboard_key(&mut state, &mut dispatcher, 125, 1, 10);
         handle_keyboard_key(&mut state, &mut dispatcher, 28, 1, 20);
@@ -3248,24 +3258,22 @@ mod xdg_seat_tests {
         let mut state = make_state();
         let (mut client, mut dispatcher) = make_client();
 
-        let parent_focus = SurfaceFocus {
-            client_id: ClientId::from_raw(7),
-            surface_id: WlSurfaceId::from(50),
-        };
-        let popup_focus = SurfaceFocus {
-            client_id: ClientId::from_raw(7),
-            surface_id: WlSurfaceId::from(51),
-        };
-        insert_surface(&mut state, &mut client, parent_focus.surface_id);
-        insert_surface(&mut state, &mut client, popup_focus.surface_id);
+        let parent_surface_id = WlSurfaceId::from(50);
+        let popup_surface_id = WlSurfaceId::from(51);
+        let parent_surface_object_id = insert_surface(&mut state, &mut client, parent_surface_id);
+        let popup_surface_object_id = insert_surface(&mut state, &mut client, popup_surface_id);
+        let parent_focus =
+            focus_for_surface(client.client_id(), parent_surface_id, parent_surface_object_id);
+        let popup_focus =
+            focus_for_surface(client.client_id(), popup_surface_id, popup_surface_object_id);
 
         state.seat.keyboard_focus = Some(parent_focus);
         begin_popup_grab(
             &mut state,
             &mut dispatcher,
-            parent_focus.client_id,
+            parent_focus.client_id(),
             XdgPopupId::from(60),
-            popup_focus.surface_id,
+            popup_focus.surface_id(),
         );
         state.seat.keyboard_focus = Some(popup_focus);
 
@@ -3308,10 +3316,8 @@ mod xdg_seat_tests {
             surface.test_map(ObjectId::from(500usize), 40, 50, 120, 80);
         }
 
-        let focus = SurfaceFocus {
-            client_id: client.client_id(),
-            surface_id: WlSurfaceId::from(70),
-        };
+        let focus =
+            focus_for_surface(client.client_id(), WlSurfaceId::from(70), wl_surface_object_id);
         let serial = state.seat.next_serial();
         state.seat.record_pointer_button(1, serial, Some(focus));
 
@@ -3389,10 +3395,8 @@ mod xdg_seat_tests {
             surface.test_map(ObjectId::from(700usize), 10, 20, 80, 60);
         }
 
-        let focus = SurfaceFocus {
-            client_id: client.client_id(),
-            surface_id: WlSurfaceId::from(100),
-        };
+        let focus =
+            focus_for_surface(client.client_id(), WlSurfaceId::from(100), wl_surface_object_id);
         let serial = state.seat.next_serial();
         state.seat.record_keyboard_trigger(serial, focus);
 
@@ -3452,10 +3456,8 @@ mod xdg_seat_tests {
             surface.test_map(ObjectId::from(701usize), 20, 30, 90, 70);
         }
 
-        let focus = SurfaceFocus {
-            client_id: client.client_id(),
-            surface_id: WlSurfaceId::from(101),
-        };
+        let focus =
+            focus_for_surface(client.client_id(), WlSurfaceId::from(101), wl_surface_object_id);
         let serial = state.seat.next_serial();
         state.seat.record_pointer_button(1, serial, Some(focus));
 
@@ -3514,10 +3516,8 @@ mod xdg_seat_tests {
             toplevel.test_set_interactive_size_constraints(Some((90, 0)), Some((110, 0)));
         }
 
-        let focus = SurfaceFocus {
-            client_id: client.client_id(),
-            surface_id: WlSurfaceId::from(130),
-        };
+        let focus =
+            focus_for_surface(client.client_id(), WlSurfaceId::from(130), wl_surface_object_id);
         let serial = state.seat.next_serial();
         state.seat.record_pointer_button(1, serial, Some(focus));
         state.seat.pointer_pos = (40.0, 90.0);
@@ -3712,10 +3712,7 @@ mod xdg_seat_tests {
     fn pointer_cursor_request_accepts_exact_enter_serial() {
         let mut seat = SeatState::default();
         seat.pointer_focus = Some(super::PointerFocus {
-            target: SurfaceFocus {
-                client_id: ClientId::from_raw(7),
-                surface_id: WlSurfaceId::from(50),
-            },
+            target: fake_focus(ClientId::from_raw(7), WlSurfaceId::from(50)),
             rect: super::SurfaceRect { x: 0, y: 0, width: 100, height: 100 },
         });
         seat.record_pointer_enter(ClientId::from_raw(7), 100);
@@ -3728,10 +3725,7 @@ mod xdg_seat_tests {
     fn pointer_cursor_request_rejects_wrong_enter_serial() {
         let mut seat = SeatState::default();
         seat.pointer_focus = Some(super::PointerFocus {
-            target: SurfaceFocus {
-                client_id: ClientId::from_raw(7),
-                surface_id: WlSurfaceId::from(50),
-            },
+            target: fake_focus(ClientId::from_raw(7), WlSurfaceId::from(50)),
             rect: super::SurfaceRect { x: 0, y: 0, width: 100, height: 100 },
         });
         seat.record_pointer_enter(ClientId::from_raw(7), 100);
@@ -3742,10 +3736,7 @@ mod xdg_seat_tests {
     #[test]
     fn pointer_cursor_request_accepts_active_grab_serial_for_focused_client() {
         let mut seat = SeatState::default();
-        let focus = SurfaceFocus {
-            client_id: ClientId::from_raw(7),
-            surface_id: WlSurfaceId::from(50),
-        };
+        let focus = fake_focus(ClientId::from_raw(7), WlSurfaceId::from(50));
         seat.pointer_focus = Some(super::PointerFocus {
             target: focus,
             rect: super::SurfaceRect { x: 0, y: 0, width: 100, height: 100 },
