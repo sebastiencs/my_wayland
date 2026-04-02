@@ -159,6 +159,12 @@ where
     pub fn try_ref<'a>(self, state: &'a State) -> Option<&'a K::Object> {
         state.objects.try_ref_object::<K::Object>(self.object_id)
     }
+    pub fn rref<'a>(self, state: &'a State) -> &'a K::Object {
+        state
+            .objects
+            .try_ref_object::<K::Object>(self.object_id)
+            .unwrap()
+    }
 
     pub fn try_ref_mut<'a>(self, state: &'a mut State) -> Option<&'a mut K::Object> {
         state
@@ -2030,21 +2036,20 @@ fn active_cursor_surface_refresh_params(
     client_id: ClientId,
 ) -> Option<(ObjectId, i32, i32)> {
     let (pointer_x, pointer_y) = state.seat.pointer_position();
-    let crate::cursor::CursorSourceRef::Surface { owner_client_id, cursor } =
-        state.seat.visible_cursor_source()?
+    let crate::cursor::CursorSourceRef::Surface { cursor } = state.seat.visible_cursor_source()?
     else {
         return None;
     };
-    if owner_client_id != client_id {
+    if cursor.surface.client_id() != client_id {
         return None;
     }
     let surface = state
         .objects
-        .try_ref_object::<WlSurface>(cursor.object_id)?;
+        .try_ref_object::<WlSurface>(cursor.surface.object_id())?;
     let (root_x, root_y) = surface.root_position();
     let base_x = pointer_x.round() as i32 - cursor.hotspot_x - root_x;
     let base_y = pointer_y.round() as i32 - cursor.hotspot_y - root_y;
-    Some((cursor.object_id, base_x, base_y))
+    Some((cursor.surface.object_id(), base_x, base_y))
 }
 
 fn active_dnd_icon_surface_refresh_params(

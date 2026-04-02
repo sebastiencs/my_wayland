@@ -466,14 +466,16 @@ fn end_compositor_pointer_grab(state: &mut State, dispatcher: &mut Dispatcher, t
 fn visible_cursor_owner_client(state: &State) -> Option<ClientId> {
     match state.seat.visible_cursor_source()? {
         CursorSourceRef::Named { owner_client_id, .. } => owner_client_id,
-        CursorSourceRef::Surface { owner_client_id, .. } => Some(owner_client_id),
+        CursorSourceRef::Surface { cursor } => Some(cursor.surface.client_id()),
     }
 }
 
 fn refresh_visible_cursor_surface_outputs(state: &State, dispatcher: &mut Dispatcher) {
-    if let Some(CursorSourceRef::Surface { owner_client_id, .. }) =
-        state.seat.visible_cursor_source()
-    {
-        dispatch_client_action(dispatcher, owner_client_id, ClientAction::RefreshSurfaceOutputs);
+    if let Some(CursorSourceRef::Surface { cursor }) = state.seat.visible_cursor_source() {
+        dispatch_client_action(
+            dispatcher,
+            cursor.surface.client_id(),
+            ClientAction::RefreshSurfaceOutputs,
+        );
     }
 }

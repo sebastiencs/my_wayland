@@ -120,25 +120,9 @@ impl HyprlandCtmControlManagerV1 {
         state: &State,
         output: crate::protocol_generated::WlOutputId,
         dispatcher: &mut ClientDispatcher,
-    ) -> Option<OutputId> {
-        let Some(output_object_id) = client.try_object_id(output, state) else {
-            client.protocol_violation_disconnect(
-                dispatcher,
-                self.id.into(),
-                wl_display::Error::InvalidObject as u32,
-                "hyprland_ctm_control requires a live wl_output",
-            );
-            return None;
-        };
-        let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(output_object_id) else {
-            client.protocol_violation_disconnect(
-                dispatcher,
-                self.id.into(),
-                wl_display::Error::InvalidObject as u32,
-                "CTM target is not a wl_output",
-            );
-            return None;
-        };
+    ) -> Result<OutputId, crate::object::AbortRequest> {
+        let output = client.resolve_or_disconnect(output, state, dispatcher)?;
+        let wl_output = output.rref(state);
         let Some(output_id) = wl_output.output_id() else {
             client.protocol_violation_disconnect(
                 dispatcher,
@@ -146,7 +130,7 @@ impl HyprlandCtmControlManagerV1 {
                 wl_display::Error::InvalidObject as u32,
                 "CTM target output has been removed",
             );
-            return None;
+            return Err(crate::object::AbortRequest::InvalidObject);
         };
         if !state.output_supports_ctm_control(output_id) {
             client.protocol_violation_disconnect(
@@ -155,9 +139,9 @@ impl HyprlandCtmControlManagerV1 {
                 wl_display::Error::InvalidObject as u32,
                 "target output does not support CTM",
             );
-            return None;
+            return Err(crate::object::AbortRequest::InvalidObject);
         }
-        Some(output_id)
+        Ok(output_id)
     }
 
     fn apply_pending(&mut self, state: &mut State, dispatcher: &mut ClientDispatcher) {
@@ -231,10 +215,7 @@ impl Object for HyprlandCtmControlManagerV1 {
                 if self.blocked {
                     return Ok(());
                 }
-                let Some(output_id) = self.resolve_output_id(client, state, output, dispatcher)
-                else {
-                    return Ok(());
-                };
+                let output_id = self.resolve_output_id(client, state, output, dispatcher)?;
                 let Some(matrix) = self.validate_matrix(
                     client,
                     dispatcher,

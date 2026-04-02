@@ -87,23 +87,22 @@ impl Object for WlPointer {
                 {
                     return Ok(());
                 }
-                let cursor_changed = if surface.is_none() {
-                    state.seat.clear_cursor_for_client(client.client_id())
-                } else {
-                    let object_id = client.object_id(surface);
-                    {
-                        let mut surface_object = client.grab_object(surface, state);
-                        if surface_object.set_cursor_role(dispatcher).is_err() {
-                            return Ok(());
+                let cursor_changed = match surface {
+                    None => state.seat.clear_cursor_for_client(client.client_id()),
+                    Some(surface) => {
+                        let object_id = surface.object_id();
+                        {
+                            let mut surface_object = surface.ref_mut(state);
+                            if surface_object.set_cursor_role(dispatcher).is_err() {
+                                return Ok(());
+                            }
                         }
+                        state.seat.set_cursor_surface(
+                            surface.with_client(client),
+                            hotspot_x,
+                            hotspot_y,
+                        )
                     }
-                    state.seat.set_cursor_surface(
-                        client.client_id(),
-                        surface,
-                        object_id,
-                        hotspot_x,
-                        hotspot_y,
-                    )
                 };
                 if cursor_changed {
                     dispatcher.dispatch_to(

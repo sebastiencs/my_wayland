@@ -6,7 +6,11 @@ use std::{
 
 use xcursor::{parser, CursorTheme};
 
-use crate::{clients::ClientId, protocol_generated::WlSurfaceId, state::ObjectId};
+use crate::{
+    clients::{ClientId, ClientObjectId},
+    protocol_generated::WlSurfaceId,
+    state::ObjectId,
+};
 
 const DEFAULT_ICON_NAMES: &[&str] = &["default", "left_ptr"];
 
@@ -31,8 +35,7 @@ pub struct CursorImageContentKey {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CursorSurface {
-    pub surface_id: WlSurfaceId,
-    pub object_id: ObjectId,
+    pub surface: ClientObjectId<WlSurfaceId>,
     pub hotspot_x: i32,
     pub hotspot_y: i32,
 }
@@ -60,7 +63,7 @@ struct NamedCursorAnimation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CursorSource {
     Named(NamedCursor),
-    Surface { owner_client_id: ClientId, cursor: CursorSurface },
+    Surface { cursor: CursorSurface },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,7 +75,6 @@ pub enum CursorSourceRef<'a> {
         next_frame_in_msec: Option<u32>,
     },
     Surface {
-        owner_client_id: ClientId,
         cursor: &'a CursorSurface,
     },
 }
@@ -121,9 +123,7 @@ impl CursorState {
                     next_frame_in_msec,
                 })
             }
-            CursorSource::Surface { owner_client_id, cursor } => {
-                Some(CursorSourceRef::Surface { owner_client_id: *owner_client_id, cursor })
-            }
+            CursorSource::Surface { cursor } => Some(CursorSourceRef::Surface { cursor }),
         }
     }
 
@@ -221,16 +221,12 @@ impl CursorState {
 
     pub fn set_surface_cursor(
         &mut self,
-        owner_client_id: ClientId,
-        surface_id: WlSurfaceId,
-        object_id: ObjectId,
+        surface: ClientObjectId<WlSurfaceId>,
         hotspot_x: i32,
         hotspot_y: i32,
     ) -> bool {
-        let next = CursorSource::Surface {
-            owner_client_id,
-            cursor: CursorSurface { surface_id, object_id, hotspot_x, hotspot_y },
-        };
+        let next =
+            CursorSource::Surface { cursor: CursorSurface { surface, hotspot_x, hotspot_y } };
         let changed = self.source.as_ref() != Some(&next);
         if changed {
             self.source = Some(next);
@@ -242,7 +238,7 @@ impl CursorState {
         let Some(CursorSource::Surface { cursor, .. }) = self.source.as_ref() else {
             return false;
         };
-        if cursor.object_id != object_id {
+        if cursor.surface.object_id() != object_id {
             return false;
         }
         self.clear()
@@ -252,7 +248,7 @@ impl CursorState {
         let Some(CursorSource::Surface { cursor, .. }) = self.source.as_mut() else {
             return false;
         };
-        if cursor.object_id != object_id || (dx == 0 && dy == 0) {
+        if cursor.surface.object_id() != object_id || (dx == 0 && dy == 0) {
             return false;
         }
         cursor.hotspot_x = clamp_i64_to_i32(i64::from(cursor.hotspot_x) - i64::from(dx));
@@ -336,7 +332,7 @@ impl CursorState {
     fn owner_client_id(&self) -> Option<ClientId> {
         match self.source.as_ref()? {
             CursorSource::Named(cursor) => cursor.owner.client_id(),
-            CursorSource::Surface { owner_client_id, .. } => Some(*owner_client_id),
+            CursorSource::Surface { cursor } => Some(cursor.surface.client_id()),
         }
     }
 
@@ -478,24 +474,28 @@ mod tests {
     fn surface_cursor_replaces_previous_source() {
         let mut cursor = CursorState::default();
         assert!(cursor.set_surface_cursor(
-            ClientId::from_raw(1),
-            WlSurfaceId::from(5),
-            ObjectId::from(9usize),
+            (
+                ClientId::from_raw(1),
+                crate::clients::Resolved::new(WlSurfaceId::from(5), ObjectId::from(9usize)),
+            )
+                .into(),
             3,
             4,
         ));
         assert!(!cursor.set_surface_cursor(
-            ClientId::from_raw(1),
-            WlSurfaceId::from(5),
-            ObjectId::from(9usize),
+            (
+                ClientId::from_raw(1),
+                crate::clients::Resolved::new(WlSurfaceId::from(5), ObjectId::from(9usize)),
+            )
+                .into(),
             3,
             4,
         ));
         match cursor.source().unwrap() {
-            CursorSourceRef::Surface { owner_client_id, cursor } => {
-                assert_eq!(owner_client_id, ClientId::from_raw(1));
-                assert_eq!(cursor.surface_id, WlSurfaceId::from(5));
-                assert_eq!(cursor.object_id, ObjectId::from(9usize));
+            CursorSourceRef::Surface { cursor } => {
+                assert_eq!(cursor.surface.client_id(), ClientId::from_raw(1));
+                assert_eq!(cursor.surface.wayland_id(), WlSurfaceId::from(5));
+                assert_eq!(cursor.surface.object_id(), ObjectId::from(9usize));
             }
             other => panic!("unexpected cursor source: {other:?}"),
         }
@@ -505,9 +505,11 @@ mod tests {
     fn clear_surface_only_clears_matching_surface() {
         let mut cursor = CursorState::default();
         cursor.set_surface_cursor(
-            ClientId::from_raw(2),
-            WlSurfaceId::from(7),
-            ObjectId::from(11usize),
+            (
+                ClientId::from_raw(2),
+                crate::clients::Resolved::new(WlSurfaceId::from(7), ObjectId::from(11usize)),
+            )
+                .into(),
             0,
             0,
         );
@@ -520,9 +522,11 @@ mod tests {
     fn applying_surface_offset_updates_cursor_hotspot() {
         let mut cursor = CursorState::default();
         cursor.set_surface_cursor(
-            ClientId::from_raw(3),
-            WlSurfaceId::from(9),
-            ObjectId::from(14usize),
+            (
+                ClientId::from_raw(3),
+                crate::clients::Resolved::new(WlSurfaceId::from(9), ObjectId::from(14usize)),
+            )
+                .into(),
             12,
             15,
         );
@@ -636,9 +640,11 @@ mod tests {
     fn compositor_default_replaces_client_owned_cursor() {
         let mut cursor = CursorState::default();
         assert!(cursor.set_surface_cursor(
-            ClientId::from_raw(4),
-            WlSurfaceId::from(12),
-            ObjectId::from(18usize),
+            (
+                ClientId::from_raw(4),
+                crate::clients::Resolved::new(WlSurfaceId::from(12), ObjectId::from(18usize)),
+            )
+                .into(),
             2,
             3,
         ));

@@ -2994,13 +2994,16 @@ mod tests {
         state.register_root_surface(object_id);
         let surface_id = WlSurfaceId::from(5);
 
-        assert!(state
-            .seat
-            .set_cursor_surface(client.client_id(), surface_id, object_id, 1, 2,));
+        assert!(state.seat.set_cursor_surface(
+            (client.client_id(), crate::clients::Resolved::new(surface_id, object_id)).into(),
+            1,
+            2,
+        ));
         assert!(matches!(
             state.seat.visible_cursor_source(),
-            Some(CursorSourceRef::Surface { owner_client_id, cursor })
-                if owner_client_id == client.client_id() && cursor.object_id == object_id
+            Some(CursorSourceRef::Surface { cursor })
+                if cursor.surface.client_id() == client.client_id()
+                    && cursor.surface.object_id() == object_id
         ));
 
         let mut surface = state.objects.grab_object::<WlSurface>(object_id);

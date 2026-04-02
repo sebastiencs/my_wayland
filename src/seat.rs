@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    clients::{Client, ClientAction, ClientId, Resolved},
+    clients::{Client, ClientAction, ClientId, ClientObjectId, Resolved},
     config,
     cursor::{CursorSourceRef, CursorState},
     drm::schedule_outputs_for_points,
@@ -652,14 +652,12 @@ impl SeatState {
 
     pub fn set_cursor_surface(
         &mut self,
-        client_id: ClientId,
-        surface_id: WlSurfaceId,
-        object_id: ObjectId,
+        surface: ClientObjectId<WlSurfaceId>,
         hotspot_x: i32,
         hotspot_y: i32,
     ) -> bool {
         self.cursor
-            .set_surface_cursor(client_id, surface_id, object_id, hotspot_x, hotspot_y)
+            .set_surface_cursor(surface, hotspot_x, hotspot_y)
     }
 
     pub fn clear_cursor_for_client(&mut self, client_id: ClientId) -> bool {
@@ -1180,7 +1178,7 @@ pub fn finish_active_drag(state: &mut State, dispatcher: &mut Dispatcher) {
 pub fn cancel_active_drag(
     state: &mut State,
     dispatcher: &mut Dispatcher,
-    source: Option<crate::clients::ClientObjectId<WlDataSourceId>>,
+    source: Option<ClientObjectId<WlDataSourceId>>,
 ) {
     let Some(drag) = state.seat.clear_active_drag() else {
         return;
@@ -1348,7 +1346,7 @@ pub(crate) fn dispatch_client_action(
 fn visible_cursor_owner_client(state: &State) -> Option<ClientId> {
     match state.seat.visible_cursor_source()? {
         CursorSourceRef::Named { owner_client_id, .. } => owner_client_id,
-        CursorSourceRef::Surface { owner_client_id, .. } => Some(owner_client_id),
+        CursorSourceRef::Surface { cursor } => Some(cursor.surface.client_id()),
     }
 }
 
@@ -1360,10 +1358,12 @@ fn visible_dnd_icon_owner_client(state: &State) -> Option<ClientId> {
 }
 
 fn refresh_visible_cursor_surface_outputs(state: &State, dispatcher: &mut Dispatcher) {
-    if let Some(CursorSourceRef::Surface { owner_client_id, .. }) =
-        state.seat.visible_cursor_source()
-    {
-        dispatch_client_action(dispatcher, owner_client_id, ClientAction::RefreshSurfaceOutputs);
+    if let Some(CursorSourceRef::Surface { cursor }) = state.seat.visible_cursor_source() {
+        dispatch_client_action(
+            dispatcher,
+            cursor.surface.client_id(),
+            ClientAction::RefreshSurfaceOutputs,
+        );
     }
 }
 
@@ -2272,9 +2272,11 @@ mod xdg_seat_tests {
         state.keyboard.update_key(125, true);
         state.seat.pointer_pos = (70.0, 80.0);
         assert!(state.seat.set_cursor_surface(
-            client.client_id(),
-            WlSurfaceId::from(999),
-            ObjectId::from(998usize),
+            (
+                client.client_id(),
+                crate::clients::Resolved::new(WlSurfaceId::from(999), ObjectId::from(998usize)),
+            )
+                .into(),
             2,
             3,
         ));
@@ -2306,8 +2308,8 @@ mod xdg_seat_tests {
         ));
         assert!(!matches!(
             state.seat.visible_cursor_source(),
-            Some(CursorSourceRef::Surface { owner_client_id, .. })
-                if owner_client_id == client.client_id()
+            Some(CursorSourceRef::Surface { cursor })
+                if cursor.surface.client_id() == client.client_id()
         ));
         assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
             client.client_id(),
@@ -3619,18 +3621,20 @@ mod xdg_seat_tests {
     fn no_focus_fallback_installs_default_cursor() {
         let mut seat = SeatState::default();
         assert!(seat.set_cursor_surface(
-            ClientId::from_raw(7),
-            WlSurfaceId::from(50),
-            ObjectId::from(80usize),
+            (
+                ClientId::from_raw(7),
+                crate::clients::Resolved::new(WlSurfaceId::from(50), ObjectId::from(80usize)),
+            )
+                .into(),
             4,
             5,
         ));
 
         assert!(matches!(
             seat.visible_cursor_source(),
-            Some(CursorSourceRef::Surface { owner_client_id, cursor })
-                if owner_client_id == ClientId::from_raw(7)
-                    && cursor.object_id == ObjectId::from(80usize)
+            Some(CursorSourceRef::Surface { cursor })
+                if cursor.surface.client_id() == ClientId::from_raw(7)
+                    && cursor.surface.object_id() == ObjectId::from(80usize)
         ));
 
         assert!(seat.test_install_default_cursor());
@@ -3645,9 +3649,11 @@ mod xdg_seat_tests {
         let mut seat = SeatState::default();
         seat.test_install_default_cursor();
         assert!(seat.set_cursor_surface(
-            ClientId::from_raw(7),
-            WlSurfaceId::from(50),
-            ObjectId::from(80usize),
+            (
+                ClientId::from_raw(7),
+                crate::clients::Resolved::new(WlSurfaceId::from(50), ObjectId::from(80usize)),
+            )
+                .into(),
             4,
             5,
         ));
@@ -3666,18 +3672,20 @@ mod xdg_seat_tests {
     fn client_cursor_stays_visible_without_default_fallback() {
         let mut seat = SeatState::default();
         assert!(seat.set_cursor_surface(
-            ClientId::from_raw(7),
-            WlSurfaceId::from(50),
-            ObjectId::from(80usize),
+            (
+                ClientId::from_raw(7),
+                crate::clients::Resolved::new(WlSurfaceId::from(50), ObjectId::from(80usize)),
+            )
+                .into(),
             4,
             5,
         ));
 
         assert!(matches!(
             seat.visible_cursor_source(),
-            Some(CursorSourceRef::Surface { owner_client_id, cursor })
-                if owner_client_id == ClientId::from_raw(7)
-                    && cursor.object_id == ObjectId::from(80usize)
+            Some(CursorSourceRef::Surface { cursor })
+                if cursor.surface.client_id() == ClientId::from_raw(7)
+                    && cursor.surface.object_id() == ObjectId::from(80usize)
         ));
     }
 

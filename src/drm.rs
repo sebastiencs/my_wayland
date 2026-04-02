@@ -4311,7 +4311,10 @@ fn collect_cursor_surface_snapshots(
     let Some(CursorSourceRef::Surface { cursor, .. }) = state.seat.visible_cursor_source() else {
         return Vec::new();
     };
-    let Some(surface) = state.objects.try_ref_object::<WlSurface>(cursor.object_id) else {
+    let Some(surface) = state
+        .objects
+        .try_ref_object::<WlSurface>(cursor.surface.object_id())
+    else {
         return Vec::new();
     };
     let (root_x, root_y) = surface.root_position();
@@ -4320,7 +4323,7 @@ fn collect_cursor_surface_snapshots(
     let mut snapshots = Vec::new();
     collect_surface_snapshots(
         state,
-        cursor.object_id,
+        cursor.surface.object_id(),
         base_x,
         base_y,
         retired_candidates,
@@ -4388,7 +4391,7 @@ fn build_surface_cursor_plane_request(
     let (pointer_x, pointer_y) = state.seat.pointer_position();
     let surface = state
         .objects
-        .try_ref_object::<WlSurface>(cursor.object_id)?;
+        .try_ref_object::<WlSurface>(cursor.surface.object_id())?;
     if !matches!(surface.current_stack(), [StackEntry::Parent]) {
         return None;
     }
@@ -4416,7 +4419,7 @@ fn build_surface_cursor_plane_request(
         hotspot_x: cursor.hotspot_x,
         hotspot_y: cursor.hotspot_y,
         content_key: CursorPlaneContentKey::Surface(CursorSurfaceContentKey {
-            surface_object_id: cursor.object_id,
+            surface_object_id: cursor.surface.object_id(),
             buffer_object_id,
             content_revision,
             width: render_state.width,
@@ -4915,8 +4918,11 @@ mod presentation_timing_tests {
         let request = build_surface_cursor_plane_request(
             &state,
             &CursorSurface {
-                surface_id: WlSurfaceId::from(2),
-                object_id: surface_object_id,
+                surface: (
+                    ClientId::from_raw(1),
+                    crate::clients::Resolved::new(WlSurfaceId::from(2), surface_object_id),
+                )
+                    .into(),
                 hotspot_x: 3,
                 hotspot_y: 2,
             },
@@ -4961,8 +4967,11 @@ mod presentation_timing_tests {
         let request = build_surface_cursor_plane_request(
             &state,
             &CursorSurface {
-                surface_id: WlSurfaceId::from(10),
-                object_id: surface_object_id,
+                surface: (
+                    ClientId::from_raw(1),
+                    crate::clients::Resolved::new(WlSurfaceId::from(10), surface_object_id),
+                )
+                    .into(),
                 hotspot_x: 0,
                 hotspot_y: 0,
             },
@@ -5372,9 +5381,12 @@ mod surface_tree_render_tests {
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
 
-        state
-            .seat
-            .set_cursor_surface(ClientId::from_raw(1), WlSurfaceId::from(1), root, 3, 4);
+        state.seat.set_cursor_surface(
+            (ClientId::from_raw(1), crate::clients::Resolved::new(WlSurfaceId::from(1), root))
+                .into(),
+            3,
+            4,
+        );
         let snapshots = collect_cursor_surface_snapshots(&mut state, &mut Vec::new());
 
         let ids: Vec<_> = snapshots
