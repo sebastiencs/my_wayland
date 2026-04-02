@@ -460,8 +460,7 @@ mod tests {
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
             target: Some(DragTargetState {
-                client_id: client.client_id(),
-                surface_id: 31u32.into(),
+                surface: Resolved::new(client.client_id(), 31u32.into(), ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![offer_id],

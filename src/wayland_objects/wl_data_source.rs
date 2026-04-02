@@ -232,7 +232,8 @@ mod tests {
             runner::Dispatcher,
             seat::{set_keyboard_focus_from_surface, SurfaceFocus},
             state::{
-                DragPhase, DragSource, DragState, DragTargetState, SelectionSourceState, State,
+                DragPhase, DragSource, DragState, DragTargetState, ObjectId, SelectionSourceState,
+                State,
             },
             wayland_objects::wl_surface::WlSurface,
             xkb::Xkb,
@@ -335,7 +336,9 @@ mod tests {
             },
             origin_surface_id: 20u32.into(),
             icon_surface_object_id: None,
-            target: Some(DragTargetState { client_id: target_client_id, surface_id: 21u32.into() }),
+            target: Some(DragTargetState {
+                surface: Resolved::new(target_client_id, 21u32.into(), ObjectId::from(0usize)),
+            }),
             negotiation: Default::default(),
             phase: DragPhase::Dragging,
         });

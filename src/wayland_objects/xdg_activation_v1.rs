@@ -78,24 +78,19 @@ impl Object for XdgActivationV1 {
                     );
                     return Ok(());
                 };
-                let Some((root_surface_object_id, focus)) =
-                    resolve_activation_target(state, surface)
-                else {
+                let Some(focus) = resolve_activation_target(state, surface) else {
                     log::debug!(
                         "ignoring activation request for non-activatable surface {:?}",
                         surface
                     );
                     return Ok(());
                 };
-                if !state.raise_root_surface(root_surface_object_id) {
+                if !state.raise_root_surface2(&focus) {
                     return Ok(());
                 }
                 set_keyboard_focus_from_surface(state, dispatcher, Some(focus));
-                if let Some(bounds) = state
-                    .objects
-                    .try_ref_object::<crate::wayland_objects::wl_surface::WlSurface>(
-                        root_surface_object_id,
-                    )
+                if let Some(bounds) = focus
+                    .try_ref(state)
                     .and_then(|surface| surface.global_logical_bounds())
                 {
                     schedule_outputs_for_rect(state, bounds, dispatcher);

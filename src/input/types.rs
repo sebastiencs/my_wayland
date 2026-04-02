@@ -9,7 +9,7 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, derive_more::Deref)]
 pub struct SurfaceFocus {
     pub surface: Resolved<WlSurfaceId>,
 }
@@ -19,20 +19,8 @@ impl SurfaceFocus {
         Self { surface }
     }
 
-    pub fn client_id(self) -> ClientId {
-        self.surface.client_id()
-    }
-
     pub fn surface_id(self) -> WlSurfaceId {
         self.surface.wayland_id()
-    }
-
-    pub fn object_id(self) -> ObjectId {
-        self.surface.object_id()
-    }
-
-    pub fn resolved(self) -> Resolved<WlSurfaceId> {
-        self.surface
     }
 }
 

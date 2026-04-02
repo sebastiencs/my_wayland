@@ -1076,11 +1076,15 @@ impl DragSource {
     }
 }
 
-// TODO: Use resolved
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, derive_more::Deref)]
 pub struct DragTargetState {
-    pub client_id: ClientId,
-    pub surface_id: WlSurfaceId,
+    pub surface: Resolved<WlSurfaceId>,
+}
+
+impl DragTargetState {
+    pub fn surface_id(self) -> WlSurfaceId {
+        self.surface.wayland_id()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1773,21 +1777,23 @@ impl State {
             .or_else(|| self.root_surface_content_rect(object_id))
     }
 
-    pub fn root_surface_for_surface_object(&self, mut object_id: ObjectId) -> Option<ObjectId> {
+    pub fn root_surface_for_surface_object(
+        &self,
+        mut surface: Resolved<WlSurfaceId>,
+    ) -> Option<ObjectId> {
         loop {
-            let surface = self.objects.try_ref_object::<WlSurface>(object_id)?;
-            if surface.is_root() {
-                return Some(object_id);
+            let wl_surface = surface.try_ref(self)?;
+            if wl_surface.is_root() {
+                return Some(surface.object_id());
             }
-            // TODO: Use Resolved
-            object_id = surface.parent_surface()?.object_id();
+            surface = *wl_surface.parent_surface()?;
         }
     }
 
     pub fn focused_root_surface_object_id(&self) -> Option<ObjectId> {
         let focus = self.seat.keyboard_focus()?;
-        focus.resolved().exists(self).then_some(())?;
-        self.root_surface_for_surface_object(focus.object_id())
+        focus.exists(self).then_some(())?;
+        self.root_surface_for_surface_object(focus.surface)
     }
 
     pub fn root_surface_is_fullscreen(&self, object_id: ObjectId) -> bool {
@@ -2193,6 +2199,17 @@ impl State {
         true
     }
 
+    pub fn raise_root_surface2(&mut self, surface: &Resolved<WlSurfaceId>) -> bool {
+        if !surface.exists(self) {
+            return false;
+        }
+        if tiling::raise_surface(self, surface.object_id()) {
+            return true;
+        }
+        self.register_root_surface(surface.object_id());
+        true
+    }
+
     pub fn root_surface_ids(&self) -> Vec<ObjectId> {
         self.root_surfaces
             .iter()
@@ -2259,7 +2276,6 @@ impl State {
             .or_else(|| {
                 self.seat.keyboard_focus().and_then(|focus| {
                     focus
-                        .resolved()
                         .try_ref(self)
                         .and_then(|surface| self.layout_output_id_for_surface(surface))
                 })

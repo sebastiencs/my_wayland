@@ -92,7 +92,7 @@ pub enum SeatClientEvent {
 #[derive(Clone, Debug)]
 struct PopupGrabState {
     client_id: ClientId,
-    popup_stack: Vec<(XdgPopupId, WlSurfaceId)>,
+    popup_stack: Vec<(XdgPopupId, Resolved<WlSurfaceId>)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -329,7 +329,7 @@ impl SeatState {
         };
         if drag
             .target
-            .is_none_or(|target| target.client_id != target_client_id)
+            .is_none_or(|target| target.client_id() != target_client_id)
         {
             return false;
         }
@@ -351,7 +351,7 @@ impl SeatState {
         };
         if drag
             .target
-            .is_none_or(|target| target.client_id != target_client_id)
+            .is_none_or(|target| target.client_id() != target_client_id)
         {
             return false;
         }
@@ -369,7 +369,7 @@ impl SeatState {
     ) -> bool {
         self.active_drag.as_ref().is_some_and(|drag| {
             drag.target
-                .is_some_and(|target| target.client_id == target_client_id)
+                .is_some_and(|target| target.client_id() == target_client_id)
                 && drag.negotiation.offer_ids.contains(&offer_id)
         })
     }
@@ -379,7 +379,7 @@ impl SeatState {
             .as_ref()
             .and_then(|drag| {
                 drag.target
-                    .is_some_and(|target| target.client_id == target_client_id)
+                    .is_some_and(|target| target.client_id() == target_client_id)
                     .then(|| drag.negotiation.offer_ids.clone())
             })
             .unwrap_or_default()
@@ -396,7 +396,7 @@ impl SeatState {
         };
         if drag
             .target
-            .is_none_or(|target| target.client_id != target_client_id)
+            .is_none_or(|target| target.client_id() != target_client_id)
             || !drag.negotiation.offer_ids.contains(&offer_id)
         {
             return false;
@@ -421,7 +421,7 @@ impl SeatState {
         };
         if drag
             .target
-            .is_none_or(|target| target.client_id != target_client_id)
+            .is_none_or(|target| target.client_id() != target_client_id)
             || !drag.negotiation.offer_ids.contains(&offer_id)
         {
             return false;
@@ -448,7 +448,7 @@ impl SeatState {
         };
         if drag
             .target
-            .is_none_or(|target| target.client_id != target_client_id)
+            .is_none_or(|target| target.client_id() != target_client_id)
         {
             return false;
         }
@@ -470,7 +470,7 @@ impl SeatState {
         };
         if drag
             .target
-            .is_none_or(|target| target.client_id != target_client_id)
+            .is_none_or(|target| target.client_id() != target_client_id)
             || !drag.negotiation.offer_ids.contains(&offer_id)
         {
             return false;
@@ -566,7 +566,7 @@ impl SeatState {
         } else if let Some(drag) = self.active_drag.as_mut() {
             if drag
                 .target
-                .is_some_and(|target| target.client_id == client_id)
+                .is_some_and(|target| target.client_id() == client_id)
             {
                 drag.target = None;
                 drag.negotiation = DragNegotiationState::default();
@@ -750,20 +750,20 @@ impl SeatState {
         self.popup_grab.as_ref().map(|grab| grab.client_id)
     }
 
-    pub(crate) fn popup_keyboard_surface(&self) -> Option<WlSurfaceId> {
+    pub(crate) fn popup_keyboard_surface(&self) -> Option<Resolved<WlSurfaceId>> {
         self.popup_grab
             .as_ref()
             .and_then(|grab| grab.popup_stack.last())
-            .map(|(_, surface_id)| *surface_id)
+            .map(|(_, surface)| *surface)
     }
 
-    pub(crate) fn popup_grab_contains_surface(&self, surface: Resolved<WlSurfaceId>) -> bool {
+    pub(crate) fn popup_grab_contains_surface(&self, surface: &Resolved<WlSurfaceId>) -> bool {
         self.popup_grab.as_ref().is_some_and(|grab| {
             grab.client_id == surface.client_id()
                 && grab
                     .popup_stack
                     .iter()
-                    .any(|(_, candidate)| *candidate == surface.wayland_id())
+                    .any(|(_, candidate)| candidate == surface)
         })
     }
 
@@ -771,7 +771,7 @@ impl SeatState {
         &mut self,
         client_id: ClientId,
         popup_id: XdgPopupId,
-        popup_surface_id: WlSurfaceId,
+        popup_surface: Resolved<WlSurfaceId>,
     ) {
         let grab = self
             .popup_grab
@@ -781,7 +781,7 @@ impl SeatState {
         }
         grab.popup_stack
             .retain(|(candidate, _)| *candidate != popup_id);
-        grab.popup_stack.push((popup_id, popup_surface_id));
+        grab.popup_stack.push((popup_id, popup_surface));
     }
 
     pub(crate) fn remove_popup_grab(&mut self, popup_id: XdgPopupId) {
@@ -1107,7 +1107,7 @@ pub fn handle_keyboard_key(
 pub fn resolve_activation_target(
     state: &State,
     surface: Resolved<WlSurfaceId>,
-) -> Option<(ObjectId, SurfaceFocus)> {
+) -> Option<SurfaceFocus> {
     crate::input::resolve_activation_target(state, surface)
 }
 
@@ -1174,7 +1174,7 @@ pub fn finish_active_drag(state: &mut State, dispatcher: &mut Dispatcher) {
         schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
     }
     if let Some(target) = drag.target {
-        dispatcher.dispatch_to(target.client_id, ClientAction::DataDeviceDragLeave);
+        dispatcher.dispatch_to(target.client_id(), ClientAction::DataDeviceDragLeave);
     }
 }
 
@@ -1195,7 +1195,7 @@ pub fn cancel_active_drag(
         schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
     }
     if let Some(target) = drag.target {
-        dispatcher.dispatch_to(target.client_id, ClientAction::DataDeviceDragLeave);
+        dispatcher.dispatch_to(target.client_id(), ClientAction::DataDeviceDragLeave);
     }
     let source = source.or(drag.source.resolved());
     if let Some(source) = source {
@@ -1313,7 +1313,7 @@ fn complete_drag_drop(state: &mut State, dispatcher: &mut Dispatcher) {
     if state.seat.active_drag_can_drop() {
         let target = drag.target.expect("validated active drag target");
         state.seat.set_active_drag_phase(DragPhase::DropSent);
-        dispatcher.dispatch_to(target.client_id, ClientAction::DataDeviceDragDrop);
+        dispatcher.dispatch_to(target.client_id(), ClientAction::DataDeviceDragDrop);
         if let Some(source) = drag.source.resolved() {
             dispatcher.dispatch_to(
                 source.client_id(),
@@ -1381,11 +1381,11 @@ pub fn begin_popup_grab(
     dispatcher: &mut Dispatcher,
     client_id: ClientId,
     popup_id: XdgPopupId,
-    popup_surface_id: WlSurfaceId,
+    popup_surface: Resolved<WlSurfaceId>,
 ) {
     state
         .seat
-        .start_popup_grab(client_id, popup_id, popup_surface_id);
+        .start_popup_grab(client_id, popup_id, popup_surface);
     if let Some(focus) = popup_keyboard_focus(state) {
         set_keyboard_focus(state, dispatcher, Some(focus));
     }
@@ -1400,7 +1400,18 @@ pub fn request_popup_grab(
     popup_id: XdgPopupId,
     popup_surface_id: WlSurfaceId,
 ) -> bool {
-    begin_popup_grab(state, dispatcher, client_id, popup_id, popup_surface_id);
+    let Some(popup_surface_object_id) =
+        state.surface_object_id_for_client(client_id, popup_surface_id)
+    else {
+        return false;
+    };
+    begin_popup_grab(
+        state,
+        dispatcher,
+        client_id,
+        popup_id,
+        Resolved::new(client_id, popup_surface_id, popup_surface_object_id),
+    );
     true
 }
 
@@ -2020,7 +2031,14 @@ mod xdg_seat_tests {
         assert!(popup.has_explicit_grab());
         assert_eq!(
             state.seat.popup_grab.as_ref().unwrap().popup_stack,
-            vec![(XdgPopupId::from(40), WlSurfaceId::from(11))]
+            vec![(
+                XdgPopupId::from(40),
+                crate::clients::Resolved::new(
+                    client.client_id(),
+                    WlSurfaceId::from(11),
+                    popup_wl_surface_object_id,
+                ),
+            )]
         );
         assert_eq!(
             state.seat.keyboard_focus,
@@ -2101,7 +2119,14 @@ mod xdg_seat_tests {
         assert!(popup.has_explicit_grab());
         assert_eq!(
             state.seat.popup_grab.as_ref().unwrap().popup_stack,
-            vec![(XdgPopupId::from(40), WlSurfaceId::from(11))]
+            vec![(
+                XdgPopupId::from(40),
+                crate::clients::Resolved::new(
+                    client.client_id(),
+                    WlSurfaceId::from(11),
+                    popup_wl_surface_object_id,
+                ),
+            )]
         );
         assert_eq!(
             state.seat.keyboard_focus,
@@ -2243,7 +2268,7 @@ mod xdg_seat_tests {
             &mut dispatcher,
             parent_focus.client_id(),
             XdgPopupId::from(60),
-            popup_focus.surface_id(),
+            *popup_focus,
         );
         state.seat.pointer_focus = Some(super::PointerFocus {
             target: parent_focus,
@@ -3273,7 +3298,7 @@ mod xdg_seat_tests {
             &mut dispatcher,
             parent_focus.client_id(),
             XdgPopupId::from(60),
-            popup_focus.surface_id(),
+            *popup_focus,
         );
         state.seat.keyboard_focus = Some(popup_focus);
 
@@ -3759,8 +3784,11 @@ mod xdg_seat_tests {
             origin_surface_id: WlSurfaceId::from(10),
             icon_surface_object_id: None,
             target: Some(DragTargetState {
-                client_id: target_client_id,
-                surface_id: WlSurfaceId::from(11),
+                surface: crate::clients::Resolved::new(
+                    target_client_id,
+                    WlSurfaceId::from(11),
+                    ObjectId::from(0usize),
+                ),
             }),
             negotiation: Default::default(),
             phase: DragPhase::Dragging,
@@ -3794,8 +3822,11 @@ mod xdg_seat_tests {
             origin_surface_id: WlSurfaceId::from(20),
             icon_surface_object_id: None,
             target: Some(DragTargetState {
-                client_id: target_client_id,
-                surface_id: WlSurfaceId::from(21),
+                surface: crate::clients::Resolved::new(
+                    target_client_id,
+                    WlSurfaceId::from(21),
+                    ObjectId::from(0usize),
+                ),
             }),
             negotiation: Default::default(),
             phase: DragPhase::Dragging,

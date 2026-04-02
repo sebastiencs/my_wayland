@@ -62,11 +62,10 @@ pub(crate) fn set_keyboard_focus_from_surface(
     set_keyboard_focus(state, dispatcher, new_focus);
 }
 
-// TODO: Remove ObjectId in return
 pub(crate) fn resolve_activation_target(
     state: &State,
     mut surface: Resolved<WlSurfaceId>,
-) -> Option<(ObjectId, SurfaceFocus)> {
+) -> Option<SurfaceFocus> {
     loop {
         let surface_ref = surface.try_ref(state)?;
         match surface_ref.parent_surface() {
@@ -75,7 +74,7 @@ pub(crate) fn resolve_activation_target(
                 if !surface_ref.has_committed_buffer() {
                     return None;
                 }
-                return Some((surface.object_id(), SurfaceFocus::new(surface)));
+                return Some(SurfaceFocus::new(surface));
             }
         }
     }
@@ -130,11 +129,10 @@ pub(crate) fn maybe_dismiss_popup_grab_on_button(
     let Some(_grab_client_id) = state.seat.popup_grab_client() else {
         return false;
     };
-    let inside_popup_stack = state.seat.pointer_focus.is_some_and(|focus| {
-        state
-            .seat
-            .popup_grab_contains_surface(focus.target.resolved())
-    });
+    let inside_popup_stack = state
+        .seat
+        .pointer_focus
+        .is_some_and(|focus| state.seat.popup_grab_contains_surface(&focus.target));
     if inside_popup_stack {
         return false;
     }
@@ -251,13 +249,10 @@ pub(crate) fn refresh_drag_focus(
     }
 
     let hit = surface_focus_pick_at(state, state.seat.pointer_position());
-    let mut new_target = hit.map(|focus| DragTargetState {
-        client_id: focus.target.client_id(),
-        surface_id: focus.target.surface_id(),
-    });
+    let mut new_target = hit.map(|focus| DragTargetState { surface: focus.target.surface });
     if active_drag.source.object_id().is_none()
         && new_target
-            .is_some_and(|target| target.client_id != active_drag.source.initiator_client_id())
+            .is_some_and(|target| target.client_id() != active_drag.source.initiator_client_id())
     {
         new_target = None;
     }
@@ -265,7 +260,7 @@ pub(crate) fn refresh_drag_focus(
     let old_target = active_drag.target;
     if old_target != new_target {
         if let Some(old_target) = old_target {
-            dispatcher.dispatch_to(old_target.client_id, ClientAction::DataDeviceDragLeave);
+            dispatcher.dispatch_to(old_target.client_id(), ClientAction::DataDeviceDragLeave);
         }
         if let Some(source) = active_drag.source.resolved() {
             dispatcher.dispatch_to(
@@ -288,10 +283,10 @@ pub(crate) fn refresh_drag_focus(
             let serial = state.seat.next_serial();
             let (x, y) = local_coords(hit.rect, state.seat.pointer_pos);
             dispatcher.dispatch_to(
-                new_target.client_id,
+                new_target.client_id(),
                 ClientAction::DataDeviceDragEnter {
                     serial,
-                    surface: new_target.surface_id,
+                    surface: new_target.surface_id(),
                     x,
                     y,
                     source: active_drag.source.resolved(),
@@ -299,7 +294,7 @@ pub(crate) fn refresh_drag_focus(
             );
             if send_motion {
                 dispatcher.dispatch_to(
-                    new_target.client_id,
+                    new_target.client_id(),
                     ClientAction::DataDeviceDragMotion { time, x, y },
                 );
             }
@@ -313,19 +308,15 @@ pub(crate) fn refresh_drag_focus(
         if let (Some(hit), Some(target)) = (hit, new_target) {
             let (x, y) = local_coords(hit.rect, state.seat.pointer_pos);
             dispatcher
-                .dispatch_to(target.client_id, ClientAction::DataDeviceDragMotion { time, x, y });
+                .dispatch_to(target.client_id(), ClientAction::DataDeviceDragMotion { time, x, y });
         }
     }
 
     true
 }
 
-// Use Resolved
 pub(crate) fn popup_keyboard_focus(state: &State) -> Option<SurfaceFocus> {
-    let surface_id = state.seat.popup_keyboard_surface()?;
-    let client_id = state.seat.popup_grab_client()?;
-    let object_id = state.surface_object_id_for_client(client_id, surface_id)?;
-    Some(SurfaceFocus::new(Resolved::new(client_id, surface_id, object_id)))
+    Some(SurfaceFocus::new(state.seat.popup_keyboard_surface()?))
 }
 
 fn local_coords(rect: SurfaceRect, pointer_pos: (f64, f64)) -> (f32, f32) {
@@ -337,8 +328,8 @@ fn refresh_selection_focus_clients(
     old_focus: Option<SurfaceFocus>,
     new_focus: Option<SurfaceFocus>,
 ) {
-    let old_client = old_focus.map(SurfaceFocus::client_id);
-    let new_client = new_focus.map(SurfaceFocus::client_id);
+    let old_client = old_focus.map(|surface| surface.client_id());
+    let new_client = new_focus.map(|surface| surface.client_id());
     if old_client == new_client {
         return;
     }
@@ -409,7 +400,7 @@ fn topmost_exclusive_layer_focus_with_snapshot(
 }
 
 fn surface_object_id_for_focus(state: &State, focus: SurfaceFocus) -> Option<ObjectId> {
-    focus.resolved().exists(state).then_some(focus.object_id())
+    focus.exists(state).then_some(focus.object_id())
 }
 
 fn monotonic_time_msec() -> u32 {

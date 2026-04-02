@@ -534,8 +534,7 @@ mod tests {
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
             target: Some(DragTargetState {
-                client_id: target.client_id(),
-                surface_id: 31u32.into(),
+                surface: Resolved::new(target.client_id(), 31u32.into(), ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![offer_id],
@@ -595,8 +594,7 @@ mod tests {
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
             target: Some(DragTargetState {
-                client_id: client.client_id(),
-                surface_id: 31u32.into(),
+                surface: Resolved::new(client.client_id(), 31u32.into(), ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![offer_id],
@@ -674,8 +672,7 @@ mod tests {
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
             target: Some(DragTargetState {
-                client_id: target.client_id(),
-                surface_id: 31u32.into(),
+                surface: Resolved::new(target.client_id(), 31u32.into(), ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![offer_a_id, offer_b_id],
@@ -721,8 +718,7 @@ mod tests {
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
             target: Some(DragTargetState {
-                client_id: client.client_id(),
-                surface_id: 31u32.into(),
+                surface: Resolved::new(client.client_id(), 31u32.into(), ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![live_offer_id],
@@ -782,8 +778,7 @@ mod tests {
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
             target: Some(DragTargetState {
-                client_id: client.client_id(),
-                surface_id: 31u32.into(),
+                surface: Resolved::new(client.client_id(), 31u32.into(), ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![WlDataOfferId::from(99)],
@@ -846,8 +841,7 @@ mod tests {
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
             target: Some(DragTargetState {
-                client_id: client.client_id(),
-                surface_id: 31u32.into(),
+                surface: Resolved::new(client.client_id(), 31u32.into(), ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![offer_id],
@@ -927,8 +921,7 @@ mod tests {
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
             target: Some(DragTargetState {
-                client_id: target.client_id(),
-                surface_id: 31u32.into(),
+                surface: Resolved::new(target.client_id(), 31u32.into(), ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![offer_id],
@@ -993,8 +986,7 @@ mod tests {
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
             target: Some(DragTargetState {
-                client_id: target.client_id(),
-                surface_id: 31u32.into(),
+                surface: Resolved::new(target.client_id(), 31u32.into(), ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![offer_id],

@@ -1152,7 +1152,7 @@ impl Client {
         if let Some(drag) = state.seat.active_drag() {
             if drag
                 .target
-                .is_some_and(|target| target.client_id == self.id)
+                .is_some_and(|target| target.client_id() == self.id)
             {
                 if let Some(source) = drag.source.resolved() {
                     if drag.negotiation.chosen_action == 0 {
