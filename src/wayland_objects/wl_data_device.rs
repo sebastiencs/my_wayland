@@ -17,8 +17,8 @@ pub struct WlDataDevice {
     id: WlDataDeviceId,
     seat_id: WlSeatId,
     version: u32,
-    selection_offer: Option<WlDataOfferId>,
-    drag_offer: Option<WlDataOfferId>,
+    selection_offer: Option<Resolved<WlDataOfferId>>,
+    drag_offer: Option<Resolved<WlDataOfferId>>,
 }
 
 impl WlDataDevice {
@@ -36,19 +36,19 @@ impl WlDataDevice {
         self.version
     }
 
-    pub fn take_selection_offer(&mut self) -> Option<WlDataOfferId> {
+    pub fn take_selection_offer(&mut self) -> Option<Resolved<WlDataOfferId>> {
         self.selection_offer.take()
     }
 
-    pub fn set_selection_offer(&mut self, offer_id: Option<WlDataOfferId>) {
+    pub fn set_selection_offer(&mut self, offer_id: Option<Resolved<WlDataOfferId>>) {
         self.selection_offer = offer_id;
     }
 
-    pub fn take_drag_offer(&mut self) -> Option<WlDataOfferId> {
+    pub fn take_drag_offer(&mut self) -> Option<Resolved<WlDataOfferId>> {
         self.drag_offer.take()
     }
 
-    pub fn set_drag_offer(&mut self, offer_id: Option<WlDataOfferId>) {
+    pub fn set_drag_offer(&mut self, offer_id: Option<Resolved<WlDataOfferId>>) {
         self.drag_offer = offer_id;
     }
 
@@ -110,14 +110,14 @@ impl Object for WlDataDevice {
                 state
                     .seat
                     .unregister_data_device(client.client_id(), self.id);
-                if let Some(offer_id) = self.selection_offer.take() {
-                    if client.contains_object(offer_id, state) {
-                        client.destroy_data_offer(state, dispatcher, offer_id);
+                if let Some(offer) = self.selection_offer.take() {
+                    if offer.exists(state) {
+                        client.destroy_data_offer(state, dispatcher, offer);
                     }
                 }
-                if let Some(offer_id) = self.drag_offer.take() {
-                    if client.contains_object(offer_id, state) {
-                        client.destroy_data_offer(state, dispatcher, offer_id);
+                if let Some(offer) = self.drag_offer.take() {
+                    if offer.exists(state) {
+                        client.destroy_data_offer(state, dispatcher, offer);
                     }
                 }
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
@@ -473,7 +473,11 @@ mod tests {
             let mut data_device = state
                 .objects
                 .grab_object::<WlDataDevice>(data_device_object_id);
-            data_device.set_drag_offer(Some(offer_id));
+            data_device.set_drag_offer(Some(Resolved::new(
+                client.client_id(),
+                offer_id,
+                client.object_id(offer_id),
+            )));
         }
 
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);

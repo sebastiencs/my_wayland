@@ -890,18 +890,18 @@ impl Client {
         &mut self,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        offer_id: WlDataOfferId,
+        offer: Resolved<WlDataOfferId>,
     ) {
-        if !self.contains_object(offer_id, state) {
+        if offer.client_id() != self.id {
             return;
         }
-        let Some(object_id) = self.object_id_for_wayland(offer_id) else {
+        if !offer.exists(state) {
             return;
-        };
-        if let Some(mut offer) = state.objects.try_grab_object::<WlDataOffer>(object_id) {
-            offer.before_destroy(self.id, state, dispatcher);
         }
-        self.delete_id(&WlDisplay::default(), state, dispatcher, offer_id.into());
+        if let Some(mut offer_obj) = offer.try_grab(state) {
+            offer_obj.before_destroy(self.id, state, dispatcher);
+        }
+        self.delete_id(&WlDisplay::default(), state, dispatcher, offer.wayland_id().into());
     }
 
     fn create_data_offer_for_device(
@@ -911,7 +911,7 @@ impl Client {
         device_id: crate::protocol_generated::WlDataDeviceId,
         source: Resolved<WlDataSourceId>,
         role: DataOfferRole,
-    ) -> Option<WlDataOfferId> {
+    ) -> Option<Resolved<WlDataOfferId>> {
         if !self.contains_object(device_id, state) {
             return None;
         }
@@ -946,7 +946,8 @@ impl Client {
 
         let offer_id = self.allocate_server_object_id::<WlDataOfferId>();
         let offer = WlDataOffer::new(offer_id, device_version, role, Some(source));
-        let _ = self.insert_object(state, offer);
+        let ((_, offer_object_id), _) = self.insert_object(state, offer);
+        let resolved_offer = Resolved::new(self.id, offer_id, offer_object_id);
         {
             let device = self.ref_object(device_id, state);
             device.send_data_offer(offer_id, dispatcher);
@@ -962,7 +963,7 @@ impl Client {
                 offer.send_action(chosen_action, dispatcher);
             }
         }
-        Some(offer_id)
+        Some(resolved_offer)
     }
 
     fn refresh_data_device_selection(
@@ -1004,7 +1005,9 @@ impl Client {
             let data_device = self.ref_object_mut(data_device_id, state);
             data_device.set_selection_offer(next_offer);
             data_device.send_selection(
-                next_offer.unwrap_or_else(|| WlDataOfferId::from(0u32)),
+                next_offer
+                    .map(|offer| offer.wayland_id())
+                    .unwrap_or_else(|| WlDataOfferId::from(0u32)),
                 dispatcher,
             );
         }
@@ -1064,7 +1067,7 @@ impl Client {
                 self.destroy_data_offer(state, dispatcher, previous_offer);
             }
 
-            let offer_id = source.and_then(|source| {
+            let offer = source.and_then(|source| {
                 self.create_data_offer_for_device(
                     state,
                     dispatcher,
@@ -1073,22 +1076,24 @@ impl Client {
                     DataOfferRole::Drag,
                 )
             });
-            if let Some(offer_id) = offer_id {
+            if let Some(offer) = offer {
                 let _ = state.seat.register_active_drag_offer(
                     self.id,
-                    offer_id,
+                    offer.wayland_id(),
                     device_version >= wl_data_offer::ACTION_SINCE,
                 );
             }
 
             let data_device = self.ref_object_mut(data_device_id, state);
-            data_device.set_drag_offer(offer_id);
+            data_device.set_drag_offer(offer);
             data_device.send_enter(
                 serial,
                 surface,
                 x,
                 y,
-                offer_id.unwrap_or_else(|| WlDataOfferId::from(0u32)),
+                offer
+                    .map(|offer| offer.wayland_id())
+                    .unwrap_or_else(|| WlDataOfferId::from(0u32)),
                 dispatcher,
             );
         }
