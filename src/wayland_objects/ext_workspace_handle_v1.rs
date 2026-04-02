@@ -175,27 +175,10 @@ impl Object for ExtWorkspaceHandleV1 {
                 if self.removed {
                     return Ok(());
                 }
-                let Some(group_object_id) = client.object_id_for_wayland(workspace_group) else {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "assign requires a live ext_workspace_group_handle_v1",
-                    );
-                    return Ok(());
-                };
-                let Some(group) = state
-                    .objects
-                    .try_ref_object::<ExtWorkspaceGroupHandleV1>(group_object_id)
-                else {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "assign target is not an ext_workspace_group_handle_v1",
-                    );
-                    return Ok(());
-                };
+                let group = client
+                    .resolve_or_disconnect(workspace_group, state, dispatcher)?
+                    .try_ref(state)
+                    .unwrap();
                 let group_id = group.group_id();
                 let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
                     return Ok(());

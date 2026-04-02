@@ -1,12 +1,12 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest},
-    object::{Object, Parser},
+    clients::{Client, ClientDispatcher, ClientObjectId, RawRequest, Resolved},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_data_device, WaylandId, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlSeatId,
         WlSurfaceId,
     },
     seat,
-    state::State,
+    state::{SelectionSourceState, State},
     wayland_objects::{wl_data_source::SourceUse, wl_display::WlDisplay, wl_surface::WlSurface},
 };
 
@@ -101,10 +101,10 @@ impl Object for WlDataDevice {
 
         match client.parse::<Self>(req).unwrap() {
             StartDrag { source, origin, icon, serial } => {
-                start_drag(self, client, state, dispatcher, source, origin, icon, serial);
+                start_drag(self, client, state, dispatcher, source, origin, icon, serial)?;
             }
             SetSelection { source, serial } => {
-                set_selection(self, client, state, dispatcher, source, serial);
+                set_selection(self, client, state, dispatcher, source, serial)?;
             }
             Release => {
                 state
@@ -134,65 +134,52 @@ fn set_selection(
     dispatcher: &mut ClientDispatcher,
     source: WlDataSourceId,
     serial: u32,
-) {
+) -> RequestResult {
     if !state
         .seat
         .keyboard_focus()
         .is_some_and(|focus| focus.client_id == client.client_id())
     {
-        return;
+        return Ok(());
     }
     if !state.seat.validate_selection_serial(serial) {
-        return;
+        return Ok(());
     }
     if !state
         .seat
         .validate_client_serial(client.client_id(), serial)
     {
-        return;
+        return Ok(());
     }
 
     let source_raw: u32 = source.into();
     let next_selection = if source_raw == 0 {
         None
     } else {
-        if !client.object_is(source, state) {
-            client.protocol_violation_disconnect(
-                dispatcher,
-                data_device.id.into(),
-                crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                "invalid wl_data_source for selection",
-            );
-            return;
-        }
-
-        let mut source_object = client.grab_object(source, state);
+        let source = client.resolve_or_disconnect(source, state, dispatcher)?;
+        let mut source_object = source.grab(state);
         if source_object.dnd_actions() != 0 {
             client.protocol_violation_disconnect(
                 dispatcher,
-                source.into(),
+                source.wayland_id().into(),
                 crate::protocol_generated::wl_data_source::Error::InvalidSource as u32,
                 "selection source must not set drag-and-drop actions",
             );
-            return;
+            return Ok(());
         }
         // Real clients sometimes reuse the same wl_data_source object for multiple
         // selection operations. wlroots and Smithay are intentionally permissive
         // here, so we keep the source usable instead of disconnecting.
         source_object.set_used(SourceUse::Selection);
-        Some(crate::state::SelectionSourceState {
-            source_object_id: client.object_id(source),
-            source_id: source,
-            owner_client_id: client.client_id(),
-        })
+        Some(SelectionSourceState { source: ClientObjectId::from((client, &source)) })
     };
 
     let previous = state.seat.replace_selection_source(next_selection, serial);
     if let Some(previous) = previous {
         dispatcher.dispatch_to(
-            previous.owner_client_id,
+            previous.source.client_id(),
             ClientAction::DataSourceEvent {
-                source_id: previous.source_id,
+                source: previous.source,
                 event: DataSourceClientEvent::Cancelled,
             },
         );
@@ -201,6 +188,8 @@ fn set_selection(
     if let Some(focus) = state.seat.keyboard_focus() {
         dispatcher.dispatch_to(focus.client_id, ClientAction::RefreshDataDeviceSelection);
     }
+
+    Ok(())
 }
 
 fn start_drag(
@@ -212,90 +201,72 @@ fn start_drag(
     origin: WlSurfaceId,
     icon: WlSurfaceId,
     serial: u32,
-) {
-    if !client.object_is(origin, state) {
-        client.protocol_violation_disconnect(
-            dispatcher,
-            data_device.id.into(),
-            crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-            "invalid drag origin surface",
-        );
-        return;
-    }
+) -> RequestResult {
+    use crate::state::{DragPhase, DragSource, DragState};
+
+    let origin = client.resolve_or_disconnect(origin, state, dispatcher)?;
     if !state
         .seat
-        .validate_data_transfer_serial(client.client_id(), origin, serial)
+        .validate_data_transfer_serial(client.client_id(), origin.wayland_id(), serial)
     {
-        return;
+        return Ok(());
     }
 
-    let source_raw: u32 = source.into();
-    let (source_object_id, source_id) = if source_raw == 0 {
-        (None, None)
-    } else {
-        if !client.object_is(source, state) {
-            client.protocol_violation_disconnect(
-                dispatcher,
-                data_device.id.into(),
-                crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                "invalid wl_data_source for drag-and-drop",
-            );
-            return;
+    let source: Option<Resolved<WlDataSourceId>> = match source.to_opt() {
+        None => None,
+        Some(source) => {
+            let source = client.resolve_or_disconnect(source, state, dispatcher)?;
+            let source_object = source.ref_mut(state);
+            // Some clients incorrectly recycle a wl_data_source across multiple drags.
+            // We stay compatible with wlroots/Smithay and accept that reuse instead of
+            // disconnecting the client for a protocol nicety.
+            source_object.set_used(SourceUse::Drag);
+            Some(source)
         }
-        let mut source_object = client.grab_object(source, state);
-        // Some clients incorrectly recycle a wl_data_source across multiple drags.
-        // We stay compatible with wlroots/Smithay and accept that reuse instead of
-        // disconnecting the client for a protocol nicety.
-        source_object.set_used(SourceUse::Drag);
-        (Some(client.object_id(source)), Some(source))
     };
 
-    let icon_raw: u32 = icon.into();
-    let (icon_surface_object_id, icon_surface_id) = if icon_raw == 0 {
-        (None, None)
-    } else {
-        if !client.object_is(icon, state) {
-            client.protocol_violation_disconnect(
-                dispatcher,
-                data_device.id.into(),
-                crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                "invalid drag icon surface",
-            );
-            return;
+    let icon: Option<Resolved<WlSurfaceId>> = match icon.to_opt() {
+        None => None,
+        Some(icon) => {
+            let icon = client.resolve_or_disconnect(icon, state, dispatcher)?;
+            let icon_surface = icon.ref_mut(state);
+            if icon_surface.set_dnd_icon_role().is_err() {
+                client.protocol_violation_disconnect(
+                    dispatcher,
+                    data_device.id.into(),
+                    wl_data_device::Error::Role as u32,
+                    "drag icon surface already has another role",
+                );
+                return Ok(());
+            }
+            Some(icon)
         }
-        let mut icon_surface = client.grab_object(icon, state);
-        if icon_surface.set_dnd_icon_role().is_err() {
-            client.protocol_violation_disconnect(
-                dispatcher,
-                data_device.id.into(),
-                wl_data_device::Error::Role as u32,
-                "drag icon surface already has another role",
-            );
-            return;
-        }
-        (Some(client.object_id(icon)), Some(icon))
     };
 
     if state.seat.active_drag().is_some() {
         seat::cancel_active_drag(state, dispatcher, None);
     }
 
-    state.seat.set_active_drag(crate::state::DragState {
-        source_object_id,
-        source_id,
-        source_client_id: client.client_id(),
-        origin_surface_id: origin,
-        icon_surface_object_id,
-        icon_surface_id,
+    let client_id = client.client_id();
+    state.seat.set_active_drag(DragState {
+        source: source
+            .map(|source| DragSource::DataSource {
+                source: ClientObjectId::from((client, &source)),
+            })
+            .unwrap_or(DragSource::None { initiator_client_id: client_id }),
+        origin_surface_id: origin.wayland_id(),
+        icon_surface_object_id: icon.map(Resolved::object_id),
         target: None,
         negotiation: Default::default(),
-        phase: crate::state::DragPhase::Dragging,
+        phase: DragPhase::Dragging,
     });
-    if icon_surface_object_id.is_some() {
-        dispatcher.dispatch_to(client.client_id(), ClientAction::RefreshSurfaceOutputs);
+    if icon.is_some() {
+        dispatcher.dispatch_to(client_id, ClientAction::RefreshSurfaceOutputs);
         crate::drm::schedule_active_output(state, dispatcher);
     }
     seat::refresh_active_drag_focus(state, dispatcher, 0);
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -303,7 +274,10 @@ mod tests {
     use {
         super::{set_selection, start_drag, WlDataDevice},
         crate::{
-            clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent},
+            clients::{
+                Client, ClientAction, ClientId, ClientObjectId, DataSourceClientEvent, RawEvent,
+                Resolved,
+            },
             egl::EGL,
             globals::Globals,
             object::Object,
@@ -311,7 +285,8 @@ mod tests {
             runner::Dispatcher,
             seat::{handle_keyboard_key, set_keyboard_focus_from_surface, SurfaceFocus},
             state::{
-                DataOfferRole, DragNegotiationState, DragPhase, DragState, DragTargetState, State,
+                DataOfferRole, DragNegotiationState, DragPhase, DragSource, DragState,
+                DragTargetState, ObjectId, State,
             },
             wayland_objects::{
                 wl_data_offer::WlDataOffer, wl_data_source::WlDataSource, wl_surface::WlSurface,
@@ -468,9 +443,7 @@ mod tests {
                 offer_id,
                 2,
                 DataOfferRole::Drag,
-                None,
-                Some(source_id),
-                Some(source_client_id),
+                Some((source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into()),
             ),
         );
 
@@ -478,12 +451,11 @@ mod tests {
             .seat
             .register_data_device(client.client_id(), data_device_id);
         state.seat.set_active_drag(DragState {
-            source_object_id: None,
-            source_id: Some(source_id),
-            source_client_id,
+            source: DragSource::DataSource {
+                source: (source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into(),
+            },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
-            icon_surface_id: None,
             target: Some(DragTargetState {
                 client_id: client.client_id(),
                 surface_id: 31u32.into(),
@@ -528,9 +500,9 @@ mod tests {
                 matches!(
                     action,
                     ClientAction::DataSourceEvent {
-                        source_id: queued_source_id,
+                        source: queued_source,
                         event: DataSourceClientEvent::DndFinished,
-                    } if *queued_source_id == source_id
+                    } if queued_source.wayland_id() == source_id
                 )
             }
         ));

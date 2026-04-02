@@ -20,6 +20,29 @@ macro_rules! wayland_id {
                 Self(value.0)
             }
         }
+        impl $name {
+            pub fn null_or<T, F: FnOnce($name) -> T>(self, fun: F) -> Option<T> {
+                if u32::from(self) == 0 {
+                    None
+                } else {
+                    Some(fun(self))
+                }
+            }
+            pub fn null_or_ok<T, E, F: FnOnce($name) -> Result<T, E>>(self, fun: F) -> Result<Option<T>, E> {
+                if u32::from(self) == 0 {
+                    Ok(None)
+                } else {
+                    Ok(Some(fun(self)?))
+                }
+            }
+            pub fn to_opt(self) -> Option<Self> {
+                if u32::from(self) == 0 {
+                    None
+                } else {
+                    Some(self)
+                }
+            }
+        }
         impl std::fmt::Debug for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let Self(this) = self;

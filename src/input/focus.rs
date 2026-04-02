@@ -266,8 +266,9 @@ pub(crate) fn refresh_drag_focus(
         client_id: focus.target.client_id,
         surface_id: focus.target.surface_id,
     });
-    if active_drag.source_object_id.is_none()
-        && new_target.is_some_and(|target| target.client_id != active_drag.source_client_id)
+    if active_drag.source.object_id().is_none()
+        && new_target
+            .is_some_and(|target| target.client_id != active_drag.source.initiator_client_id())
     {
         new_target = None;
     }
@@ -277,18 +278,18 @@ pub(crate) fn refresh_drag_focus(
         if let Some(old_target) = old_target {
             dispatcher.dispatch_to(old_target.client_id, ClientAction::DataDeviceDragLeave);
         }
-        if let Some(source_id) = active_drag.source_id {
+        if let Some(source) = active_drag.source.client_object() {
             dispatcher.dispatch_to(
-                active_drag.source_client_id,
+                source.client_id(),
                 ClientAction::DataSourceEvent {
-                    source_id,
+                    source,
                     event: crate::clients::DataSourceClientEvent::Target(None),
                 },
             );
             dispatcher.dispatch_to(
-                active_drag.source_client_id,
+                source.client_id(),
                 ClientAction::DataSourceEvent {
-                    source_id,
+                    source,
                     event: crate::clients::DataSourceClientEvent::Action { dnd_action: 0 },
                 },
             );
@@ -304,7 +305,7 @@ pub(crate) fn refresh_drag_focus(
                     surface: new_target.surface_id,
                     x,
                     y,
-                    source_object_id: active_drag.source_object_id,
+                    source: active_drag.source.client_object(),
                 },
             );
             if send_motion {

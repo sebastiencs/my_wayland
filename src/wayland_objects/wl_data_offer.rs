@@ -2,8 +2,8 @@ use std::os::fd::FromRawFd;
 
 use crate::{
     clients::{
-        Client, ClientAction, ClientDispatcher, ClientId, DataSourceClientEvent, EventWriter,
-        RawRequest,
+        Client, ClientAction, ClientDispatcher, ClientId, ClientObjectId, DataSourceClientEvent,
+        EventWriter, RawRequest,
     },
     object::{Object, Parser},
     protocol_generated::{
@@ -19,9 +19,7 @@ pub struct WlDataOffer {
     id: WlDataOfferId,
     version: u32,
     role: DataOfferRole,
-    source_object_id: Option<ObjectId>,
-    source_id: Option<WlDataSourceId>,
-    source_client_id: Option<ClientId>,
+    source: Option<ClientObjectId<WlDataSourceId>>,
     finished: bool,
 }
 
@@ -30,29 +28,21 @@ impl WlDataOffer {
         id: WlDataOfferId,
         version: u32,
         role: DataOfferRole,
-        source_object_id: Option<ObjectId>,
-        source_id: Option<WlDataSourceId>,
-        source_client_id: Option<ClientId>,
+        source: Option<ClientObjectId<WlDataSourceId>>,
     ) -> Self {
-        Self {
-            id,
-            version,
-            role,
-            source_object_id,
-            source_id,
-            source_client_id,
-            finished: false,
-        }
+        Self { id, version, role, source, finished: false }
     }
 
     pub fn source_object_id(&self) -> Option<ObjectId> {
-        self.source_object_id
+        self.source.map(|src| src.object_id())
     }
 
     pub fn clear_source(&mut self) {
-        self.source_object_id = None;
-        self.source_id = None;
-        self.source_client_id = None;
+        self.source = None;
+    }
+
+    fn source(&self) -> Option<ClientObjectId<WlDataSourceId>> {
+        self.source
     }
 
     pub fn send_offer(&self, mime_type: String, dispatcher: &mut ClientDispatcher) {
@@ -96,14 +86,12 @@ impl WlDataOffer {
             if drag.negotiation.offer_ids.is_empty() {
                 if drag.phase == DragPhase::DropSent && !drag.negotiation.has_finish_capable_offer {
                     self.finished = true;
-                    if let (Some(source_client_id), Some(source_id)) =
-                        (self.source_client_id, self.source_id)
-                    {
+                    if let Some(source) = self.source() {
                         if drag.negotiation.chosen_action != 0 {
                             dispatcher.dispatch_to(
-                                source_client_id,
+                                source.client_id(),
                                 ClientAction::DataSourceEvent {
-                                    source_id,
+                                    source,
                                     event: DataSourceClientEvent::Action {
                                         dnd_action: drag.negotiation.chosen_action,
                                     },
@@ -111,9 +99,9 @@ impl WlDataOffer {
                             );
                         }
                         dispatcher.dispatch_to(
-                            source_client_id,
+                            source.client_id(),
                             ClientAction::DataSourceEvent {
-                                source_id,
+                                source,
                                 event: DataSourceClientEvent::DndFinished,
                             },
                         );
@@ -194,13 +182,11 @@ impl Object for WlDataOffer {
                         self.id,
                         accepted_mime.clone(),
                     );
-                    if let (Some(source_client_id), Some(source_id)) =
-                        (self.source_client_id, self.source_id)
-                    {
+                    if let Some(source) = self.source() {
                         dispatcher.dispatch_to(
-                            source_client_id,
+                            source.client_id(),
                             ClientAction::DataSourceEvent {
-                                source_id,
+                                source,
                                 event: DataSourceClientEvent::Target(accepted_mime),
                             },
                         );
@@ -224,16 +210,14 @@ impl Object for WlDataOffer {
                     let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
                     return Ok(());
                 }
-                let source_client = self.source_client_id;
-                let source_id = self.source_id;
-                if let (Some(source_client_id), Some(source_id)) = (source_client, source_id) {
+                if let Some(source) = self.source() {
                     // Be intentionally permissive for compatibility: even if the MIME type
                     // was not previously advertised, forward the request to the source
                     // instead of rejecting it in the compositor.
                     dispatcher.dispatch_to(
-                        source_client_id,
+                        source.client_id(),
                         ClientAction::DataSourceEvent {
-                            source_id,
+                            source,
                             event: DataSourceClientEvent::Send { mime_type, fd },
                         },
                     );
@@ -297,22 +281,20 @@ impl Object for WlDataOffer {
                 let _ = state
                     .seat
                     .set_active_drag_finished(client.client_id(), self.id, true);
-                if let (Some(source_client_id), Some(source_id)) =
-                    (self.source_client_id, self.source_id)
-                {
+                if let Some(source) = self.source() {
                     dispatcher.dispatch_to(
-                        source_client_id,
+                        source.client_id(),
                         ClientAction::DataSourceEvent {
-                            source_id,
+                            source,
                             event: DataSourceClientEvent::Action {
                                 dnd_action: drag.negotiation.chosen_action,
                             },
                         },
                     );
                     dispatcher.dispatch_to(
-                        source_client_id,
+                        source.client_id(),
                         ClientAction::DataSourceEvent {
-                            source_id,
+                            source,
                             event: DataSourceClientEvent::DndFinished,
                         },
                     );
@@ -367,7 +349,8 @@ impl Object for WlDataOffer {
                 }
 
                 let source_actions = self
-                    .source_object_id
+                    .source
+                    .map(|src| src.object_id())
                     .and_then(|source_object_id| {
                         state
                             .objects
@@ -401,13 +384,11 @@ impl Object for WlDataOffer {
                     let offer = client.ref_object(offer_id, state);
                     offer.send_action(chosen_action, dispatcher);
                 }
-                if let (Some(source_client_id), Some(source_id)) =
-                    (self.source_client_id, self.source_id)
-                {
+                if let Some(source) = self.source() {
                     dispatcher.dispatch_to(
-                        source_client_id,
+                        source.client_id(),
                         ClientAction::DataSourceEvent {
-                            source_id,
+                            source,
                             event: DataSourceClientEvent::Action { dnd_action: chosen_action },
                         },
                     );
@@ -424,8 +405,8 @@ mod tests {
         super::WlDataOffer,
         crate::{
             clients::{
-                Client, ClientAction, ClientId, ClientManagerAction, DataSourceClientEvent,
-                RawEvent,
+                Client, ClientAction, ClientId, ClientManagerAction, ClientObjectId,
+                DataSourceClientEvent, RawEvent, Resolved,
             },
             egl::EGL,
             globals::Globals,
@@ -433,7 +414,8 @@ mod tests {
             protocol_generated::{wl_data_device_manager, WlDataOfferId, WlDataSourceId},
             runner::Dispatcher,
             state::{
-                DataOfferRole, DragNegotiationState, DragPhase, DragState, DragTargetState, State,
+                DataOfferRole, DragNegotiationState, DragPhase, DragSource, DragState,
+                DragTargetState, ObjectId, State,
             },
             wayland_objects::wl_data_source::WlDataSource,
             xkb::Xkb,
@@ -541,19 +523,16 @@ mod tests {
                 offer_id,
                 2,
                 DataOfferRole::Drag,
-                None,
-                Some(source_id),
-                Some(source_client_id),
+                Some((source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into()),
             ),
         );
 
         state.seat.set_active_drag(DragState {
-            source_object_id: None,
-            source_id: Some(source_id),
-            source_client_id,
+            source: DragSource::DataSource {
+                source: (source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into(),
+            },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
-            icon_surface_id: None,
             target: Some(DragTargetState {
                 client_id: target.client_id(),
                 surface_id: 31u32.into(),
@@ -584,9 +563,9 @@ mod tests {
                 matches!(
                     action,
                     ClientAction::DataSourceEvent {
-                        source_id: queued_source_id,
+                        source: queued_source,
                         event: DataSourceClientEvent::DndFinished,
-                    } if *queued_source_id == source_id
+                    } if queued_source.wayland_id() == source_id
                 )
             }
         ));
@@ -596,9 +575,9 @@ mod tests {
                 matches!(
                     action,
                     ClientAction::DataSourceEvent {
-                        source_id: queued_source_id,
+                        source: queued_source,
                         event: DataSourceClientEvent::Cancelled,
-                    } if *queued_source_id == source_id
+                    } if queued_source.wayland_id() == source_id
                 )
             }
         ));
@@ -609,17 +588,12 @@ mod tests {
         let mut state = make_state();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let offer_id = WlDataOfferId::from(20);
-        let ((_, offer_object_id), _) = client.insert_object(
-            &mut state,
-            WlDataOffer::new(offer_id, 3, DataOfferRole::Drag, None, None, None),
-        );
+        let ((_, offer_object_id), _) = client
+            .insert_object(&mut state, WlDataOffer::new(offer_id, 3, DataOfferRole::Drag, None));
         state.seat.set_active_drag(DragState {
-            source_object_id: None,
-            source_id: None,
-            source_client_id: ClientId::from_raw(9),
+            source: DragSource::None { initiator_client_id: ClientId::from_raw(9) },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
-            icon_surface_id: None,
             target: Some(DragTargetState {
                 client_id: client.client_id(),
                 surface_id: 31u32.into(),
@@ -669,9 +643,13 @@ mod tests {
                 offer_a_id,
                 3,
                 DataOfferRole::Drag,
-                None,
-                Some(WlDataSourceId::from(10)),
-                Some(source_client_id),
+                Some(
+                    (
+                        source_client_id,
+                        Resolved::new(WlDataSourceId::from(10), ObjectId::from(0usize)),
+                    )
+                        .into(),
+                ),
             ),
         );
         let _ = target.insert_object(
@@ -680,18 +658,25 @@ mod tests {
                 offer_b_id,
                 3,
                 DataOfferRole::Drag,
-                None,
-                Some(WlDataSourceId::from(10)),
-                Some(source_client_id),
+                Some(
+                    (
+                        source_client_id,
+                        Resolved::new(WlDataSourceId::from(10), ObjectId::from(0usize)),
+                    )
+                        .into(),
+                ),
             ),
         );
         state.seat.set_active_drag(DragState {
-            source_object_id: None,
-            source_id: Some(WlDataSourceId::from(10)),
-            source_client_id,
+            source: DragSource::DataSource {
+                source: (
+                    source_client_id,
+                    Resolved::new(WlDataSourceId::from(10), ObjectId::from(0usize)),
+                )
+                    .into(),
+            },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
-            icon_surface_id: None,
             target: Some(DragTargetState {
                 client_id: target.client_id(),
                 surface_id: 31u32.into(),
@@ -733,15 +718,12 @@ mod tests {
         let live_offer_id = WlDataOfferId::from(21);
         let ((_, stale_offer_object_id), _) = client.insert_object(
             &mut state,
-            WlDataOffer::new(stale_offer_id, 3, DataOfferRole::Drag, None, None, None),
+            WlDataOffer::new(stale_offer_id, 3, DataOfferRole::Drag, None),
         );
         state.seat.set_active_drag(DragState {
-            source_object_id: None,
-            source_id: None,
-            source_client_id: ClientId::from_raw(9),
+            source: DragSource::None { initiator_client_id: ClientId::from_raw(9) },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
-            icon_surface_id: None,
             target: Some(DragTargetState {
                 client_id: client.client_id(),
                 surface_id: 31u32.into(),
@@ -790,18 +772,19 @@ mod tests {
                 selection_offer_id,
                 3,
                 DataOfferRole::Selection,
-                Some(source_object_id),
-                Some(source_id),
-                Some(client.client_id()),
+                Some((client.client_id(), Resolved::new(source_id, source_object_id)).into()),
             ),
         );
         state.seat.set_active_drag(DragState {
-            source_object_id: None,
-            source_id: Some(WlDataSourceId::from(99)),
-            source_client_id: ClientId::from_raw(9),
+            source: DragSource::DataSource {
+                source: (
+                    ClientId::from_raw(9),
+                    Resolved::new(WlDataSourceId::from(99), ObjectId::from(0usize)),
+                )
+                    .into(),
+            },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
-            icon_surface_id: None,
             target: Some(DragTargetState {
                 client_id: client.client_id(),
                 surface_id: 31u32.into(),
@@ -856,19 +839,20 @@ mod tests {
                 offer_id,
                 3,
                 DataOfferRole::Drag,
-                None,
-                Some(source_id),
-                Some(ClientId::from_raw(9)),
+                Some(
+                    (ClientId::from_raw(9), Resolved::new(source_id, ObjectId::from(0usize)))
+                        .into(),
+                ),
             ),
         );
 
         state.seat.set_active_drag(DragState {
-            source_object_id: None,
-            source_id: Some(source_id),
-            source_client_id: ClientId::from_raw(9),
+            source: DragSource::DataSource {
+                source: (ClientId::from_raw(9), Resolved::new(source_id, ObjectId::from(0usize)))
+                    .into(),
+            },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
-            icon_surface_id: None,
             target: Some(DragTargetState {
                 client_id: client.client_id(),
                 surface_id: 31u32.into(),
@@ -901,10 +885,8 @@ mod tests {
         let mut state = make_state();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let offer_id = WlDataOfferId::from(20);
-        let ((_, offer_object_id), _) = client.insert_object(
-            &mut state,
-            WlDataOffer::new(offer_id, 3, DataOfferRole::Drag, None, None, None),
-        );
+        let ((_, offer_object_id), _) = client
+            .insert_object(&mut state, WlDataOffer::new(offer_id, 3, DataOfferRole::Drag, None));
 
         {
             let offer = state
@@ -943,18 +925,15 @@ mod tests {
                 offer_id,
                 3,
                 DataOfferRole::Drag,
-                None,
-                Some(source_id),
-                Some(source_client_id),
+                Some((source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into()),
             ),
         );
         state.seat.set_active_drag(DragState {
-            source_object_id: None,
-            source_id: Some(source_id),
-            source_client_id,
+            source: DragSource::DataSource {
+                source: (source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into(),
+            },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
-            icon_surface_id: None,
             target: Some(DragTargetState {
                 client_id: target.client_id(),
                 surface_id: 31u32.into(),
@@ -988,9 +967,10 @@ mod tests {
                 matches!(
                     action,
                     ClientAction::DataSourceEvent {
-                        source_id: queued_source_id,
+                        source: queued_source,
                         event: DataSourceClientEvent::Target(Some(mime_type)),
-                    } if *queued_source_id == source_id && mime_type == "application/x-unadvertised"
+                    } if queued_source.wayland_id() == source_id
+                        && mime_type == "application/x-unadvertised"
                 )
             }
         ));
@@ -1011,18 +991,15 @@ mod tests {
                 offer_id,
                 3,
                 DataOfferRole::Drag,
-                None,
-                Some(source_id),
-                Some(source_client_id),
+                Some((source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into()),
             ),
         );
         state.seat.set_active_drag(DragState {
-            source_object_id: None,
-            source_id: Some(source_id),
-            source_client_id,
+            source: DragSource::DataSource {
+                source: (source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into(),
+            },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
-            icon_surface_id: None,
             target: Some(DragTargetState {
                 client_id: target.client_id(),
                 surface_id: 31u32.into(),
@@ -1060,9 +1037,10 @@ mod tests {
                 matches!(
                     action,
                     ClientAction::DataSourceEvent {
-                        source_id: queued_source_id,
+                        source: queued_source,
                         event: DataSourceClientEvent::Send { mime_type, .. },
-                    } if *queued_source_id == source_id && mime_type == "application/x-unadvertised"
+                    } if queued_source.wayland_id() == source_id
+                        && mime_type == "application/x-unadvertised"
                 )
             }
         ));

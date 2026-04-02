@@ -497,7 +497,7 @@ impl SeatState {
             if drag.phase != DragPhase::Dragging || drag.target.is_none() {
                 return false;
             }
-            if drag.source_id.is_none() {
+            if drag.source.is_none() {
                 return true;
             }
             drag.negotiation.accepted_mime.is_some() && drag.negotiation.chosen_action != 0
@@ -512,7 +512,7 @@ impl SeatState {
         self.keyboard_resources.remove(&client_id);
         if self
             .selection_source
-            .is_some_and(|selection| selection.owner_client_id == client_id)
+            .is_some_and(|selection| selection.source.client_id() == client_id)
         {
             self.selection_source = None;
         }
@@ -559,7 +559,7 @@ impl SeatState {
         if self
             .active_drag
             .as_ref()
-            .is_some_and(|drag| drag.source_client_id == client_id)
+            .is_some_and(|drag| drag.source.initiator_client_id() == client_id)
         {
             self.active_drag = None;
         } else if let Some(drag) = self.active_drag.as_mut() {
@@ -1167,7 +1167,7 @@ pub fn finish_active_drag(state: &mut State, dispatcher: &mut Dispatcher) {
     if drag.icon_surface_object_id.is_some() {
         dispatch_client_action(
             dispatcher,
-            drag.source_client_id,
+            drag.source.initiator_client_id(),
             ClientAction::RefreshSurfaceOutputs,
         );
         schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
@@ -1180,7 +1180,7 @@ pub fn finish_active_drag(state: &mut State, dispatcher: &mut Dispatcher) {
 pub fn cancel_active_drag(
     state: &mut State,
     dispatcher: &mut Dispatcher,
-    source: Option<(ClientId, WlDataSourceId)>,
+    source: Option<crate::clients::ClientObjectId<WlDataSourceId>>,
 ) {
     let Some(drag) = state.seat.clear_active_drag() else {
         return;
@@ -1188,7 +1188,7 @@ pub fn cancel_active_drag(
     if drag.icon_surface_object_id.is_some() {
         dispatch_client_action(
             dispatcher,
-            drag.source_client_id,
+            drag.source.initiator_client_id(),
             ClientAction::RefreshSurfaceOutputs,
         );
         schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
@@ -1196,15 +1196,12 @@ pub fn cancel_active_drag(
     if let Some(target) = drag.target {
         dispatcher.dispatch_to(target.client_id, ClientAction::DataDeviceDragLeave);
     }
-    let source = source.or_else(|| {
-        drag.source_id
-            .map(|source_id| (drag.source_client_id, source_id))
-    });
-    if let Some((source_client_id, source_id)) = source {
+    let source = source.or(drag.source.client_object());
+    if let Some(source) = source {
         dispatcher.dispatch_to(
-            source_client_id,
+            source.client_id(),
             ClientAction::DataSourceEvent {
-                source_id,
+                source,
                 event: crate::clients::DataSourceClientEvent::Cancelled,
             },
         );
@@ -1316,11 +1313,11 @@ fn complete_drag_drop(state: &mut State, dispatcher: &mut Dispatcher) {
         let target = drag.target.expect("validated active drag target");
         state.seat.set_active_drag_phase(DragPhase::DropSent);
         dispatcher.dispatch_to(target.client_id, ClientAction::DataDeviceDragDrop);
-        if let Some(source_id) = drag.source_id {
+        if let Some(source) = drag.source.client_object() {
             dispatcher.dispatch_to(
-                drag.source_client_id,
+                source.client_id(),
                 ClientAction::DataSourceEvent {
-                    source_id,
+                    source,
                     event: crate::clients::DataSourceClientEvent::DndDropPerformed,
                 },
             );
@@ -1356,10 +1353,10 @@ fn visible_cursor_owner_client(state: &State) -> Option<ClientId> {
 }
 
 fn visible_dnd_icon_owner_client(state: &State) -> Option<ClientId> {
-    state
-        .seat
-        .active_drag()
-        .and_then(|drag| drag.icon_surface_object_id.map(|_| drag.source_client_id))
+    state.seat.active_drag().and_then(|drag| {
+        drag.icon_surface_object_id
+            .map(|_| drag.source.initiator_client_id())
+    })
 }
 
 fn refresh_visible_cursor_surface_outputs(state: &State, dispatcher: &mut Dispatcher) {
@@ -1718,7 +1715,9 @@ mod xdg_seat_tests {
             },
             region::RectI,
             runner::Dispatcher,
-            state::{DragPhase, DragState, DragTargetState, ObjectId, State, WorkspaceGroup},
+            state::{
+                DragPhase, DragSource, DragState, DragTargetState, ObjectId, State, WorkspaceGroup,
+            },
             wayland_objects::{
                 wl_seat::WlSeat,
                 wl_surface::{Role, WlSurface},
@@ -3738,12 +3737,9 @@ mod xdg_seat_tests {
         let target_client_id = ClientId::from_raw(42);
 
         state.seat.set_active_drag(DragState {
-            source_object_id: None,
-            source_id: None,
-            source_client_id: target_client_id,
+            source: DragSource::None { initiator_client_id: target_client_id },
             origin_surface_id: WlSurfaceId::from(10),
             icon_surface_object_id: None,
-            icon_surface_id: None,
             target: Some(DragTargetState {
                 client_id: target_client_id,
                 surface_id: WlSurfaceId::from(11),
@@ -3770,12 +3766,15 @@ mod xdg_seat_tests {
         let source_id = crate::protocol_generated::WlDataSourceId::from(12);
 
         state.seat.set_active_drag(DragState {
-            source_object_id: None,
-            source_id: Some(source_id),
-            source_client_id,
+            source: DragSource::DataSource {
+                source: (
+                    source_client_id,
+                    crate::clients::Resolved::new(source_id, ObjectId::from(0usize)),
+                )
+                    .into(),
+            },
             origin_surface_id: WlSurfaceId::from(20),
             icon_surface_object_id: None,
-            icon_surface_id: None,
             target: Some(DragTargetState {
                 client_id: target_client_id,
                 surface_id: WlSurfaceId::from(21),
@@ -3793,9 +3792,9 @@ mod xdg_seat_tests {
                 matches!(
                     action,
                     ClientAction::DataSourceEvent {
-                        source_id: queued_source_id,
+                        source: queued_source,
                         event: DataSourceClientEvent::Cancelled,
-                    } if *queued_source_id == source_id
+                    } if queued_source.wayland_id() == source_id
                 )
             }
         ));
@@ -3808,12 +3807,9 @@ mod xdg_seat_tests {
         let source_client_id = ClientId::from_raw(60);
 
         state.seat.set_active_drag(DragState {
-            source_object_id: None,
-            source_id: None,
-            source_client_id,
+            source: DragSource::None { initiator_client_id: source_client_id },
             origin_surface_id: WlSurfaceId::from(30),
             icon_surface_object_id: Some(ObjectId::from(123usize)),
-            icon_surface_id: Some(WlSurfaceId::from(31)),
             target: None,
             negotiation: Default::default(),
             phase: DragPhase::Dragging,

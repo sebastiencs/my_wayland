@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest},
+    clients::{Client, ClientAction, ClientDispatcher, RawRequest},
     globals::Global,
     object::{Object, Parser},
     protocol_generated::{
@@ -62,15 +62,7 @@ impl Object for WlDataDeviceManager {
                     .insert_object(state, WlDataSource::new(id, client.client_id(), self.version));
             }
             GetDataDevice { id, seat } => {
-                if !client.object_is::<crate::protocol_generated::WlSeatId>(seat, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                        "wl_data_device_manager.get_data_device requires a wl_seat object",
-                    );
-                    return Ok(());
-                }
+                client.resolve_or_disconnect(seat, state, dispatcher)?;
                 let _ = client.insert_object(
                     state,
                     WlDataDevice::new(WlDataDeviceId::from(id), seat, self.version),
@@ -84,10 +76,8 @@ impl Object for WlDataDeviceManager {
                     .keyboard_focus()
                     .is_some_and(|focus| focus.client_id == client.client_id())
                 {
-                    dispatcher.dispatch_to(
-                        client.client_id(),
-                        crate::clients::ClientAction::RefreshDataDeviceSelection,
-                    );
+                    dispatcher
+                        .dispatch_to(client.client_id(), ClientAction::RefreshDataDeviceSelection);
                 }
             }
         }
@@ -209,6 +199,7 @@ mod tests {
             WlDataSource::new(WlDataSourceId::from(2), client.client_id(), 3),
         );
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        client_dispatcher.set_requester_object_id_for_tests(manager_id.into());
 
         manager.on(
             &mut client,

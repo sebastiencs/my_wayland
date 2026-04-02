@@ -1,6 +1,8 @@
 use crate::{
-    clients::{Client, ClientAction, ClientDispatcher, EventWriter, RawRequest},
-    object::{Object, Parser},
+    clients::{
+        Client, ClientAction, ClientDispatcher, ClientObjectId, EventWriter, RawRequest, Resolved,
+    },
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wl_data_device_manager, wl_data_source, WaylandId, WlDataSourceId},
     seat,
     state::State,
@@ -177,21 +179,23 @@ fn destroy_source(
     dispatcher: &mut ClientDispatcher,
     source_id: WlDataSourceId,
     owner_client_id: crate::clients::ClientId,
-) {
-    let source_object_id = client.object_id(source_id);
+) -> RequestResult {
+    let source = client
+        .resolve_or_disconnect(source_id, state, dispatcher)?
+        .with_client_id(owner_client_id);
 
     let offer_ids = state
         .objects
         .iter()
         .filter_map(|(object_id, object)| {
             let offer = object.downcast_ref::<WlDataOffer>()?;
-            (offer.source_object_id() == Some(source_object_id)).then_some(object_id)
+            (offer.source_object_id() == Some(source.object_id())).then_some(object_id)
         })
         .collect::<Vec<_>>();
     for offer_object_id in offer_ids {
-        if let Some(mut offer) = state
+        if let Some(offer) = state
             .objects
-            .try_grab_object::<WlDataOffer>(offer_object_id)
+            .try_ref_object_mut::<WlDataOffer>(offer_object_id)
         {
             offer.clear_source();
         }
@@ -200,7 +204,7 @@ fn destroy_source(
     if state
         .seat
         .selection_source()
-        .is_some_and(|selection| selection.source_object_id == source_object_id)
+        .is_some_and(|selection| selection.source.object_id() == source.object_id())
     {
         state
             .seat
@@ -213,10 +217,12 @@ fn destroy_source(
     if state
         .seat
         .active_drag()
-        .is_some_and(|drag| drag.source_object_id == Some(source_object_id))
+        .is_some_and(|drag| drag.source.object_id() == Some(source.object_id()))
     {
-        seat::cancel_active_drag(state, dispatcher, Some((owner_client_id, source_id)));
+        seat::cancel_active_drag(state, dispatcher, Some(source));
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -224,13 +230,17 @@ mod tests {
     use {
         super::{destroy_source, WlDataSource},
         crate::{
-            clients::{Client, ClientAction, ClientId, DataSourceClientEvent},
+            clients::{
+                Client, ClientAction, ClientId, ClientObjectId, DataSourceClientEvent, Resolved,
+            },
             egl::EGL,
             globals::Globals,
             protocol_generated::WlDataSourceId,
             runner::Dispatcher,
             seat::{set_keyboard_focus_from_surface, SurfaceFocus},
-            state::{DragPhase, DragState, DragTargetState, SelectionSourceState, State},
+            state::{
+                DragPhase, DragSource, DragState, DragTargetState, SelectionSourceState, State,
+            },
             wayland_objects::wl_surface::WlSurface,
             xkb::Xkb,
         },
@@ -292,7 +302,9 @@ mod tests {
             );
         }
         state.seat.replace_selection_source(
-            Some(SelectionSourceState { source_object_id, source_id, owner_client_id }),
+            Some(SelectionSourceState {
+                source: (owner_client_id, Resolved::new(source_id, source_object_id)).into(),
+            }),
             1,
         );
 
@@ -318,12 +330,11 @@ mod tests {
             owner.insert_object(&mut state, WlDataSource::new(source_id, owner_client_id, 3));
 
         state.seat.set_active_drag(DragState {
-            source_object_id: Some(source_object_id),
-            source_id: Some(source_id),
-            source_client_id: owner.client_id(),
+            source: DragSource::DataSource {
+                source: (owner.client_id(), Resolved::new(source_id, source_object_id)).into(),
+            },
             origin_surface_id: 20u32.into(),
             icon_surface_object_id: None,
-            icon_surface_id: None,
             target: Some(DragTargetState { client_id: target_client_id, surface_id: 21u32.into() }),
             negotiation: Default::default(),
             phase: DragPhase::Dragging,
@@ -344,9 +355,9 @@ mod tests {
                 matches!(
                     action,
                     ClientAction::DataSourceEvent {
-                        source_id: queued_source_id,
+                        source: queued_source,
                         event: DataSourceClientEvent::Cancelled,
-                    } if *queued_source_id == source_id
+                    } if queued_source.wayland_id() == source_id
                 )
             }
         ));

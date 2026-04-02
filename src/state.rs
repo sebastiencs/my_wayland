@@ -1,5 +1,5 @@
 use crate::{
-    clients::ClientId,
+    clients::{ClientId, ClientObjectId},
     config::{DecorationInsets, OutputScaleSetting, RuntimeConfig, XdgDecorationModePolicy},
     drm::Drm,
     egl::EGL,
@@ -460,6 +460,11 @@ impl IndexMap<ObjectId, Box<dyn Object>> {
     pub fn try_ref_object<T: Object>(&self, key: ObjectId) -> Option<&T> {
         self.try_get(key)
             .and_then(|object| object.downcast_ref::<T>())
+    }
+
+    pub fn try_ref_object_mut<T: Object>(&mut self, key: ObjectId) -> Option<&mut T> {
+        self.try_get_mut(key)
+            .and_then(|object| object.downcast_mut::<T>())
     }
 
     pub fn try_grab_object<T: Object>(
@@ -1035,9 +1040,40 @@ pub enum DataOfferRole {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelectionSourceState {
-    pub source_object_id: ObjectId,
-    pub source_id: WlDataSourceId,
-    pub owner_client_id: ClientId,
+    pub source: ClientObjectId<WlDataSourceId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragSource {
+    None { initiator_client_id: ClientId },
+    DataSource { source: ClientObjectId<WlDataSourceId> },
+}
+
+impl DragSource {
+    pub fn initiator_client_id(self) -> ClientId {
+        match self {
+            Self::None { initiator_client_id } => initiator_client_id,
+            Self::DataSource { source, .. } => source.client_id(),
+        }
+    }
+
+    pub fn client_object(self) -> Option<ClientObjectId<WlDataSourceId>> {
+        match self {
+            Self::None { .. } => None,
+            Self::DataSource { source } => Some(source),
+        }
+    }
+
+    pub fn object_id(self) -> Option<ObjectId> {
+        match self {
+            Self::None { .. } => None,
+            Self::DataSource { source } => Some(source.object_id()),
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None { .. })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1068,12 +1104,9 @@ pub struct DragNegotiationState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DragState {
-    pub source_object_id: Option<ObjectId>,
-    pub source_id: Option<WlDataSourceId>,
-    pub source_client_id: ClientId,
+    pub source: DragSource,
     pub origin_surface_id: WlSurfaceId,
     pub icon_surface_object_id: Option<ObjectId>,
-    pub icon_surface_id: Option<WlSurfaceId>,
     pub target: Option<DragTargetState>,
     pub negotiation: DragNegotiationState,
     pub phase: DragPhase,

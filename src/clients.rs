@@ -20,9 +20,10 @@ use crate::{
     },
     object::{AbortRequest, IdToObject, Object, Parser, ParserError, PostAction},
     protocol_generated::{
-        wl_display, Array, Constants, HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId,
-        WlDataSourceId, WlOutputId, WlSurfaceId, WpPresentationFeedbackId, XdgPopupId,
-        XdgToplevelId, ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id,
+        wl_data_device_manager::DndAction, wl_data_offer, wl_display, Array, Constants,
+        HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId, WlDataSourceId, WlOutputId,
+        WlSurfaceId, WpPresentationFeedbackId, XdgPopupId, XdgToplevelId, ZwlrGammaControlV1Id,
+        ZwlrLayerSurfaceV1Id,
     },
     region::RectI,
     runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
@@ -67,12 +68,86 @@ pub struct Resolved<K> {
 }
 
 impl<K> Resolved<K> {
+    pub fn new(wayland_id: K, object_id: ObjectId) -> Self {
+        Self { wayland_id, object_id }
+    }
+
     pub fn object_id(self) -> ObjectId {
         self.object_id
     }
 
-    pub fn wayland_id(self) -> K {
+    pub fn wayland_id(&self) -> K
+    where
+        K: Copy,
+    {
         self.wayland_id
+    }
+
+    pub fn with_client(self, client: &Client) -> ClientObjectId<K> {
+        ClientObjectId::new(client.client_id(), self)
+    }
+
+    pub fn with_client_id(self, client_id: ClientId) -> ClientObjectId<K> {
+        ClientObjectId::new(client_id, self)
+    }
+}
+
+/// A durable client-scoped object reference.
+///
+/// Unlike bare `Resolved<K>`, this also records which client the Wayland id
+/// belongs to so it can be stored or queued and then re-resolved later.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ClientObjectId<K> {
+    client_id: ClientId,
+    resolved: Resolved<K>,
+}
+
+impl<K: Copy> From<(&Client, &Resolved<K>)> for ClientObjectId<K> {
+    fn from((client, id): (&Client, &Resolved<K>)) -> Self {
+        ClientObjectId::new(client.client_id(), *id)
+    }
+}
+impl<K: Copy> From<(&Client, Resolved<K>)> for ClientObjectId<K> {
+    fn from((client, id): (&Client, Resolved<K>)) -> Self {
+        ClientObjectId::new(client.client_id(), id)
+    }
+}
+impl<K> From<(ClientId, Resolved<K>)> for ClientObjectId<K> {
+    fn from((client_id, resolved): (ClientId, Resolved<K>)) -> Self {
+        ClientObjectId::new(client_id, resolved)
+    }
+}
+impl<K: Copy> From<(&mut Client, &Resolved<K>)> for ClientObjectId<K> {
+    fn from((client, id): (&mut Client, &Resolved<K>)) -> Self {
+        ClientObjectId::new(client.client_id(), *id)
+    }
+}
+
+impl<K> core::ops::Deref for ClientObjectId<K> {
+    type Target = Resolved<K>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.resolved
+    }
+}
+
+impl<K> ClientObjectId<K> {
+    fn new(client_id: ClientId, resolved: Resolved<K>) -> Self {
+        Self { client_id, resolved }
+    }
+
+    pub fn client_id(self) -> ClientId {
+        self.client_id
+    }
+}
+
+impl<K> ClientObjectId<K>
+where
+    K: Copy + Into<WaylandId> + IdToObject,
+    K::Object: Object,
+{
+    pub fn resolve(self, client: &Client) -> Option<Resolved<K>> {
+        (self.client_id == client.id).then_some(self.resolved)
     }
 }
 
@@ -85,8 +160,32 @@ where
         state.objects.try_ref_object::<K::Object>(self.object_id)
     }
 
+    pub fn try_ref_mut<'a>(self, state: &'a mut State) -> Option<&'a mut K::Object> {
+        state
+            .objects
+            .try_ref_object_mut::<K::Object>(self.object_id)
+    }
+
+    pub fn ref_mut<'a>(self, state: &'a mut State) -> &'a mut K::Object {
+        state
+            .objects
+            .try_ref_object_mut::<K::Object>(self.object_id)
+            .unwrap()
+    }
+
     pub fn try_grab(self, state: &mut State) -> Option<GrabbedObject<K::Object>> {
         state.objects.try_grab_object::<K::Object>(self.object_id)
+    }
+
+    pub fn grab(self, state: &mut State) -> GrabbedObject<K::Object> {
+        state
+            .objects
+            .try_grab_object::<K::Object>(self.object_id)
+            .unwrap()
+    }
+
+    pub fn exists(&self, state: &State) -> bool {
+        state.objects.contains(self.object_id)
     }
 }
 
@@ -317,7 +416,7 @@ pub enum ClientAction {
         surface: WlSurfaceId,
         x: f32,
         y: f32,
-        source_object_id: Option<ObjectId>,
+        source: Option<ClientObjectId<WlDataSourceId>>,
     },
     DataDeviceDragLeave,
     DataDeviceDragMotion {
@@ -327,7 +426,7 @@ pub enum ClientAction {
     },
     DataDeviceDragDrop,
     DataSourceEvent {
-        source_id: WlDataSourceId,
+        source: ClientObjectId<WlDataSourceId>,
         event: DataSourceClientEvent,
     },
     RegistryGlobalAdded {
@@ -862,7 +961,7 @@ impl Client {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
         device_id: crate::protocol_generated::WlDataDeviceId,
-        source_object_id: ObjectId,
+        source: ClientObjectId<WlDataSourceId>,
         role: DataOfferRole,
     ) -> Option<WlDataOfferId> {
         if !self.contains_object(device_id, state) {
@@ -879,27 +978,17 @@ impl Client {
                     .unwrap_or(0),
             )
         };
-        let (source_id, source_client_id, mime_types, source_actions) = {
-            let source = state
-                .objects
-                .try_ref_object::<WlDataSource>(source_object_id)?;
-            (
-                source.wl_data_source_id(),
-                source.owner_client_id(),
-                source.mime_types().to_vec(),
-                source.effective_dnd_actions(),
-            )
+        let (mime_types, source_actions) = {
+            let source = source.try_ref(state)?;
+            (source.mime_types().to_vec(), source.effective_dnd_actions())
         };
         let chosen_action = if role == DataOfferRole::Drag
-            && device_version < crate::protocol_generated::wl_data_offer::SOURCE_ACTIONS_SINCE
+            && device_version < wl_data_offer::SOURCE_ACTIONS_SINCE
         {
             if previous_chosen_action != 0 {
                 previous_chosen_action
-            } else if source_actions
-                & crate::protocol_generated::wl_data_device_manager::DndAction::Copy as u32
-                != 0
-            {
-                crate::protocol_generated::wl_data_device_manager::DndAction::Copy as u32
+            } else if source_actions & DndAction::Copy as u32 != 0 {
+                DndAction::Copy as u32
             } else {
                 0
             }
@@ -908,14 +997,7 @@ impl Client {
         };
 
         let offer_id = self.allocate_server_object_id::<WlDataOfferId>();
-        let offer = WlDataOffer::new(
-            offer_id,
-            device_version,
-            role,
-            Some(source_object_id),
-            Some(source_id),
-            Some(source_client_id),
-        );
+        let offer = WlDataOffer::new(offer_id, device_version, role, Some(source));
         let _ = self.insert_object(state, offer);
         {
             let device = self.ref_object(device_id, state);
@@ -925,9 +1007,7 @@ impl Client {
             let offer = self.ref_object(offer_id, state);
             offer.send_offer(mime_type, dispatcher);
         }
-        if role == DataOfferRole::Drag
-            && device_version >= crate::protocol_generated::wl_data_offer::SOURCE_ACTIONS_SINCE
-        {
+        if role == DataOfferRole::Drag && device_version >= wl_data_offer::SOURCE_ACTIONS_SINCE {
             let offer = self.ref_object_mut(offer_id, state);
             offer.send_source_actions(source_actions, dispatcher);
             if chosen_action != 0 {
@@ -968,7 +1048,7 @@ impl Client {
                     state,
                     dispatcher,
                     data_device_id,
-                    selection.source_object_id,
+                    selection.source,
                     DataOfferRole::Selection,
                 )
             });
@@ -990,7 +1070,7 @@ impl Client {
         surface: WlSurfaceId,
         x: f32,
         y: f32,
-        source_object_id: Option<ObjectId>,
+        source: Option<ClientObjectId<WlDataSourceId>>,
     ) {
         let has_legacy_device = state
             .seat
@@ -999,7 +1079,7 @@ impl Client {
             .filter(|data_device_id| self.contains_object(*data_device_id, state))
             .any(|data_device_id| {
                 self.ref_object(data_device_id, state).version()
-                    < crate::protocol_generated::wl_data_offer::SOURCE_ACTIONS_SINCE
+                    < wl_data_offer::SOURCE_ACTIONS_SINCE
             });
         if has_legacy_device
             && state
@@ -1007,7 +1087,8 @@ impl Client {
                 .active_drag()
                 .is_some_and(|drag| drag.negotiation.chosen_action == 0)
         {
-            let source_actions = source_object_id
+            let source_actions = source
+                .map(|source| source.object_id())
                 .and_then(|source_object_id| {
                     state
                         .objects
@@ -1015,14 +1096,10 @@ impl Client {
                         .map(|source| source.effective_dnd_actions())
                 })
                 .unwrap_or(0);
-            if source_actions
-                & crate::protocol_generated::wl_data_device_manager::DndAction::Copy as u32
-                != 0
-            {
-                let _ = state.seat.set_active_drag_chosen_action(
-                    self.id,
-                    crate::protocol_generated::wl_data_device_manager::DndAction::Copy as u32,
-                );
+            if source_actions & DndAction::Copy as u32 != 0 {
+                let _ = state
+                    .seat
+                    .set_active_drag_chosen_action(self.id, DndAction::Copy as u32);
             }
         }
         for data_device_id in state.seat.data_device_resources(self.id) {
@@ -1039,12 +1116,12 @@ impl Client {
                 self.destroy_data_offer(state, dispatcher, previous_offer);
             }
 
-            let offer_id = source_object_id.and_then(|source_object_id| {
+            let offer_id = source.and_then(|source| {
                 self.create_data_offer_for_device(
                     state,
                     dispatcher,
                     data_device_id,
-                    source_object_id,
+                    source,
                     DataOfferRole::Drag,
                 )
             });
@@ -1052,7 +1129,7 @@ impl Client {
                 let _ = state.seat.register_active_drag_offer(
                     self.id,
                     offer_id,
-                    device_version >= crate::protocol_generated::wl_data_offer::ACTION_SINCE,
+                    device_version >= wl_data_offer::ACTION_SINCE,
                 );
             }
 
@@ -1124,14 +1201,14 @@ impl Client {
                 .target
                 .is_some_and(|target| target.client_id == self.id)
             {
-                if let Some(source_id) = drag.source_id {
+                if let Some(source) = drag.source.client_object() {
                     if drag.negotiation.chosen_action == 0 {
                         return;
                     }
                     dispatcher.dispatch_to(
-                        drag.source_client_id,
+                        source.client_id(),
                         ClientAction::DataSourceEvent {
-                            source_id,
+                            source,
                             event: DataSourceClientEvent::Action {
                                 dnd_action: drag.negotiation.chosen_action,
                             },
@@ -1146,16 +1223,16 @@ impl Client {
         &mut self,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        source_id: WlDataSourceId,
+        source: ClientObjectId<WlDataSourceId>,
         event: DataSourceClientEvent,
     ) {
-        if !self.contains_object(source_id, state) {
+        if !source.exists(state) {
             if let DataSourceClientEvent::Send { fd, .. } = event {
                 let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
             }
             return;
-        }
-        let source = self.ref_object_mut(source_id, state);
+        };
+        let source = source.ref_mut(state);
         match event {
             DataSourceClientEvent::Target(mime_type) => {
                 source.send_target(mime_type, dispatcher);
@@ -1975,7 +2052,7 @@ fn active_dnd_icon_surface_refresh_params(
     client_id: ClientId,
 ) -> Option<(ObjectId, i32, i32)> {
     let drag = state.seat.active_drag()?;
-    if drag.source_client_id != client_id {
+    if drag.source.initiator_client_id() != client_id {
         return None;
     }
     let surface_object_id = drag.icon_surface_object_id?;
@@ -2016,6 +2093,11 @@ impl<'a> ClientDispatcher<'a> {
             command,
             post_actions: VecDeque::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub fn set_requester_object_id_for_tests(&mut self, id: WaylandId) {
+        self.requester_object_id = Some(id);
     }
 
     /// Enqueue work to run after the current `Object::on` handler returns and its grabbed object
@@ -2113,7 +2195,7 @@ impl Model for Client {
             RefreshDataDeviceSelection => {
                 self.refresh_data_device_selection(state, &mut dispatcher);
             }
-            DataDeviceDragEnter { serial, surface, x, y, source_object_id } => {
+            DataDeviceDragEnter { serial, surface, x, y, source } => {
                 self.handle_data_device_drag_enter(
                     state,
                     &mut dispatcher,
@@ -2121,7 +2203,7 @@ impl Model for Client {
                     surface,
                     x,
                     y,
-                    source_object_id,
+                    source,
                 );
             }
             DataDeviceDragLeave => {
@@ -2133,8 +2215,8 @@ impl Model for Client {
             DataDeviceDragDrop => {
                 self.handle_data_device_drag_drop(state, &mut dispatcher);
             }
-            DataSourceEvent { source_id, event } => {
-                self.handle_data_source_event(state, &mut dispatcher, source_id, event);
+            DataSourceEvent { source, event } => {
+                self.handle_data_source_event(state, &mut dispatcher, source, event);
             }
             RegistryGlobalAdded { name, interface, version } => {
                 self.handle_registry_global_added(state, &mut dispatcher, name, interface, version);
