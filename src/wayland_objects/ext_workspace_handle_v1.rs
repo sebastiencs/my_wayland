@@ -138,7 +138,7 @@ impl Object for ExtWorkspaceHandleV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use ext_workspace_handle_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -155,16 +155,16 @@ impl Object for ExtWorkspaceHandleV1 {
             }
             Activate => {
                 if self.removed {
-                    return;
+                    return Ok(());
                 }
                 let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
-                    return;
+                    return Ok(());
                 };
                 let Some(mut manager) = state
                     .objects
                     .try_grab_object::<ExtWorkspaceManagerV1>(manager_object_id)
                 else {
-                    return;
+                    return Ok(());
                 };
                 manager.queue_request(PendingWorkspaceRequest::Activate {
                     workspace_id: self.workspace_id,
@@ -173,7 +173,7 @@ impl Object for ExtWorkspaceHandleV1 {
             Deactivate => {}
             Assign { workspace_group } => {
                 if self.removed {
-                    return;
+                    return Ok(());
                 }
                 let Some(group_object_id) = client.object_id_for_wayland(workspace_group) else {
                     client.protocol_violation_disconnect(
@@ -182,7 +182,7 @@ impl Object for ExtWorkspaceHandleV1 {
                         wl_display::Error::InvalidObject as u32,
                         "assign requires a live ext_workspace_group_handle_v1",
                     );
-                    return;
+                    return Ok(());
                 };
                 let Some(group) = state
                     .objects
@@ -194,17 +194,17 @@ impl Object for ExtWorkspaceHandleV1 {
                         wl_display::Error::InvalidObject as u32,
                         "assign target is not an ext_workspace_group_handle_v1",
                     );
-                    return;
+                    return Ok(());
                 };
                 let group_id = group.group_id();
                 let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
-                    return;
+                    return Ok(());
                 };
                 let Some(mut manager) = state
                     .objects
                     .try_grab_object::<ExtWorkspaceManagerV1>(manager_object_id)
                 else {
-                    return;
+                    return Ok(());
                 };
                 manager.queue_request(PendingWorkspaceRequest::Assign {
                     workspace_id: self.workspace_id,
@@ -213,21 +213,22 @@ impl Object for ExtWorkspaceHandleV1 {
             }
             Remove => {
                 if self.removed {
-                    return;
+                    return Ok(());
                 }
                 let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
-                    return;
+                    return Ok(());
                 };
                 let Some(mut manager) = state
                     .objects
                     .try_grab_object::<ExtWorkspaceManagerV1>(manager_object_id)
                 else {
-                    return;
+                    return Ok(());
                 };
                 manager.queue_request(PendingWorkspaceRequest::Remove {
                     workspace_id: self.workspace_id,
                 });
             }
         }
+        Ok(())
     }
 }

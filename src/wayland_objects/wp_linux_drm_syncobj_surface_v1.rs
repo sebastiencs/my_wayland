@@ -34,7 +34,7 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wp_linux_drm_syncobj_surface_v1::Request::*;
 
         let Some(mut surface) = state
@@ -47,7 +47,7 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
                 wp_linux_drm_syncobj_surface_v1::Error::NoSurface as u32,
                 "associated wl_surface no longer exists",
             );
-            return;
+            return Ok(());
         };
 
         match client.parse::<Self>(req).unwrap() {
@@ -64,7 +64,7 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
                         wp_linux_drm_syncobj_surface_v1::Error::NoSurface as u32,
                         "invalid syncobj timeline for acquire point",
                     );
-                    return;
+                    return Ok(());
                 }
                 let timeline: &mut WpLinuxDrmSyncobjTimelineV1 =
                     client.ref_object_mut(timeline, state);
@@ -80,7 +80,7 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
                         wp_linux_drm_syncobj_surface_v1::Error::NoSurface as u32,
                         "invalid syncobj timeline for release point",
                     );
-                    return;
+                    return Ok(());
                 }
                 let timeline: &mut WpLinuxDrmSyncobjTimelineV1 =
                     client.ref_object_mut(timeline, state);
@@ -89,5 +89,6 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
                     ReleasePoint::TimelinePoint { timeline: timeline.timeline().clone(), point };
             }
         }
+        Ok(())
     }
 }

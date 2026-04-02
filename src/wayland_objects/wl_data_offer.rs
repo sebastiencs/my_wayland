@@ -167,7 +167,7 @@ impl Object for WlDataOffer {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_data_offer::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -179,7 +179,7 @@ impl Object for WlDataOffer {
                         wl_data_offer::Error::InvalidFinish as u32,
                         "wl_data_offer.accept is invalid after finish",
                     );
-                    return;
+                    return Ok(());
                 }
                 // Some clients accept or request MIME types that do not exactly match the
                 // advertised list. Be intentionally permissive here and let the source
@@ -187,7 +187,7 @@ impl Object for WlDataOffer {
                 let accepted_mime = (!mime_type.is_empty()).then_some(mime_type);
                 if self.role == DataOfferRole::Drag {
                     if !self.is_active_drag_offer(state, client.client_id()) {
-                        return;
+                        return Ok(());
                     }
                     let _ = state.seat.set_active_drag_accepted_mime(
                         client.client_id(),
@@ -216,13 +216,13 @@ impl Object for WlDataOffer {
                         "wl_data_offer.receive is invalid after finish",
                     );
                     let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
-                    return;
+                    return Ok(());
                 }
                 if self.role == DataOfferRole::Drag
                     && !self.is_active_drag_offer(state, client.client_id())
                 {
                     let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
-                    return;
+                    return Ok(());
                 }
                 let source_client = self.source_client_id;
                 let source_id = self.source_id;
@@ -258,13 +258,13 @@ impl Object for WlDataOffer {
                         wl_data_offer::Error::InvalidFinish as u32,
                         "wl_data_offer.finish is only valid for drag-and-drop offers",
                     );
-                    return;
+                    return Ok(());
                 }
                 if !self.is_active_drag_offer(state, client.client_id()) {
-                    return;
+                    return Ok(());
                 }
                 let Some(drag) = state.seat.active_drag() else {
-                    return;
+                    return Ok(());
                 };
                 if drag.negotiation.accepted_mime.is_none() || drag.negotiation.chosen_action == 0 {
                     client.protocol_violation_disconnect(
@@ -273,7 +273,7 @@ impl Object for WlDataOffer {
                         wl_data_offer::Error::InvalidFinish as u32,
                         "wl_data_offer.finish requires an accepted mime type and action",
                     );
-                    return;
+                    return Ok(());
                 }
                 if drag.negotiation.chosen_action == wl_data_device_manager::DndAction::Ask as u32 {
                     client.protocol_violation_disconnect(
@@ -282,7 +282,7 @@ impl Object for WlDataOffer {
                         wl_data_offer::Error::InvalidOffer as u32,
                         "wl_data_offer.finish requires a resolved drag-and-drop action",
                     );
-                    return;
+                    return Ok(());
                 }
                 if drag.phase != DragPhase::DropSent {
                     client.protocol_violation_disconnect(
@@ -291,7 +291,7 @@ impl Object for WlDataOffer {
                         wl_data_offer::Error::InvalidFinish as u32,
                         "wl_data_offer.finish before drop completion",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.finished = true;
                 let _ = state
@@ -327,7 +327,7 @@ impl Object for WlDataOffer {
                         wl_data_offer::Error::InvalidFinish as u32,
                         "wl_data_offer.set_actions is invalid after finish",
                     );
-                    return;
+                    return Ok(());
                 }
                 if self.role != DataOfferRole::Drag {
                     client.protocol_violation_disconnect(
@@ -336,10 +336,10 @@ impl Object for WlDataOffer {
                         wl_data_offer::Error::InvalidOffer as u32,
                         "wl_data_offer.set_actions is only valid for drag-and-drop offers",
                     );
-                    return;
+                    return Ok(());
                 }
                 if !self.is_active_drag_offer(state, client.client_id()) {
-                    return;
+                    return Ok(());
                 }
                 const VALID_MASK: u32 = wl_data_device_manager::DndAction::Copy as u32
                     | wl_data_device_manager::DndAction::Move as u32
@@ -351,7 +351,7 @@ impl Object for WlDataOffer {
                         wl_data_offer::Error::InvalidActionMask as u32,
                         "invalid drag-and-drop destination action mask",
                     );
-                    return;
+                    return Ok(());
                 }
                 if preferred_action & !VALID_MASK != 0
                     || preferred_action.count_ones() > 1
@@ -363,7 +363,7 @@ impl Object for WlDataOffer {
                         wl_data_offer::Error::InvalidAction as u32,
                         "invalid preferred drag-and-drop action",
                     );
-                    return;
+                    return Ok(());
                 }
 
                 let source_actions = self
@@ -414,6 +414,7 @@ impl Object for WlDataOffer {
                 }
             }
         }
+        Ok(())
     }
 }
 

@@ -2234,7 +2234,7 @@ impl Model for Client {
                 let mut pending_fds = std::mem::take(&mut self.pending_fds);
                 request.fds = Some(&mut pending_fds);
 
-                () = {
+                let _ = {
                     let mut obj = state.objects.grab(obj_id);
                     obj.on(self, state, request, &mut dispatcher)
                 };

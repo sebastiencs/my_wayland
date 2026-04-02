@@ -56,14 +56,14 @@ impl Object for XdgActivationTokenV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use xdg_activation_token_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
             SetSerial { serial, seat } => {
                 if self.committed {
                     self.already_used(dispatcher);
-                    return;
+                    return Ok(());
                 }
                 if !client.object_is(seat, state) {
                     client.protocol_violation_disconnect(
@@ -72,7 +72,7 @@ impl Object for XdgActivationTokenV1 {
                         wl_display::Error::InvalidObject as u32,
                         "xdg_activation_token_v1.set_serial requires a live wl_seat",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.serial = Some(serial);
                 self.seat_id = Some(seat);
@@ -80,14 +80,14 @@ impl Object for XdgActivationTokenV1 {
             SetAppId { app_id } => {
                 if self.committed {
                     self.already_used(dispatcher);
-                    return;
+                    return Ok(());
                 }
                 self.app_id = Some(app_id);
             }
             SetSurface { surface } => {
                 if self.committed {
                     self.already_used(dispatcher);
-                    return;
+                    return Ok(());
                 }
                 if !client.object_is(surface, state) {
                     client.protocol_violation_disconnect(
@@ -96,14 +96,14 @@ impl Object for XdgActivationTokenV1 {
                         wl_display::Error::InvalidObject as u32,
                         "xdg_activation_token_v1.set_surface requires a live wl_surface",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.surface_id = Some(surface);
             }
             Commit => {
                 if self.committed {
                     self.already_used(dispatcher);
-                    return;
+                    return Ok(());
                 }
                 self.committed = true;
 
@@ -138,5 +138,6 @@ impl Object for XdgActivationTokenV1 {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
+        Ok(())
     }
 }

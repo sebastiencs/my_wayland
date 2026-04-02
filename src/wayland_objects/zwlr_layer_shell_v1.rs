@@ -122,11 +122,11 @@ impl Object for ZwlrLayerShellV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use zwlr_layer_shell_v1::Request::*;
 
         let Some(request) = self.parse_request(client, req, dispatcher) else {
-            return;
+            return Ok(());
         };
 
         match request {
@@ -138,7 +138,7 @@ impl Object for ZwlrLayerShellV1 {
                         wl_display::Error::InvalidObject as u32,
                         "zwlr_layer_shell_v1.get_layer_surface requires a live wl_surface",
                     );
-                    return;
+                    return Ok(());
                 }
 
                 let Some(layer) = LayerShellLayer::from_raw(layer) else {
@@ -148,7 +148,7 @@ impl Object for ZwlrLayerShellV1 {
                         zwlr_layer_shell_v1::Error::InvalidLayer as u32,
                         "zwlr_layer_shell_v1.get_layer_surface used an invalid layer",
                     );
-                    return;
+                    return Ok(());
                 };
 
                 let requested_output_id = match self.resolve_output_id(client, state, output) {
@@ -160,7 +160,7 @@ impl Object for ZwlrLayerShellV1 {
                             wl_display::Error::InvalidObject as u32,
                             "zwlr_layer_shell_v1.get_layer_surface requires a live wl_output when output is non-null",
                         );
-                        return;
+                        return Ok(());
                     }
                 };
 
@@ -173,7 +173,7 @@ impl Object for ZwlrLayerShellV1 {
                         zwlr_layer_shell_v1::Error::AlreadyConstructed as u32,
                         "wl_surface must not have an attached or committed buffer before get_layer_surface",
                     );
-                    return;
+                    return Ok(());
                 }
                 if wl_surface.role() != Role::None {
                     client.send_protocol_error(
@@ -182,10 +182,10 @@ impl Object for ZwlrLayerShellV1 {
                         zwlr_layer_shell_v1::Error::Role as u32,
                         "wl_surface already has a role",
                     );
-                    return;
+                    return Ok(());
                 }
                 if wl_surface.set_role(Role::LayerSurface, dispatcher).is_err() {
-                    return;
+                    return Ok(());
                 }
                 wl_surface.set_layer_surface_impl(id);
 
@@ -213,11 +213,12 @@ impl Object for ZwlrLayerShellV1 {
                         wl_display::Error::InvalidMethod as u32,
                         "zwlr_layer_shell_v1.destroy requires zwlr_layer_shell_v1 version >= 3",
                     );
-                    return;
+                    return Ok(());
                 }
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
+        Ok(())
     }
 }
 

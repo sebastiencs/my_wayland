@@ -64,7 +64,7 @@ impl Object for WpPresentation {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wp_presentation::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -75,6 +75,7 @@ impl Object for WpPresentation {
                 self.on_feedback(client, state, dispatcher, surface, callback);
             }
         }
+        Ok(())
     }
 }
 

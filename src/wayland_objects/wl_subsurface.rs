@@ -69,7 +69,7 @@ impl Object for WlSubsurface {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_subsurface::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -105,7 +105,7 @@ impl Object for WlSubsurface {
                     .objects
                     .try_grab_object::<WlSurface>(self.surface_object_id)
                 else {
-                    return;
+                    return Ok(());
                 };
                 surface.set_subsurface_position(x, y);
             }
@@ -116,13 +116,13 @@ impl Object for WlSubsurface {
                         dispatcher,
                         "place_above sibling must be the parent or a sibling surface",
                     );
-                    return;
+                    return Ok(());
                 };
                 let Some(mut parent_surface) = state
                     .objects
                     .try_grab_object::<WlSurface>(self.parent_surface_object_id)
                 else {
-                    return;
+                    return Ok(());
                 };
                 if !parent_surface.restack_child_relative(
                     self.surface_object_id,
@@ -143,13 +143,13 @@ impl Object for WlSubsurface {
                         dispatcher,
                         "place_below sibling must be the parent or a sibling surface",
                     );
-                    return;
+                    return Ok(());
                 };
                 let Some(mut parent_surface) = state
                     .objects
                     .try_grab_object::<WlSurface>(self.parent_surface_object_id)
                 else {
-                    return;
+                    return Ok(());
                 };
                 if !parent_surface.restack_child_relative(
                     self.surface_object_id,
@@ -168,7 +168,7 @@ impl Object for WlSubsurface {
                     .objects
                     .try_grab_object::<WlSurface>(self.surface_object_id)
                 else {
-                    return;
+                    return Ok(());
                 };
                 surface.set_subsurface_sync_mode(true);
             }
@@ -177,12 +177,13 @@ impl Object for WlSubsurface {
                     .objects
                     .try_grab_object::<WlSurface>(self.surface_object_id)
                 else {
-                    return;
+                    return Ok(());
                 };
                 surface.set_subsurface_sync_mode(false);
                 surface.apply_cached_if_parent_desynchronized(client, state, dispatcher);
             }
         }
+        Ok(())
     }
 }
 

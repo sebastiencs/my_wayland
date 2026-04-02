@@ -25,5 +25,13 @@ impl Object for WlCallback {
         self.id.into()
     }
 
-    fn on(&mut self, _: &mut Client, _: &mut State, _: RawRequest, _: &mut ClientDispatcher) {}
+    fn on(
+        &mut self,
+        _: &mut Client,
+        _: &mut State,
+        _: RawRequest,
+        _: &mut ClientDispatcher,
+    ) -> crate::object::RequestResult {
+        Ok(())
+    }
 }

@@ -218,7 +218,7 @@ impl Object for HyprlandCtmControlManagerV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use hyprland_ctm_control_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -229,22 +229,23 @@ impl Object for HyprlandCtmControlManagerV1 {
             Commit => self.apply_pending(state, dispatcher),
             SetCtmForOutput { output, mat0, mat1, mat2, mat3, mat4, mat5, mat6, mat7, mat8 } => {
                 if self.blocked {
-                    return;
+                    return Ok(());
                 }
                 let Some(output_id) = self.resolve_output_id(client, state, output, dispatcher)
                 else {
-                    return;
+                    return Ok(());
                 };
                 let Some(matrix) = self.validate_matrix(
                     client,
                     dispatcher,
                     [mat0, mat1, mat2, mat3, mat4, mat5, mat6, mat7, mat8],
                 ) else {
-                    return;
+                    return Ok(());
                 };
                 self.pending_ctms.insert(output_id, matrix);
             }
         }
+        Ok(())
     }
 
     fn on_client_disconnect(

@@ -245,7 +245,7 @@ impl Object for XdgPopup {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use xdg_popup::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -265,7 +265,7 @@ impl Object for XdgPopup {
                                 xdg_wm_base::Error::NotTheTopmostPopup,
                                 "xdg_popup.destroy requires the topmost popup",
                             );
-                            return;
+                            return Ok(());
                         }
                         fallback_focus = Some(crate::input::SurfaceFocus {
                             client_id: client.client_id(),
@@ -284,7 +284,7 @@ impl Object for XdgPopup {
                                 xdg_popup::Error::InvalidGrab,
                                 "xdg_popup.destroy requires the topmost popup",
                             );
-                            return;
+                            return Ok(());
                         }
                         fallback_focus = Some(crate::input::SurfaceFocus {
                             client_id: client.client_id(),
@@ -309,7 +309,7 @@ impl Object for XdgPopup {
                         xdg_popup::Error::InvalidGrab,
                         "xdg_popup.grab must happen before the popup is mapped",
                     );
-                    return;
+                    return Ok(());
                 }
                 if let PopupParent::XdgSurface(parent_surface_id) = self.parent {
                     let invalid_parent = {
@@ -330,7 +330,7 @@ impl Object for XdgPopup {
                             xdg_wm_base::Error::InvalidPopupParent,
                             "nested grabbing popups require a grabbing popup parent",
                         );
-                        return;
+                        return Ok(());
                     }
                 }
                 if !client.object_is(seat, state) {
@@ -340,7 +340,7 @@ impl Object for XdgPopup {
                         crate::protocol_generated::wl_display::Error::InvalidObject as u32,
                         "xdg_popup.grab requires a live wl_seat",
                     );
-                    return;
+                    return Ok(());
                 }
                 let parent_wl_surface_id = {
                     match self.parent {
@@ -361,7 +361,7 @@ impl Object for XdgPopup {
                                 xdg_popup::Error::InvalidGrab,
                                 "xdg_popup.grab requires a parent surface",
                             );
-                            return;
+                            return Ok(());
                         }
                     }
                 };
@@ -386,7 +386,7 @@ impl Object for XdgPopup {
                         crate::protocol_generated::wl_display::Error::InvalidObject as u32,
                         "xdg_popup.reposition requires a live xdg_positioner",
                     );
-                    return;
+                    return Ok(());
                 }
                 let positioner = state
                     .objects
@@ -404,7 +404,7 @@ impl Object for XdgPopup {
                         xdg_wm_base::Error::InvalidPositioner,
                         "xdg_popup.reposition requires a complete xdg_positioner",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.positioner = positioner;
                 self.pending_reposition_token = Some(token);
@@ -412,6 +412,7 @@ impl Object for XdgPopup {
                 self.send_configure_sequence(&mut xdg_surface, client, state, dispatcher);
             }
         }
+        Ok(())
     }
 }
 

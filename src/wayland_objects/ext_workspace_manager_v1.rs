@@ -301,7 +301,7 @@ impl Object for ExtWorkspaceManagerV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use ext_workspace_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -309,11 +309,12 @@ impl Object for ExtWorkspaceManagerV1 {
                 let (affected_outputs, had_requests) = self.apply_pending_requests(state);
                 if !had_requests {
                     self.send_event(ext_workspace_manager_v1::Event::Done, dispatcher);
-                    return;
+                    return Ok(());
                 }
                 publish_workspace_state_changed(state, dispatcher, affected_outputs);
             }
             Stop => self.stop(client, state, dispatcher),
         }
+        Ok(())
     }
 }

@@ -58,7 +58,7 @@ impl Object for ZxdgOutputManagerV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use zxdg_output_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -74,7 +74,7 @@ impl Object for ZxdgOutputManagerV1 {
                         wl_display::Error::InvalidObject as u32,
                         "invalid wl_output for zxdg_output_v1",
                     );
-                    return;
+                    return Ok(());
                 };
                 let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(output_oid) else {
                     client.protocol_violation_disconnect(
@@ -83,7 +83,7 @@ impl Object for ZxdgOutputManagerV1 {
                         wl_display::Error::InvalidObject as u32,
                         "zxdg_output target is not a wl_output",
                     );
-                    return;
+                    return Ok(());
                 };
 
                 let Some(output_id) = wl_output.output_id() else {
@@ -93,7 +93,7 @@ impl Object for ZxdgOutputManagerV1 {
                         wl_display::Error::InvalidObject as u32,
                         "wl_output is no longer associated with a live output node",
                     );
-                    return;
+                    return Ok(());
                 };
 
                 let xdg_output = ZxdgOutputV1::new(id, output_id, self.version);
@@ -107,5 +107,6 @@ impl Object for ZxdgOutputManagerV1 {
                 client.insert_object(state, xdg_output);
             }
         }
+        Ok(())
     }
 }

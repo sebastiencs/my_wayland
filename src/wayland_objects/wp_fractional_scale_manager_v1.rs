@@ -54,7 +54,7 @@ impl Object for WpFractionalScaleManagerV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wp_fractional_scale_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -71,7 +71,7 @@ impl Object for WpFractionalScaleManagerV1 {
                         crate::protocol_generated::wl_display::Error::InvalidObject as u32,
                         "invalid wl_surface for wp_fractional_scale_manager_v1.get_fractional_scale",
                     );
-                    return;
+                    return Ok(());
                 }
                 let surface_oid = client.object_id(surface);
                 {
@@ -83,7 +83,7 @@ impl Object for WpFractionalScaleManagerV1 {
                             wp_fractional_scale_manager_v1::Error::FractionalScaleExists as u32,
                             "wl_surface already has a wp_fractional_scale_v1 object",
                         );
-                        return;
+                        return Ok(());
                     }
                 }
 
@@ -97,6 +97,7 @@ impl Object for WpFractionalScaleManagerV1 {
                 surface.send_preferred_fractional_scale_for_object(state, surface_oid, dispatcher);
             }
         }
+        Ok(())
     }
 }
 

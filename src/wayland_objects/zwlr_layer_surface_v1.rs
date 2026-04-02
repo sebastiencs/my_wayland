@@ -1231,18 +1231,18 @@ impl Object for ZwlrLayerSurfaceV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use zwlr_layer_surface_v1::Request::*;
 
         let Some(request) = self.parse_request(client, req, dispatcher) else {
-            return;
+            return Ok(());
         };
 
         if self.closed {
             if matches!(request, Destroy) {
                 self.destroy_impl(client, state, dispatcher);
             }
-            return;
+            return Ok(());
         }
 
         match request {
@@ -1258,7 +1258,7 @@ impl Object for ZwlrLayerSurfaceV1 {
                         zwlr_layer_surface_v1::Error::InvalidAnchor,
                         "zwlr_layer_surface_v1.set_anchor contained unknown bits",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.pending.anchor = Some(anchor);
             }
@@ -1276,7 +1276,7 @@ impl Object for ZwlrLayerSurfaceV1 {
                         zwlr_layer_surface_v1::Error::InvalidKeyboardInteractivity,
                         "zwlr_layer_surface_v1.set_keyboard_interactivity used an invalid value",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.pending.keyboard_interactivity = Some(keyboard_interactivity);
             }
@@ -1288,7 +1288,7 @@ impl Object for ZwlrLayerSurfaceV1 {
                         wl_display::Error::InvalidObject as u32,
                         "zwlr_layer_surface_v1.get_popup requires a live xdg_popup",
                     );
-                    return;
+                    return Ok(());
                 }
                 let popup_id = popup;
                 let mut popup = client.grab_object(popup, state);
@@ -1307,7 +1307,7 @@ impl Object for ZwlrLayerSurfaceV1 {
                         zwlr_layer_surface_v1::Error::InvalidSurfaceState,
                         message,
                     );
-                    return;
+                    return Ok(());
                 }
                 let popup_surface_id = {
                     let xdg_surface = client.ref_object(popup.xdg_surface_id(), state);
@@ -1329,7 +1329,7 @@ impl Object for ZwlrLayerSurfaceV1 {
                         zwlr_layer_surface_v1::Error::InvalidSurfaceState,
                         "zwlr_layer_surface_v1.ack_configure referenced an unknown serial",
                     );
-                    return;
+                    return Ok(());
                 };
                 let acked = self.pending_configures[position];
                 self.pending_configures.drain(..=position);
@@ -1343,7 +1343,7 @@ impl Object for ZwlrLayerSurfaceV1 {
                         wl_display::Error::InvalidMethod as u32,
                         "zwlr_layer_surface_v1.set_layer requires version 2",
                     );
-                    return;
+                    return Ok(());
                 }
                 let Some(layer) = LayerShellLayer::from_raw(layer) else {
                     client.send_protocol_error(
@@ -1352,7 +1352,7 @@ impl Object for ZwlrLayerSurfaceV1 {
                         zwlr_layer_shell_v1::Error::InvalidLayer as u32,
                         "zwlr_layer_surface_v1.set_layer used an invalid layer value",
                     );
-                    return;
+                    return Ok(());
                 };
                 self.pending.layer = Some(layer);
             }
@@ -1364,11 +1364,11 @@ impl Object for ZwlrLayerSurfaceV1 {
                         wl_display::Error::InvalidMethod as u32,
                         "zwlr_layer_surface_v1.set_exclusive_edge requires version 5",
                     );
-                    return;
+                    return Ok(());
                 }
                 if edge == 0 {
                     self.pending.exclusive_edge = Some(None);
-                    return;
+                    return Ok(());
                 }
                 if edge & !ANCHOR_MASK != 0 || edge.count_ones() != 1 {
                     self.send_error(
@@ -1377,7 +1377,7 @@ impl Object for ZwlrLayerSurfaceV1 {
                         zwlr_layer_surface_v1::Error::InvalidExclusiveEdge,
                         "zwlr_layer_surface_v1.set_exclusive_edge requires exactly one edge or 0",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.pending.exclusive_edge = Some(Some(edge));
             }
@@ -1385,6 +1385,7 @@ impl Object for ZwlrLayerSurfaceV1 {
                 self.destroy_impl(client, state, dispatcher);
             }
         }
+        Ok(())
     }
 
     fn on_client_disconnect(

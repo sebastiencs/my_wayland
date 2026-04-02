@@ -69,7 +69,7 @@ impl Object for WlSeat {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_seat::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -97,6 +97,7 @@ impl Object for WlSeat {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
+        Ok(())
     }
 }
 

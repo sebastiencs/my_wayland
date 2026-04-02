@@ -120,7 +120,7 @@ impl Object for ZwlrGammaControlManagerV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use zwlr_gamma_control_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -130,5 +130,6 @@ impl Object for ZwlrGammaControlManagerV1 {
                 self.create_gamma_control(client, state, id, output, dispatcher);
             }
         }
+        Ok(())
     }
 }

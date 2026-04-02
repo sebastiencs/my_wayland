@@ -53,7 +53,7 @@ impl Object for WlRegistry {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         match client.parse::<Self>(req).unwrap() {
             wl_registry::Request::Bind { name, id, requested_version } => {
                 let Some(mut global) = state.globals.try_grab_global(name) else {
@@ -63,7 +63,7 @@ impl Object for WlRegistry {
                         wl_display::Error::InvalidObject as u32,
                         "invalid global name",
                     );
-                    return;
+                    return Ok(());
                 };
 
                 let (_, max_version) = global.interface();
@@ -71,5 +71,6 @@ impl Object for WlRegistry {
                 global.bind(client, state, id, version, dispatcher);
             }
         }
+        Ok(())
     }
 }

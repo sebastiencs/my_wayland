@@ -50,7 +50,7 @@ impl Object for WlCompositor {
         state: &mut State,
         req: RawRequest,
         _: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use crate::protocol_generated::wl_compositor::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -63,5 +63,6 @@ impl Object for WlCompositor {
                 client.insert_object(state, WlRegion::new(id));
             }
         }
+        Ok(())
     }
 }

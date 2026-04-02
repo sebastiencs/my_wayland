@@ -577,7 +577,7 @@ impl Object for XdgSurface {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use xdg_surface::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -589,7 +589,7 @@ impl Object for XdgSurface {
                         xdg_surface::Error::DefunctRoleObject,
                         "xdg_surface destroyed before its role object",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.delete_self(client, state, dispatcher);
             }
@@ -598,7 +598,7 @@ impl Object for XdgSurface {
                     .set_role_kind(RoleKind::Toplevel, client, dispatcher)
                     .is_err()
                 {
-                    return;
+                    return Ok(());
                 }
                 self.role_object = RoleObject::Toplevel(id);
 
@@ -616,7 +616,7 @@ impl Object for XdgSurface {
                         crate::protocol_generated::wl_display::Error::InvalidObject as u32,
                         "xdg_surface.get_popup requires a live xdg_positioner",
                     );
-                    return;
+                    return Ok(());
                 }
 
                 let parent = match u32::from(parent) {
@@ -629,7 +629,7 @@ impl Object for XdgSurface {
                                 crate::protocol_generated::wl_display::Error::InvalidObject as u32,
                                 "xdg_surface.get_popup requires a live parent xdg_surface",
                             );
-                            return;
+                            return Ok(());
                         }
                         Some(parent)
                     }
@@ -647,7 +647,7 @@ impl Object for XdgSurface {
                         xdg_wm_base::Error::InvalidPositioner,
                         "xdg_surface.get_popup requires a complete xdg_positioner",
                     );
-                    return;
+                    return Ok(());
                 }
 
                 if let Some(parent_surface_id) = parent {
@@ -668,7 +668,7 @@ impl Object for XdgSurface {
                             xdg_wm_base::Error::InvalidPopupParent,
                             "popup parent must be a toplevel or a grabbing popup",
                         );
-                        return;
+                        return Ok(());
                     }
                     let mut parent_surface = client.grab_object(parent_surface_id, state);
                     parent_surface.add_popup_child(id);
@@ -682,7 +682,7 @@ impl Object for XdgSurface {
                         let mut parent_surface = client.grab_object(parent_surface_id, state);
                         parent_surface.remove_popup_child(id);
                     }
-                    return;
+                    return Ok(());
                 }
                 self.role_object = RoleObject::Popup(id);
                 let popup =
@@ -705,7 +705,7 @@ impl Object for XdgSurface {
                         xdg_surface::Error::InvalidSize,
                         "xdg_surface.set_window_geometry requires positive dimensions",
                     );
-                    return;
+                    return Ok(());
                 };
                 if window_geometry.is_empty() {
                     self.send_surface_error(
@@ -714,7 +714,7 @@ impl Object for XdgSurface {
                         xdg_surface::Error::InvalidSize,
                         "xdg_surface.set_window_geometry requires positive dimensions",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.pending_window_geometry = Some(window_geometry);
                 log::debug!(
@@ -736,7 +736,7 @@ impl Object for XdgSurface {
                         xdg_surface::Error::InvalidSerial,
                         "xdg_surface.ack_configure referenced an unknown serial",
                     );
-                    return;
+                    return Ok(());
                 };
 
                 let acked = self.pending_configures[position].clone();
@@ -764,6 +764,7 @@ impl Object for XdgSurface {
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -1480,7 +1481,7 @@ pub mod xdg_toplevel {
             state: &mut State,
             req: RawRequest,
             dispatcher: &mut ClientDispatcher,
-        ) {
+        ) -> crate::object::RequestResult {
             use proto_xdg_toplevel::Request::*;
 
             match client.parse::<Self>(req).unwrap() {
@@ -1522,7 +1523,7 @@ pub mod xdg_toplevel {
                                         as u32,
                                     "xdg_toplevel.set_parent requires a live xdg_toplevel",
                                 );
-                                return;
+                                return Ok(());
                             }
                             Some(parent)
                         }
@@ -1534,7 +1535,7 @@ pub mod xdg_toplevel {
                             proto_xdg_toplevel::Error::InvalidParent,
                             "xdg_toplevel parent would create a cycle",
                         );
-                        return;
+                        return Ok(());
                     }
                     self.parent = parent;
                 }
@@ -1555,7 +1556,7 @@ pub mod xdg_toplevel {
                             crate::protocol_generated::wl_display::Error::InvalidObject as u32,
                             "xdg_toplevel.move requires a live wl_seat",
                         );
-                        return;
+                        return Ok(());
                     }
                     let xdg_surface = client.ref_object(self.xdg_surface_id, state);
                     let surface_id = xdg_surface.wl_surface_id();
@@ -1563,7 +1564,7 @@ pub mod xdg_toplevel {
                     let Some(surface) =
                         state.objects.try_ref_object::<WlSurface>(surface_object_id)
                     else {
-                        return;
+                        return Ok(());
                     };
                     if !crate::input::request_toplevel_move(
                         state,
@@ -1589,7 +1590,7 @@ pub mod xdg_toplevel {
                             proto_xdg_toplevel::Error::InvalidResizeEdge,
                             "xdg_toplevel.resize requires a non-zero resize edge",
                         );
-                        return;
+                        return Ok(());
                     }
                     if decode_resize_edge(edges).is_none() {
                         self.send_error(
@@ -1598,7 +1599,7 @@ pub mod xdg_toplevel {
                             proto_xdg_toplevel::Error::InvalidResizeEdge,
                             "xdg_toplevel.resize received an unknown resize edge",
                         );
-                        return;
+                        return Ok(());
                     }
                     if !client.object_is(seat, state) {
                         client.protocol_violation_disconnect(
@@ -1607,7 +1608,7 @@ pub mod xdg_toplevel {
                             crate::protocol_generated::wl_display::Error::InvalidObject as u32,
                             "xdg_toplevel.resize requires a live wl_seat",
                         );
-                        return;
+                        return Ok(());
                     }
                     let xdg_surface = client.ref_object(self.xdg_surface_id, state);
                     let surface_id = xdg_surface.wl_surface_id();
@@ -1615,11 +1616,11 @@ pub mod xdg_toplevel {
                     let Some(surface) =
                         state.objects.try_ref_object::<WlSurface>(surface_object_id)
                     else {
-                        return;
+                        return Ok(());
                     };
                     if surface.logical_size().is_none() {
                         log::debug!("xdg_toplevel.resize ignored for unmapped surface");
-                        return;
+                        return Ok(());
                     }
                     if !crate::input::request_toplevel_resize(
                         state,
@@ -1642,13 +1643,13 @@ pub mod xdg_toplevel {
                 }
                 SetMaxSize { width, height } => {
                     if !self.store_size_pair(client, dispatcher, width, height, false) {
-                        return;
+                        return Ok(());
                     }
                     self.relayout_after_constraint_change(client, state, dispatcher);
                 }
                 SetMinSize { width, height } => {
                     if !self.store_size_pair(client, dispatcher, width, height, true) {
-                        return;
+                        return Ok(());
                     }
                     self.relayout_after_constraint_change(client, state, dispatcher);
                 }
@@ -1714,6 +1715,7 @@ pub mod xdg_toplevel {
                     log::debug!("xdg_toplevel.set_minimized has no compositor integration yet");
                 }
             }
+            Ok(())
         }
     }
 

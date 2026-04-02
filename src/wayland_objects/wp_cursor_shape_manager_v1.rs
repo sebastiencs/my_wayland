@@ -59,7 +59,7 @@ impl Object for WpCursorShapeManagerV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wp_cursor_shape_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -76,7 +76,7 @@ impl Object for WpCursorShapeManagerV1 {
                         wl_display::Error::InvalidObject as u32,
                         "invalid wl_pointer for cursor shape device",
                     );
-                    return;
+                    return Ok(());
                 }
                 client.insert_object(
                     state,
@@ -91,5 +91,6 @@ impl Object for WpCursorShapeManagerV1 {
                 );
             }
         }
+        Ok(())
     }
 }

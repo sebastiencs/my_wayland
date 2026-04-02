@@ -96,7 +96,7 @@ impl Object for WlDataDevice {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_data_device::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -123,6 +123,7 @@ impl Object for WlDataDevice {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
+        Ok(())
     }
 }
 

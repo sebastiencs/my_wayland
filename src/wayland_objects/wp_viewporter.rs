@@ -49,7 +49,7 @@ impl Object for WpViewporter {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wp_viewporter::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -65,7 +65,7 @@ impl Object for WpViewporter {
                         crate::protocol_generated::wl_display::Error::InvalidObject as u32,
                         "invalid wl_surface for wp_viewporter.get_viewport",
                     );
-                    return;
+                    return Ok(());
                 }
                 let surface_oid = client.object_id(surface);
                 {
@@ -77,11 +77,12 @@ impl Object for WpViewporter {
                             wp_viewporter::Error::ViewportExists as u32,
                             "wl_surface already has a wp_viewport object",
                         );
-                        return;
+                        return Ok(());
                     }
                 }
                 client.insert_object(state, WpViewport::new(id, surface_oid));
             }
         }
+        Ok(())
     }
 }

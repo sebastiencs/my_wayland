@@ -59,7 +59,7 @@ impl Object for XdgActivationV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use xdg_activation_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -77,14 +77,14 @@ impl Object for XdgActivationV1 {
                         wl_display::Error::InvalidObject as u32,
                         "xdg_activation_v1.activate requires a live wl_surface",
                     );
-                    return;
+                    return Ok(());
                 }
                 let Some(_) = state.activation_tokens.consume(&token) else {
                     log::debug!(
                         "ignoring activation request with unknown or expired token from client {:?}",
                         client.client_id()
                     );
-                    return;
+                    return Ok(());
                 };
                 let Some((root_surface_object_id, focus)) =
                     resolve_activation_target(state, surface)
@@ -93,10 +93,10 @@ impl Object for XdgActivationV1 {
                         "ignoring activation request for non-activatable surface {:?}",
                         surface
                     );
-                    return;
+                    return Ok(());
                 };
                 if !state.raise_root_surface(root_surface_object_id) {
-                    return;
+                    return Ok(());
                 }
                 set_keyboard_focus_from_surface(state, dispatcher, Some(focus));
                 if let Some(bounds) = state
@@ -112,6 +112,7 @@ impl Object for XdgActivationV1 {
                 }
             }
         }
+        Ok(())
     }
 }
 

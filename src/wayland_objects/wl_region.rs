@@ -51,7 +51,7 @@ impl Object for WlRegion {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_region::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -59,18 +59,19 @@ impl Object for WlRegion {
             Add { x, y, width, height } => {
                 let Some(rect) = RectI::new(x, y, width, height) else {
                     self.reject_negative_extents(dispatcher);
-                    return;
+                    return Ok(());
                 };
                 self.spec.add_rect(rect);
             }
             Subtract { x, y, width, height } => {
                 let Some(rect) = RectI::new(x, y, width, height) else {
                     self.reject_negative_extents(dispatcher);
-                    return;
+                    return Ok(());
                 };
                 self.spec.subtract_rect(rect);
             }
         }
+        Ok(())
     }
 }
 

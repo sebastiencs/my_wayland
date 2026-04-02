@@ -37,7 +37,7 @@ impl Object for WpLinuxDrmSyncobjTimelineV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wp_linux_drm_syncobj_timeline_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -46,5 +46,6 @@ impl Object for WpLinuxDrmSyncobjTimelineV1 {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
+        Ok(())
     }
 }

@@ -1914,7 +1914,7 @@ mod xdg_seat_tests {
         let mut xdg_surface = state
             .objects
             .grab_object::<XdgSurface>(xdg_surface_object_id);
-        xdg_surface.on(
+        let _ = xdg_surface.on(
             client,
             state,
             get_toplevel_request(xdg_surface_id, toplevel_id),
@@ -1984,7 +1984,7 @@ mod xdg_seat_tests {
 
         {
             let mut popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
-            popup.on(
+            let _ = popup.on(
                 &mut client,
                 &mut state,
                 popup_grab_request(XdgPopupId::from(40), WlSeatId::from(2), 999),
@@ -2063,7 +2063,7 @@ mod xdg_seat_tests {
 
         {
             let mut popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
-            popup.on(
+            let _ = popup.on(
                 &mut client,
                 &mut state,
                 popup_grab_request(XdgPopupId::from(40), WlSeatId::from(2), serial),
@@ -2139,13 +2139,13 @@ mod xdg_seat_tests {
             let mut positioner = state
                 .objects
                 .grab_object::<XdgPositioner>(positioner_object_id);
-            positioner.on(
+            let _ = positioner.on(
                 &mut client,
                 &mut state,
                 positioner_set_size_request(XdgPositionerId::from(50), 40, 30),
                 &mut client_dispatcher,
             );
-            positioner.on(
+            let _ = positioner.on(
                 &mut client,
                 &mut state,
                 positioner_set_anchor_rect_request(XdgPositionerId::from(50), 0, 0, 10, 10),
@@ -2158,7 +2158,7 @@ mod xdg_seat_tests {
             let mut xdg_surface = state
                 .objects
                 .grab_object::<XdgSurface>(popup_xdg_surface_object_id);
-            xdg_surface.on(
+            let _ = xdg_surface.on(
                 &mut client,
                 &mut state,
                 get_popup_request(
@@ -2190,7 +2190,7 @@ mod xdg_seat_tests {
         {
             let popup_object_id = client.object_id(XdgPopupId::from(40));
             let mut popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
-            popup.on(
+            let _ = popup.on(
                 &mut client,
                 &mut state,
                 popup_destroy_request(XdgPopupId::from(40)),
@@ -3304,7 +3304,7 @@ mod xdg_seat_tests {
 
         {
             let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
-            toplevel.on(
+            let _ = toplevel.on(
                 &mut client,
                 &mut state,
                 toplevel_resize_request(
@@ -3322,7 +3322,7 @@ mod xdg_seat_tests {
 
         {
             let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
-            toplevel.on(
+            let _ = toplevel.on(
                 &mut client,
                 &mut state,
                 toplevel_resize_request(
@@ -3385,7 +3385,7 @@ mod xdg_seat_tests {
 
         {
             let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
-            toplevel.on(
+            let _ = toplevel.on(
                 &mut client,
                 &mut state,
                 toplevel_resize_request(
@@ -3448,7 +3448,7 @@ mod xdg_seat_tests {
 
         {
             let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
-            toplevel.on(
+            let _ = toplevel.on(
                 &mut client,
                 &mut state,
                 toplevel_move_request(XdgToplevelId::from(121), WlSeatId::from(6), serial),
@@ -3511,7 +3511,7 @@ mod xdg_seat_tests {
 
         {
             let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
-            toplevel.on(
+            let _ = toplevel.on(
                 &mut client,
                 &mut state,
                 toplevel_resize_request(
@@ -3572,13 +3572,13 @@ mod xdg_seat_tests {
             let mut positioner = state
                 .objects
                 .grab_object::<XdgPositioner>(positioner_object_id);
-            positioner.on(
+            let _ = positioner.on(
                 &mut client,
                 &mut state,
                 positioner_set_size_request(XdgPositionerId::from(150), 40, 30),
                 &mut client_dispatcher,
             );
-            positioner.on(
+            let _ = positioner.on(
                 &mut client,
                 &mut state,
                 positioner_set_anchor_rect_request(XdgPositionerId::from(150), 0, 0, 10, 10),
@@ -3591,7 +3591,7 @@ mod xdg_seat_tests {
             let mut xdg_surface = state
                 .objects
                 .grab_object::<XdgSurface>(xdg_surface_object_id);
-            xdg_surface.on(
+            let _ = xdg_surface.on(
                 &mut client,
                 &mut state,
                 get_popup_request(
@@ -3611,7 +3611,7 @@ mod xdg_seat_tests {
             let mut xdg_surface = state
                 .objects
                 .grab_object::<XdgSurface>(xdg_surface_object_id);
-            xdg_surface.on(
+            let _ = xdg_surface.on(
                 &mut client,
                 &mut state,
                 get_toplevel_request(XdgSurfaceId::from(140), XdgToplevelId::from(170)),

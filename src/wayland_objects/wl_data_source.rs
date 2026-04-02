@@ -120,7 +120,7 @@ impl Object for WlDataSource {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_data_source::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -144,7 +144,7 @@ impl Object for WlDataSource {
                         wl_data_source::Error::InvalidActionMask as u32,
                         "invalid drag-and-drop action mask",
                     );
-                    return;
+                    return Ok(());
                 }
                 if self.used != SourceUse::Unused || self.dnd_actions != 0 {
                     client.protocol_violation_disconnect(
@@ -153,11 +153,12 @@ impl Object for WlDataSource {
                         wl_data_source::Error::InvalidSource as u32,
                         "wl_data_source.set_actions must happen exactly once before start_drag",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.dnd_actions = dnd_actions;
             }
         }
+        Ok(())
     }
 
     fn on_client_disconnect(

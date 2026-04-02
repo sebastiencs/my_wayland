@@ -30,7 +30,7 @@ impl Object for WlKeyboard {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_keyboard::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -39,6 +39,7 @@ impl Object for WlKeyboard {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
+        Ok(())
     }
 }
 

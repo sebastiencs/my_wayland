@@ -63,7 +63,7 @@ impl Object for WlOutput {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_output::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -72,6 +72,7 @@ impl Object for WlOutput {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
+        Ok(())
     }
 }
 

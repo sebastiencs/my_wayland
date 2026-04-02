@@ -74,7 +74,7 @@ impl Object for XdgWmBase {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use xdg_wm_base::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -86,7 +86,7 @@ impl Object for XdgWmBase {
                         xdg_wm_base::Error::DefunctSurfaces as u32,
                         "xdg_wm_base destroyed while created xdg_surfaces are still alive",
                     );
-                    return;
+                    return Ok(());
                 }
                 use crate::wayland_objects::wl_display::WlDisplay;
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
@@ -102,7 +102,7 @@ impl Object for XdgWmBase {
                         wl_display::Error::InvalidObject as u32,
                         "get_xdg_surface requires a live wl_surface",
                     );
-                    return;
+                    return Ok(());
                 }
                 let wl_surface = client.ref_object_mut(surface, state);
                 if wl_surface.has_attached_or_committed_buffer() {
@@ -112,10 +112,10 @@ impl Object for XdgWmBase {
                         xdg_wm_base::Error::InvalidSurfaceState as u32,
                         "wl_surface must not have an attached or committed buffer before get_xdg_surface",
                     );
-                    return;
+                    return Ok(());
                 }
                 if wl_surface.set_role(Role::XdgSurface, dispatcher).is_err() {
-                    return;
+                    return Ok(());
                 }
                 wl_surface.set_xdg_surface_impl(id);
 
@@ -125,5 +125,6 @@ impl Object for XdgWmBase {
             }
             Pong { serial: _ } => {}
         }
+        Ok(())
     }
 }

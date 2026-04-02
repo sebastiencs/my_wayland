@@ -167,7 +167,7 @@ impl Object for ZxdgToplevelDecorationV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use zxdg_toplevel_decoration_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -190,7 +190,7 @@ impl Object for ZxdgToplevelDecorationV1 {
                         zxdg_toplevel_decoration_v1::Error::InvalidMode as u32,
                         "invalid zxdg_toplevel_decoration_v1 mode",
                     );
-                    return;
+                    return Ok(());
                 };
                 self.requested_mode = Some(mode);
                 self.update_effective_mode(client, state, dispatcher, true, true);
@@ -200,6 +200,7 @@ impl Object for ZxdgToplevelDecorationV1 {
                 self.update_effective_mode(client, state, dispatcher, true, true);
             }
         }
+        Ok(())
     }
 
     fn on_client_disconnect(

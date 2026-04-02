@@ -65,7 +65,7 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wp_linux_drm_syncobj_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -81,7 +81,7 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                         wl_display::Error::InvalidObject as u32,
                         "invalid wl_surface for syncobj surface",
                     );
-                    return;
+                    return Ok(());
                 };
                 {
                     if state
@@ -100,7 +100,7 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                             wl_display::Error::InvalidObject as u32,
                             msg,
                         );
-                        return;
+                        return Ok(());
                     }
                 }
                 {
@@ -112,10 +112,10 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                             wp_linux_drm_syncobj_manager_v1::Error::SurfaceExists as u32,
                             "surface already has a syncobj surface object",
                         );
-                        return;
+                        return Ok(());
                     }
                     if surface.set_syncobj_surface_object(id).is_err() {
-                        return;
+                        return Ok(());
                     }
                 }
                 client.insert_object(state, WpLinuxDrmSyncobjSurfaceV1::new(id, surface_oid));
@@ -129,7 +129,7 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                         "cannot import syncobj timeline without an active DRM backend",
                     );
                     unsafe { libc::close(fd) };
-                    return;
+                    return Ok(());
                 };
                 if !drm.supports_linux_drm_syncobj() {
                     client.send_protocol_error(
@@ -139,7 +139,7 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                         "DRM backend does not support syncobj timelines",
                     );
                     unsafe { libc::close(fd) };
-                    return;
+                    return Ok(());
                 }
                 let drm_fd = drm.fd();
                 let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
@@ -153,7 +153,7 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                             format!("failed to import DRM syncobj timeline: {error}"),
                         );
                         unsafe { libc::close(fd) };
-                        return;
+                        return Ok(());
                     }
                 };
                 unsafe { libc::close(fd) };
@@ -163,5 +163,6 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                 );
             }
         }
+        Ok(())
     }
 }

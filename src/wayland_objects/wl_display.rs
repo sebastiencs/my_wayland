@@ -39,7 +39,7 @@ impl Object for WlDisplay {
         state: &mut State,
         request: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_display::Request::*;
 
         match client.parse::<Self>(request).unwrap() {
@@ -54,5 +54,6 @@ impl Object for WlDisplay {
                 client.insert_object(state, registry);
             }
         }
+        Ok(())
     }
 }

@@ -70,7 +70,7 @@ impl Object for WlPointer {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_pointer::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -83,13 +83,13 @@ impl Object for WlPointer {
                         crate::protocol_generated::wl_display::Error::InvalidObject as u32,
                         "invalid wl_surface for cursor",
                     );
-                    return;
+                    return Ok(());
                 }
                 if !state
                     .seat
                     .pointer_cursor_request_allowed(client.client_id(), serial)
                 {
-                    return;
+                    return Ok(());
                 }
                 let cursor_changed = if surface_raw == 0 {
                     state.seat.clear_cursor_for_client(client.client_id())
@@ -98,7 +98,7 @@ impl Object for WlPointer {
                     {
                         let mut surface_object = client.grab_object(surface, state);
                         if surface_object.set_cursor_role(dispatcher).is_err() {
-                            return;
+                            return Ok(());
                         }
                     }
                     state.seat.set_cursor_surface(
@@ -123,5 +123,6 @@ impl Object for WlPointer {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
+        Ok(())
     }
 }

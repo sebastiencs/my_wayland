@@ -65,7 +65,7 @@ impl Object for WlSubcompositor {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_subcompositor::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -78,7 +78,7 @@ impl Object for WlSubcompositor {
                         wl_subcompositor::Error::BadSurface as u32,
                         "get_subsurface surface must be a live wl_surface",
                     );
-                    return;
+                    return Ok(());
                 }
                 if !client.object_is(parent, state) {
                     client.send_protocol_error(
@@ -87,7 +87,7 @@ impl Object for WlSubcompositor {
                         wl_subcompositor::Error::BadParent as u32,
                         "get_subsurface parent must be a live wl_surface",
                     );
-                    return;
+                    return Ok(());
                 }
 
                 let surface_object_id = client.object_id(surface);
@@ -99,7 +99,7 @@ impl Object for WlSubcompositor {
                         wl_subcompositor::Error::BadParent as u32,
                         "get_subsurface parent must be different from the child surface",
                     );
-                    return;
+                    return Ok(());
                 }
 
                 {
@@ -111,7 +111,7 @@ impl Object for WlSubcompositor {
                             wl_subcompositor::Error::BadSurface as u32,
                             "get_subsurface surface already has a role or subsurface object",
                         );
-                        return;
+                        return Ok(());
                     }
                 }
 
@@ -130,7 +130,7 @@ impl Object for WlSubcompositor {
                             wl_subcompositor::Error::BadSurface as u32,
                             message,
                         );
-                        return;
+                        return Ok(());
                     };
                     if surface_ref.is_ancestor_of(
                         surface_object_id,
@@ -143,7 +143,7 @@ impl Object for WlSubcompositor {
                             wl_subcompositor::Error::BadParent as u32,
                             "get_subsurface parent must not be a descendant of the child surface",
                         );
-                        return;
+                        return Ok(());
                     }
                 }
 
@@ -163,6 +163,7 @@ impl Object for WlSubcompositor {
                 }
             }
         }
+        Ok(())
     }
 }
 

@@ -2601,7 +2601,8 @@ mod tests {
             _state: &mut State,
             _request: RawRequest,
             _dispatcher: &mut ClientDispatcher,
-        ) {
+        ) -> crate::object::RequestResult {
+            Ok(())
         }
     }
 
@@ -2621,7 +2622,8 @@ mod tests {
             _state: &mut State,
             _request: RawRequest,
             _dispatcher: &mut ClientDispatcher,
-        ) {
+        ) -> crate::object::RequestResult {
+            Ok(())
         }
     }
 

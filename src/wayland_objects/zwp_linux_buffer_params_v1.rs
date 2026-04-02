@@ -114,7 +114,7 @@ impl Object for ZwpLinuxBufferParamsV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use zwp_linux_buffer_params_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -124,7 +124,7 @@ impl Object for ZwpLinuxBufferParamsV1 {
             }
             Add { fd, plane_idx, offset, stride, modifier_hi, modifier_lo } => {
                 if self.already_used(dispatcher).is_err() {
-                    return;
+                    return Ok(());
                 }
                 if plane_idx > 3 {
                     self.send_error(
@@ -132,7 +132,7 @@ impl Object for ZwpLinuxBufferParamsV1 {
                         zwp_linux_buffer_params_v1::Error::PlaneIdx as u32,
                         "plane index out of bounds",
                     );
-                    return;
+                    return Ok(());
                 }
                 if self.planes.contains_key(&plane_idx) {
                     self.send_error(
@@ -140,7 +140,7 @@ impl Object for ZwpLinuxBufferParamsV1 {
                         zwp_linux_buffer_params_v1::Error::PlaneSet as u32,
                         "plane index already set",
                     );
-                    return;
+                    return Ok(());
                 }
                 let modifier = Modifier(((modifier_hi as u64) << 32) | modifier_lo as u64);
                 self.planes.insert(
@@ -155,7 +155,7 @@ impl Object for ZwpLinuxBufferParamsV1 {
             }
             Create { width, height, format, flags } => {
                 if self.already_used(dispatcher).is_err() {
-                    return;
+                    return Ok(());
                 }
                 self.used = true;
                 let y_inverted = (flags & zwp_linux_buffer_params_v1::Flags::YInvert as u32) != 0;
@@ -187,7 +187,7 @@ impl Object for ZwpLinuxBufferParamsV1 {
             }
             CreateImmed { buffer_id, width, height, format, flags } => {
                 if self.already_used(dispatcher).is_err() {
-                    return;
+                    return Ok(());
                 }
                 self.used = true;
                 let y_inverted = (flags & zwp_linux_buffer_params_v1::Flags::YInvert as u32) != 0;
@@ -214,5 +214,6 @@ impl Object for ZwpLinuxBufferParamsV1 {
                 }
             }
         }
+        Ok(())
     }
 }

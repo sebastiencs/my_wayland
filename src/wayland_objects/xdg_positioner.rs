@@ -377,7 +377,7 @@ impl Object for XdgPositioner {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use xdg_positioner::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -390,7 +390,7 @@ impl Object for XdgPositioner {
                         xdg_positioner::Error::InvalidInput,
                         "xdg_positioner.set_size requires positive dimensions",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.state.size = Some((width, height));
             }
@@ -402,7 +402,7 @@ impl Object for XdgPositioner {
                         xdg_positioner::Error::InvalidInput,
                         "xdg_positioner.set_anchor_rect requires non-negative dimensions",
                     );
-                    return;
+                    return Ok(());
                 };
                 self.state.anchor_rect = Some(anchor_rect);
             }
@@ -414,7 +414,7 @@ impl Object for XdgPositioner {
                         xdg_positioner::Error::InvalidInput,
                         "xdg_positioner.set_anchor received an unknown enum value",
                     );
-                    return;
+                    return Ok(());
                 };
                 self.state.anchor = anchor;
             }
@@ -426,7 +426,7 @@ impl Object for XdgPositioner {
                         xdg_positioner::Error::InvalidInput,
                         "xdg_positioner.set_gravity received an unknown enum value",
                     );
-                    return;
+                    return Ok(());
                 };
                 self.state.gravity = gravity;
             }
@@ -438,7 +438,7 @@ impl Object for XdgPositioner {
                         xdg_positioner::Error::InvalidInput,
                         "xdg_positioner.set_constraint_adjustment received unknown bits",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.state.constraint_adjustment = constraint_adjustment;
             }
@@ -456,7 +456,7 @@ impl Object for XdgPositioner {
                         xdg_positioner::Error::InvalidInput,
                         "xdg_positioner.set_parent_size requires non-negative dimensions",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.state.parent_size = Some((parent_width, parent_height));
             }
@@ -464,6 +464,7 @@ impl Object for XdgPositioner {
                 self.state.parent_configure = Some(serial);
             }
         }
+        Ok(())
     }
 }
 

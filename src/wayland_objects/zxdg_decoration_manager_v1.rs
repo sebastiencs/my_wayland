@@ -60,7 +60,7 @@ impl Object for ZxdgDecorationManagerV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use zxdg_decoration_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -77,7 +77,7 @@ impl Object for ZxdgDecorationManagerV1 {
                         wl_display::Error::InvalidObject as u32,
                         "get_toplevel_decoration requires a live xdg_toplevel",
                     );
-                    return;
+                    return Ok(());
                 }
                 let toplevel_object_id = client.object_id(toplevel);
                 let Some(toplevel_ref) = state
@@ -90,7 +90,7 @@ impl Object for ZxdgDecorationManagerV1 {
                         wl_display::Error::InvalidObject as u32,
                         "get_toplevel_decoration requires an xdg_toplevel object",
                     );
-                    return;
+                    return Ok(());
                 };
                 if toplevel_ref.has_decoration_object() {
                     client.send_protocol_error(
@@ -99,7 +99,7 @@ impl Object for ZxdgDecorationManagerV1 {
                         zxdg_toplevel_decoration_v1::Error::AlreadyConstructed as u32,
                         "xdg_toplevel already has a zxdg_toplevel_decoration_v1 object",
                     );
-                    return;
+                    return Ok(());
                 }
                 let xdg_surface_object_id = client.object_id(toplevel_ref.xdg_surface_id());
                 let Some(xdg_surface_ref) = state
@@ -112,7 +112,7 @@ impl Object for ZxdgDecorationManagerV1 {
                         wl_display::Error::InvalidObject as u32,
                         "get_toplevel_decoration requires a live xdg_surface",
                     );
-                    return;
+                    return Ok(());
                 };
                 let wl_surface_object_id = client.object_id(xdg_surface_ref.wl_surface_id());
                 if state
@@ -126,7 +126,7 @@ impl Object for ZxdgDecorationManagerV1 {
                         zxdg_toplevel_decoration_v1::Error::UnconfiguredBuffer as u32,
                         "xdg_toplevel_decoration must not have a buffer at creation",
                     );
-                    return;
+                    return Ok(());
                 }
 
                 let decoration = ZxdgToplevelDecorationV1::new(id, toplevel_object_id);
@@ -139,6 +139,7 @@ impl Object for ZxdgDecorationManagerV1 {
                 decoration.initialize_negotiation(client, state, dispatcher);
             }
         }
+        Ok(())
     }
 }
 

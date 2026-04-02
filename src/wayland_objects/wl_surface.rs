@@ -2588,7 +2588,7 @@ impl Object for WlSurface {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_surface::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -2622,7 +2622,7 @@ impl Object for WlSurface {
                         wl_display::Error::InvalidMethod as u32,
                         "wl_surface.set_buffer_transform requires wl_surface version >= 2",
                     );
-                    return;
+                    return Ok(());
                 }
                 let Some(transform) = BufferTransform::from_wayland(transform) else {
                     self.send_error(
@@ -2630,7 +2630,7 @@ impl Object for WlSurface {
                         wl_surface::Error::InvalidTransform as u32,
                         "invalid wl_surface buffer transform",
                     );
-                    return;
+                    return Ok(());
                 };
                 self.pending.buffer_transform = transform;
             }
@@ -2642,7 +2642,7 @@ impl Object for WlSurface {
                         wl_display::Error::InvalidMethod as u32,
                         "wl_surface.set_buffer_scale requires wl_surface version >= 3",
                     );
-                    return;
+                    return Ok(());
                 }
                 if scale < 1 {
                     self.send_error(
@@ -2650,7 +2650,7 @@ impl Object for WlSurface {
                         wl_surface::Error::InvalidScale as u32,
                         "wl_surface buffer scale must be at least 1",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.pending.buffer_scale = scale;
             }
@@ -2662,7 +2662,7 @@ impl Object for WlSurface {
                         wl_display::Error::InvalidMethod as u32,
                         "wl_surface.damage_buffer requires wl_surface version >= 4",
                     );
-                    return;
+                    return Ok(());
                 }
                 self.pending
                     .damage_buffer
@@ -2676,13 +2676,14 @@ impl Object for WlSurface {
                         wl_display::Error::InvalidMethod as u32,
                         "wl_surface.offset requires wl_surface version >= 5",
                     );
-                    return;
+                    return Ok(());
                 }
                 if self.role != Role::Subsurface {
                     self.pending.offset = (x, y);
                 }
             }
         }
+        Ok(())
     }
 
     fn on_client_disconnect(

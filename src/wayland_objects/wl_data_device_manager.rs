@@ -53,7 +53,7 @@ impl Object for WlDataDeviceManager {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_data_device_manager::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -69,7 +69,7 @@ impl Object for WlDataDeviceManager {
                         crate::protocol_generated::wl_display::Error::InvalidObject as u32,
                         "wl_data_device_manager.get_data_device requires a wl_seat object",
                     );
-                    return;
+                    return Ok(());
                 }
                 let _ = client.insert_object(
                     state,
@@ -91,6 +91,7 @@ impl Object for WlDataDeviceManager {
                 }
             }
         }
+        Ok(())
     }
 }
 

@@ -17,7 +17,7 @@ where
         state: &mut State,
         request: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    );
+    ) -> RequestResult;
 
     /// Silent compositor-side cleanup before tearing down all objects owned by a disconnected
     /// client. Unlike normal protocol destruction, this should not try to talk to the client.
@@ -29,6 +29,13 @@ where
     ) {
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AbortRequest {
+    InvalidObject,
+}
+
+pub type RequestResult = Result<(), AbortRequest>;
 
 pub trait PostAction: 'static {
     fn execute(

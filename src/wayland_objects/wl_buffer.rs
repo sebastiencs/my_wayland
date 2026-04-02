@@ -317,7 +317,7 @@ impl Object for WlBuffer {
         _state: &mut State,
         req: RawRequest,
         _: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_buffer::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -326,5 +326,6 @@ impl Object for WlBuffer {
                 client.remove_wayland_object(self.id);
             }
         }
+        Ok(())
     }
 }

@@ -63,7 +63,7 @@ impl Object for WlShm {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use crate::protocol_generated::wl_shm::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -75,5 +75,6 @@ impl Object for WlShm {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
+        Ok(())
     }
 }

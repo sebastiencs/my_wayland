@@ -79,7 +79,7 @@ impl Object for ZwpLinuxDmabufV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use zwp_linux_dmabuf_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -100,5 +100,6 @@ impl Object for ZwpLinuxDmabufV1 {
                 );
             }
         }
+        Ok(())
     }
 }

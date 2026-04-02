@@ -74,7 +74,7 @@ impl Object for WlShmPool {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wl_shm_pool::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -87,7 +87,7 @@ impl Object for WlShmPool {
                         wl_shm::Error::InvalidFormat as u32,
                         "invalid SHM buffer format",
                     );
-                    return;
+                    return Ok(());
                 };
                 if self
                     .validate_create_buffer(offset, width, height, stride, format.bpp as usize)
@@ -99,7 +99,7 @@ impl Object for WlShmPool {
                         wl_shm::Error::InvalidStride as u32,
                         "invalid SHM buffer parameters",
                     );
-                    return;
+                    return Ok(());
                 }
                 let mem = self.mem.clone();
                 let wl_buffer = match WlBuffer::new(NewWlBufferParams {
@@ -120,7 +120,7 @@ impl Object for WlShmPool {
                             wl_shm::Error::InvalidStride as u32,
                             "invalid SHM buffer parameters",
                         );
-                        return;
+                        return Ok(());
                     }
                 };
                 client.insert_object(state, wl_buffer);
@@ -136,7 +136,7 @@ impl Object for WlShmPool {
                         wl_shm::Error::InvalidStride as u32,
                         "invalid SHM pool size",
                     );
-                    return;
+                    return Ok(());
                 }
 
                 let size = usize::try_from(size).unwrap();
@@ -147,11 +147,11 @@ impl Object for WlShmPool {
                         wl_shm::Error::InvalidStride as u32,
                         "shrinking a SHM pool is forbidden",
                     );
-                    return;
+                    return Ok(());
                 }
 
                 if size == self.size {
-                    return;
+                    return Ok(());
                 }
 
                 match SharedMemory::try_mmap(self.fd.as_raw_fd(), size) {
@@ -171,6 +171,7 @@ impl Object for WlShmPool {
                 }
             }
         }
+        Ok(())
     }
 }
 

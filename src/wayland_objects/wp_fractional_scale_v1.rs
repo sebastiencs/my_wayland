@@ -33,7 +33,7 @@ impl Object for WpFractionalScaleV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wp_fractional_scale_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -47,6 +47,7 @@ impl Object for WpFractionalScaleV1 {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
+        Ok(())
     }
 
     fn on_client_disconnect(

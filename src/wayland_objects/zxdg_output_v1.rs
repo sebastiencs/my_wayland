@@ -103,7 +103,7 @@ impl Object for ZxdgOutputV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use zxdg_output_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -112,5 +112,6 @@ impl Object for ZxdgOutputV1 {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
+        Ok(())
     }
 }

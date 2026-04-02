@@ -173,7 +173,7 @@ impl Object for ZwlrGammaControlV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use zwlr_gamma_control_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -183,6 +183,7 @@ impl Object for ZwlrGammaControlV1 {
             }
             SetGamma { fd } => self.set_gamma_from_fd(client, state, fd, dispatcher),
         }
+        Ok(())
     }
 
     fn on_client_disconnect(

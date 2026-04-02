@@ -45,7 +45,7 @@ impl Object for WpCursorShapeDeviceV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use wp_cursor_shape_device_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -54,16 +54,16 @@ impl Object for WpCursorShapeDeviceV1 {
             }
             SetShape { serial, shape } => {
                 let DeviceKind::Pointer { pointer_id } = self.kind else {
-                    return;
+                    return Ok(());
                 };
                 if !client.object_is(pointer_id, state) {
-                    return;
+                    return Ok(());
                 }
                 if !state
                     .seat
                     .pointer_cursor_request_allowed(client.client_id(), serial)
                 {
-                    return;
+                    return Ok(());
                 }
                 let Some(icon_names) = cursor_icon_names(shape, self.version) else {
                     client.send_protocol_error(
@@ -72,7 +72,7 @@ impl Object for WpCursorShapeDeviceV1 {
                         wp_cursor_shape_device_v1::Error::InvalidShape as u32,
                         "the specified cursor shape is invalid",
                     );
-                    return;
+                    return Ok(());
                 };
                 if state.seat.set_named_cursor(client.client_id(), icon_names) {
                     dispatcher.dispatch_to(
@@ -84,6 +84,7 @@ impl Object for WpCursorShapeDeviceV1 {
                 }
             }
         }
+        Ok(())
     }
 }
 

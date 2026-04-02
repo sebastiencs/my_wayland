@@ -154,22 +154,22 @@ impl Object for ExtWorkspaceGroupHandleV1 {
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) {
+    ) -> crate::object::RequestResult {
         use ext_workspace_group_handle_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
             CreateWorkspace { workspace } => {
                 if self.removed {
-                    return;
+                    return Ok(());
                 }
                 let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
-                    return;
+                    return Ok(());
                 };
                 let Some(mut manager) = state
                     .objects
                     .try_grab_object::<ExtWorkspaceManagerV1>(manager_object_id)
                 else {
-                    return;
+                    return Ok(());
                 };
                 manager.queue_request(PendingWorkspaceRequest::CreateWorkspace {
                     group_id: self.group_id,
@@ -188,5 +188,6 @@ impl Object for ExtWorkspaceGroupHandleV1 {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
+        Ok(())
     }
 }
