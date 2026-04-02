@@ -69,9 +69,9 @@ impl ZwlrLayerShellV1 {
         state: &State,
         output: WlOutputId,
     ) -> Result<Option<OutputId>, ()> {
-        if u32::from(output) == 0 {
+        let Some(output) = output.to_opt() else {
             return Ok(None);
-        }
+        };
         let Some(output_object_id) = client.try_object_id(output, state) else {
             return Err(());
         };

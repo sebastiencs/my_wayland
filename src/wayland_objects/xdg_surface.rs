@@ -619,9 +619,9 @@ impl Object for XdgSurface {
                     return Ok(());
                 }
 
-                let parent = match u32::from(parent) {
-                    0 => None,
-                    _ => {
+                let parent = match parent.to_opt() {
+                    None => None,
+                    Some(parent) => {
                         if !client.object_is(parent, state) {
                             client.protocol_violation_disconnect(
                                 dispatcher,
@@ -1512,9 +1512,9 @@ pub mod xdg_toplevel {
                     self.delete_self(client, state, dispatcher);
                 }
                 SetParent { parent } => {
-                    let parent = match u32::from(parent) {
-                        0 => None,
-                        _ => {
+                    let parent = match parent.to_opt() {
+                        None => None,
+                        Some(parent) => {
                             if !client.object_is(parent, state) {
                                 client.protocol_violation_disconnect(
                                     dispatcher,

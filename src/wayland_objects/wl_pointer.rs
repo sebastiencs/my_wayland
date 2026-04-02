@@ -75,23 +75,19 @@ impl Object for WlPointer {
 
         match client.parse::<Self>(req).unwrap() {
             SetCursor { serial, surface, hotspot_x, hotspot_y } => {
-                let surface_raw: u32 = surface.into();
-                if surface_raw != 0 && !client.object_is(surface, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        surface.into(),
-                        crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                        "invalid wl_surface for cursor",
-                    );
-                    return Ok(());
-                }
+                let surface = match surface.to_opt() {
+                    Some(surface) => {
+                        Some(client.resolve_or_disconnect(surface, state, dispatcher)?)
+                    }
+                    None => None,
+                };
                 if !state
                     .seat
                     .pointer_cursor_request_allowed(client.client_id(), serial)
                 {
                     return Ok(());
                 }
-                let cursor_changed = if surface_raw == 0 {
+                let cursor_changed = if surface.is_none() {
                     state.seat.clear_cursor_for_client(client.client_id())
                 } else {
                     let object_id = client.object_id(surface);

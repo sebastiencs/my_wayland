@@ -152,26 +152,26 @@ fn set_selection(
         return Ok(());
     }
 
-    let source_raw: u32 = source.into();
-    let next_selection = if source_raw == 0 {
-        None
-    } else {
-        let source = client.resolve_or_disconnect(source, state, dispatcher)?;
-        let mut source_object = source.grab(state);
-        if source_object.dnd_actions() != 0 {
-            client.protocol_violation_disconnect(
-                dispatcher,
-                source.wayland_id().into(),
-                crate::protocol_generated::wl_data_source::Error::InvalidSource as u32,
-                "selection source must not set drag-and-drop actions",
-            );
-            return Ok(());
+    let next_selection = match source.to_opt() {
+        None => None,
+        Some(source) => {
+            let source = client.resolve_or_disconnect(source, state, dispatcher)?;
+            let mut source_object = source.grab(state);
+            if source_object.dnd_actions() != 0 {
+                client.protocol_violation_disconnect(
+                    dispatcher,
+                    source.wayland_id().into(),
+                    crate::protocol_generated::wl_data_source::Error::InvalidSource as u32,
+                    "selection source must not set drag-and-drop actions",
+                );
+                return Ok(());
+            }
+            // Real clients sometimes reuse the same wl_data_source object for multiple
+            // selection operations. wlroots and Smithay are intentionally permissive
+            // here, so we keep the source usable instead of disconnecting.
+            source_object.set_used(SourceUse::Selection);
+            Some(SelectionSourceState { source: ClientObjectId::from((client, &source)) })
         }
-        // Real clients sometimes reuse the same wl_data_source object for multiple
-        // selection operations. wlroots and Smithay are intentionally permissive
-        // here, so we keep the source usable instead of disconnecting.
-        source_object.set_used(SourceUse::Selection);
-        Some(SelectionSourceState { source: ClientObjectId::from((client, &source)) })
     };
 
     let previous = state.seat.replace_selection_source(next_selection, serial);
