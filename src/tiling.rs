@@ -2591,7 +2591,11 @@ mod tests {
                 .unwrap();
             child_surface.assign_subsurface(
                 crate::protocol_generated::WlSubsurfaceId::from(49u32),
-                surface_object_id,
+                crate::clients::Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    crate::protocol_generated::WlSurfaceId::from(1),
+                    surface_object_id,
+                ),
             );
             child_surface.set_subsurface_position(-4, -12);
             child_surface.test_map(ObjectId::from(901usize), 0, 0, 90, 80);
@@ -2737,7 +2741,11 @@ mod tests {
                 .unwrap();
             child_surface.assign_subsurface(
                 crate::protocol_generated::WlSubsurfaceId::from(55u32),
-                surface_object_id,
+                crate::clients::Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    crate::protocol_generated::WlSurfaceId::from(1),
+                    surface_object_id,
+                ),
             );
             child_surface.set_subsurface_position(-4, -12);
             child_surface.test_map(ObjectId::from(901usize), 0, 0, 90, 80);
@@ -2800,7 +2808,11 @@ mod tests {
                 .unwrap();
             child_surface.assign_subsurface(
                 crate::protocol_generated::WlSubsurfaceId::from(60u32),
-                surface_object_id,
+                crate::clients::Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    crate::protocol_generated::WlSurfaceId::from(1),
+                    surface_object_id,
+                ),
             );
             child_surface.set_subsurface_position(-4, -12);
             child_surface.test_map(ObjectId::from(902usize), 0, 0, 90, 80);

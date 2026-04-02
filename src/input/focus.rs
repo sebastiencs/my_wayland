@@ -67,24 +67,21 @@ pub(crate) fn set_keyboard_focus_from_surface(
 
 pub(crate) fn resolve_activation_target(
     state: &State,
-    surface: Resolved<WlSurfaceId>,
+    mut surface: Resolved<WlSurfaceId>,
 ) -> Option<(ObjectId, SurfaceFocus)> {
-    let mut current_object_id = surface.object_id();
     loop {
-        let surface = state
-            .objects
-            .try_ref_object::<WlSurface>(current_object_id)?;
-        match surface.parent_surface_object_id() {
-            Some(parent_object_id) => current_object_id = parent_object_id,
+        let surface_ref = surface.try_ref(state)?;
+        match surface_ref.parent_surface() {
+            Some(parent) => surface = parent.clone(),
             None => {
-                if !surface.has_committed_buffer() {
+                if !surface_ref.has_committed_buffer() {
                     return None;
                 }
                 return Some((
-                    current_object_id,
+                    surface.object_id(),
                     SurfaceFocus {
                         client_id: surface.client_id(),
-                        surface_id: surface.surface_id(),
+                        surface_id: surface.wayland_id(),
                     },
                 ));
             }

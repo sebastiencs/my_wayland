@@ -9,6 +9,7 @@ use crate::{
     },
 };
 
+// TODO: Use Resolved<WlSurfaceId> instead
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SurfaceFocus {
     pub client_id: ClientId,

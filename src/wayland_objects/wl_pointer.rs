@@ -90,7 +90,6 @@ impl Object for WlPointer {
                 let cursor_changed = match surface {
                     None => state.seat.clear_cursor_for_client(client.client_id()),
                     Some(surface) => {
-                        let object_id = surface.object_id();
                         {
                             let mut surface_object = surface.ref_mut(state);
                             if surface_object.set_cursor_role(dispatcher).is_err() {

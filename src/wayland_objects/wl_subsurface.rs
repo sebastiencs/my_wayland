@@ -42,7 +42,11 @@ impl WlSubsurface {
         if sibling_object_id == self.parent.object_id() {
             return Ok(None);
         }
-        if sibling_surface.parent_surface_object_id() != Some(self.parent.object_id()) {
+        if sibling_surface
+            .parent_surface()
+            .map(|surface| surface.object_id())
+            != Some(self.parent.object_id())
+        {
             return Err(());
         }
         Ok(Some(sibling_object_id))
@@ -289,7 +293,10 @@ mod tests {
                 .get_mut(child_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child.assign_subsurface(WlSubsurfaceId::from(30), parent_object_id);
+            child.assign_subsurface(
+                WlSubsurfaceId::from(30),
+                Resolved::new(client.client_id(), WlSurfaceId::from(10), parent_object_id),
+            );
         }
 
         let mut subsurface = state

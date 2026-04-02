@@ -1778,7 +1778,8 @@ impl State {
             if surface.is_root() {
                 return Some(object_id);
             }
-            object_id = surface.parent_surface_object_id()?;
+            // TODO: Use Resolved
+            object_id = surface.parent_surface()?.object_id();
         }
     }
 

@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    clients::{Client, ClientDispatcher, ClientId, ClientManagerAction, EventWriter, RawRequest},
+    clients::{
+        Client, ClientDispatcher, ClientId, ClientManagerAction, EventWriter, RawRequest, Resolved,
+    },
     drm::{schedule_active_output, schedule_outputs, schedule_outputs_for_rect},
     object::{Object, Parser},
     protocol_generated::{
@@ -78,7 +80,7 @@ enum SubsurfaceSyncMode {
 #[derive(Clone, Debug)]
 struct SubsurfaceState {
     object_id: WlSubsurfaceId,
-    parent_surface_object_id: ObjectId,
+    parent_surface: Resolved<WlSurfaceId>,
     pending_position: (i32, i32),
     current_position: (i32, i32),
     sync_mode: SubsurfaceSyncMode,
@@ -537,12 +539,12 @@ impl WlSurface {
     pub fn assign_subsurface(
         &mut self,
         object_id: WlSubsurfaceId,
-        parent_surface_object_id: ObjectId,
+        parent_surface: Resolved<WlSurfaceId>,
     ) {
         self.role = Role::Subsurface;
         self.subsurface = Some(SubsurfaceState {
             object_id,
-            parent_surface_object_id,
+            parent_surface,
             pending_position: (0, 0),
             current_position: (0, 0),
             sync_mode: SubsurfaceSyncMode::Sync,
@@ -555,10 +557,10 @@ impl WlSurface {
             .map(|subsurface| subsurface.object_id)
     }
 
-    pub fn parent_surface_object_id(&self) -> Option<ObjectId> {
+    pub fn parent_surface(&self) -> Option<&Resolved<WlSurfaceId>> {
         self.subsurface
             .as_ref()
-            .map(|subsurface| subsurface.parent_surface_object_id)
+            .map(|subsurface| &subsurface.parent_surface)
     }
 
     pub fn is_root(&self) -> bool {
@@ -860,19 +862,19 @@ impl WlSurface {
 
     pub fn is_ancestor_of(
         &self,
-        self_object_id: ObjectId,
+        ancestor: Resolved<WlSurfaceId>,
         state: &State,
-        descendant_surface_object_id: ObjectId,
+        descendant: Resolved<WlSurfaceId>,
     ) -> bool {
-        let mut current = Some(descendant_surface_object_id);
-        while let Some(object_id) = current {
-            if object_id == self_object_id {
+        let mut current = Some(descendant);
+        while let Some(surface) = current {
+            if surface.object_id() == ancestor.object_id() {
                 return true;
             }
-            let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
+            let Some(surface) = surface.try_ref(state) else {
                 return false;
             };
-            current = surface.parent_surface_object_id();
+            current = surface.parent_surface().copied();
         }
         false
     }
@@ -1439,10 +1441,10 @@ impl WlSurface {
     }
 
     fn parent_behaves_synchronized(&self, state: &State) -> bool {
-        let Some(parent_object_id) = self.parent_surface_object_id() else {
+        let Some(parent) = self.parent_surface() else {
             return false;
         };
-        let Some(parent) = state.objects.try_ref_object::<WlSurface>(parent_object_id) else {
+        let Some(parent) = parent.try_ref(state) else {
             return false;
         };
         parent.behaves_synchronized(state)
@@ -2537,11 +2539,8 @@ impl WlSurface {
         for child_surface_object_id in self.child_surface_ids() {
             Self::detach_subsurface_tree(child_surface_object_id, client, state, dispatcher);
         }
-        if let Some(parent_surface_object_id) = self.parent_surface_object_id() {
-            if let Some(mut parent_surface) = state
-                .objects
-                .try_grab_object::<WlSurface>(parent_surface_object_id)
-            {
+        if let Some(parent_surface) = self.parent_surface() {
+            if let Some(parent_surface) = parent_surface.try_ref_mut(state) {
                 parent_surface.remove_child_from_tree(client.object_id(self.id));
             }
         }
@@ -2706,7 +2705,7 @@ mod tests {
             WlSurface,
         },
         crate::{
-            clients::{Client, ClientId, ClientManagerAction, RawEvent, RawRequest},
+            clients::{Client, ClientId, ClientManagerAction, RawEvent, RawRequest, Resolved},
             cursor::CursorSourceRef,
             drm::ARGB8888,
             egl::EGL,
@@ -3352,7 +3351,7 @@ mod tests {
                 .unwrap();
             child_surface.assign_subsurface(
                 crate::protocol_generated::WlSubsurfaceId::from(146),
-                surface_object_id,
+                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), surface_object_id),
             );
             child_surface.set_subsurface_position(2, 0);
             child_surface.test_map(ObjectId::from(903usize), 0, 0, 2, 2);
@@ -3874,7 +3873,7 @@ mod tests {
                 .unwrap();
             child_a.assign_subsurface(
                 crate::protocol_generated::WlSubsurfaceId::from(10),
-                parent_object_id,
+                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
             );
             child_a.set_subsurface_position(20, 30);
         }
@@ -3886,7 +3885,7 @@ mod tests {
                 .unwrap();
             child_b.assign_subsurface(
                 crate::protocol_generated::WlSubsurfaceId::from(11),
-                parent_object_id,
+                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
             );
             child_b.set_subsurface_position(-5, 7);
         }
@@ -3950,7 +3949,7 @@ mod tests {
                 .unwrap();
             child.assign_subsurface(
                 crate::protocol_generated::WlSubsurfaceId::from(20),
-                root_object_id,
+                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root_object_id),
             );
             child.set_subsurface_sync_mode(true);
         }
@@ -3962,7 +3961,7 @@ mod tests {
                 .unwrap();
             grandchild.assign_subsurface(
                 crate::protocol_generated::WlSubsurfaceId::from(21),
-                child_object_id,
+                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(2), child_object_id),
             );
             grandchild.set_subsurface_sync_mode(false);
         }
@@ -4051,7 +4050,7 @@ mod tests {
                 .unwrap();
             child_a.assign_subsurface(
                 crate::protocol_generated::WlSubsurfaceId::from(41),
-                parent_object_id,
+                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
             );
         }
         {
@@ -4062,7 +4061,7 @@ mod tests {
                 .unwrap();
             child_b.assign_subsurface(
                 crate::protocol_generated::WlSubsurfaceId::from(42),
-                parent_object_id,
+                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
             );
         }
         {
@@ -4073,7 +4072,7 @@ mod tests {
                 .unwrap();
             child_c.assign_subsurface(
                 crate::protocol_generated::WlSubsurfaceId::from(43),
-                parent_object_id,
+                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
             );
         }
         {
@@ -4119,7 +4118,7 @@ mod tests {
                 .unwrap();
             child.assign_subsurface(
                 crate::protocol_generated::WlSubsurfaceId::from(51),
-                parent_object_id,
+                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
             );
             child.set_subsurface_position(12, 34);
         }
@@ -4273,7 +4272,10 @@ mod tests {
                 .get_mut(child_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child.assign_subsurface(WlSubsurfaceId::from(61), parent_object_id);
+            child.assign_subsurface(
+                WlSubsurfaceId::from(61),
+                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
+            );
             child.set_subsurface_position(5, 6);
             child.add_pending_child(grandchild_object_id);
             child.test_map(ObjectId::from(301usize), 0, 0, 20, 20);
@@ -4284,7 +4286,10 @@ mod tests {
                 .get_mut(grandchild_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            grandchild.assign_subsurface(WlSubsurfaceId::from(62), child_object_id);
+            grandchild.assign_subsurface(
+                WlSubsurfaceId::from(62),
+                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(2), child_object_id),
+            );
             grandchild.set_subsurface_position(7, 8);
             grandchild.test_map(ObjectId::from(302usize), 0, 0, 10, 10);
         }

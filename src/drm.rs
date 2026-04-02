@@ -5215,7 +5215,10 @@ mod surface_tree_render_tests {
                 .get_mut(below)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            below_surface.assign_subsurface(WlSubsurfaceId::from(11), root);
+            below_surface.assign_subsurface(
+                WlSubsurfaceId::from(11),
+                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
+            );
             below_surface.set_subsurface_position(2, 3);
             below_surface.test_map(ObjectId::from(101usize), 0, 0, 10, 10);
         }
@@ -5225,7 +5228,10 @@ mod surface_tree_render_tests {
                 .get_mut(above)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            above_surface.assign_subsurface(WlSubsurfaceId::from(12), root);
+            above_surface.assign_subsurface(
+                WlSubsurfaceId::from(12),
+                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
+            );
             above_surface.set_subsurface_position(7, 8);
             above_surface.test_map(ObjectId::from(102usize), 0, 0, 10, 10);
         }
@@ -5274,7 +5280,10 @@ mod surface_tree_render_tests {
                 .get_mut(child)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_surface.assign_subsurface(WlSubsurfaceId::from(31), root);
+            child_surface.assign_subsurface(
+                WlSubsurfaceId::from(31),
+                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
+            );
             child_surface.set_subsurface_position(3, 4);
             child_surface.test_map(ObjectId::from(121usize), 0, 0, 10, 10);
         }
@@ -5315,7 +5324,10 @@ mod surface_tree_render_tests {
                 .get_mut(child)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_surface.assign_subsurface(WlSubsurfaceId::from(21), root);
+            child_surface.assign_subsurface(
+                WlSubsurfaceId::from(21),
+                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
+            );
             child_surface.set_subsurface_position(5, 7);
             child_surface.test_map(ObjectId::from(111usize), 1, 2, 20, 10);
             child_surface.add_pending_child(grandchild);
@@ -5326,7 +5338,10 @@ mod surface_tree_render_tests {
                 .get_mut(grandchild)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            grandchild_surface.assign_subsurface(WlSubsurfaceId::from(22), child);
+            grandchild_surface.assign_subsurface(
+                WlSubsurfaceId::from(22),
+                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(2), child),
+            );
             grandchild_surface.set_subsurface_position(11, 13);
             grandchild_surface.test_map(ObjectId::from(112usize), 3, 4, 8, 6);
         }
@@ -5372,7 +5387,10 @@ mod surface_tree_render_tests {
                 .get_mut(child)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_surface.assign_subsurface(WlSubsurfaceId::from(81), root);
+            child_surface.assign_subsurface(
+                WlSubsurfaceId::from(81),
+                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
+            );
             child_surface.set_subsurface_position(4, 5);
             child_surface.test_map(ObjectId::from(131usize), 0, 0, 8, 9);
         }

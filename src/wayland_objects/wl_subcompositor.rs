@@ -71,24 +71,8 @@ impl Object for WlSubcompositor {
         match client.parse::<Self>(req).unwrap() {
             Destroy => self.delete_self(client, state, dispatcher),
             GetSubsurface { id, surface, parent } => {
-                let Some(surface) = client.resolve(surface, state) else {
-                    client.send_protocol_error(
-                        dispatcher,
-                        self.id.into(),
-                        wl_subcompositor::Error::BadSurface as u32,
-                        "get_subsurface surface must be a live wl_surface",
-                    );
-                    return Ok(());
-                };
-                let Some(parent) = client.resolve(parent, state) else {
-                    client.send_protocol_error(
-                        dispatcher,
-                        self.id.into(),
-                        wl_subcompositor::Error::BadParent as u32,
-                        "get_subsurface parent must be a live wl_surface",
-                    );
-                    return Ok(());
-                };
+                let surface = client.resolve_or_disconnect(surface, state, dispatcher)?;
+                let parent = client.resolve_or_disconnect(parent, state, dispatcher)?;
 
                 if surface.object_id() == parent.object_id() {
                     client.send_protocol_error(
@@ -111,24 +95,7 @@ impl Object for WlSubcompositor {
                         );
                         return Ok(());
                     }
-                }
-
-                {
-                    let Some(surface_ref) = surface.try_ref(state) else {
-                        let message = if state.objects.contains(surface.object_id()) {
-                            "get_subsurface surface is not a wl_surface"
-                        } else {
-                            "get_subsurface surface disappeared during validation"
-                        };
-                        client.send_protocol_error(
-                            dispatcher,
-                            self.id.into(),
-                            wl_subcompositor::Error::BadSurface as u32,
-                            message,
-                        );
-                        return Ok(());
-                    };
-                    if surface_ref.is_ancestor_of(surface.object_id(), state, parent.object_id()) {
+                    if surface_ref.is_ancestor_of(surface, state, parent) {
                         client.send_protocol_error(
                             dispatcher,
                             self.id.into(),
@@ -143,15 +110,11 @@ impl Object for WlSubcompositor {
                 state.unregister_root_surface(surface.object_id());
 
                 {
-                    let mut surface_ref = surface
-                        .try_grab(state)
-                        .expect("resolved wl_surface vanished");
-                    surface_ref.assign_subsurface(id, parent.object_id());
+                    let surface_ref = surface.ref_mut(state);
+                    surface_ref.assign_subsurface(id, parent);
                 }
                 {
-                    let mut parent_ref = parent
-                        .try_grab(state)
-                        .expect("resolved wl_surface vanished");
+                    let parent_ref = parent.ref_mut(state);
                     parent_ref.add_pending_child(surface.object_id());
                 }
             }
