@@ -4918,11 +4918,11 @@ mod presentation_timing_tests {
         let request = build_surface_cursor_plane_request(
             &state,
             &CursorSurface {
-                surface: (
+                surface: crate::clients::Resolved::new(
                     ClientId::from_raw(1),
-                    crate::clients::Resolved::new(WlSurfaceId::from(2), surface_object_id),
-                )
-                    .into(),
+                    WlSurfaceId::from(2),
+                    surface_object_id,
+                ),
                 hotspot_x: 3,
                 hotspot_y: 2,
             },
@@ -4967,11 +4967,11 @@ mod presentation_timing_tests {
         let request = build_surface_cursor_plane_request(
             &state,
             &CursorSurface {
-                surface: (
+                surface: crate::clients::Resolved::new(
                     ClientId::from_raw(1),
-                    crate::clients::Resolved::new(WlSurfaceId::from(10), surface_object_id),
-                )
-                    .into(),
+                    WlSurfaceId::from(10),
+                    surface_object_id,
+                ),
                 hotspot_x: 0,
                 hotspot_y: 0,
             },
@@ -5382,8 +5382,7 @@ mod surface_tree_render_tests {
         }
 
         state.seat.set_cursor_surface(
-            (ClientId::from_raw(1), crate::clients::Resolved::new(WlSurfaceId::from(1), root))
-                .into(),
+            crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
             3,
             4,
         );

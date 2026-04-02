@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, ClientObjectId, RawRequest, Resolved},
+    clients::{Client, ClientDispatcher, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_data_device, WaylandId, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlSeatId,
@@ -170,7 +170,7 @@ fn set_selection(
             // selection operations. wlroots and Smithay are intentionally permissive
             // here, so we keep the source usable instead of disconnecting.
             source_object.set_used(SourceUse::Selection);
-            Some(SelectionSourceState { source: ClientObjectId::from((client, &source)) })
+            Some(SelectionSourceState { source })
         }
     };
 
@@ -250,9 +250,7 @@ fn start_drag(
     let client_id = client.client_id();
     state.seat.set_active_drag(DragState {
         source: source
-            .map(|source| DragSource::DataSource {
-                source: ClientObjectId::from((client, &source)),
-            })
+            .map(|source| DragSource::DataSource { source })
             .unwrap_or(DragSource::None { initiator_client_id: client_id }),
         origin_surface_id: origin.wayland_id(),
         icon_surface_object_id: icon.map(Resolved::object_id),
@@ -274,10 +272,7 @@ mod tests {
     use {
         super::{set_selection, start_drag, WlDataDevice},
         crate::{
-            clients::{
-                Client, ClientAction, ClientId, ClientObjectId, DataSourceClientEvent, RawEvent,
-                Resolved,
-            },
+            clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent, Resolved},
             egl::EGL,
             globals::Globals,
             object::Object,
@@ -443,7 +438,7 @@ mod tests {
                 offer_id,
                 2,
                 DataOfferRole::Drag,
-                Some((source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into()),
+                Some(Resolved::new(source_client_id, source_id, ObjectId::from(0usize))),
             ),
         );
 
@@ -452,7 +447,7 @@ mod tests {
             .register_data_device(client.client_id(), data_device_id);
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
-                source: (source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into(),
+                source: Resolved::new(source_client_id, source_id, ObjectId::from(0usize)),
             },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,

@@ -139,10 +139,7 @@ impl Object for WlSubcompositor {
                     }
                 }
 
-                client.insert_object(
-                    state,
-                    WlSubsurface::new(id, surface.with_client(client), parent.with_client(client)),
-                );
+                client.insert_object(state, WlSubsurface::new(id, surface, parent));
                 state.unregister_root_surface(surface.object_id());
 
                 {

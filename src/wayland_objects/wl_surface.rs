@@ -2995,7 +2995,7 @@ mod tests {
         let surface_id = WlSurfaceId::from(5);
 
         assert!(state.seat.set_cursor_surface(
-            (client.client_id(), crate::clients::Resolved::new(surface_id, object_id)).into(),
+            crate::clients::Resolved::new(client.client_id(), surface_id, object_id),
             1,
             2,
         ));

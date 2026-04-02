@@ -1,7 +1,5 @@
 use crate::{
-    clients::{
-        Client, ClientAction, ClientDispatcher, ClientObjectId, EventWriter, RawRequest, Resolved,
-    },
+    clients::{Client, ClientAction, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
     protocol_generated::{wl_data_device_manager, wl_data_source, WaylandId, WlDataSourceId},
     seat,
@@ -132,7 +130,7 @@ impl Object for WlDataSource {
                 }
             }
             Destroy => {
-                destroy_source(client, state, dispatcher, self.id, self.client_id);
+                destroy_source(client, state, dispatcher, self.id);
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
             SetActions { dnd_actions } => {
@@ -169,7 +167,7 @@ impl Object for WlDataSource {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        destroy_source(client, state, dispatcher, self.id, self.client_id);
+        destroy_source(client, state, dispatcher, self.id);
     }
 }
 
@@ -178,11 +176,8 @@ fn destroy_source(
     state: &mut State,
     dispatcher: &mut ClientDispatcher,
     source_id: WlDataSourceId,
-    owner_client_id: crate::clients::ClientId,
 ) -> RequestResult {
-    let source = client
-        .resolve_or_disconnect(source_id, state, dispatcher)?
-        .with_client_id(owner_client_id);
+    let source = client.resolve_or_disconnect(source_id, state, dispatcher)?;
 
     let offer_ids = state
         .objects
@@ -230,9 +225,7 @@ mod tests {
     use {
         super::{destroy_source, WlDataSource},
         crate::{
-            clients::{
-                Client, ClientAction, ClientId, ClientObjectId, DataSourceClientEvent, Resolved,
-            },
+            clients::{Client, ClientAction, ClientId, DataSourceClientEvent, Resolved},
             egl::EGL,
             globals::Globals,
             protocol_generated::WlDataSourceId,
@@ -303,14 +296,14 @@ mod tests {
         }
         state.seat.replace_selection_source(
             Some(SelectionSourceState {
-                source: (owner_client_id, Resolved::new(source_id, source_object_id)).into(),
+                source: Resolved::new(owner_client_id, source_id, source_object_id),
             }),
             1,
         );
 
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = owner.test_dispatcher(&mut dispatcher);
-        destroy_source(&mut owner, &mut state, &mut client_dispatcher, source_id, owner_client_id);
+        destroy_source(&mut owner, &mut state, &mut client_dispatcher, source_id);
 
         assert!(state.seat.selection_source().is_none());
         assert!(dispatcher
@@ -331,7 +324,7 @@ mod tests {
 
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
-                source: (owner.client_id(), Resolved::new(source_id, source_object_id)).into(),
+                source: Resolved::new(owner.client_id(), source_id, source_object_id),
             },
             origin_surface_id: 20u32.into(),
             icon_surface_object_id: None,
@@ -342,7 +335,7 @@ mod tests {
 
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = owner.test_dispatcher(&mut dispatcher);
-        destroy_source(&mut owner, &mut state, &mut client_dispatcher, source_id, owner_client_id);
+        destroy_source(&mut owner, &mut state, &mut client_dispatcher, source_id);
 
         assert!(state.seat.active_drag().is_none());
         assert!(dispatcher

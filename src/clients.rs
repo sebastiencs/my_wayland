@@ -63,13 +63,18 @@ impl ClientId {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Resolved<K> {
+    client_id: ClientId,
     wayland_id: K,
     object_id: ObjectId,
 }
 
 impl<K> Resolved<K> {
-    pub fn new(wayland_id: K, object_id: ObjectId) -> Self {
-        Self { wayland_id, object_id }
+    pub fn new(client_id: ClientId, wayland_id: K, object_id: ObjectId) -> Self {
+        Self { client_id, wayland_id, object_id }
+    }
+
+    pub fn client_id(self) -> ClientId {
+        self.client_id
     }
 
     pub fn object_id(self) -> ObjectId {
@@ -81,73 +86,6 @@ impl<K> Resolved<K> {
         K: Copy,
     {
         self.wayland_id
-    }
-
-    pub fn with_client(self, client: &Client) -> ClientObjectId<K> {
-        ClientObjectId::new(client.client_id(), self)
-    }
-
-    pub fn with_client_id(self, client_id: ClientId) -> ClientObjectId<K> {
-        ClientObjectId::new(client_id, self)
-    }
-}
-
-/// A durable client-scoped object reference.
-///
-/// Unlike bare `Resolved<K>`, this also records which client the Wayland id
-/// belongs to so it can be stored or queued and then re-resolved later.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct ClientObjectId<K> {
-    client_id: ClientId,
-    resolved: Resolved<K>,
-}
-
-impl<K: Copy> From<(&Client, &Resolved<K>)> for ClientObjectId<K> {
-    fn from((client, id): (&Client, &Resolved<K>)) -> Self {
-        ClientObjectId::new(client.client_id(), *id)
-    }
-}
-impl<K: Copy> From<(&Client, Resolved<K>)> for ClientObjectId<K> {
-    fn from((client, id): (&Client, Resolved<K>)) -> Self {
-        ClientObjectId::new(client.client_id(), id)
-    }
-}
-impl<K> From<(ClientId, Resolved<K>)> for ClientObjectId<K> {
-    fn from((client_id, resolved): (ClientId, Resolved<K>)) -> Self {
-        ClientObjectId::new(client_id, resolved)
-    }
-}
-impl<K: Copy> From<(&mut Client, &Resolved<K>)> for ClientObjectId<K> {
-    fn from((client, id): (&mut Client, &Resolved<K>)) -> Self {
-        ClientObjectId::new(client.client_id(), *id)
-    }
-}
-
-impl<K> core::ops::Deref for ClientObjectId<K> {
-    type Target = Resolved<K>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.resolved
-    }
-}
-
-impl<K> ClientObjectId<K> {
-    fn new(client_id: ClientId, resolved: Resolved<K>) -> Self {
-        Self { client_id, resolved }
-    }
-
-    pub fn client_id(self) -> ClientId {
-        self.client_id
-    }
-}
-
-impl<K> ClientObjectId<K>
-where
-    K: Copy + Into<WaylandId> + IdToObject,
-    K::Object: Object,
-{
-    pub fn resolve(self, client: &Client) -> Option<Resolved<K>> {
-        (self.client_id == client.id).then_some(self.resolved)
     }
 }
 
@@ -422,7 +360,7 @@ pub enum ClientAction {
         surface: WlSurfaceId,
         x: f32,
         y: f32,
-        source: Option<ClientObjectId<WlDataSourceId>>,
+        source: Option<Resolved<WlDataSourceId>>,
     },
     DataDeviceDragLeave,
     DataDeviceDragMotion {
@@ -432,7 +370,7 @@ pub enum ClientAction {
     },
     DataDeviceDragDrop,
     DataSourceEvent {
-        source: ClientObjectId<WlDataSourceId>,
+        source: Resolved<WlDataSourceId>,
         event: DataSourceClientEvent,
     },
     RegistryGlobalAdded {
@@ -611,7 +549,11 @@ impl Client {
         let wayland_id: WaylandId = id.into();
         let entry = self.objects.get(&wayland_id)?;
         (entry.type_id == TypeId::of::<K::Object>() && state.objects.contains(entry.object_id))
-            .then_some(Resolved { wayland_id: id, object_id: entry.object_id })
+            .then_some(Resolved {
+                client_id: self.id,
+                wayland_id: id,
+                object_id: entry.object_id,
+            })
     }
 
     pub fn resolve_or_disconnect<K>(
@@ -967,7 +909,7 @@ impl Client {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
         device_id: crate::protocol_generated::WlDataDeviceId,
-        source: ClientObjectId<WlDataSourceId>,
+        source: Resolved<WlDataSourceId>,
         role: DataOfferRole,
     ) -> Option<WlDataOfferId> {
         if !self.contains_object(device_id, state) {
@@ -1076,7 +1018,7 @@ impl Client {
         surface: WlSurfaceId,
         x: f32,
         y: f32,
-        source: Option<ClientObjectId<WlDataSourceId>>,
+        source: Option<Resolved<WlDataSourceId>>,
     ) {
         let has_legacy_device = state
             .seat
@@ -1207,7 +1149,7 @@ impl Client {
                 .target
                 .is_some_and(|target| target.client_id == self.id)
             {
-                if let Some(source) = drag.source.client_object() {
+                if let Some(source) = drag.source.resolved() {
                     if drag.negotiation.chosen_action == 0 {
                         return;
                     }
@@ -1229,7 +1171,7 @@ impl Client {
         &mut self,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        source: ClientObjectId<WlDataSourceId>,
+        source: Resolved<WlDataSourceId>,
         event: DataSourceClientEvent,
     ) {
         if !source.exists(state) {

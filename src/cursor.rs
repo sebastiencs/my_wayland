@@ -7,7 +7,7 @@ use std::{
 use xcursor::{parser, CursorTheme};
 
 use crate::{
-    clients::{ClientId, ClientObjectId},
+    clients::{ClientId, Resolved},
     protocol_generated::WlSurfaceId,
     state::ObjectId,
 };
@@ -35,7 +35,7 @@ pub struct CursorImageContentKey {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CursorSurface {
-    pub surface: ClientObjectId<WlSurfaceId>,
+    pub surface: Resolved<WlSurfaceId>,
     pub hotspot_x: i32,
     pub hotspot_y: i32,
 }
@@ -221,7 +221,7 @@ impl CursorState {
 
     pub fn set_surface_cursor(
         &mut self,
-        surface: ClientObjectId<WlSurfaceId>,
+        surface: Resolved<WlSurfaceId>,
         hotspot_x: i32,
         hotspot_y: i32,
     ) -> bool {
@@ -474,20 +474,20 @@ mod tests {
     fn surface_cursor_replaces_previous_source() {
         let mut cursor = CursorState::default();
         assert!(cursor.set_surface_cursor(
-            (
+            crate::clients::Resolved::new(
                 ClientId::from_raw(1),
-                crate::clients::Resolved::new(WlSurfaceId::from(5), ObjectId::from(9usize)),
-            )
-                .into(),
+                WlSurfaceId::from(5),
+                ObjectId::from(9usize),
+            ),
             3,
             4,
         ));
         assert!(!cursor.set_surface_cursor(
-            (
+            crate::clients::Resolved::new(
                 ClientId::from_raw(1),
-                crate::clients::Resolved::new(WlSurfaceId::from(5), ObjectId::from(9usize)),
-            )
-                .into(),
+                WlSurfaceId::from(5),
+                ObjectId::from(9usize),
+            ),
             3,
             4,
         ));
@@ -505,11 +505,11 @@ mod tests {
     fn clear_surface_only_clears_matching_surface() {
         let mut cursor = CursorState::default();
         cursor.set_surface_cursor(
-            (
+            crate::clients::Resolved::new(
                 ClientId::from_raw(2),
-                crate::clients::Resolved::new(WlSurfaceId::from(7), ObjectId::from(11usize)),
-            )
-                .into(),
+                WlSurfaceId::from(7),
+                ObjectId::from(11usize),
+            ),
             0,
             0,
         );
@@ -522,11 +522,11 @@ mod tests {
     fn applying_surface_offset_updates_cursor_hotspot() {
         let mut cursor = CursorState::default();
         cursor.set_surface_cursor(
-            (
+            crate::clients::Resolved::new(
                 ClientId::from_raw(3),
-                crate::clients::Resolved::new(WlSurfaceId::from(9), ObjectId::from(14usize)),
-            )
-                .into(),
+                WlSurfaceId::from(9),
+                ObjectId::from(14usize),
+            ),
             12,
             15,
         );
@@ -640,11 +640,11 @@ mod tests {
     fn compositor_default_replaces_client_owned_cursor() {
         let mut cursor = CursorState::default();
         assert!(cursor.set_surface_cursor(
-            (
+            crate::clients::Resolved::new(
                 ClientId::from_raw(4),
-                crate::clients::Resolved::new(WlSurfaceId::from(12), ObjectId::from(18usize)),
-            )
-                .into(),
+                WlSurfaceId::from(12),
+                ObjectId::from(18usize),
+            ),
             2,
             3,
         ));

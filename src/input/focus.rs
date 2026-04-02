@@ -278,7 +278,7 @@ pub(crate) fn refresh_drag_focus(
         if let Some(old_target) = old_target {
             dispatcher.dispatch_to(old_target.client_id, ClientAction::DataDeviceDragLeave);
         }
-        if let Some(source) = active_drag.source.client_object() {
+        if let Some(source) = active_drag.source.resolved() {
             dispatcher.dispatch_to(
                 source.client_id(),
                 ClientAction::DataSourceEvent {
@@ -305,7 +305,7 @@ pub(crate) fn refresh_drag_focus(
                     surface: new_target.surface_id,
                     x,
                     y,
-                    source: active_drag.source.client_object(),
+                    source: active_drag.source.resolved(),
                 },
             );
             if send_motion {

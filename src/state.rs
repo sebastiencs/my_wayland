@@ -1,5 +1,5 @@
 use crate::{
-    clients::{ClientId, ClientObjectId},
+    clients::{ClientId, Resolved},
     config::{DecorationInsets, OutputScaleSetting, RuntimeConfig, XdgDecorationModePolicy},
     drm::Drm,
     egl::EGL,
@@ -1040,13 +1040,13 @@ pub enum DataOfferRole {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelectionSourceState {
-    pub source: ClientObjectId<WlDataSourceId>,
+    pub source: Resolved<WlDataSourceId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DragSource {
     None { initiator_client_id: ClientId },
-    DataSource { source: ClientObjectId<WlDataSourceId> },
+    DataSource { source: Resolved<WlDataSourceId> },
 }
 
 impl DragSource {
@@ -1057,7 +1057,7 @@ impl DragSource {
         }
     }
 
-    pub fn client_object(self) -> Option<ClientObjectId<WlDataSourceId>> {
+    pub fn resolved(self) -> Option<Resolved<WlDataSourceId>> {
         match self {
             Self::None { .. } => None,
             Self::DataSource { source } => Some(source),

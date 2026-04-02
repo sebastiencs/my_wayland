@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, ClientObjectId, RawRequest},
+    clients::{Client, ClientDispatcher, RawRequest, Resolved},
     drm::{schedule_active_output, schedule_outputs_for_rect},
     object::{Object, Parser},
     protocol_generated::{wl_subsurface, WaylandId, WlSubsurfaceId, WlSurfaceId},
@@ -10,15 +10,15 @@ use crate::{
 #[derive(Debug)]
 pub struct WlSubsurface {
     id: WlSubsurfaceId,
-    surface: ClientObjectId<WlSurfaceId>,
-    parent: ClientObjectId<WlSurfaceId>,
+    surface: Resolved<WlSurfaceId>,
+    parent: Resolved<WlSurfaceId>,
 }
 
 impl WlSubsurface {
     pub fn new(
         id: WlSubsurfaceId,
-        surface: ClientObjectId<WlSurfaceId>,
-        parent: ClientObjectId<WlSurfaceId>,
+        surface: Resolved<WlSurfaceId>,
+        parent: Resolved<WlSurfaceId>,
     ) -> Self {
         Self { id, surface, parent }
     }
@@ -270,8 +270,8 @@ mod tests {
             &mut state,
             WlSubsurface::new(
                 WlSubsurfaceId::from(30),
-                (client.client_id(), Resolved::new(WlSurfaceId::from(11), child_object_id)).into(),
-                (client.client_id(), Resolved::new(WlSurfaceId::from(10), parent_object_id)).into(),
+                Resolved::new(client.client_id(), WlSurfaceId::from(11), child_object_id),
+                Resolved::new(client.client_id(), WlSurfaceId::from(10), parent_object_id),
             ),
         );
 

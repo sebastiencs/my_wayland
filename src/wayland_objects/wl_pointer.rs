@@ -97,11 +97,7 @@ impl Object for WlPointer {
                                 return Ok(());
                             }
                         }
-                        state.seat.set_cursor_surface(
-                            surface.with_client(client),
-                            hotspot_x,
-                            hotspot_y,
-                        )
+                        state.seat.set_cursor_surface(surface, hotspot_x, hotspot_y)
                     }
                 };
                 if cursor_changed {

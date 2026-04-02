@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    clients::{Client, ClientAction, ClientId, ClientObjectId, Resolved},
+    clients::{Client, ClientAction, ClientId, Resolved},
     config,
     cursor::{CursorSourceRef, CursorState},
     drm::schedule_outputs_for_points,
@@ -652,7 +652,7 @@ impl SeatState {
 
     pub fn set_cursor_surface(
         &mut self,
-        surface: ClientObjectId<WlSurfaceId>,
+        surface: Resolved<WlSurfaceId>,
         hotspot_x: i32,
         hotspot_y: i32,
     ) -> bool {
@@ -1178,7 +1178,7 @@ pub fn finish_active_drag(state: &mut State, dispatcher: &mut Dispatcher) {
 pub fn cancel_active_drag(
     state: &mut State,
     dispatcher: &mut Dispatcher,
-    source: Option<ClientObjectId<WlDataSourceId>>,
+    source: Option<Resolved<WlDataSourceId>>,
 ) {
     let Some(drag) = state.seat.clear_active_drag() else {
         return;
@@ -1194,7 +1194,7 @@ pub fn cancel_active_drag(
     if let Some(target) = drag.target {
         dispatcher.dispatch_to(target.client_id, ClientAction::DataDeviceDragLeave);
     }
-    let source = source.or(drag.source.client_object());
+    let source = source.or(drag.source.resolved());
     if let Some(source) = source {
         dispatcher.dispatch_to(
             source.client_id(),
@@ -1311,7 +1311,7 @@ fn complete_drag_drop(state: &mut State, dispatcher: &mut Dispatcher) {
         let target = drag.target.expect("validated active drag target");
         state.seat.set_active_drag_phase(DragPhase::DropSent);
         dispatcher.dispatch_to(target.client_id, ClientAction::DataDeviceDragDrop);
-        if let Some(source) = drag.source.client_object() {
+        if let Some(source) = drag.source.resolved() {
             dispatcher.dispatch_to(
                 source.client_id(),
                 ClientAction::DataSourceEvent {
@@ -2272,11 +2272,11 @@ mod xdg_seat_tests {
         state.keyboard.update_key(125, true);
         state.seat.pointer_pos = (70.0, 80.0);
         assert!(state.seat.set_cursor_surface(
-            (
+            crate::clients::Resolved::new(
                 client.client_id(),
-                crate::clients::Resolved::new(WlSurfaceId::from(999), ObjectId::from(998usize)),
-            )
-                .into(),
+                WlSurfaceId::from(999),
+                ObjectId::from(998usize),
+            ),
             2,
             3,
         ));
@@ -3621,11 +3621,11 @@ mod xdg_seat_tests {
     fn no_focus_fallback_installs_default_cursor() {
         let mut seat = SeatState::default();
         assert!(seat.set_cursor_surface(
-            (
+            crate::clients::Resolved::new(
                 ClientId::from_raw(7),
-                crate::clients::Resolved::new(WlSurfaceId::from(50), ObjectId::from(80usize)),
-            )
-                .into(),
+                WlSurfaceId::from(50),
+                ObjectId::from(80usize),
+            ),
             4,
             5,
         ));
@@ -3649,11 +3649,11 @@ mod xdg_seat_tests {
         let mut seat = SeatState::default();
         seat.test_install_default_cursor();
         assert!(seat.set_cursor_surface(
-            (
+            crate::clients::Resolved::new(
                 ClientId::from_raw(7),
-                crate::clients::Resolved::new(WlSurfaceId::from(50), ObjectId::from(80usize)),
-            )
-                .into(),
+                WlSurfaceId::from(50),
+                ObjectId::from(80usize),
+            ),
             4,
             5,
         ));
@@ -3672,11 +3672,11 @@ mod xdg_seat_tests {
     fn client_cursor_stays_visible_without_default_fallback() {
         let mut seat = SeatState::default();
         assert!(seat.set_cursor_surface(
-            (
+            crate::clients::Resolved::new(
                 ClientId::from_raw(7),
-                crate::clients::Resolved::new(WlSurfaceId::from(50), ObjectId::from(80usize)),
-            )
-                .into(),
+                WlSurfaceId::from(50),
+                ObjectId::from(80usize),
+            ),
             4,
             5,
         ));
@@ -3775,11 +3775,11 @@ mod xdg_seat_tests {
 
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
-                source: (
+                source: crate::clients::Resolved::new(
                     source_client_id,
-                    crate::clients::Resolved::new(source_id, ObjectId::from(0usize)),
-                )
-                    .into(),
+                    source_id,
+                    ObjectId::from(0usize),
+                ),
             },
             origin_surface_id: WlSurfaceId::from(20),
             icon_surface_object_id: None,

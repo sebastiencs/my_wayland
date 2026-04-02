@@ -2,8 +2,8 @@ use std::os::fd::FromRawFd;
 
 use crate::{
     clients::{
-        Client, ClientAction, ClientDispatcher, ClientId, ClientObjectId, DataSourceClientEvent,
-        EventWriter, RawRequest,
+        Client, ClientAction, ClientDispatcher, ClientId, DataSourceClientEvent, EventWriter,
+        RawRequest, Resolved,
     },
     object::{Object, Parser},
     protocol_generated::{
@@ -19,7 +19,7 @@ pub struct WlDataOffer {
     id: WlDataOfferId,
     version: u32,
     role: DataOfferRole,
-    source: Option<ClientObjectId<WlDataSourceId>>,
+    source: Option<Resolved<WlDataSourceId>>,
     finished: bool,
 }
 
@@ -28,7 +28,7 @@ impl WlDataOffer {
         id: WlDataOfferId,
         version: u32,
         role: DataOfferRole,
-        source: Option<ClientObjectId<WlDataSourceId>>,
+        source: Option<Resolved<WlDataSourceId>>,
     ) -> Self {
         Self { id, version, role, source, finished: false }
     }
@@ -41,7 +41,7 @@ impl WlDataOffer {
         self.source = None;
     }
 
-    fn source(&self) -> Option<ClientObjectId<WlDataSourceId>> {
+    fn source(&self) -> Option<Resolved<WlDataSourceId>> {
         self.source
     }
 
@@ -405,8 +405,8 @@ mod tests {
         super::WlDataOffer,
         crate::{
             clients::{
-                Client, ClientAction, ClientId, ClientManagerAction, ClientObjectId,
-                DataSourceClientEvent, RawEvent, Resolved,
+                Client, ClientAction, ClientId, ClientManagerAction, DataSourceClientEvent,
+                RawEvent, Resolved,
             },
             egl::EGL,
             globals::Globals,
@@ -523,13 +523,13 @@ mod tests {
                 offer_id,
                 2,
                 DataOfferRole::Drag,
-                Some((source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into()),
+                Some(Resolved::new(source_client_id, source_id, ObjectId::from(0usize))),
             ),
         );
 
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
-                source: (source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into(),
+                source: Resolved::new(source_client_id, source_id, ObjectId::from(0usize)),
             },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
@@ -643,13 +643,11 @@ mod tests {
                 offer_a_id,
                 3,
                 DataOfferRole::Drag,
-                Some(
-                    (
-                        source_client_id,
-                        Resolved::new(WlDataSourceId::from(10), ObjectId::from(0usize)),
-                    )
-                        .into(),
-                ),
+                Some(Resolved::new(
+                    source_client_id,
+                    WlDataSourceId::from(10),
+                    ObjectId::from(0usize),
+                )),
             ),
         );
         let _ = target.insert_object(
@@ -658,22 +656,20 @@ mod tests {
                 offer_b_id,
                 3,
                 DataOfferRole::Drag,
-                Some(
-                    (
-                        source_client_id,
-                        Resolved::new(WlDataSourceId::from(10), ObjectId::from(0usize)),
-                    )
-                        .into(),
-                ),
+                Some(Resolved::new(
+                    source_client_id,
+                    WlDataSourceId::from(10),
+                    ObjectId::from(0usize),
+                )),
             ),
         );
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
-                source: (
+                source: Resolved::new(
                     source_client_id,
-                    Resolved::new(WlDataSourceId::from(10), ObjectId::from(0usize)),
-                )
-                    .into(),
+                    WlDataSourceId::from(10),
+                    ObjectId::from(0usize),
+                ),
             },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
@@ -772,16 +768,16 @@ mod tests {
                 selection_offer_id,
                 3,
                 DataOfferRole::Selection,
-                Some((client.client_id(), Resolved::new(source_id, source_object_id)).into()),
+                Some(Resolved::new(client.client_id(), source_id, source_object_id)),
             ),
         );
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
-                source: (
+                source: Resolved::new(
                     ClientId::from_raw(9),
-                    Resolved::new(WlDataSourceId::from(99), ObjectId::from(0usize)),
-                )
-                    .into(),
+                    WlDataSourceId::from(99),
+                    ObjectId::from(0usize),
+                ),
             },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
@@ -839,17 +835,13 @@ mod tests {
                 offer_id,
                 3,
                 DataOfferRole::Drag,
-                Some(
-                    (ClientId::from_raw(9), Resolved::new(source_id, ObjectId::from(0usize)))
-                        .into(),
-                ),
+                Some(Resolved::new(ClientId::from_raw(9), source_id, ObjectId::from(0usize))),
             ),
         );
 
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
-                source: (ClientId::from_raw(9), Resolved::new(source_id, ObjectId::from(0usize)))
-                    .into(),
+                source: Resolved::new(ClientId::from_raw(9), source_id, ObjectId::from(0usize)),
             },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
@@ -925,12 +917,12 @@ mod tests {
                 offer_id,
                 3,
                 DataOfferRole::Drag,
-                Some((source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into()),
+                Some(Resolved::new(source_client_id, source_id, ObjectId::from(0usize))),
             ),
         );
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
-                source: (source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into(),
+                source: Resolved::new(source_client_id, source_id, ObjectId::from(0usize)),
             },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
@@ -991,12 +983,12 @@ mod tests {
                 offer_id,
                 3,
                 DataOfferRole::Drag,
-                Some((source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into()),
+                Some(Resolved::new(source_client_id, source_id, ObjectId::from(0usize))),
             ),
         );
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
-                source: (source_client_id, Resolved::new(source_id, ObjectId::from(0usize))).into(),
+                source: Resolved::new(source_client_id, source_id, ObjectId::from(0usize)),
             },
             origin_surface_id: 30u32.into(),
             icon_surface_object_id: None,
