@@ -70,15 +70,7 @@ impl Object for XdgActivationV1 {
                 client.insert_object(state, XdgActivationTokenV1::new(id));
             }
             Activate { token, surface } => {
-                if !client.object_is(surface, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "xdg_activation_v1.activate requires a live wl_surface",
-                    );
-                    return Ok(());
-                }
+                let surface = client.resolve_or_disconnect(surface, state, dispatcher)?;
                 let Some(_) = state.activation_tokens.consume(&token) else {
                     log::debug!(
                         "ignoring activation request with unknown or expired token from client {:?}",

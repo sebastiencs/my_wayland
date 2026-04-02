@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientAction, ClientId},
+    clients::{Client, ClientAction, ClientId, Resolved},
     protocol_generated::{WlSeatId, WlSurfaceId},
     runner::Dispatcher,
     seat::{dispatch_client_event, SeatClientEvent},
@@ -65,23 +65,11 @@ pub(crate) fn set_keyboard_focus_from_surface(
     set_keyboard_focus(state, dispatcher, new_focus);
 }
 
-pub(crate) fn surface_focus_for_wayland_id(
-    state: &State,
-    surface_id: WlSurfaceId,
-) -> Option<SurfaceFocus> {
-    let object_id = surface_object_id_for_wayland_id(state, surface_id)?;
-    let surface = state.objects.try_ref_object::<WlSurface>(object_id)?;
-    Some(SurfaceFocus {
-        client_id: surface.client_id(),
-        surface_id: surface.surface_id(),
-    })
-}
-
 pub(crate) fn resolve_activation_target(
     state: &State,
-    surface_id: WlSurfaceId,
+    surface: Resolved<WlSurfaceId>,
 ) -> Option<(ObjectId, SurfaceFocus)> {
-    let mut current_object_id = surface_object_id_for_wayland_id(state, surface_id)?;
+    let mut current_object_id = surface.object_id();
     loop {
         let surface = state
             .objects
@@ -344,7 +332,8 @@ pub(crate) fn refresh_drag_focus(
 
 pub(crate) fn popup_keyboard_focus(state: &State) -> Option<SurfaceFocus> {
     let surface_id = state.seat.popup_keyboard_surface()?;
-    surface_focus_for_wayland_id(state, surface_id)
+    let client_id = state.seat.popup_grab_client()?;
+    Some(SurfaceFocus { client_id, surface_id })
 }
 
 fn local_coords(rect: SurfaceRect, pointer_pos: (f64, f64)) -> (f32, f32) {
@@ -382,15 +371,15 @@ fn normalize_keyboard_focus_with_snapshot(
     snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
 ) -> Option<SurfaceFocus> {
     let requested_focus = requested_focus.and_then(|focus| {
-        let surface_object_id = surface_object_id_for_wayland_id(state, focus.surface_id)?;
+        let surface_object_id = surface_object_id_for_focus(state, focus)?;
         match layer_surface_keyboard_focus_with_snapshot(state, surface_object_id, snapshot) {
             Some(LayerKeyboardFocus::None) => None,
             _ => Some(focus),
         }
     });
 
-    if let Some(popup_surface_id) = state.seat.popup_keyboard_surface() {
-        if requested_focus.is_some_and(|focus| focus.surface_id == popup_surface_id) {
+    if let Some(popup_focus) = popup_keyboard_focus(state) {
+        if requested_focus == Some(popup_focus) {
             return requested_focus;
         }
     }
@@ -426,12 +415,12 @@ fn topmost_exclusive_layer_focus_with_snapshot(
     None
 }
 
-fn surface_object_id_for_wayland_id(state: &State, surface_id: WlSurfaceId) -> Option<ObjectId> {
+fn surface_object_id_for_focus(state: &State, focus: SurfaceFocus) -> Option<ObjectId> {
     for (object_id, object) in state.objects.iter() {
         let Some(surface) = object.downcast_ref::<WlSurface>() else {
             continue;
         };
-        if surface.surface_id() == surface_id {
+        if surface.client_id() == focus.client_id && surface.surface_id() == focus.surface_id {
             return Some(object_id);
         }
     }

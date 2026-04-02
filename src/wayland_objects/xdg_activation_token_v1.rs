@@ -65,15 +65,7 @@ impl Object for XdgActivationTokenV1 {
                     self.already_used(dispatcher);
                     return Ok(());
                 }
-                if !client.object_is(seat, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "xdg_activation_token_v1.set_serial requires a live wl_seat",
-                    );
-                    return Ok(());
-                }
+                client.resolve_or_disconnect(seat, state, dispatcher)?;
                 self.serial = Some(serial);
                 self.seat_id = Some(seat);
             }
@@ -89,15 +81,7 @@ impl Object for XdgActivationTokenV1 {
                     self.already_used(dispatcher);
                     return Ok(());
                 }
-                if !client.object_is(surface, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "xdg_activation_token_v1.set_surface requires a live wl_surface",
-                    );
-                    return Ok(());
-                }
+                client.resolve_or_disconnect(surface, state, dispatcher)?;
                 self.surface_id = Some(surface);
             }
             Commit => {

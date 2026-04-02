@@ -93,6 +93,8 @@ impl<T: 'static> AsAny for T {
 pub trait Parser: Constants {
     type Request: 'static;
 
+    /// Decode the wire request only. Client-scoped object resolution happens in
+    /// request handlers after parsing, once `Client` and `State` are available.
     fn parse_request(req: RawRequest) -> Result<Self::Request, ParserError>;
 }
 

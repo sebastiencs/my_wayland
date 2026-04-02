@@ -18,7 +18,7 @@ use crate::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted, RingId},
     },
-    object::{IdToObject, Object, Parser, ParserError, PostAction},
+    object::{AbortRequest, IdToObject, Object, Parser, ParserError, PostAction},
     protocol_generated::{
         wl_display, Array, Constants, HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId,
         WlDataSourceId, WlOutputId, WlSurfaceId, WpPresentationFeedbackId, XdgPopupId,
@@ -57,6 +57,36 @@ pub struct ClientId(u64);
 impl ClientId {
     pub(crate) fn from_raw(raw: u64) -> Self {
         Self(raw)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Resolved<K> {
+    wayland_id: K,
+    object_id: ObjectId,
+}
+
+impl<K> Resolved<K> {
+    pub fn object_id(self) -> ObjectId {
+        self.object_id
+    }
+
+    pub fn wayland_id(self) -> K {
+        self.wayland_id
+    }
+}
+
+impl<K> Resolved<K>
+where
+    K: IdToObject,
+    K::Object: Object,
+{
+    pub fn try_ref<'a>(self, state: &'a State) -> Option<&'a K::Object> {
+        state.objects.try_ref_object::<K::Object>(self.object_id)
+    }
+
+    pub fn try_grab(self, state: &mut State) -> Option<GrabbedObject<K::Object>> {
+        state.objects.try_grab_object::<K::Object>(self.object_id)
     }
 }
 
@@ -466,6 +496,44 @@ impl Client {
         state.objects[obj_id].downcast_ref().unwrap()
     }
 
+    /// Resolve a client-visible Wayland id to a live compositor object of the
+    /// expected interface type.
+    pub fn resolve<K>(&self, id: K, state: &State) -> Option<Resolved<K>>
+    where
+        K: Copy + Into<WaylandId> + IdToObject,
+        K::Object: Object,
+    {
+        let wayland_id: WaylandId = id.into();
+        let entry = self.objects.get(&wayland_id)?;
+        (entry.type_id == TypeId::of::<K::Object>() && state.objects.contains(entry.object_id))
+            .then_some(Resolved { wayland_id: id, object_id: entry.object_id })
+    }
+
+    pub fn resolve_or_disconnect<K>(
+        &mut self,
+        id: K,
+        state: &State,
+        dispatcher: &mut ClientDispatcher,
+    ) -> Result<Resolved<K>, AbortRequest>
+    where
+        K: Copy + Into<WaylandId> + IdToObject,
+        K::Object: Object + Constants,
+    {
+        let Some(resolved) = self.resolve(id, state) else {
+            let requester_object_id = dispatcher
+                .requester_object_id
+                .expect("missing requester object id");
+            self.protocol_violation_disconnect(
+                dispatcher,
+                requester_object_id,
+                wl_display::Error::InvalidObject as u32,
+                format!("requires a live {}", K::Object::INTERFACE_NAME),
+            );
+            return Err(AbortRequest::InvalidObject);
+        };
+        Ok(resolved)
+    }
+
     /// Resolve a client-visible Wayland id to our internal `ObjectId` if the id
     /// is still live in both the per-client object map and `State::objects`.
     ///
@@ -500,14 +568,10 @@ impl Client {
     /// malformed ids with a protocol error instead of panicking in `get_object()`.
     pub fn object_is<K>(&self, id: K, state: &State) -> bool
     where
-        K: Into<WaylandId> + IdToObject,
+        K: Copy + Into<WaylandId> + IdToObject,
         K::Object: Object,
     {
-        let id: WaylandId = id.into();
-        let Some(entry) = self.objects.get(&id) else {
-            return false;
-        };
-        entry.type_id == TypeId::of::<K::Object>() && state.objects.contains(entry.object_id)
+        self.resolve(id, state).is_some()
     }
 
     pub fn grab_object<K>(&self, id: K, state: &mut State) -> GrabbedObject<K::Object>
@@ -1933,6 +1997,7 @@ pub struct ClientDispatcher<'a> {
     dispatcher: &'a mut Dispatcher,
     client_fd: RawFd,
     client_id: ClientId,
+    requester_object_id: Option<WaylandId>,
     command: Option<Rc<ProcessInfo>>,
     /// Deferred work to run after the current `Object::on` handler returns and its grabbed object
     /// is released (see `MsgReceived` in `Client::process`).
@@ -1947,6 +2012,7 @@ impl<'a> ClientDispatcher<'a> {
             dispatcher,
             client_fd: client.fd.as_raw_fd(),
             client_id: client.id,
+            requester_object_id: None,
             command,
             post_actions: VecDeque::new(),
         }
@@ -2212,6 +2278,7 @@ impl Model for Client {
                 );
             }
             MsgReceived { mut request } => {
+                let requester_object_id = request.object_id();
                 let Some(obj_id) = self
                     .objects
                     .get(&request.object_id())
@@ -2231,8 +2298,10 @@ impl Model for Client {
                     return Ok(());
                 };
 
+                assert!(dispatcher.requester_object_id.is_none());
                 let mut pending_fds = std::mem::take(&mut self.pending_fds);
                 request.fds = Some(&mut pending_fds);
+                dispatcher.requester_object_id = Some(requester_object_id);
 
                 let _ = {
                     let mut obj = state.objects.grab(obj_id);
@@ -2242,6 +2311,7 @@ impl Model for Client {
                     action.execute(self, state, &mut dispatcher);
                 }
 
+                dispatcher.requester_object_id = None;
                 self.pending_fds = pending_fds;
             }
             Close => {

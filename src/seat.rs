@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    clients::{Client, ClientAction, ClientId},
+    clients::{Client, ClientAction, ClientId, Resolved},
     config,
     cursor::{CursorSourceRef, CursorState},
     drm::schedule_outputs_for_points,
@@ -1103,18 +1103,11 @@ pub fn handle_keyboard_key(
     }
 }
 
-pub fn surface_focus_for_wayland_id(
-    state: &State,
-    surface_id: WlSurfaceId,
-) -> Option<SurfaceFocus> {
-    crate::input::surface_focus_for_wayland_id(state, surface_id)
-}
-
 pub fn resolve_activation_target(
     state: &State,
-    surface_id: WlSurfaceId,
+    surface: Resolved<WlSurfaceId>,
 ) -> Option<(ObjectId, SurfaceFocus)> {
-    crate::input::resolve_activation_target(state, surface_id)
+    crate::input::resolve_activation_target(state, surface)
 }
 
 pub fn validate_activation_serial(
