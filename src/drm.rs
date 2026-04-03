@@ -4739,6 +4739,7 @@ mod presentation_timing_tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -5159,6 +5160,7 @@ mod surface_tree_render_tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),

@@ -61,7 +61,7 @@ impl ClientId {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Resolved<K> {
     client_id: ClientId,
     wayland_id: K,
@@ -2917,6 +2917,7 @@ mod surface_output_refresh_tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),

@@ -747,7 +747,7 @@ pub struct Workspace {
     pub name: String,
     pub coordinates: Vec<u32>,
     pub group: Option<WorkspaceGroupId>,
-    pub root_surfaces: BTreeSet<ObjectId>,
+    pub root_surfaces: BTreeSet<Resolved<WlSurfaceId>>,
     pub layout: WorkspaceLayout,
 }
 
@@ -1119,7 +1119,8 @@ pub struct DragState {
 
 pub struct State {
     pub objects: Box<IndexMap<ObjectId, Box<dyn Object>>>,
-    pub root_surfaces: Vec<ObjectId>,
+    pub root_surfaces: Vec<Resolved<WlSurfaceId>>,
+    pub root_surface_resolved_by_object: BTreeMap<ObjectId, Resolved<WlSurfaceId>>,
     pub layer_surface_objects: BTreeMap<ZwlrLayerSurfaceV1Id, ObjectId>,
     pub inputs: IndexMap<InputId, Input>,
     pub drm: IndexMap<DrmId, Drm>,
@@ -1128,8 +1129,8 @@ pub struct State {
     pub workspace_groups: IndexMap<WorkspaceGroupId, WorkspaceGroup>,
     pub workspaces: IndexMap<WorkspaceId, Workspace>,
     pub output_workspace_groups: BTreeMap<OutputId, WorkspaceGroupId>,
-    pub root_surface_workspaces: BTreeMap<ObjectId, WorkspaceId>,
-    pub managed_root_surfaces: BTreeMap<ObjectId, ManagedRootSurfaceState>,
+    pub root_surface_workspaces: BTreeMap<Resolved<WlSurfaceId>, WorkspaceId>,
+    pub managed_root_surfaces: BTreeMap<Resolved<WlSurfaceId>, ManagedRootSurfaceState>,
     pub xdg_toplevel_roles: BTreeMap<(ClientId, XdgSurfaceId), ObjectId>,
     pub next_workspace_serial: u32,
     pub backend_syncobj_globals: BTreeMap<DrmId, GlobalName>,
@@ -1201,39 +1202,61 @@ impl State {
             .and_then(|group_id| self.active_workspace_for_group(group_id))
     }
 
+    pub fn resolved_root_surface(&self, object_id: ObjectId) -> Option<Resolved<WlSurfaceId>> {
+        self.root_surface_resolved_by_object
+            .get(&object_id)
+            .copied()
+    }
+
+    // Use this only when promoting a live wl_surface into root-surface state.
+    // Querying existing root-surface bookkeeping should use `resolved_root_surface()`
+    // so lookups stay limited to tracked roots and keep working while the object is grabbed.
+    fn resolve_root_surface_object(&self, object_id: ObjectId) -> Option<Resolved<WlSurfaceId>> {
+        self.resolved_root_surface(object_id).or_else(|| {
+            let surface = self.objects.try_ref_object::<WlSurface>(object_id)?;
+            Some(Resolved::new(surface.client_id(), surface.surface_id(), object_id))
+        })
+    }
+
     pub fn root_surface_workspace(&self, object_id: ObjectId) -> Option<WorkspaceId> {
-        self.root_surface_workspaces.get(&object_id).copied()
+        self.resolved_root_surface(object_id)
+            .and_then(|surface| self.root_surface_workspaces.get(&surface).copied())
     }
 
     pub fn managed_root_surface_state(
         &self,
         object_id: ObjectId,
     ) -> Option<&ManagedRootSurfaceState> {
-        self.managed_root_surfaces.get(&object_id)
+        self.resolved_root_surface(object_id)
+            .and_then(|surface| self.managed_root_surfaces.get(&surface))
     }
 
     pub fn take_pending_floating_rect_restore(&mut self, object_id: ObjectId) -> Option<RectI> {
+        let surface = self.resolved_root_surface(object_id)?;
         self.managed_root_surfaces
-            .get_mut(&object_id)
+            .get_mut(&surface)
             .and_then(|managed| managed.pending_floating_rect_restore.take())
     }
 
     pub fn root_surface_is_mapped(&self, object_id: ObjectId) -> bool {
-        self.managed_root_surfaces
-            .get(&object_id)
+        self.resolved_root_surface(object_id)
+            .and_then(|surface| self.managed_root_surfaces.get(&surface))
             .is_some_and(|managed| managed.mapped)
     }
 
     pub fn prepare_root_surface_initial_layout(&mut self, object_id: ObjectId) -> bool {
+        let Some(surface) = self.resolved_root_surface(object_id) else {
+            return false;
+        };
         let Some(workspace_id) = self
             .managed_root_surfaces
-            .get(&object_id)
+            .get(&surface)
             .map(|managed| managed.workspace_id)
             .or_else(|| self.ensure_root_surface_workspace(object_id))
         else {
             return false;
         };
-        let Some(managed) = self.managed_root_surfaces.get_mut(&object_id) else {
+        let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
             return false;
         };
         if managed.mode != ManagedWindowMode::Tiled || managed.mapped {
@@ -1248,14 +1271,17 @@ impl State {
     }
 
     pub fn confirm_root_surface_mapped(&mut self, object_id: ObjectId) {
+        let Some(surface) = self.resolved_root_surface(object_id) else {
+            return;
+        };
         let Some(workspace_id) = self
             .managed_root_surfaces
-            .get(&object_id)
+            .get(&surface)
             .map(|managed| managed.workspace_id)
         else {
             return;
         };
-        let Some(managed) = self.managed_root_surfaces.get_mut(&object_id) else {
+        let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
             return;
         };
         if !managed.pending_initial_layout {
@@ -1502,14 +1528,17 @@ impl State {
         object_id: ObjectId,
         workspace_id: WorkspaceId,
     ) -> bool {
-        if self.root_surface_workspaces.get(&object_id).copied() == Some(workspace_id) {
+        let Some(surface) = self.resolve_root_surface_object(object_id) else {
+            return false;
+        };
+        if self.root_surface_workspaces.get(&surface).copied() == Some(workspace_id) {
             return false;
         }
         if let Some(previous_workspace_id) =
-            self.root_surface_workspaces.insert(object_id, workspace_id)
+            self.root_surface_workspaces.insert(surface, workspace_id)
         {
             if let Some(previous_workspace) = self.workspaces.try_get_mut(previous_workspace_id) {
-                previous_workspace.root_surfaces.remove(&object_id);
+                previous_workspace.root_surfaces.remove(&surface);
                 if previous_workspace
                     .layout
                     .fullscreen
@@ -1522,13 +1551,13 @@ impl State {
             tiling::mark_workspace_dirty(self, previous_workspace_id);
         }
         let Some(workspace) = self.workspaces.try_get_mut(workspace_id) else {
-            self.root_surface_workspaces.remove(&object_id);
+            self.root_surface_workspaces.remove(&surface);
             return false;
         };
-        workspace.root_surfaces.insert(object_id);
+        workspace.root_surfaces.insert(surface);
         workspace.layout.mark_dirty();
         self.managed_root_surfaces
-            .entry(object_id)
+            .entry(surface)
             .and_modify(|managed| managed.workspace_id = workspace_id)
             .or_insert(ManagedRootSurfaceState {
                 workspace_id,
@@ -1546,9 +1575,10 @@ impl State {
         &mut self,
         object_id: ObjectId,
     ) -> Option<WorkspaceId> {
-        let workspace_id = self.root_surface_workspaces.remove(&object_id)?;
+        let surface = self.resolved_root_surface(object_id)?;
+        let workspace_id = self.root_surface_workspaces.remove(&surface)?;
         if let Some(workspace) = self.workspaces.try_get_mut(workspace_id) {
-            workspace.root_surfaces.remove(&object_id);
+            workspace.root_surfaces.remove(&surface);
             workspace.layout.remove_surface(object_id);
             if workspace
                 .layout
@@ -1559,7 +1589,7 @@ impl State {
                 workspace.layout.set_fullscreen(None);
             }
         }
-        self.managed_root_surfaces.remove(&object_id);
+        self.managed_root_surfaces.remove(&surface);
         Some(workspace_id)
     }
 
@@ -1819,9 +1849,12 @@ impl State {
     }
 
     pub fn set_root_surface_floating(&mut self, object_id: ObjectId, floating: bool) -> bool {
+        let Some(surface) = self.resolved_root_surface(object_id) else {
+            return false;
+        };
         let Some(workspace_id) = self
             .managed_root_surfaces
-            .get(&object_id)
+            .get(&surface)
             .map(|managed| managed.workspace_id)
             .or_else(|| self.root_surface_workspace(object_id))
         else {
@@ -1831,7 +1864,7 @@ impl State {
             .objects
             .try_ref_object::<WlSurface>(object_id)
             .and_then(|surface| surface.global_logical_bounds());
-        let Some(managed) = self.managed_root_surfaces.get_mut(&object_id) else {
+        let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
             return false;
         };
         let was_floating = managed.mode == ManagedWindowMode::Floating;
@@ -1874,9 +1907,12 @@ impl State {
     }
 
     pub fn set_root_surface_fullscreen(&mut self, object_id: ObjectId, fullscreen: bool) -> bool {
+        let Some(surface) = self.resolved_root_surface(object_id) else {
+            return false;
+        };
         let Some(workspace_id) = self
             .managed_root_surfaces
-            .get(&object_id)
+            .get(&surface)
             .map(|managed| managed.workspace_id)
             .or_else(|| self.root_surface_workspace(object_id))
         else {
@@ -1891,26 +1927,29 @@ impl State {
             let managed_ids = self
                 .managed_root_surfaces
                 .iter()
-                .filter_map(|(candidate_object_id, managed)| {
+                .filter_map(|(candidate_surface, managed)| {
                     (managed.workspace_id == workspace_id && managed.fullscreen)
-                        .then_some(*candidate_object_id)
+                        .then_some(*candidate_surface)
                 })
                 .collect::<Vec<_>>();
-            for candidate_object_id in managed_ids {
-                if let Some(managed) = self.managed_root_surfaces.get_mut(&candidate_object_id) {
-                    if candidate_object_id != object_id {
+            for candidate_surface in managed_ids {
+                if let Some(managed) = self.managed_root_surfaces.get_mut(&candidate_surface) {
+                    if candidate_surface.object_id() != object_id {
                         if managed.mode == ManagedWindowMode::Floating {
                             managed.pending_floating_rect_restore = managed.last_floating_rect;
                         }
                         managed.fullscreen = false;
                     }
                 }
-                if candidate_object_id != object_id {
-                    self.sync_root_surface_requested_fullscreen(candidate_object_id, false);
+                if candidate_surface.object_id() != object_id {
+                    self.sync_root_surface_requested_fullscreen(
+                        candidate_surface.object_id(),
+                        false,
+                    );
                 }
             }
             self.managed_root_surfaces
-                .entry(object_id)
+                .entry(surface)
                 .and_modify(|managed| {
                     if !managed.fullscreen && managed.mode == ManagedWindowMode::Floating {
                         if let Some(bounds) = current_bounds {
@@ -1931,7 +1970,7 @@ impl State {
                 });
         } else {
             {
-                let Some(managed) = self.managed_root_surfaces.get_mut(&object_id) else {
+                let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
                     return false;
                 };
                 if !managed.fullscreen {
@@ -2043,11 +2082,13 @@ impl State {
                 .pending_floating_rect_restore
                 .map(|rect| rect.translate(dx, dy));
         }
-        let Some(surface_ids) = self
-            .workspaces
-            .try_get(workspace_id)
-            .map(|workspace| workspace.root_surfaces.iter().copied().collect::<Vec<_>>())
-        else {
+        let Some(surface_ids) = self.workspaces.try_get(workspace_id).map(|workspace| {
+            workspace
+                .root_surfaces
+                .iter()
+                .map(|surface| surface.object_id())
+                .collect::<Vec<_>>()
+        }) else {
             return;
         };
         for surface_object_id in surface_ids {
@@ -2150,8 +2191,13 @@ impl State {
     }
 
     pub fn register_root_surface(&mut self, object_id: ObjectId) {
+        let Some(surface) = self.resolve_root_surface_object(object_id) else {
+            return;
+        };
         self.unregister_root_surface(object_id);
-        self.root_surfaces.push(object_id);
+        self.root_surface_resolved_by_object
+            .insert(object_id, surface);
+        self.root_surfaces.push(surface);
         if let Some(workspace_id) = self.ensure_root_surface_workspace(object_id) {
             tiling::mark_workspace_dirty(self, workspace_id);
         }
@@ -2181,11 +2227,14 @@ impl State {
     }
 
     pub fn unregister_root_surface(&mut self, object_id: ObjectId) {
-        self.root_surfaces
-            .retain(|candidate| *candidate != object_id);
+        let Some(surface) = self.resolved_root_surface(object_id) else {
+            return;
+        };
+        self.root_surfaces.retain(|candidate| *candidate != surface);
         if let Some(workspace_id) = self.detach_root_surface_from_workspace(object_id) {
             tiling::mark_workspace_dirty(self, workspace_id);
         }
+        self.root_surface_resolved_by_object.remove(&object_id);
     }
 
     pub fn raise_root_surface(&mut self, object_id: ObjectId) -> bool {
@@ -2213,8 +2262,8 @@ impl State {
     pub fn root_surface_ids(&self) -> Vec<ObjectId> {
         self.root_surfaces
             .iter()
-            .copied()
-            .filter(|object_id| self.objects.contains(*object_id))
+            .filter(|surface| surface.exists(self))
+            .map(|surface| surface.object_id())
             .collect()
     }
 
@@ -2598,6 +2647,7 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -3301,9 +3351,10 @@ mod tests {
             state.insert_object(WlSurface::new(WlSurfaceId::from(16u32), ClientId::from_raw(7), 6));
         state.register_root_surface(object_id);
         state.assign_root_surface_to_workspace(object_id, left_workspace);
+        let surface = state.resolved_root_surface(object_id).unwrap();
         state
             .managed_root_surfaces
-            .get_mut(&object_id)
+            .get_mut(&surface)
             .unwrap()
             .last_floating_rect = Some(RectI { x: 10, y: 20, width: 50, height: 50 });
 
@@ -3331,9 +3382,10 @@ mod tests {
             state.insert_object(WlSurface::new(WlSurfaceId::from(17u32), ClientId::from_raw(8), 6));
         state.register_root_surface(object_id);
         state.assign_root_surface_to_workspace(object_id, left_workspace);
+        let surface = state.resolved_root_surface(object_id).unwrap();
         state
             .managed_root_surfaces
-            .get_mut(&object_id)
+            .get_mut(&surface)
             .unwrap()
             .pending_floating_rect_restore = Some(RectI { x: 10, y: 20, width: 50, height: 50 });
 

@@ -963,8 +963,8 @@ pub fn initial_layout_configure_for_surface(
     let workspace_surface_ids = state
         .managed_root_surfaces
         .iter()
-        .filter_map(|(object_id, managed)| {
-            (managed.workspace_id == workspace_id).then_some(*object_id)
+        .filter_map(|(surface, managed)| {
+            (managed.workspace_id == workspace_id).then_some(surface.object_id())
         })
         .collect::<Vec<_>>();
     let candidate_surfaces = workspace_surface_ids
@@ -1006,13 +1006,13 @@ pub fn initial_layout_configure_for_surface(
     let min_sizes = state
         .managed_root_surfaces
         .iter()
-        .filter_map(|(object_id, managed)| {
+        .filter_map(|(surface, managed)| {
             (managed.workspace_id == workspace_id).then_some((
-                *object_id,
-                if *object_id == surface_object_id {
+                surface.object_id(),
+                if surface.object_id() == surface_object_id {
                     target_min_size.unwrap_or((1, 1))
                 } else {
-                    minimum_size_for_surface(state, *object_id)
+                    minimum_size_for_surface(state, surface.object_id())
                 },
             ))
         })
@@ -1210,8 +1210,8 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
             state
                 .managed_root_surfaces
                 .iter()
-                .filter_map(|(object_id, managed)| {
-                    (managed.workspace_id == workspace_id).then_some(*object_id)
+                .filter_map(|(surface, managed)| {
+                    (managed.workspace_id == workspace_id).then_some(surface.object_id())
                 }),
         );
         let operations = {
@@ -1509,8 +1509,8 @@ fn sync_workspace_layout(state: &mut State, workspace_id: WorkspaceId) {
     let workspace_surface_ids = state
         .managed_root_surfaces
         .iter()
-        .filter_map(|(object_id, managed)| {
-            (managed.workspace_id == workspace_id).then_some(*object_id)
+        .filter_map(|(surface, managed)| {
+            (managed.workspace_id == workspace_id).then_some(surface.object_id())
         })
         .collect::<Vec<_>>();
     let candidate_surfaces = workspace_surface_ids
@@ -1523,21 +1523,22 @@ fn sync_workspace_layout(state: &mut State, workspace_id: WorkspaceId) {
         .iter()
         .filter_map(|object_id| {
             state
-                .managed_root_surfaces
-                .get(object_id)
+                .managed_root_surface_state(*object_id)
                 .map(|managed| (*object_id, managed.mode))
         })
         .collect::<BTreeMap<_, _>>();
     for object_id in &workspace_surface_ids {
-        if let Some(managed) = state.managed_root_surfaces.get_mut(object_id) {
+        let Some(surface) = state.resolved_root_surface(*object_id) else {
+            continue;
+        };
+        if let Some(managed) = state.managed_root_surfaces.get_mut(&surface) {
             managed.mapped = candidate_set.contains(object_id);
         }
     }
 
     let fullscreen_surface = workspace_surface_ids.iter().find_map(|object_id| {
         state
-            .managed_root_surfaces
-            .get(object_id)
+            .managed_root_surface_state(*object_id)
             .is_some_and(|managed| managed.fullscreen && managed.mapped)
             .then_some(*object_id)
     });
@@ -2113,9 +2114,11 @@ fn workspace_minimum_sizes(
     state
         .managed_root_surfaces
         .iter()
-        .filter_map(|(object_id, managed)| {
-            (managed.workspace_id == workspace_id)
-                .then_some((*object_id, minimum_size_for_surface(state, *object_id)))
+        .filter_map(|(surface, managed)| {
+            (managed.workspace_id == workspace_id).then_some((
+                surface.object_id(),
+                minimum_size_for_surface(state, surface.object_id()),
+            ))
         })
         .collect()
 }
@@ -2232,6 +2235,7 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
+            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
