@@ -722,13 +722,14 @@ pub mod xdg_toplevel {
 
     use crate::{
         clients::{
-            Client, ClientDispatcher, ClientManagerAction, EventWriter, RawRequest, Resolved,
+            Client, ClientDispatcher, ClientId, ClientManagerAction, EventWriter, RawRequest,
+            Resolved,
         },
         drm::schedule_outputs,
-        object::{Object, Parser},
+        object::{Object, Parser, PostAction},
         protocol_generated::{
             xdg_toplevel as proto_xdg_toplevel, zxdg_toplevel_decoration_v1, Array, WaylandId,
-            WlOutputId, WlSeatId, XdgToplevelId, ZxdgToplevelDecorationV1Id,
+            WlOutputId, WlSeatId, WlSurfaceId, XdgToplevelId, ZxdgToplevelDecorationV1Id,
         },
         region::RectI,
         state::{ObjectId, State},
@@ -1538,24 +1539,18 @@ pub mod xdg_toplevel {
                     let Some(xdg_toplevel) = client.resolve(self.id, state) else {
                         return Ok(());
                     };
-                    if !crate::input::request_toplevel_resize(
-                        state,
-                        dispatcher,
-                        client.client_id(),
+
+                    dispatcher.dispatch_post_action(PostXdgToplevel::RequestResize {
+                        client_id: client.client_id(),
                         surface,
                         serial,
                         root_surface,
                         xdg_toplevel,
-                        self.interactive_size_constraints(),
-                        self.is_maximized(),
-                        state.root_surface_is_fullscreen(root_surface),
+                        size_constraints: self.interactive_size_constraints(),
+                        is_maximized: self.is_maximized(),
+                        is_fullscreen: state.root_surface_is_fullscreen(root_surface),
                         edges,
-                    ) {
-                        log::debug!(
-                            "xdg_toplevel.resize ignored due to invalid pointer grab serial {}",
-                            serial
-                        );
-                    }
+                    });
                 }
                 SetMaxSize { width, height } => {
                     if !self.store_size_pair(client, dispatcher, width, height, false) {
@@ -1638,6 +1633,62 @@ pub mod xdg_toplevel {
                 }
             }
             Ok(())
+        }
+    }
+
+    enum PostXdgToplevel {
+        RequestResize {
+            client_id: ClientId,
+            surface: Resolved<WlSurfaceId>,
+            serial: u32,
+            root_surface: Resolved<WlSurfaceId>,
+            xdg_toplevel: Resolved<XdgToplevelId>,
+            size_constraints: InteractiveSizeConstraints,
+            is_maximized: bool,
+            is_fullscreen: bool,
+            edges: u32,
+        },
+    }
+
+    impl PostAction for PostXdgToplevel {
+        fn execute(
+            self: Box<Self>,
+            _client: &mut Client,
+            state: &mut State,
+            dispatcher: &mut ClientDispatcher,
+        ) {
+            match *self {
+                PostXdgToplevel::RequestResize {
+                    client_id,
+                    surface,
+                    serial,
+                    root_surface,
+                    xdg_toplevel,
+                    size_constraints,
+                    is_maximized,
+                    is_fullscreen,
+                    edges,
+                } => {
+                    if !crate::input::request_toplevel_resize(
+                        state,
+                        dispatcher,
+                        client_id,
+                        surface,
+                        serial,
+                        root_surface,
+                        xdg_toplevel,
+                        size_constraints,
+                        is_maximized,
+                        is_fullscreen,
+                        edges,
+                    ) {
+                        log::debug!(
+                            "xdg_toplevel.resize ignored due to invalid pointer grab serial {}",
+                            serial
+                        );
+                    }
+                }
+            }
         }
     }
 
