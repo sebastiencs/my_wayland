@@ -7,10 +7,10 @@ pub(crate) mod types;
 pub use types::SurfaceFocus;
 pub(crate) use {
     focus::{
-        maybe_dismiss_popup_grab_on_button, popup_keyboard_focus, refresh_active_drag_focus,
-        refresh_drag_focus, refresh_keyboard_focus, refresh_keyboard_focus_with_snapshot,
-        refresh_pointer_focus, resolve_activation_target, set_keyboard_focus,
-        set_keyboard_focus_from_surface, validate_activation_serial,
+        focus_after_client_disconnect, maybe_dismiss_popup_grab_on_button, popup_keyboard_focus,
+        refresh_active_drag_focus, refresh_drag_focus, refresh_keyboard_focus,
+        refresh_keyboard_focus_with_snapshot, refresh_pointer_focus, resolve_activation_target,
+        set_keyboard_focus, set_keyboard_focus_from_surface, validate_activation_serial,
     },
     grab::{
         abort_pointer_interactive_grab, apply_interaction_intent, apply_pointer_interactive_grab,

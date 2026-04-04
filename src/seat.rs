@@ -112,6 +112,7 @@ struct PointerEnterState {
 pub(crate) struct SeatClientRemovalResult {
     pub cursor_changed: bool,
     pub interactive_grab_cleared: bool,
+    pub keyboard_focus_cleared: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -127,6 +128,7 @@ struct SerialRange {
 }
 
 const MAX_TRACKED_SERIAL_RANGES: usize = 32;
+const MAX_KEYBOARD_FOCUS_HISTORY: usize = 64;
 
 pub struct SeatState {
     current_serial: u32,
@@ -134,6 +136,7 @@ pub struct SeatState {
     pub(crate) pointer_focus: Option<SurfaceFocusPick>,
     last_pointer_enter: Option<PointerEnterState>,
     pub(crate) keyboard_focus: Option<SurfaceFocus>,
+    keyboard_focus_history: VecDeque<SurfaceFocus>,
     pub(crate) pointer_button_count: u32,
     last_pointer_press: Option<PointerPressState>,
     last_keyboard_trigger: Option<KeyboardTriggerState>,
@@ -161,6 +164,7 @@ impl Default for SeatState {
             pointer_focus: None,
             last_pointer_enter: None,
             keyboard_focus: None,
+            keyboard_focus_history: VecDeque::new(),
             pointer_button_count: 0,
             last_pointer_press: None,
             last_keyboard_trigger: None,
@@ -544,7 +548,10 @@ impl SeatState {
             .is_some_and(|focus| focus.client_id() == client_id)
         {
             self.keyboard_focus = None;
+            result.keyboard_focus_cleared = true;
         }
+        self.keyboard_focus_history
+            .retain(|focus| focus.client_id() != client_id);
         if self
             .popup_grab
             .as_ref()
@@ -712,6 +719,19 @@ impl SeatState {
 
     pub fn keyboard_focus(&self) -> Option<SurfaceFocus> {
         self.keyboard_focus
+    }
+
+    pub(crate) fn keyboard_focus_history(&self) -> Vec<SurfaceFocus> {
+        self.keyboard_focus_history.iter().copied().collect()
+    }
+
+    pub(crate) fn remember_keyboard_focus(&mut self, focus: SurfaceFocus) {
+        self.keyboard_focus_history
+            .retain(|candidate| *candidate != focus);
+        self.keyboard_focus_history.push_front(focus);
+        while self.keyboard_focus_history.len() > MAX_KEYBOARD_FOCUS_HISTORY {
+            let _ = self.keyboard_focus_history.pop_back();
+        }
     }
 
     #[cfg(test)]
@@ -1154,6 +1174,10 @@ pub fn refresh_keyboard_focus_with_snapshot(
 pub fn refresh_scene_focus(state: &mut State, dispatcher: &mut Dispatcher) {
     refresh_pointer_focus(state, dispatcher, monotonic_time_msec(), false);
     refresh_keyboard_focus(state, dispatcher);
+}
+
+pub fn focus_after_client_disconnect(state: &mut State, dispatcher: &mut Dispatcher) {
+    crate::input::focus_after_client_disconnect(state, dispatcher);
 }
 
 pub fn refresh_active_drag_focus(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {

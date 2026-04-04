@@ -1,14 +1,17 @@
-use crate::{
-    clients::{Client, ClientAction, ClientId, Resolved},
-    protocol_generated::{WlSeatId, WlSurfaceId},
-    runner::Dispatcher,
-    seat::{dispatch_client_event, SeatClientEvent},
-    state::{DragPhase, DragTargetState, State},
-    wayland_objects::zwlr_layer_surface_v1::{
-        layer_surface_keyboard_focus_with_snapshot, lookup_snapshot_surface,
-        ordered_scene_root_surfaces_with_snapshot, LayerKeyboardFocus, LayerLayoutObjectSnapshot,
-        LayerShellLayer,
+use {
+    crate::{
+        clients::{Client, ClientAction, ClientId, Resolved},
+        protocol_generated::{WlSeatId, WlSurfaceId},
+        runner::Dispatcher,
+        seat::{dispatch_client_event, SeatClientEvent},
+        state::{DragPhase, DragTargetState, State},
+        wayland_objects::zwlr_layer_surface_v1::{
+            layer_surface_keyboard_focus_with_snapshot, lookup_snapshot_surface,
+            ordered_scene_root_surfaces_with_snapshot, LayerKeyboardFocus,
+            LayerLayoutObjectSnapshot, LayerShellLayer,
+        },
     },
+    std::collections::BTreeSet,
 };
 
 use super::{scene_pick_for_pointer, surface_focus_pick_at, SurfaceFocus, SurfaceRect};
@@ -51,6 +54,13 @@ pub(crate) fn set_keyboard_focus(
 
     let old_focus = state.seat.keyboard_focus;
     state.seat.keyboard_focus = new_focus;
+    if let Some(new_focus) = new_focus {
+        let root_focus = state
+            .root_surface_for_surface(new_focus.surface)
+            .map(SurfaceFocus::new)
+            .unwrap_or(new_focus);
+        state.seat.remember_keyboard_focus(root_focus);
+    }
     refresh_selection_focus_clients(dispatcher, old_focus, new_focus);
 }
 
@@ -113,6 +123,82 @@ pub(crate) fn refresh_keyboard_focus_with_snapshot(
 pub(crate) fn refresh_scene_focus(state: &mut State, dispatcher: &mut Dispatcher) {
     refresh_pointer_focus(state, dispatcher, monotonic_time_msec(), false);
     refresh_keyboard_focus(state, dispatcher);
+}
+
+pub(crate) fn focus_after_client_disconnect(state: &mut State, dispatcher: &mut Dispatcher) {
+    if state.seat.keyboard_focus().is_some() {
+        return;
+    }
+    let Some(workspace_id) = state
+        .active_output_id()
+        .and_then(|output_id| state.active_workspace_for_output(output_id))
+    else {
+        refresh_keyboard_focus(state, dispatcher);
+        return;
+    };
+    if let Some(candidate) = mru_focus_candidate_for_workspace(state, workspace_id)
+        .or_else(|| topmost_focus_candidate_for_workspace(state, workspace_id))
+        .or_else(|| pointer_focus_candidate_for_workspace(state, workspace_id))
+    {
+        set_keyboard_focus(state, dispatcher, Some(candidate));
+        return;
+    }
+    refresh_keyboard_focus(state, dispatcher);
+}
+
+fn mru_focus_candidate_for_workspace(
+    state: &State,
+    workspace_id: crate::state::WorkspaceId,
+) -> Option<SurfaceFocus> {
+    let mut seen = BTreeSet::new();
+    for focus in state.seat.keyboard_focus_history() {
+        let root_surface = state
+            .root_surface_for_surface(focus.surface)
+            .unwrap_or(focus.surface);
+        if !seen.insert(root_surface) {
+            continue;
+        }
+        if !focus_candidate_matches_workspace(state, root_surface, workspace_id) {
+            continue;
+        }
+        return Some(SurfaceFocus::new(root_surface));
+    }
+    None
+}
+
+fn topmost_focus_candidate_for_workspace(
+    state: &State,
+    workspace_id: crate::state::WorkspaceId,
+) -> Option<SurfaceFocus> {
+    state
+        .tiling_scene_root_surfaces()
+        .into_iter()
+        .rev()
+        .find(|surface| focus_candidate_matches_workspace(state, *surface, workspace_id))
+        .map(SurfaceFocus::new)
+}
+
+fn pointer_focus_candidate_for_workspace(
+    state: &State,
+    workspace_id: crate::state::WorkspaceId,
+) -> Option<SurfaceFocus> {
+    let pointer_focus = state.seat.pointer_focus.map(|focus| focus.target)?;
+    let root_surface = state
+        .root_surface_for_surface(pointer_focus.surface)
+        .unwrap_or(pointer_focus.surface);
+    focus_candidate_matches_workspace(state, root_surface, workspace_id)
+        .then_some(SurfaceFocus::new(root_surface))
+}
+
+fn focus_candidate_matches_workspace(
+    state: &State,
+    root_surface: Resolved<WlSurfaceId>,
+    workspace_id: crate::state::WorkspaceId,
+) -> bool {
+    root_surface.exists(state)
+        && state.root_surface_workspace(root_surface) == Some(workspace_id)
+        && state.root_surface_is_mapped(root_surface)
+        && state.root_surface_is_visible(root_surface)
 }
 
 pub(crate) fn refresh_active_drag_focus(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {

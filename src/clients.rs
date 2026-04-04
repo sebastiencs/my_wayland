@@ -2249,6 +2249,9 @@ impl Model for Client {
                 {
                     crate::seat::cancel_active_drag(state, &mut dispatcher, None);
                 }
+                if seat_removal.keyboard_focus_cleared {
+                    crate::seat::focus_after_client_disconnect(state, &mut dispatcher);
+                }
                 self.pending_fds.clear();
                 if seat_removal.cursor_changed
                     || seat_removal.interactive_grab_cleared
