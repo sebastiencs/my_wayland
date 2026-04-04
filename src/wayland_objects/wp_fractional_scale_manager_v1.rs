@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest},
+    clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
     object::{Object, Parser},
     protocol_generated::{
@@ -63,19 +63,10 @@ impl Object for WpFractionalScaleManagerV1 {
             }
             GetFractionalScale { id, surface } => {
                 let id = WpFractionalScaleV1Id::from(id);
-                let surface = WlSurfaceId::from(surface);
-                if !client.object_is(surface, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                        "invalid wl_surface for wp_fractional_scale_manager_v1.get_fractional_scale",
-                    );
-                    return Ok(());
-                }
-                let surface_oid = client.object_id(surface);
+                let surface_resolved =
+                    client.resolve_or_disconnect(WlSurfaceId::from(surface), state, dispatcher)?;
                 {
-                    let surface = state.objects.try_ref_object::<WlSurface>(surface_oid);
+                    let surface = surface_resolved.try_ref(state);
                     if surface.is_some_and(|s| s.has_fractional_scale_object()) {
                         client.send_protocol_error(
                             dispatcher,
@@ -87,14 +78,19 @@ impl Object for WpFractionalScaleManagerV1 {
                     }
                 }
 
-                let fractional = WpFractionalScaleV1::new(id, surface_oid);
-                let ((_, object_id), _) = client.insert_object(state, fractional);
+                let fractional = WpFractionalScaleV1::new(id, surface_resolved);
+                client.insert_object(state, fractional);
+                let object = client.resolve(id, state).unwrap();
                 {
-                    let mut surface = state.objects.grab_object::<WlSurface>(surface_oid);
-                    let _ = surface.set_fractional_scale_object(object_id);
+                    let mut surface = surface_resolved.grab(state);
+                    let _ = surface.set_fractional_scale_object(object);
                 }
-                let mut surface = state.objects.grab_object::<WlSurface>(surface_oid);
-                surface.send_preferred_fractional_scale_for_object(state, surface_oid, dispatcher);
+                let mut surface = surface_resolved.grab(state);
+                surface.send_preferred_fractional_scale_for_object(
+                    state,
+                    surface_resolved,
+                    dispatcher,
+                );
             }
         }
         Ok(())
@@ -125,7 +121,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -172,6 +167,7 @@ mod tests {
 
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        client_dispatcher.set_requester_object_id_for_tests(manager_id.into());
 
         {
             let mut manager = client.grab_object(manager_id, &mut state);

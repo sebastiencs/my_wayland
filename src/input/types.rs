@@ -2,7 +2,6 @@ use crate::{
     clients::{ClientId, Resolved},
     protocol_generated::{WlSurfaceId, XdgToplevelId},
     region::RectI,
-    state::ObjectId,
     tiling::TiledResizeState,
     wayland_objects::xdg_surface::xdg_toplevel::{
         InteractiveSizeConstraints, ToplevelDecorationMode,
@@ -47,7 +46,7 @@ pub(crate) struct ScenePick {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowRoleSnapshot {
     XdgToplevel {
-        xdg_toplevel_id: XdgToplevelId,
+        xdg_toplevel: Resolved<XdgToplevelId>,
         size_constraints: InteractiveSizeConstraints,
         is_maximized: bool,
         is_fullscreen: bool,
@@ -58,15 +57,27 @@ pub(crate) enum WindowRoleSnapshot {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WindowSnapshot {
-    pub client_id: ClientId,
-    pub surface_id: WlSurfaceId,
-    pub root_surface_object_id: ObjectId,
+    pub root_surface: Resolved<WlSurfaceId>,
     pub role: WindowRoleSnapshot,
     pub initial_root_pos: (i32, i32),
     pub initial_size: (i32, i32),
     pub content_rect: RectI,
     pub interactive_rect: RectI,
     pub outer_rect: RectI,
+}
+
+impl WindowSnapshot {
+    pub fn client_id(self) -> ClientId {
+        self.root_surface.client_id()
+    }
+
+    pub fn surface_id(self) -> WlSurfaceId {
+        self.root_surface.wayland_id()
+    }
+
+    pub fn object_id(self) -> crate::state::ObjectId {
+        self.root_surface.object_id()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,15 +119,13 @@ pub(crate) const PROTOCOL_INTERACTION_START_OPTIONS: InteractionStartOptions =
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ActiveGrab {
     Move {
-        client_id: ClientId,
-        root_surface_object_id: ObjectId,
+        root_surface: Resolved<WlSurfaceId>,
         initial_pointer_pos: (f64, f64),
         initial_root_pos: (i32, i32),
     },
     Resize {
-        client_id: ClientId,
-        root_surface_object_id: ObjectId,
-        xdg_toplevel_id: XdgToplevelId,
+        root_surface: Resolved<WlSurfaceId>,
+        xdg_toplevel: Resolved<XdgToplevelId>,
         size_constraints: InteractiveSizeConstraints,
         edges: u32,
         initial_pointer_pos: (f64, f64),
@@ -125,8 +134,7 @@ pub(crate) enum ActiveGrab {
         last_size: (i32, i32),
     },
     ResizeTiled {
-        client_id: ClientId,
-        root_surface_object_id: ObjectId,
+        root_surface: Resolved<WlSurfaceId>,
         edges: u32,
         initial_pointer_pos: (f64, f64),
         resize_state: TiledResizeState,

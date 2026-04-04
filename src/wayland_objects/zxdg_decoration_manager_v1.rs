@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest},
+    clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
     object::{Object, Parser},
     protocol_generated::{
@@ -8,9 +8,7 @@ use crate::{
     },
     state::State,
     wayland_objects::{
-        wl_display::WlDisplay,
-        wl_surface::WlSurface,
-        xdg_surface::{xdg_toplevel::XdgToplevel, XdgSurface},
+        wl_display::WlDisplay, wl_surface::WlSurface, xdg_surface::xdg_toplevel::XdgToplevel,
         zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
     },
 };
@@ -69,29 +67,8 @@ impl Object for ZxdgDecorationManagerV1 {
             }
             GetToplevelDecoration { id, toplevel } => {
                 let id = ZxdgToplevelDecorationV1Id::from(id);
-                let toplevel = XdgToplevelId::from(toplevel);
-                if !client.object_is(toplevel, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "get_toplevel_decoration requires a live xdg_toplevel",
-                    );
-                    return Ok(());
-                }
-                let toplevel_object_id = client.object_id(toplevel);
-                let Some(toplevel_ref) = state
-                    .objects
-                    .try_ref_object::<XdgToplevel>(toplevel_object_id)
-                else {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "get_toplevel_decoration requires an xdg_toplevel object",
-                    );
-                    return Ok(());
-                };
+                let toplevel = client.resolve_or_disconnect(toplevel, state, dispatcher)?;
+                let toplevel_ref = toplevel.rref(state);
                 if toplevel_ref.has_decoration_object() {
                     client.send_protocol_error(
                         dispatcher,
@@ -101,11 +78,7 @@ impl Object for ZxdgDecorationManagerV1 {
                     );
                     return Ok(());
                 }
-                let xdg_surface_object_id = client.object_id(toplevel_ref.xdg_surface_id());
-                let Some(xdg_surface_ref) = state
-                    .objects
-                    .try_ref_object::<XdgSurface>(xdg_surface_object_id)
-                else {
+                let Some(xdg_surface_ref) = toplevel_ref.xdg_surface().try_ref(state) else {
                     client.protocol_violation_disconnect(
                         dispatcher,
                         self.id.into(),
@@ -114,10 +87,9 @@ impl Object for ZxdgDecorationManagerV1 {
                     );
                     return Ok(());
                 };
-                let wl_surface_object_id = client.object_id(xdg_surface_ref.wl_surface_id());
-                if state
-                    .objects
-                    .try_ref_object::<WlSurface>(wl_surface_object_id)
+                let wl_surface_object = xdg_surface_ref.wl_surface();
+                if wl_surface_object
+                    .try_ref(state)
                     .is_some_and(WlSurface::has_attached_or_committed_buffer)
                 {
                     client.send_protocol_error(
@@ -129,11 +101,11 @@ impl Object for ZxdgDecorationManagerV1 {
                     return Ok(());
                 }
 
-                let decoration = ZxdgToplevelDecorationV1::new(id, toplevel_object_id);
-                let ((_, decoration_object_id), _) = client.insert_object(state, decoration);
+                let decoration = ZxdgToplevelDecorationV1::new(id, toplevel);
+                let (decoration_resolved, _) = client.insert_object(state, decoration);
                 {
-                    let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
-                    assert!(toplevel.set_decoration_object(decoration_object_id));
+                    let mut toplevel = toplevel.grab(state);
+                    assert!(toplevel.set_decoration_object(decoration_resolved));
                 }
                 let mut decoration = client.grab_object(id, state);
                 decoration.initialize_negotiation(client, state, dispatcher);
@@ -174,7 +146,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -242,24 +213,45 @@ mod tests {
         let decoration_id = ZxdgToplevelDecorationV1Id::from(5u32);
 
         client.insert_object(&mut state, ZxdgDecorationManagerV1 { id: manager_id, version: 1 });
-        let ((_, surface_object_id), _) =
+        let (surface_resolved, _) =
             client.insert_object(&mut state, WlSurface::new(wl_surface_id, client.client_id(), 6));
+        let surface_object_id = surface_resolved.object_id();
         {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             assert!(surface
                 .set_role(Role::XdgSurface, &mut client_dispatcher)
                 .is_ok());
-            surface.set_xdg_surface_impl(xdg_surface_id);
+        }
+        let (xdg_surface_resolved, _) = client.insert_object(
+            &mut state,
+            XdgSurface::new(
+                xdg_surface_id,
+                Resolved::new(client.client_id(), XdgWmBaseId::from(6), ObjectId::from(6usize)),
+                Resolved::new(client.client_id(), wl_surface_id, surface_object_id),
+                7,
+            ),
+        );
+        let xdg_surface_object_id = xdg_surface_resolved.object_id();
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.set_xdg_surface_impl(Resolved::new(
+                client.client_id(),
+                xdg_surface_id,
+                xdg_surface_object_id,
+            ));
             let buffer_object_id = insert_test_buffer(&mut state, client.client_id());
             surface.test_map(buffer_object_id, 0, 0, 2, 2);
         }
-        client.insert_object(
+        let (toplevel_resolved, _) = client.insert_object(
             &mut state,
-            XdgSurface::new(xdg_surface_id, XdgWmBaseId::from(6), wl_surface_id, 7),
+            XdgToplevel::new(
+                toplevel_id,
+                Resolved::new(client.client_id(), xdg_surface_id, xdg_surface_object_id),
+                7,
+            ),
         );
-        let ((_, toplevel_object_id), _) =
-            client.insert_object(&mut state, XdgToplevel::new(toplevel_id, xdg_surface_id, 7));
-        state.register_xdg_toplevel_role(client.client_id(), xdg_surface_id, toplevel_object_id);
+        let toplevel_object_id = toplevel_resolved.object_id();
+        state.register_xdg_toplevel_role(xdg_surface_resolved, toplevel_resolved);
 
         {
             let mut manager = client.grab_object(manager_id, &mut state);

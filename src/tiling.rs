@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
+    clients::Resolved,
     config::DecorationInsets,
-    protocol_generated::{xdg_toplevel, XdgSurfaceId},
+    protocol_generated::{xdg_toplevel, WlSurfaceId, XdgSurfaceId},
     region::RectI,
     state::{ManagedWindowMode, ObjectId, State, WorkspaceId},
     transform::SizeI,
@@ -28,12 +29,12 @@ pub struct GapPolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LayoutOperation {
-    surface_object_id: ObjectId,
+    surface_object_id: Resolved<WlSurfaceId>,
     frame_rect: RectI,
     content_rect: RectI,
 }
 
-type DecorationInsetsMap = BTreeMap<ObjectId, DecorationInsets>;
+type DecorationInsetsMap = BTreeMap<Resolved<WlSurfaceId>, DecorationInsets>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InitialLayoutConfigure {
@@ -96,7 +97,7 @@ pub struct ContainerNode {
 
 #[derive(Clone, Debug)]
 pub struct LeafNode {
-    pub surface_object_id: ObjectId,
+    pub surface_object_id: Resolved<WlSurfaceId>,
     pub parent: Option<LayoutNodeId>,
     pub last_applied_rect: Option<RectI>,
     pub tiled_edges: u32,
@@ -110,12 +111,12 @@ pub enum LayoutNode {
 
 #[derive(Clone, Debug, Default)]
 pub struct FloatingState {
-    pub stack: Vec<ObjectId>,
+    pub stack: Vec<Resolved<WlSurfaceId>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct FullscreenState {
-    pub surface_object_id: ObjectId,
+    pub surface_object_id: Resolved<WlSurfaceId>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -132,7 +133,7 @@ pub struct TiledResizeState {
 pub struct WorkspaceLayout {
     pub root: Option<LayoutNodeId>,
     pub nodes: BTreeMap<LayoutNodeId, LayoutNode>,
-    pub surface_leaves: BTreeMap<ObjectId, LayoutNodeId>,
+    pub surface_leaves: BTreeMap<Resolved<WlSurfaceId>, LayoutNodeId>,
     pub floating: FloatingState,
     pub fullscreen: Option<FullscreenState>,
     pub focused_leaf: Option<LayoutNodeId>,
@@ -145,7 +146,7 @@ impl WorkspaceLayout {
         self.dirty = true;
     }
 
-    pub fn contains_surface(&self, surface_object_id: ObjectId) -> bool {
+    pub fn contains_surface(&self, surface_object_id: Resolved<WlSurfaceId>) -> bool {
         self.surface_leaves.contains_key(&surface_object_id)
             || self.floating.stack.contains(&surface_object_id)
             || self
@@ -154,27 +155,27 @@ impl WorkspaceLayout {
                 .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id)
     }
 
-    pub fn is_tiled_surface(&self, surface_object_id: ObjectId) -> bool {
+    pub fn is_tiled_surface(&self, surface_object_id: Resolved<WlSurfaceId>) -> bool {
         self.surface_leaves.contains_key(&surface_object_id)
     }
 
-    pub fn is_floating_surface(&self, surface_object_id: ObjectId) -> bool {
+    pub fn is_floating_surface(&self, surface_object_id: Resolved<WlSurfaceId>) -> bool {
         self.floating.stack.contains(&surface_object_id)
     }
 
-    pub fn tiled_rect(&self, surface_object_id: ObjectId) -> Option<RectI> {
+    pub fn tiled_rect(&self, surface_object_id: Resolved<WlSurfaceId>) -> Option<RectI> {
         let leaf_id = *self.surface_leaves.get(&surface_object_id)?;
         let leaf = self.nodes.get(&leaf_id)?.as_leaf()?;
         leaf.last_applied_rect
     }
 
-    pub fn tiled_edges(&self, surface_object_id: ObjectId) -> Option<u32> {
+    pub fn tiled_edges(&self, surface_object_id: Resolved<WlSurfaceId>) -> Option<u32> {
         let leaf_id = *self.surface_leaves.get(&surface_object_id)?;
         let leaf = self.nodes.get(&leaf_id)?.as_leaf()?;
         Some(leaf.tiled_edges)
     }
 
-    pub fn tiled_scene_order(&self) -> Vec<ObjectId> {
+    pub fn tiled_scene_order(&self) -> Vec<Resolved<WlSurfaceId>> {
         let mut order = Vec::new();
         if let Some(root_id) = self.root {
             self.collect_leaf_surfaces(root_id, &mut order);
@@ -182,11 +183,11 @@ impl WorkspaceLayout {
         order
     }
 
-    pub fn floating_scene_order(&self) -> Vec<ObjectId> {
+    pub fn floating_scene_order(&self) -> Vec<Resolved<WlSurfaceId>> {
         self.floating.stack.clone()
     }
 
-    pub fn focus_surface(&mut self, surface_object_id: ObjectId) -> bool {
+    pub fn focus_surface(&mut self, surface_object_id: Resolved<WlSurfaceId>) -> bool {
         if let Some(&leaf_id) = self.surface_leaves.get(&surface_object_id) {
             self.focused_leaf = Some(leaf_id);
             self.update_focus_chain(leaf_id);
@@ -199,7 +200,7 @@ impl WorkspaceLayout {
         false
     }
 
-    pub fn raise_floating_surface(&mut self, surface_object_id: ObjectId) -> bool {
+    pub fn raise_floating_surface(&mut self, surface_object_id: Resolved<WlSurfaceId>) -> bool {
         let Some(index) = self
             .floating
             .stack
@@ -213,7 +214,7 @@ impl WorkspaceLayout {
         true
     }
 
-    pub fn insert_tiled(&mut self, surface_object_id: ObjectId) -> bool {
+    pub fn insert_tiled(&mut self, surface_object_id: Resolved<WlSurfaceId>) -> bool {
         if self.contains_surface(surface_object_id) {
             return false;
         }
@@ -244,7 +245,7 @@ impl WorkspaceLayout {
         true
     }
 
-    pub fn remove_surface(&mut self, surface_object_id: ObjectId) -> bool {
+    pub fn remove_surface(&mut self, surface_object_id: Resolved<WlSurfaceId>) -> bool {
         let mut removed = false;
         if let Some(index) = self
             .floating
@@ -276,7 +277,11 @@ impl WorkspaceLayout {
         removed
     }
 
-    pub fn set_floating(&mut self, surface_object_id: ObjectId, floating: bool) -> bool {
+    pub fn set_floating(
+        &mut self,
+        surface_object_id: Resolved<WlSurfaceId>,
+        floating: bool,
+    ) -> bool {
         if floating {
             if self.is_floating_surface(surface_object_id) {
                 return false;
@@ -300,7 +305,7 @@ impl WorkspaceLayout {
         self.insert_tiled(surface_object_id)
     }
 
-    pub fn set_fullscreen(&mut self, fullscreen_surface: Option<ObjectId>) -> bool {
+    pub fn set_fullscreen(&mut self, fullscreen_surface: Option<Resolved<WlSurfaceId>>) -> bool {
         let next =
             fullscreen_surface.map(|surface_object_id| FullscreenState { surface_object_id });
         let changed = self
@@ -317,7 +322,7 @@ impl WorkspaceLayout {
 
     pub fn resize_tiled_surface(
         &mut self,
-        surface_object_id: ObjectId,
+        surface_object_id: Resolved<WlSurfaceId>,
         edges: u32,
         dx: i32,
         dy: i32,
@@ -330,7 +335,7 @@ impl WorkspaceLayout {
 
     pub fn begin_tiled_resize(
         &self,
-        surface_object_id: ObjectId,
+        surface_object_id: Resolved<WlSurfaceId>,
         edges: u32,
     ) -> Option<TiledResizeState> {
         let Some(&leaf_id) = self.surface_leaves.get(&surface_object_id) else {
@@ -409,7 +414,7 @@ impl WorkspaceLayout {
 
     pub fn resize_tiled_surface_from_state(
         &mut self,
-        surface_object_id: ObjectId,
+        surface_object_id: Resolved<WlSurfaceId>,
         resize_state: TiledResizeState,
         dx: i32,
         dy: i32,
@@ -469,9 +474,9 @@ impl WorkspaceLayout {
 
     pub fn resize_affected_surfaces(
         &self,
-        surface_object_id: ObjectId,
+        surface_object_id: Resolved<WlSurfaceId>,
         resize_state: TiledResizeState,
-    ) -> Option<BTreeSet<ObjectId>> {
+    ) -> Option<BTreeSet<Resolved<WlSurfaceId>>> {
         let &leaf_id = self.surface_leaves.get(&surface_object_id)?;
         let parent_id = self.nodes.get(&leaf_id).and_then(LayoutNode::parent)?;
         let container = self
@@ -499,7 +504,7 @@ impl WorkspaceLayout {
 
     fn alloc_leaf(
         &mut self,
-        surface_object_id: ObjectId,
+        surface_object_id: Resolved<WlSurfaceId>,
         parent: Option<LayoutNodeId>,
     ) -> LayoutNodeId {
         let id = self.alloc_node_id();
@@ -816,7 +821,11 @@ impl WorkspaceLayout {
         }
     }
 
-    fn collect_leaf_surfaces(&self, node_id: LayoutNodeId, output: &mut Vec<ObjectId>) {
+    fn collect_leaf_surfaces(
+        &self,
+        node_id: LayoutNodeId,
+        output: &mut Vec<Resolved<WlSurfaceId>>,
+    ) {
         let Some(node) = self.nodes.get(&node_id) else {
             return;
         };
@@ -895,7 +904,10 @@ impl LayoutNode {
     }
 }
 
-pub fn tiled_content_rect_for_surface(state: &State, surface_object_id: ObjectId) -> Option<RectI> {
+pub fn tiled_content_rect_for_surface(
+    state: &State,
+    surface_object_id: Resolved<WlSurfaceId>,
+) -> Option<RectI> {
     let workspace_id = state.root_surface_workspace(surface_object_id)?;
     let workspace = state.workspaces.try_get(workspace_id)?;
     workspace
@@ -922,7 +934,10 @@ pub fn tiled_content_rect_for_surface(state: &State, surface_object_id: ObjectId
         })
 }
 
-pub fn tiled_frame_rect_for_surface(state: &State, surface_object_id: ObjectId) -> Option<RectI> {
+pub fn tiled_frame_rect_for_surface(
+    state: &State,
+    surface_object_id: Resolved<WlSurfaceId>,
+) -> Option<RectI> {
     let workspace_id = state.root_surface_workspace(surface_object_id)?;
     let workspace = state.workspaces.try_get(workspace_id)?;
     workspace.layout.tiled_rect(surface_object_id).or_else(|| {
@@ -936,7 +951,10 @@ pub fn tiled_frame_rect_for_surface(state: &State, surface_object_id: ObjectId) 
     })
 }
 
-pub fn tiled_edges_for_surface(state: &State, surface_object_id: ObjectId) -> Option<u32> {
+pub fn tiled_edges_for_surface(
+    state: &State,
+    surface_object_id: Resolved<WlSurfaceId>,
+) -> Option<u32> {
     let workspace_id = state.root_surface_workspace(surface_object_id)?;
     let workspace = state.workspaces.try_get(workspace_id)?;
     workspace.layout.tiled_edges(surface_object_id).or_else(|| {
@@ -951,11 +969,12 @@ pub fn tiled_edges_for_surface(state: &State, surface_object_id: ObjectId) -> Op
 
 pub fn initial_layout_configure_for_surface(
     state: &mut State,
-    surface_object_id: ObjectId,
+    surface: Resolved<WlSurfaceId>,
     surface_decoration_insets: DecorationInsets,
     target_min_size: Option<(i32, i32)>,
     configure_bounds: Option<(i32, i32)>,
 ) -> Option<InitialLayoutConfigure> {
+    let surface_object_id = surface;
     if !state.prepare_root_surface_initial_layout(surface_object_id) {
         return None;
     }
@@ -963,9 +982,7 @@ pub fn initial_layout_configure_for_surface(
     let workspace_surface_ids = state
         .managed_root_surfaces
         .iter()
-        .filter_map(|(surface, managed)| {
-            (managed.workspace_id == workspace_id).then_some(surface.object_id())
-        })
+        .filter_map(|(surface, managed)| (managed.workspace_id == workspace_id).then_some(*surface))
         .collect::<Vec<_>>();
     let candidate_surfaces = workspace_surface_ids
         .iter()
@@ -1008,11 +1025,11 @@ pub fn initial_layout_configure_for_surface(
         .iter()
         .filter_map(|(surface, managed)| {
             (managed.workspace_id == workspace_id).then_some((
-                surface.object_id(),
-                if surface.object_id() == surface_object_id {
+                *surface,
+                if *surface == surface_object_id {
                     target_min_size.unwrap_or((1, 1))
                 } else {
-                    minimum_size_for_surface(state, surface.object_id())
+                    minimum_size_for_surface(state, *surface)
                 },
             ))
         })
@@ -1070,21 +1087,21 @@ pub fn initial_layout_configure_for_surface(
     })
 }
 
-pub fn is_tiled_surface(state: &State, surface_object_id: ObjectId) -> bool {
+pub fn is_tiled_surface(state: &State, surface_object_id: Resolved<WlSurfaceId>) -> bool {
     state
         .root_surface_workspace(surface_object_id)
         .and_then(|workspace_id| state.workspaces.try_get(workspace_id))
         .is_some_and(|workspace| workspace.layout.is_tiled_surface(surface_object_id))
 }
 
-pub fn is_floating_surface(state: &State, surface_object_id: ObjectId) -> bool {
+pub fn is_floating_surface(state: &State, surface_object_id: Resolved<WlSurfaceId>) -> bool {
     state
         .root_surface_workspace(surface_object_id)
         .and_then(|workspace_id| state.workspaces.try_get(workspace_id))
         .is_some_and(|workspace| workspace.layout.is_floating_surface(surface_object_id))
 }
 
-pub fn focus_surface(state: &mut State, surface_object_id: ObjectId) -> bool {
+pub fn focus_surface(state: &mut State, surface_object_id: Resolved<WlSurfaceId>) -> bool {
     let Some(workspace_id) = state.root_surface_workspace(surface_object_id) else {
         return false;
     };
@@ -1094,7 +1111,7 @@ pub fn focus_surface(state: &mut State, surface_object_id: ObjectId) -> bool {
     workspace.layout.focus_surface(surface_object_id)
 }
 
-pub fn raise_surface(state: &mut State, surface_object_id: ObjectId) -> bool {
+pub fn raise_surface(state: &mut State, surface_object_id: Resolved<WlSurfaceId>) -> bool {
     let Some(workspace_id) = state.root_surface_workspace(surface_object_id) else {
         return false;
     };
@@ -1112,7 +1129,7 @@ pub fn raise_surface(state: &mut State, surface_object_id: ObjectId) -> bool {
 
 pub fn set_surface_floating(
     state: &mut State,
-    surface_object_id: ObjectId,
+    surface_object_id: Resolved<WlSurfaceId>,
     floating: bool,
 ) -> bool {
     let Some(workspace_id) = state.root_surface_workspace(surface_object_id) else {
@@ -1126,7 +1143,7 @@ pub fn set_surface_floating(
 
 pub fn resize_tiled_surface(
     state: &mut State,
-    surface_object_id: ObjectId,
+    surface_object_id: Resolved<WlSurfaceId>,
     edges: u32,
     dx: i32,
     dy: i32,
@@ -1148,7 +1165,7 @@ pub fn mark_workspace_dirty(state: &mut State, workspace_id: WorkspaceId) {
     }
 }
 
-pub fn managed_scene_order(state: &State) -> Vec<ObjectId> {
+pub fn managed_scene_order(state: &State) -> Vec<Resolved<WlSurfaceId>> {
     let mut ordered = Vec::new();
     let mut seen = BTreeSet::new();
     for output_id in state.outputs.iter().map(|(output_id, _)| output_id) {
@@ -1211,7 +1228,7 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
                 .managed_root_surfaces
                 .iter()
                 .filter_map(|(surface, managed)| {
-                    (managed.workspace_id == workspace_id).then_some(surface.object_id())
+                    (managed.workspace_id == workspace_id).then_some(*surface)
                 }),
         );
         let operations = {
@@ -1228,10 +1245,7 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
             )
         };
         for operation in operations {
-            let Some(mut surface) = state
-                .objects
-                .try_grab_object::<WlSurface>(operation.surface_object_id)
-            else {
+            let Some(mut surface) = operation.surface_object_id.try_grab(state) else {
                 continue;
             };
             let (rx, ry) = tiled_root_position_for_layout(
@@ -1266,13 +1280,16 @@ fn workspace_gap_policy(state: &State, _workspace_id: WorkspaceId) -> GapPolicy 
     }
 }
 
-fn tiled_decoration_insets(state: &State, surface_object_id: ObjectId) -> DecorationInsets {
+fn tiled_decoration_insets(
+    state: &State,
+    surface_object_id: Resolved<WlSurfaceId>,
+) -> DecorationInsets {
     effective_decoration_insets(state, surface_object_id)
 }
 
 fn decoration_insets_for_surface(
     decoration_insets: &DecorationInsetsMap,
-    surface_object_id: ObjectId,
+    surface_object_id: Resolved<WlSurfaceId>,
 ) -> DecorationInsets {
     decoration_insets
         .get(&surface_object_id)
@@ -1282,7 +1299,7 @@ fn decoration_insets_for_surface(
 
 fn decoration_insets_for_surfaces<I>(state: &State, surface_object_ids: I) -> DecorationInsetsMap
 where
-    I: IntoIterator<Item = ObjectId>,
+    I: IntoIterator<Item = Resolved<WlSurfaceId>>,
 {
     surface_object_ids
         .into_iter()
@@ -1294,9 +1311,12 @@ where
 
 pub(crate) fn effective_decoration_insets(
     state: &State,
-    surface_object_id: ObjectId,
+    surface_object_id: Resolved<WlSurfaceId>,
 ) -> DecorationInsets {
-    let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
+    let Some(surface) = state
+        .objects
+        .try_ref_object::<WlSurface>(surface_object_id.object_id())
+    else {
         return state.config.general.decoration_insets;
     };
     effective_decoration_insets_for_surface(state, surface_object_id, surface)
@@ -1304,13 +1324,11 @@ pub(crate) fn effective_decoration_insets(
 
 pub(crate) fn effective_decoration_insets_for_surface(
     state: &State,
-    surface_object_id: ObjectId,
+    surface_object_id: Resolved<WlSurfaceId>,
     surface: &WlSurface,
 ) -> DecorationInsets {
     let fallback = state.config.general.decoration_insets;
-    let Some((_, toplevel)) =
-        xdg_toplevel_for_surface_ids(state, surface.client_id(), surface.xdg_surface_id())
-    else {
+    let Some((_, toplevel)) = xdg_toplevel_for_surface_ids(state, surface.xdg_surface()) else {
         return fallback;
     };
     if toplevel.decoration_mode() == ToplevelDecorationMode::ServerSide {
@@ -1332,12 +1350,11 @@ pub(crate) fn effective_decoration_insets_for_surface(
 
 pub(crate) fn effective_window_geometry_for_surface(
     state: &State,
-    surface_object_id: ObjectId,
+    _surface_object_id: Resolved<WlSurfaceId>,
     surface: &WlSurface,
     window_geometry: Option<RectI>,
 ) -> Option<RectI> {
-    let surface_bounds =
-        WlSurface::local_surface_tree_bounds_with_surface(state, surface_object_id, surface)?;
+    let surface_bounds = WlSurface::local_surface_tree_bounds_from_ref(state, surface)?;
     window_geometry
         .map(|raw| clamp_window_geometry_to_surface_bounds(raw, surface_bounds))
         .or(Some(surface_bounds))
@@ -1345,19 +1362,18 @@ pub(crate) fn effective_window_geometry_for_surface(
 
 fn debug_log_tiled_geometry_snapshot(
     state: &State,
-    surface_object_id: ObjectId,
+    surface_object_id: Resolved<WlSurfaceId>,
     surface: &WlSurface,
     frame_rect: RectI,
     content_rect: RectI,
     insets: DecorationInsets,
 ) {
     let (root_x, root_y) = surface.root_position();
-    let surface_bounds =
-        WlSurface::local_surface_tree_bounds_with_surface(state, surface_object_id, surface);
+    let surface_bounds = WlSurface::local_surface_tree_bounds_from_ref(state, surface);
     let logical_bounds = surface.global_logical_bounds();
     let logical_size = surface.logical_size();
     let (decoration_mode, explicit_window_geometry, effective_window_geometry) =
-        xdg_toplevel_for_surface_ids(state, surface.client_id(), surface.xdg_surface_id())
+        xdg_toplevel_for_surface_ids(state, surface.xdg_surface())
             .map(|(_, toplevel)| {
                 let explicit = toplevel.window_geometry();
                 (
@@ -1410,14 +1426,12 @@ fn debug_log_tiled_geometry_snapshot(
 /// outside the client's window geometry.
 pub(crate) fn tiled_root_position_for_layout(
     state: &State,
-    surface_object_id: ObjectId,
+    surface_object_id: Resolved<WlSurfaceId>,
     surface: &WlSurface,
     frame_rect: RectI,
     content_rect: RectI,
 ) -> (i32, i32) {
-    let Some((_, toplevel)) =
-        xdg_toplevel_for_surface_ids(state, surface.client_id(), surface.xdg_surface_id())
-    else {
+    let Some((_, toplevel)) = xdg_toplevel_for_surface_ids(state, surface.xdg_surface()) else {
         return (content_rect.x, content_rect.y);
     };
     let Some(explicit_geometry) = toplevel.window_geometry() else {
@@ -1509,9 +1523,7 @@ fn sync_workspace_layout(state: &mut State, workspace_id: WorkspaceId) {
     let workspace_surface_ids = state
         .managed_root_surfaces
         .iter()
-        .filter_map(|(surface, managed)| {
-            (managed.workspace_id == workspace_id).then_some(surface.object_id())
-        })
+        .filter_map(|(surface, managed)| (managed.workspace_id == workspace_id).then_some(*surface))
         .collect::<Vec<_>>();
     let candidate_surfaces = workspace_surface_ids
         .iter()
@@ -1527,12 +1539,9 @@ fn sync_workspace_layout(state: &mut State, workspace_id: WorkspaceId) {
                 .map(|managed| (*object_id, managed.mode))
         })
         .collect::<BTreeMap<_, _>>();
-    for object_id in &workspace_surface_ids {
-        let Some(surface) = state.resolved_root_surface(*object_id) else {
-            continue;
-        };
-        if let Some(managed) = state.managed_root_surfaces.get_mut(&surface) {
-            managed.mapped = candidate_set.contains(object_id);
+    for surface in &workspace_surface_ids {
+        if let Some(managed) = state.managed_root_surfaces.get_mut(surface) {
+            managed.mapped = candidate_set.contains(surface);
         }
     }
 
@@ -1558,10 +1567,10 @@ fn sync_workspace_layout(state: &mut State, workspace_id: WorkspaceId) {
 
 fn sync_workspace_layout_candidates(
     layout: &mut WorkspaceLayout,
-    candidate_surfaces: &[ObjectId],
-    candidate_set: &BTreeSet<ObjectId>,
-    candidate_modes: &BTreeMap<ObjectId, ManagedWindowMode>,
-    fullscreen_surface: Option<ObjectId>,
+    candidate_surfaces: &[Resolved<WlSurfaceId>],
+    candidate_set: &BTreeSet<Resolved<WlSurfaceId>>,
+    candidate_modes: &BTreeMap<Resolved<WlSurfaceId>, ManagedWindowMode>,
+    fullscreen_surface: Option<Resolved<WlSurfaceId>>,
 ) {
     let current_surfaces = layout
         .surface_leaves
@@ -1605,7 +1614,7 @@ fn apply_workspace_layout(
     fullscreen_bounds: RectI,
     gap_policy: GapPolicy,
     decoration_insets: &DecorationInsetsMap,
-    min_sizes: &BTreeMap<ObjectId, (i32, i32)>,
+    min_sizes: &BTreeMap<Resolved<WlSurfaceId>, (i32, i32)>,
 ) -> Vec<LayoutOperation> {
     let mut operations = Vec::new();
     if let Some(fullscreen) = layout.fullscreen.as_ref() {
@@ -1650,7 +1659,7 @@ fn apply_node_layout(
     edge_constraints: TiledEdgeConstraints,
     gap_policy: GapPolicy,
     decoration_insets: &DecorationInsetsMap,
-    min_sizes: &BTreeMap<ObjectId, (i32, i32)>,
+    min_sizes: &BTreeMap<Resolved<WlSurfaceId>, (i32, i32)>,
     operations: &mut Vec<LayoutOperation>,
 ) {
     let Some(node_snapshot) = layout.nodes.get(&node_id).cloned() else {
@@ -1809,7 +1818,7 @@ fn compute_child_main_sizes(
     rect: RectI,
     gap_policy: GapPolicy,
     decoration_insets: &DecorationInsetsMap,
-    min_sizes: &BTreeMap<ObjectId, (i32, i32)>,
+    min_sizes: &BTreeMap<Resolved<WlSurfaceId>, (i32, i32)>,
 ) -> Vec<i32> {
     let span = match container.axis {
         SplitAxis::Horizontal => rect.width,
@@ -1878,7 +1887,7 @@ fn child_minimum_main_size(
     size_hint: LayoutSizeHint,
     gap_policy: GapPolicy,
     decoration_insets: &DecorationInsetsMap,
-    min_sizes: &BTreeMap<ObjectId, (i32, i32)>,
+    min_sizes: &BTreeMap<Resolved<WlSurfaceId>, (i32, i32)>,
 ) -> i32 {
     let (min_width, min_height) = node_minimum_size(
         layout,
@@ -1900,7 +1909,7 @@ fn node_minimum_size(
     size_hint: Option<LayoutSizeHint>,
     gap_policy: GapPolicy,
     decoration_insets: &DecorationInsetsMap,
-    min_sizes: &BTreeMap<ObjectId, (i32, i32)>,
+    min_sizes: &BTreeMap<Resolved<WlSurfaceId>, (i32, i32)>,
 ) -> (i32, i32) {
     let Some(node) = layout.nodes.get(&node_id) else {
         return (1, 1);
@@ -2110,26 +2119,31 @@ fn total_inner_gap(inner_gap: i32, child_count: usize) -> i32 {
 fn workspace_minimum_sizes(
     state: &State,
     workspace_id: WorkspaceId,
-) -> BTreeMap<ObjectId, (i32, i32)> {
+) -> BTreeMap<Resolved<WlSurfaceId>, (i32, i32)> {
     state
         .managed_root_surfaces
         .iter()
         .filter_map(|(surface, managed)| {
-            (managed.workspace_id == workspace_id).then_some((
-                surface.object_id(),
-                minimum_size_for_surface(state, surface.object_id()),
-            ))
+            (managed.workspace_id == workspace_id)
+                .then_some((*surface, minimum_size_for_surface(state, *surface)))
         })
         .collect()
 }
 
-fn minimum_size_for_surface(state: &State, surface_object_id: ObjectId) -> (i32, i32) {
-    let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
+fn minimum_size_for_surface(state: &State, surface_object_id: Resolved<WlSurfaceId>) -> (i32, i32) {
+    let Some(surface) = state
+        .objects
+        .try_ref_object::<WlSurface>(surface_object_id.object_id())
+    else {
         return (1, 1);
     };
-    let Some((_, toplevel)) =
-        xdg_toplevel_for_xdg_surface(state, surface_object_id, surface.xdg_surface_id())
-    else {
+    let Some((_, toplevel)) = xdg_toplevel_for_xdg_surface(
+        state,
+        surface_object_id.object_id(),
+        surface
+            .xdg_surface()
+            .map(|xdg_surface| xdg_surface.wayland_id()),
+    ) else {
         return (1, 1);
     };
     toplevel.minimum_size().unwrap_or((1, 1))
@@ -2137,13 +2151,11 @@ fn minimum_size_for_surface(state: &State, surface_object_id: ObjectId) -> (i32,
 
 fn xdg_toplevel_for_surface_ids(
     state: &State,
-    client_id: crate::clients::ClientId,
-    xdg_surface_id: Option<XdgSurfaceId>,
+    xdg_surface: Option<crate::clients::Resolved<XdgSurfaceId>>,
 ) -> Option<(ObjectId, &XdgToplevel)> {
-    let xdg_surface_id = xdg_surface_id?;
-    let object_id = state.xdg_toplevel_object_id(client_id, xdg_surface_id)?;
-    let toplevel = state.objects.try_ref_object::<XdgToplevel>(object_id)?;
-    Some((object_id, toplevel))
+    let xdg_surface = xdg_surface?;
+    let toplevel = state.xdg_toplevel(xdg_surface)?;
+    Some((toplevel.object_id(), toplevel.rref(state)))
 }
 
 fn xdg_toplevel_for_xdg_surface(
@@ -2151,15 +2163,20 @@ fn xdg_toplevel_for_xdg_surface(
     surface_object_id: ObjectId,
     xdg_surface_id: Option<XdgSurfaceId>,
 ) -> Option<(ObjectId, &XdgToplevel)> {
-    let xdg_surface_id = xdg_surface_id?;
     let surface = state
         .objects
         .try_ref_object::<WlSurface>(surface_object_id)?;
-    xdg_toplevel_for_surface_ids(state, surface.client_id(), Some(xdg_surface_id))
+    let xdg_surface = surface.xdg_surface()?;
+    if let Some(expected) = xdg_surface_id {
+        if xdg_surface.wayland_id() != expected {
+            return None;
+        }
+    }
+    xdg_toplevel_for_surface_ids(state, Some(xdg_surface))
 }
 
-fn is_managed_root_surface_live(state: &State, surface_object_id: ObjectId) -> bool {
-    let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
+fn is_managed_root_surface_live(state: &State, surface_object_id: Resolved<WlSurfaceId>) -> bool {
+    let Some(surface) = surface_object_id.try_ref(state) else {
         return false;
     };
     is_managed_root_surface_candidate_common(state, surface_object_id, surface)
@@ -2168,15 +2185,21 @@ fn is_managed_root_surface_live(state: &State, surface_object_id: ObjectId) -> b
 
 fn is_managed_root_surface_candidate_common(
     state: &State,
-    surface_object_id: ObjectId,
+    surface_object_id: Resolved<WlSurfaceId>,
     surface: &WlSurface,
 ) -> bool {
     surface.is_root()
         && surface.role() == Role::XdgSurface
         && !surface.has_cursor_role()
         && !surface.has_dnd_icon_role()
-        && xdg_toplevel_for_xdg_surface(state, surface_object_id, surface.xdg_surface_id())
-            .is_some()
+        && xdg_toplevel_for_xdg_surface(
+            state,
+            surface_object_id.object_id(),
+            surface
+                .xdg_surface()
+                .map(|xdg_surface| xdg_surface.wayland_id()),
+        )
+        .is_some()
 }
 
 pub fn xdg_toplevel_states_for_edges(edges: u32) -> Vec<u32> {
@@ -2213,13 +2236,16 @@ mod tests {
     use {
         super::*,
         crate::{
-            clients::{Client, ClientId},
+            clients::{Client, ClientId, Resolved},
             egl::EGL,
             globals::Globals,
-            protocol_generated::{WlSurfaceId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId},
+            protocol_generated::{
+                WlSubsurfaceId, WlSurfaceId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
+            },
             runner::Dispatcher,
-            state::State,
+            state::{ObjectId, State},
             wayland_objects::{
+                wl_subsurface::WlSubsurface,
                 wl_surface::Role,
                 xdg_surface::{xdg_toplevel::ToplevelDecorationMode, XdgSurface},
             },
@@ -2235,7 +2261,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -2268,31 +2293,80 @@ mod tests {
         toplevel_id: XdgToplevelId,
         logical_size: (i32, i32),
     ) -> (ObjectId, ObjectId, ObjectId) {
-        let ((_, surface_object_id), _) =
+        let (surface_resolved, _) =
             client.insert_object(state, WlSurface::new(wl_surface_id, client.client_id(), 6));
+        let surface_object_id = surface_resolved.object_id();
         {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             assert!(surface.set_role(Role::XdgSurface, dispatcher).is_ok());
-            surface.set_xdg_surface_impl(xdg_surface_id);
-            surface.test_map(ObjectId::from(900usize), 0, 0, logical_size.0, logical_size.1);
         }
         state.register_root_surface(surface_object_id);
 
-        let ((_, xdg_surface_object_id), _) = client.insert_object(
+        let (xdg_surface_resolved, _) = client.insert_object(
             state,
-            XdgSurface::new(xdg_surface_id, XdgWmBaseId::from(1), wl_surface_id, 7),
+            XdgSurface::new(
+                xdg_surface_id,
+                Resolved::new(client.client_id(), XdgWmBaseId::from(1), ObjectId::from(1usize)),
+                Resolved::new(client.client_id(), wl_surface_id, surface_object_id),
+                7,
+            ),
         );
-        let ((_, toplevel_object_id), _) =
-            client.insert_object(state, XdgToplevel::new(toplevel_id, xdg_surface_id, 7));
-        state.register_xdg_toplevel_role(client.client_id(), xdg_surface_id, toplevel_object_id);
+        let xdg_surface_object_id = xdg_surface_resolved.object_id();
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.set_xdg_surface_impl(crate::clients::Resolved::new(
+                client.client_id(),
+                xdg_surface_id,
+                xdg_surface_object_id,
+            ));
+            surface.test_map(ObjectId::from(900usize), 0, 0, logical_size.0, logical_size.1);
+        }
+        let (toplevel_resolved, _) = client.insert_object(
+            state,
+            XdgToplevel::new(
+                toplevel_id,
+                Resolved::new(client.client_id(), xdg_surface_id, xdg_surface_object_id),
+                7,
+            ),
+        );
+        let toplevel_object_id = toplevel_resolved.object_id();
+        state.register_xdg_toplevel_role(xdg_surface_resolved, toplevel_resolved);
         (surface_object_id, xdg_surface_object_id, toplevel_object_id)
+    }
+
+    fn fake_surface(raw: usize) -> Resolved<WlSurfaceId> {
+        Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(raw as u32), ObjectId::from(raw))
+    }
+
+    fn root(state: &State, object_id: ObjectId) -> Resolved<WlSurfaceId> {
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(object_id)
+            .unwrap();
+        Resolved::new(surface.client_id(), surface.surface_id(), object_id)
+    }
+
+    fn insert_subsurface(
+        state: &mut State,
+        id: WlSubsurfaceId,
+        surface_object_id: ObjectId,
+        parent_object_id: ObjectId,
+    ) -> Resolved<WlSubsurfaceId> {
+        let object_id = state
+            .insert_object(WlSubsurface::new(
+                id,
+                root(state, surface_object_id),
+                root(state, parent_object_id),
+            ))
+            .1;
+        Resolved::new(ClientId::from_raw(1), id, object_id)
     }
 
     #[test]
     fn tiled_resize_uses_grab_start_weights() {
         let mut layout = WorkspaceLayout::default();
-        let left = ObjectId::from(1usize);
-        let right = ObjectId::from(2usize);
+        let left = fake_surface(1);
+        let right = fake_surface(2);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -2327,7 +2401,7 @@ mod tests {
     #[test]
     fn fullscreen_layout_applies_to_floating_surface() {
         let mut layout = WorkspaceLayout::default();
-        let floating = ObjectId::from(3usize);
+        let floating = fake_surface(3);
         layout.floating.stack.push(floating);
         assert!(layout.set_fullscreen(Some(floating)));
 
@@ -2354,9 +2428,9 @@ mod tests {
     #[test]
     fn inserting_after_focus_can_create_vertical_subsplit() {
         let mut layout = WorkspaceLayout::default();
-        let first = ObjectId::from(4usize);
-        let second = ObjectId::from(5usize);
-        let third = ObjectId::from(6usize);
+        let first = fake_surface(4);
+        let second = fake_surface(5);
+        let third = fake_surface(6);
 
         assert!(layout.insert_tiled(first));
         assert!(layout.insert_tiled(second));
@@ -2384,8 +2458,8 @@ mod tests {
     #[test]
     fn removing_focused_leaf_selects_remaining_tiled_focus() {
         let mut layout = WorkspaceLayout::default();
-        let first = ObjectId::from(7usize);
-        let second = ObjectId::from(8usize);
+        let first = fake_surface(7);
+        let second = fake_surface(8);
 
         assert!(layout.insert_tiled(first));
         assert!(layout.insert_tiled(second));
@@ -2405,7 +2479,7 @@ mod tests {
     #[test]
     fn removing_last_leaf_from_nested_container_cleans_up_empty_ancestors() {
         let mut layout = WorkspaceLayout::default();
-        let leaf_surface = ObjectId::from(9usize);
+        let leaf_surface = fake_surface(9);
         let leaf_id = layout.alloc_leaf(leaf_surface, None);
         let inner_id = layout.alloc_container(
             SplitAxis::Vertical,
@@ -2433,8 +2507,8 @@ mod tests {
     #[test]
     fn layout_handles_minimums_larger_than_available_space() {
         let mut layout = WorkspaceLayout::default();
-        let left = ObjectId::from(10usize);
-        let right = ObjectId::from(11usize);
+        let left = fake_surface(10);
+        let right = fake_surface(11);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -2468,8 +2542,8 @@ mod tests {
     #[test]
     fn inner_gap_inserts_spacing_between_sibling_tiles() {
         let mut layout = WorkspaceLayout::default();
-        let left = ObjectId::from(12usize);
-        let right = ObjectId::from(13usize);
+        let left = fake_surface(12);
+        let right = fake_surface(13);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -2489,8 +2563,8 @@ mod tests {
     #[test]
     fn tiled_edges_are_relative_to_gapped_tiling_bounds() {
         let mut layout = WorkspaceLayout::default();
-        let left = ObjectId::from(14usize);
-        let right = ObjectId::from(15usize);
+        let left = fake_surface(14);
+        let right = fake_surface(15);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -2534,8 +2608,9 @@ mod tests {
     fn window_geometry_derives_per_edge_decoration_insets() {
         let surface = WlSurface::new(WlSurfaceId::from(30u32), ClientId::from_raw(31), 6);
         let mut state = make_state();
-        let ((_, surface_object_id), _) =
+        let (surface_resolved, _) =
             Client::new_for_tests(ClientId::from_raw(32)).insert_object(&mut state, surface);
+        let surface_object_id = surface_resolved.object_id();
         {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             surface.test_map(ObjectId::from(901usize), 0, 0, 80, 60);
@@ -2575,17 +2650,26 @@ mod tests {
                 (80, 60),
             );
 
-        let ((_, child_surface_object_id), _) = client.insert_object(
+        let (child_resolved_insert, _) = client.insert_object(
             &mut state,
             WlSurface::new(WlSurfaceId::from(48u32), client.client_id(), 6),
         );
+        let child_surface_object_id = child_resolved_insert.object_id();
+        let child_subsurface = insert_subsurface(
+            &mut state,
+            WlSubsurfaceId::from(49u32),
+            child_surface_object_id,
+            surface_object_id,
+        );
+        let parent_resolved = root(&state, surface_object_id);
+        let child_resolved = root(&state, child_surface_object_id);
         {
             let root_surface = state
                 .objects
                 .get_mut(surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            root_surface.add_pending_child(child_surface_object_id);
+            root_surface.add_pending_child(child_resolved);
         }
         {
             let child_surface = state
@@ -2593,14 +2677,7 @@ mod tests {
                 .get_mut(child_surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_surface.assign_subsurface(
-                crate::protocol_generated::WlSubsurfaceId::from(49u32),
-                crate::clients::Resolved::new(
-                    crate::clients::ClientId::from_raw(1),
-                    crate::protocol_generated::WlSurfaceId::from(1),
-                    surface_object_id,
-                ),
-            );
+            child_surface.assign_subsurface(child_subsurface, parent_resolved);
             child_surface.set_subsurface_position(-4, -12);
             child_surface.test_map(ObjectId::from(901usize), 0, 0, 90, 80);
         }
@@ -2628,7 +2705,7 @@ mod tests {
         assert_eq!(
             tiled_root_position_for_layout(
                 &state,
-                surface_object_id,
+                root(&state, surface_object_id),
                 surface,
                 frame_rect,
                 content_rect,
@@ -2673,7 +2750,7 @@ mod tests {
         assert_eq!(
             tiled_root_position_for_layout(
                 &state,
-                surface_object_id,
+                root(&state, surface_object_id),
                 surface,
                 frame_rect,
                 content_rect,
@@ -2702,7 +2779,7 @@ mod tests {
             );
 
         assert_eq!(
-            effective_decoration_insets(&state, surface_object_id),
+            effective_decoration_insets(&state, root(&state, surface_object_id),),
             DecorationInsets { top: 7, right: 1, bottom: 2, left: 3 }
         );
     }
@@ -2725,17 +2802,26 @@ mod tests {
                 XdgToplevelId::from(53u32),
                 (80, 60),
             );
-        let ((_, child_surface_object_id), _) = client.insert_object(
+        let (child_resolved_insert, _) = client.insert_object(
             &mut state,
             WlSurface::new(WlSurfaceId::from(54u32), client.client_id(), 6),
         );
+        let child_surface_object_id = child_resolved_insert.object_id();
+        let child_subsurface = insert_subsurface(
+            &mut state,
+            WlSubsurfaceId::from(55u32),
+            child_surface_object_id,
+            surface_object_id,
+        );
+        let parent_resolved = root(&state, surface_object_id);
+        let child_resolved = root(&state, child_surface_object_id);
         {
             let root_surface = state
                 .objects
                 .get_mut(surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            root_surface.add_pending_child(child_surface_object_id);
+            root_surface.add_pending_child(child_resolved);
         }
         {
             let child_surface = state
@@ -2743,14 +2829,7 @@ mod tests {
                 .get_mut(child_surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_surface.assign_subsurface(
-                crate::protocol_generated::WlSubsurfaceId::from(55u32),
-                crate::clients::Resolved::new(
-                    crate::clients::ClientId::from_raw(1),
-                    crate::protocol_generated::WlSurfaceId::from(1),
-                    surface_object_id,
-                ),
-            );
+            child_surface.assign_subsurface(child_subsurface, parent_resolved);
             child_surface.set_subsurface_position(-4, -12);
             child_surface.test_map(ObjectId::from(901usize), 0, 0, 90, 80);
         }
@@ -2769,7 +2848,7 @@ mod tests {
         }
 
         assert_eq!(
-            effective_decoration_insets(&state, surface_object_id),
+            effective_decoration_insets(&state, root(&state, surface_object_id),),
             DecorationInsets { top: 12, right: 6, bottom: 8, left: 4 }
         );
     }
@@ -2792,17 +2871,26 @@ mod tests {
                 XdgToplevelId::from(58u32),
                 (80, 60),
             );
-        let ((_, child_surface_object_id), _) = client.insert_object(
+        let (child_resolved_insert, _) = client.insert_object(
             &mut state,
             WlSurface::new(WlSurfaceId::from(59u32), client.client_id(), 6),
         );
+        let child_surface_object_id = child_resolved_insert.object_id();
+        let child_subsurface = insert_subsurface(
+            &mut state,
+            WlSubsurfaceId::from(60u32),
+            child_surface_object_id,
+            surface_object_id,
+        );
+        let parent_resolved = root(&state, surface_object_id);
+        let child_resolved = root(&state, child_surface_object_id);
         {
             let root_surface = state
                 .objects
                 .get_mut(surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            root_surface.add_pending_child(child_surface_object_id);
+            root_surface.add_pending_child(child_resolved);
         }
         {
             let child_surface = state
@@ -2810,14 +2898,7 @@ mod tests {
                 .get_mut(child_surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_surface.assign_subsurface(
-                crate::protocol_generated::WlSubsurfaceId::from(60u32),
-                crate::clients::Resolved::new(
-                    crate::clients::ClientId::from_raw(1),
-                    crate::protocol_generated::WlSurfaceId::from(1),
-                    surface_object_id,
-                ),
-            );
+            child_surface.assign_subsurface(child_subsurface, parent_resolved);
             child_surface.set_subsurface_position(-4, -12);
             child_surface.test_map(ObjectId::from(902usize), 0, 0, 90, 80);
         }
@@ -2836,7 +2917,7 @@ mod tests {
         }
 
         assert_eq!(
-            effective_decoration_insets(&state, surface_object_id),
+            effective_decoration_insets(&state, root(&state, surface_object_id),),
             DecorationInsets { top: 12, right: 6, bottom: 8, left: 4 }
         );
     }
@@ -2875,7 +2956,7 @@ mod tests {
             .test_set_decoration_mode(ToplevelDecorationMode::ServerSide);
 
         assert_eq!(
-            effective_decoration_insets(&state, surface_object_id),
+            effective_decoration_insets(&state, root(&state, surface_object_id),),
             DecorationInsets { top: 2, right: 3, bottom: 4, left: 5 }
         );
     }
@@ -2883,7 +2964,7 @@ mod tests {
     #[test]
     fn fullscreen_layout_ignores_gaps_and_insets() {
         let mut layout = WorkspaceLayout::default();
-        let surface = ObjectId::from(16usize);
+        let surface = fake_surface(16);
         layout.floating.stack.push(surface);
         assert!(layout.set_fullscreen(Some(surface)));
 
@@ -2904,8 +2985,8 @@ mod tests {
     #[test]
     fn mixed_decoration_insets_shrink_each_leaf_independently() {
         let mut layout = WorkspaceLayout::default();
-        let left = ObjectId::from(160usize);
-        let right = ObjectId::from(161usize);
+        let left = fake_surface(160);
+        let right = fake_surface(161);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -2929,8 +3010,8 @@ mod tests {
     #[test]
     fn minimum_size_fallback_accounts_for_inner_gaps() {
         let mut layout = WorkspaceLayout::default();
-        let left = ObjectId::from(17usize);
-        let right = ObjectId::from(18usize);
+        let left = fake_surface(17);
+        let right = fake_surface(18);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -2954,8 +3035,8 @@ mod tests {
     #[test]
     fn node_minimum_size_uses_per_surface_decoration_insets() {
         let mut layout = WorkspaceLayout::default();
-        let left = ObjectId::from(170usize);
-        let right = ObjectId::from(171usize);
+        let left = fake_surface(170);
+        let right = fake_surface(171);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -2977,9 +3058,9 @@ mod tests {
     #[test]
     fn nested_container_minimum_uses_effective_gap_from_size_hint() {
         let mut layout = WorkspaceLayout::default();
-        let first = ObjectId::from(19usize);
-        let second = ObjectId::from(20usize);
-        let third = ObjectId::from(21usize);
+        let first = fake_surface(19);
+        let second = fake_surface(20);
+        let third = fake_surface(21);
         let first_id = layout.alloc_leaf(first, None);
         let second_id = layout.alloc_leaf(second, None);
         let third_id = layout.alloc_leaf(third, None);
@@ -3013,9 +3094,9 @@ mod tests {
     #[test]
     fn nested_splits_propagate_internal_tiled_edge_constraints() {
         let mut layout = WorkspaceLayout::default();
-        let first = ObjectId::from(22usize);
-        let second = ObjectId::from(23usize);
-        let third = ObjectId::from(24usize);
+        let first = fake_surface(22);
+        let second = fake_surface(23);
+        let third = fake_surface(24);
         assert!(layout.insert_tiled(first));
         assert!(layout.insert_tiled(second));
         assert!(layout.insert_tiled(third));

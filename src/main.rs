@@ -271,7 +271,6 @@ fn main() {
     let mut state = State {
         objects: Default::default(),
         root_surfaces: Default::default(),
-        root_surface_resolved_by_object: Default::default(),
         layer_surface_objects: Default::default(),
         inputs: Default::default(),
         drm: Default::default(),

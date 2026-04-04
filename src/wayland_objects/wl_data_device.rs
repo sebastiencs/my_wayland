@@ -52,20 +52,35 @@ impl WlDataDevice {
         self.drag_offer = offer_id;
     }
 
-    pub fn send_data_offer(&self, id: WlDataOfferId, dispatcher: &mut ClientDispatcher) {
-        self.send_event(wl_data_device::Event::DataOffer { id }, dispatcher);
+    pub fn send_data_offer(
+        &self,
+        offer: Resolved<WlDataOfferId>,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.send_event(wl_data_device::Event::DataOffer { id: offer.wayland_id() }, dispatcher);
     }
 
     pub fn send_enter(
         &self,
         serial: u32,
-        surface: WlSurfaceId,
+        surface: Resolved<WlSurfaceId>,
         x: f32,
         y: f32,
-        id: WlDataOfferId,
+        offer: Option<Resolved<WlDataOfferId>>,
         dispatcher: &mut ClientDispatcher,
     ) {
-        self.send_event(wl_data_device::Event::Enter { serial, surface, x, y, id }, dispatcher);
+        self.send_event(
+            wl_data_device::Event::Enter {
+                serial,
+                surface: surface.wayland_id(),
+                x,
+                y,
+                id: offer
+                    .map(|offer| offer.wayland_id())
+                    .unwrap_or_else(|| WlDataOfferId::from(0u32)),
+            },
+            dispatcher,
+        );
     }
 
     pub fn send_leave(&self, dispatcher: &mut ClientDispatcher) {
@@ -80,8 +95,19 @@ impl WlDataDevice {
         self.send_event(wl_data_device::Event::Drop, dispatcher);
     }
 
-    pub fn send_selection(&self, id: WlDataOfferId, dispatcher: &mut ClientDispatcher) {
-        self.send_event(wl_data_device::Event::Selection { id }, dispatcher);
+    pub fn send_selection(
+        &self,
+        offer: Option<Resolved<WlDataOfferId>>,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.send_event(
+            wl_data_device::Event::Selection {
+                id: offer
+                    .map(|offer| offer.wayland_id())
+                    .unwrap_or_else(|| WlDataOfferId::from(0u32)),
+            },
+            dispatcher,
+        );
     }
 }
 
@@ -107,9 +133,9 @@ impl Object for WlDataDevice {
                 set_selection(self, client, state, dispatcher, source, serial)?;
             }
             Release => {
-                state
-                    .seat
-                    .unregister_data_device(client.client_id(), self.id);
+                if let Some(data_device) = client.resolve(self.id, state) {
+                    state.seat.unregister_data_device(data_device);
+                }
                 if let Some(offer) = self.selection_offer.take() {
                     if offer.exists(state) {
                         client.destroy_data_offer(state, dispatcher, offer);
@@ -205,10 +231,7 @@ fn start_drag(
     use crate::state::{DragPhase, DragSource, DragState};
 
     let origin = client.resolve_or_disconnect(origin, state, dispatcher)?;
-    if !state
-        .seat
-        .validate_data_transfer_serial(client.client_id(), origin.wayland_id(), serial)
-    {
+    if !state.seat.validate_data_transfer_serial(origin, serial) {
         return Ok(());
     }
 
@@ -252,8 +275,8 @@ fn start_drag(
         source: source
             .map(|source| DragSource::DataSource { source })
             .unwrap_or(DragSource::None { initiator_client_id: client_id }),
-        origin_surface_id: origin.wayland_id(),
-        icon_surface_object_id: icon.map(Resolved::object_id),
+        origin_surface: origin,
+        icon_surface: icon,
         target: None,
         negotiation: Default::default(),
         phase: DragPhase::Dragging,
@@ -298,7 +321,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -329,6 +351,14 @@ mod tests {
     fn release_request(data_device_id: WlDataDeviceId) -> crate::clients::RawRequest<'static> {
         let event = RawEvent::new(data_device_id.into(), 2, 0);
         (&*event.into_bytes()).try_into().unwrap()
+    }
+
+    fn fake_surface(
+        client_id: ClientId,
+        surface_id: u32,
+        object_id: ObjectId,
+    ) -> Resolved<WlSurfaceId> {
+        Resolved::new(client_id, surface_id.into(), object_id)
     }
 
     #[test]
@@ -439,8 +469,9 @@ mod tests {
         let source_id = WlDataSourceId::from(10);
         let source_client_id = ClientId::from_raw(1);
 
-        let ((_, data_device_object_id), _) = client
+        let (data_device_resolved, _) = client
             .insert_object(&mut state, WlDataDevice::new(data_device_id, WlSeatId::from(2), 2));
+        let data_device_object_id = data_device_resolved.object_id();
         let _ = client.insert_object(
             &mut state,
             WlDataOffer::new(
@@ -451,20 +482,26 @@ mod tests {
             ),
         );
 
-        state
-            .seat
-            .register_data_device(client.client_id(), data_device_id);
+        state.seat.register_data_device(Resolved::new(
+            client.client_id(),
+            data_device_id,
+            data_device_object_id,
+        ));
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
                 source: Resolved::new(source_client_id, source_id, ObjectId::from(0usize)),
             },
-            origin_surface_id: 30u32.into(),
-            icon_surface_object_id: None,
+            origin_surface: fake_surface(source_client_id, 30, ObjectId::from(30usize)),
+            icon_surface: None,
             target: Some(DragTargetState {
-                surface: Resolved::new(client.client_id(), 31u32.into(), ObjectId::from(0usize)),
+                surface: fake_surface(client.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
-                offer_ids: vec![offer_id],
+                offer_ids: vec![Resolved::new(
+                    client.client_id(),
+                    offer_id,
+                    client.object_id(offer_id),
+                )],
                 accepted_mime: Some("text/plain".to_string()),
                 destination_actions: 0,
                 preferred_action: 0,

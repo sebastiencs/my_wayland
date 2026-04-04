@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser},
     protocol_generated::{
         ext_workspace_handle_v1, wl_display, Array, ExtWorkspaceGroupHandleV1Id,
@@ -16,7 +16,7 @@ use crate::{
 #[derive(Debug)]
 pub struct ExtWorkspaceHandleV1 {
     id: ExtWorkspaceHandleV1Id,
-    manager_id: ExtWorkspaceManagerV1Id,
+    manager: Resolved<ExtWorkspaceManagerV1Id>,
     workspace_id: WorkspaceId,
     version: u32,
     sent_name: Option<String>,
@@ -29,13 +29,13 @@ pub struct ExtWorkspaceHandleV1 {
 impl ExtWorkspaceHandleV1 {
     pub fn new(
         id: ExtWorkspaceHandleV1Id,
-        manager_id: ExtWorkspaceManagerV1Id,
+        manager: Resolved<ExtWorkspaceManagerV1Id>,
         workspace_id: WorkspaceId,
         version: u32,
     ) -> Self {
         Self {
             id,
-            manager_id,
+            manager,
             workspace_id,
             version,
             sent_name: None,
@@ -143,13 +143,8 @@ impl Object for ExtWorkspaceHandleV1 {
 
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
-                if let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) {
-                    if let Some(mut manager) = state
-                        .objects
-                        .try_grab_object::<ExtWorkspaceManagerV1>(manager_object_id)
-                    {
-                        manager.release_workspace_handle(self.workspace_id);
-                    }
+                if let Some(mut manager) = self.manager.try_ref_mut(state) {
+                    manager.release_workspace_handle(self.workspace_id);
                 }
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
@@ -157,13 +152,7 @@ impl Object for ExtWorkspaceHandleV1 {
                 if self.removed {
                     return Ok(());
                 }
-                let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
-                    return Ok(());
-                };
-                let Some(mut manager) = state
-                    .objects
-                    .try_grab_object::<ExtWorkspaceManagerV1>(manager_object_id)
-                else {
+                let Some(mut manager) = self.manager.try_ref_mut(state) else {
                     return Ok(());
                 };
                 manager.queue_request(PendingWorkspaceRequest::Activate {
@@ -177,16 +166,9 @@ impl Object for ExtWorkspaceHandleV1 {
                 }
                 let group = client
                     .resolve_or_disconnect(workspace_group, state, dispatcher)?
-                    .try_ref(state)
-                    .unwrap();
+                    .rref(state);
                 let group_id = group.group_id();
-                let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
-                    return Ok(());
-                };
-                let Some(mut manager) = state
-                    .objects
-                    .try_grab_object::<ExtWorkspaceManagerV1>(manager_object_id)
-                else {
+                let Some(mut manager) = self.manager.try_ref_mut(state) else {
                     return Ok(());
                 };
                 manager.queue_request(PendingWorkspaceRequest::Assign {
@@ -198,13 +180,7 @@ impl Object for ExtWorkspaceHandleV1 {
                 if self.removed {
                     return Ok(());
                 }
-                let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
-                    return Ok(());
-                };
-                let Some(mut manager) = state
-                    .objects
-                    .try_grab_object::<ExtWorkspaceManagerV1>(manager_object_id)
-                else {
+                let Some(mut manager) = self.manager.try_ref_mut(state) else {
                     return Ok(());
                 };
                 manager.queue_request(PendingWorkspaceRequest::Remove {

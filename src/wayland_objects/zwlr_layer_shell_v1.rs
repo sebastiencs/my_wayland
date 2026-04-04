@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest},
+    clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
     object::{Object, Parser, ParserError},
     protocol_generated::{
@@ -72,12 +72,10 @@ impl ZwlrLayerShellV1 {
         let Some(output) = output.to_opt() else {
             return Ok(None);
         };
-        let Some(output_object_id) = client.try_object_id(output, state) else {
+        let Some(output) = client.resolve(output, state) else {
             return Err(());
         };
-        let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(output_object_id) else {
-            return Err(());
-        };
+        let wl_output = output.rref(state);
         Ok(Some(wl_output.output_id().ok_or(())?))
     }
 
@@ -131,15 +129,7 @@ impl Object for ZwlrLayerShellV1 {
 
         match request {
             GetLayerSurface { id, surface, output, layer, namespace } => {
-                if !client.object_is(surface, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "zwlr_layer_shell_v1.get_layer_surface requires a live wl_surface",
-                    );
-                    return Ok(());
-                }
+                let surface = client.resolve_or_disconnect(surface, state, dispatcher)?;
 
                 let Some(layer) = LayerShellLayer::from_raw(layer) else {
                     client.send_protocol_error(
@@ -164,44 +154,44 @@ impl Object for ZwlrLayerShellV1 {
                     }
                 };
 
-                let surface_object_id = client.object_id(surface);
-                let wl_surface = client.ref_object_mut(surface, state);
-                if wl_surface.has_attached_or_committed_buffer() {
-                    client.send_protocol_error(
-                        dispatcher,
-                        self.id.into(),
-                        zwlr_layer_shell_v1::Error::AlreadyConstructed as u32,
-                        "wl_surface must not have an attached or committed buffer before get_layer_surface",
-                    );
-                    return Ok(());
+                {
+                    let wl_surface = surface.ref_mut(state);
+                    if wl_surface.has_attached_or_committed_buffer() {
+                        client.send_protocol_error(
+                            dispatcher,
+                            self.id.into(),
+                            zwlr_layer_shell_v1::Error::AlreadyConstructed as u32,
+                            "wl_surface must not have an attached or committed buffer before get_layer_surface",
+                        );
+                        return Ok(());
+                    }
+                    if wl_surface.role() != Role::None {
+                        client.send_protocol_error(
+                            dispatcher,
+                            self.id.into(),
+                            zwlr_layer_shell_v1::Error::Role as u32,
+                            "wl_surface already has a role",
+                        );
+                        return Ok(());
+                    }
+                    if wl_surface.set_role(Role::LayerSurface, dispatcher).is_err() {
+                        return Ok(());
+                    }
                 }
-                if wl_surface.role() != Role::None {
-                    client.send_protocol_error(
-                        dispatcher,
-                        self.id.into(),
-                        zwlr_layer_shell_v1::Error::Role as u32,
-                        "wl_surface already has a role",
-                    );
-                    return Ok(());
-                }
-                if wl_surface.set_role(Role::LayerSurface, dispatcher).is_err() {
-                    return Ok(());
-                }
-                wl_surface.set_layer_surface_impl(id);
 
+                let this = client.resolve(self.id, state).unwrap();
                 let layer_surface = ZwlrLayerSurfaceV1::new(
                     id,
-                    self.id,
-                    client.client_id(),
+                    this,
                     self.version,
                     surface,
-                    surface_object_id,
                     requested_output_id,
                     layer,
                     namespace,
                 );
-                let ((_, layer_surface_object_id), _) = client.insert_object(state, layer_surface);
-                state.register_layer_surface_object(id, layer_surface_object_id);
+                let (layer_surface, _) = client.insert_object(state, layer_surface);
+                surface.ref_mut(state).set_layer_surface_impl(layer_surface);
+                state.register_layer_surface_object(layer_surface);
                 self.surfaces.push(id);
                 relayout_client_layer_surfaces(client, state, dispatcher);
             }
@@ -243,7 +233,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),

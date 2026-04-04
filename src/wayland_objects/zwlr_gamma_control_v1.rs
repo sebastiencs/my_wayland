@@ -1,11 +1,11 @@
 use std::os::fd::{AsRawFd, FromRawFd};
 
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     drm::schedule_output,
     object::{Object, Parser},
     protocol_generated::{zwlr_gamma_control_v1, Constants, WaylandId, ZwlrGammaControlV1Id},
-    state::{ObjectId, OutputId, State},
+    state::{OutputId, State},
     wayland_objects::wl_display::WlDisplay,
 };
 
@@ -27,18 +27,18 @@ fn set_nonblocking(fd: i32) -> std::io::Result<()> {
 #[derive(Debug)]
 pub struct ZwlrGammaControlV1 {
     id: ZwlrGammaControlV1Id,
-    object_id: Option<ObjectId>,
+    gamma_object: Option<Resolved<ZwlrGammaControlV1Id>>,
     output_id: Option<OutputId>,
     gamma_size: u32,
 }
 
 impl ZwlrGammaControlV1 {
     pub fn new(id: ZwlrGammaControlV1Id, output_id: Option<OutputId>, gamma_size: u32) -> Self {
-        Self { id, object_id: None, output_id, gamma_size }
+        Self { id, gamma_object: None, output_id, gamma_size }
     }
 
-    pub fn set_object_id(&mut self, object_id: ObjectId) {
-        self.object_id = Some(object_id);
+    pub fn set_gamma_object(&mut self, gamma_object: Resolved<ZwlrGammaControlV1Id>) {
+        self.gamma_object = Some(gamma_object);
     }
 
     pub fn send_gamma_size(&self, dispatcher: &mut ClientDispatcher) {
@@ -61,8 +61,8 @@ impl ZwlrGammaControlV1 {
             return None;
         };
         let reset_applied = state.set_output_gamma_lut(output_id, None).is_ok();
-        if let Some(object_id) = self.object_id {
-            state.clear_gamma_control_owner(output_id, object_id);
+        if let Some(gamma_object) = self.gamma_object {
+            state.clear_gamma_control_owner(output_id, gamma_object);
         }
         reset_applied.then_some(output_id)
     }

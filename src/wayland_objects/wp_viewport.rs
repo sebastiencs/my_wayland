@@ -1,8 +1,8 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest},
+    clients::{Client, ClientDispatcher, RawRequest, Resolved},
     object::{Object, Parser},
-    protocol_generated::{wp_viewport, WaylandId, WpViewportId},
-    state::{ObjectId, State},
+    protocol_generated::{wp_viewport, WaylandId, WlSurfaceId, WpViewportId},
+    state::State,
     transform::{RectF, SizeI},
     wayland_objects::wl_surface::WlSurface,
 };
@@ -10,12 +10,12 @@ use crate::{
 #[derive(Debug)]
 pub struct WpViewport {
     id: WpViewportId,
-    surface_object_id: ObjectId,
+    surface: Resolved<WlSurfaceId>,
 }
 
 impl WpViewport {
-    pub fn new(id: WpViewportId, surface_object_id: ObjectId) -> Self {
-        Self { id, surface_object_id }
+    pub fn new(id: WpViewportId, surface: Resolved<WlSurfaceId>) -> Self {
+        Self { id, surface }
     }
 }
 
@@ -33,10 +33,7 @@ impl Object for WpViewport {
     ) -> crate::object::RequestResult {
         use wp_viewport::Request::*;
 
-        let Some(mut surface) = state
-            .objects
-            .try_grab_object::<WlSurface>(self.surface_object_id)
-        else {
+        let Some(mut surface) = self.surface.try_grab(state) else {
             client.send_protocol_error(
                 dispatcher,
                 self.id.into(),
@@ -48,7 +45,8 @@ impl Object for WpViewport {
 
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
-                surface.clear_viewport_object(self.id);
+                let this = client.resolve(self.id, state).unwrap();
+                surface.clear_viewport_object(this);
                 use crate::wayland_objects::wl_display::WlDisplay;
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }

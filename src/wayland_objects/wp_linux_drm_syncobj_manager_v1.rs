@@ -3,7 +3,7 @@ use std::os::fd::{BorrowedFd, FromRawFd};
 use drm::control::Device;
 
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest},
+    clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
     object::{Object, Parser},
     protocol_generated::{
@@ -74,37 +74,9 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
             GetSurface { id, surface } => {
-                let Some(surface_oid) = client.try_object_id(surface, state) else {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        surface.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "invalid wl_surface for syncobj surface",
-                    );
-                    return Ok(());
-                };
+                let surface = client.resolve_or_disconnect(surface, state, dispatcher)?;
                 {
-                    if state
-                        .objects
-                        .try_ref_object::<WlSurface>(surface_oid)
-                        .is_none()
-                    {
-                        let msg = if state.objects.contains(surface_oid) {
-                            "syncobj surface target is not a wl_surface"
-                        } else {
-                            "invalid wl_surface for syncobj surface"
-                        };
-                        client.protocol_violation_disconnect(
-                            dispatcher,
-                            surface.into(),
-                            wl_display::Error::InvalidObject as u32,
-                            msg,
-                        );
-                        return Ok(());
-                    }
-                }
-                {
-                    let mut surface = state.objects.grab_object::<WlSurface>(surface_oid);
+                    let surface = surface.rref(state);
                     if surface.has_syncobj_surface_object() {
                         client.send_protocol_error(
                             dispatcher,
@@ -114,11 +86,13 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                         );
                         return Ok(());
                     }
-                    if surface.set_syncobj_surface_object(id).is_err() {
-                        return Ok(());
-                    }
                 }
-                client.insert_object(state, WpLinuxDrmSyncobjSurfaceV1::new(id, surface_oid));
+                client.insert_object(state, WpLinuxDrmSyncobjSurfaceV1::new(id, surface));
+                let object = client.resolve(id, state).unwrap();
+                surface
+                    .grab(state)
+                    .set_syncobj_surface_object(object)
+                    .expect("syncobj surface existence was checked before insertion");
             }
             ImportTimeline { id, fd } => {
                 let Some(drm) = state.drm.try_get(self.import_drm_id) else {

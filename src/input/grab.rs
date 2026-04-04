@@ -4,13 +4,11 @@ use crate::{
     clients::{ClientAction, ClientId, ClientManagerAction, Resolved},
     cursor::CursorSourceRef,
     drm::{schedule_active_output, schedule_outputs_for_points, schedule_outputs_for_rects},
-    protocol_generated::{xdg_toplevel::ResizeEdge, XdgToplevelId},
+    protocol_generated::{xdg_toplevel::ResizeEdge, WlSurfaceId, XdgToplevelId},
     runner::Dispatcher,
     seat::{dispatch_client_action, dispatch_client_event, refresh_pointer_focus, SeatClientEvent},
-    state::{ObjectId, State},
-    wayland_objects::{
-        wl_surface::WlSurface, xdg_surface::xdg_toplevel::InteractiveSizeConstraints,
-    },
+    state::State,
+    wayland_objects::xdg_surface::xdg_toplevel::InteractiveSizeConstraints,
 };
 
 use super::{
@@ -63,26 +61,21 @@ pub(crate) fn apply_pointer_interactive_grab(
         return false;
     };
     match grab {
-        ActiveGrabState::Move {
-            client_id,
-            root_surface_object_id,
-            initial_pointer_pos,
-            initial_root_pos,
-            ..
-        } => {
+        ActiveGrabState::Move { root_surface, initial_pointer_pos, initial_root_pos, .. } => {
             let dx = (state.seat.pointer_pos.0 - initial_pointer_pos.0).round() as i32;
             let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
-            let Some(mut surface) = state
-                .objects
-                .try_grab_object::<WlSurface>(root_surface_object_id)
-            else {
+            let Some(mut surface) = root_surface.try_grab(state) else {
                 abort_pointer_interactive_grab(state, dispatcher, 0);
                 return true;
             };
             let old_bounds = surface.global_logical_bounds();
             surface.set_root_position(initial_root_pos.0 + dx, initial_root_pos.1 + dy);
             let new_bounds = surface.global_logical_bounds();
-            dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
+            dispatch_client_action(
+                dispatcher,
+                root_surface.client_id(),
+                ClientAction::RefreshSurfaceOutputs,
+            );
             if let Some(new_bounds) = new_bounds {
                 let rects = old_bounds.into_iter().chain(std::iter::once(new_bounds));
                 schedule_outputs_for_rects(state, rects, dispatcher);
@@ -91,9 +84,8 @@ pub(crate) fn apply_pointer_interactive_grab(
             }
         }
         ActiveGrabState::Resize {
-            client_id,
-            root_surface_object_id,
-            xdg_toplevel_id,
+            root_surface,
+            xdg_toplevel,
             size_constraints,
             edges,
             initial_pointer_pos,
@@ -126,17 +118,18 @@ pub(crate) fn apply_pointer_interactive_grab(
                 y = initial_root_pos.1 + (initial_size.1 - height);
             }
 
-            let Some(mut surface) = state
-                .objects
-                .try_grab_object::<WlSurface>(root_surface_object_id)
-            else {
+            let Some(mut surface) = root_surface.try_grab(state) else {
                 abort_pointer_interactive_grab(state, dispatcher, 0);
                 return true;
             };
             let old_bounds = surface.global_logical_bounds();
             surface.set_root_position(x, y);
             let new_bounds = surface.global_logical_bounds();
-            dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
+            dispatch_client_action(
+                dispatcher,
+                root_surface.client_id(),
+                ClientAction::RefreshSurfaceOutputs,
+            );
             if let Some(new_bounds) = new_bounds {
                 let rects = old_bounds.into_iter().chain(std::iter::once(new_bounds));
                 schedule_outputs_for_rects(state, rects, dispatcher);
@@ -147,9 +140,9 @@ pub(crate) fn apply_pointer_interactive_grab(
             if last_size != (width, height) {
                 dispatch_client_action(
                     dispatcher,
-                    client_id,
+                    root_surface.client_id(),
                     ClientAction::InteractiveResizeConfigure {
-                        xdg_toplevel_id,
+                        xdg_toplevel,
                         width,
                         height,
                         resizing: true,
@@ -159,9 +152,8 @@ pub(crate) fn apply_pointer_interactive_grab(
             }
 
             state.seat.pointer_interactive_grab = Some(ActiveGrabState::Resize {
-                client_id,
-                root_surface_object_id,
-                xdg_toplevel_id,
+                root_surface,
+                xdg_toplevel,
                 size_constraints,
                 edges,
                 initial_pointer_pos,
@@ -170,27 +162,15 @@ pub(crate) fn apply_pointer_interactive_grab(
                 last_size,
             });
         }
-        ActiveGrabState::ResizeTiled {
-            client_id,
-            root_surface_object_id,
-            edges,
-            initial_pointer_pos,
-            resize_state,
-        } => {
+        ActiveGrabState::ResizeTiled { root_surface, edges, initial_pointer_pos, resize_state } => {
             let dx = (state.seat.pointer_pos.0 - initial_pointer_pos.0).round() as i32;
             let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
-            if state.resize_tiled_root_surface_from_state(
-                root_surface_object_id,
-                resize_state,
-                dx,
-                dy,
-            ) {
+            if state.resize_tiled_root_surface_from_state(root_surface, resize_state, dx, dy) {
                 dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
                 schedule_active_output(state, dispatcher);
             }
             state.seat.pointer_interactive_grab = Some(ActiveGrabState::ResizeTiled {
-                client_id,
-                root_surface_object_id,
+                root_surface,
                 edges,
                 initial_pointer_pos,
                 resize_state,
@@ -209,12 +189,12 @@ pub(crate) fn finish_pointer_interactive_grab(
         return;
     };
     let was_tiled_resize = matches!(grab, ActiveGrabState::ResizeTiled { .. });
-    if let ActiveGrabState::Resize { client_id, xdg_toplevel_id, last_size, .. } = grab {
+    if let ActiveGrabState::Resize { root_surface, xdg_toplevel, last_size, .. } = grab {
         dispatch_client_action(
             dispatcher,
-            client_id,
+            root_surface.client_id(),
             ClientAction::InteractiveResizeConfigure {
-                xdg_toplevel_id,
+                xdg_toplevel,
                 width: last_size.0,
                 height: last_size.1,
                 resizing: false,
@@ -246,13 +226,13 @@ pub(crate) fn abort_pointer_interactive_grab(
     true
 }
 
-pub(crate) fn tiled_resize_active_root_surfaces(state: &State) -> BTreeSet<ObjectId> {
-    let Some(ActiveGrabState::ResizeTiled { root_surface_object_id, resize_state, .. }) =
+pub(crate) fn tiled_resize_active_root_surfaces(state: &State) -> BTreeSet<Resolved<WlSurfaceId>> {
+    let Some(ActiveGrabState::ResizeTiled { root_surface, resize_state, .. }) =
         state.seat.pointer_interactive_grab
     else {
         return BTreeSet::new();
     };
-    let Some(workspace_id) = state.root_surface_workspace(root_surface_object_id) else {
+    let Some(workspace_id) = state.root_surface_workspace(root_surface) else {
         return BTreeSet::new();
     };
     let Some(workspace) = state.workspaces.try_get(workspace_id) else {
@@ -260,7 +240,7 @@ pub(crate) fn tiled_resize_active_root_surfaces(state: &State) -> BTreeSet<Objec
     };
     workspace
         .layout
-        .resize_affected_surfaces(root_surface_object_id, resize_state)
+        .resize_affected_surfaces(root_surface, resize_state)
         .unwrap_or_default()
 }
 
@@ -295,24 +275,16 @@ fn prepare_window_for_pointer_grab(
 ) {
     if promote_tiled_on_move
         && matches!(intent, InteractionIntent::StartMove(_))
-        && state.is_tiled_root_surface(target.root_surface_object_id)
-        && state.set_root_surface_floating(target.root_surface_object_id, true)
+        && state.is_tiled_root_surface(target.root_surface)
+        && state.set_root_surface_floating(target.root_surface, true)
     {
         dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
         schedule_active_output(state, dispatcher);
     }
 
-    state.raise_root_surface(target.root_surface_object_id);
+    state.raise_root_surface(target.root_surface);
     schedule_outputs_for_rects(state, [target.interactive_rect], dispatcher);
-    set_keyboard_focus(
-        state,
-        dispatcher,
-        Some(SurfaceFocus::new(Resolved::new(
-            target.client_id,
-            target.surface_id,
-            target.root_surface_object_id,
-        ))),
-    );
+    set_keyboard_focus(state, dispatcher, Some(SurfaceFocus::new(target.root_surface)));
 }
 
 fn start_window_grab(
@@ -325,29 +297,29 @@ fn start_window_grab(
         (InteractionIntent::StartMove(_), _) => start_interactive_move(
             state,
             dispatcher,
-            target.client_id,
-            target.root_surface_object_id,
+            target.client_id(),
+            target.root_surface,
             target.initial_root_pos,
         ),
         (
             InteractionIntent::StartResize(_, edges),
-            WindowRoleSnapshot::XdgToplevel { xdg_toplevel_id, size_constraints, .. },
+            WindowRoleSnapshot::XdgToplevel { xdg_toplevel, size_constraints, .. },
         ) => {
-            if state.is_tiled_root_surface(target.root_surface_object_id) {
+            if state.is_tiled_root_surface(target.root_surface) {
                 start_interactive_tiled_resize(
                     state,
                     dispatcher,
-                    target.client_id,
-                    target.root_surface_object_id,
+                    target.client_id(),
+                    target.root_surface,
                     edges,
                 )
             } else {
                 start_interactive_resize(
                     state,
                     dispatcher,
-                    target.client_id,
-                    target.root_surface_object_id,
-                    xdg_toplevel_id,
+                    target.client_id(),
+                    target.root_surface,
+                    xdg_toplevel,
                     size_constraints,
                     edges,
                     target.initial_root_pos,
@@ -363,13 +335,13 @@ fn start_interactive_move(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     client_id: ClientId,
-    root_surface_object_id: ObjectId,
+    root_surface: Resolved<WlSurfaceId>,
     initial_root_pos: (i32, i32),
 ) -> bool {
     begin_compositor_pointer_grab(state, dispatcher, POINTER_MOVE_CURSOR_ICON_NAMES);
     state
         .seat
-        .start_toplevel_move(client_id, root_surface_object_id, initial_root_pos);
+        .start_toplevel_move(client_id, root_surface, initial_root_pos);
     true
 }
 
@@ -377,8 +349,8 @@ fn start_interactive_resize(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     client_id: ClientId,
-    root_surface_object_id: ObjectId,
-    xdg_toplevel_id: XdgToplevelId,
+    root_surface: Resolved<WlSurfaceId>,
+    xdg_toplevel: Resolved<XdgToplevelId>,
     size_constraints: InteractiveSizeConstraints,
     edges: u32,
     initial_root_pos: (i32, i32),
@@ -387,8 +359,8 @@ fn start_interactive_resize(
     begin_compositor_pointer_grab(state, dispatcher, resize_cursor_icon_names(edges));
     state.seat.start_toplevel_resize(
         client_id,
-        root_surface_object_id,
-        xdg_toplevel_id,
+        root_surface,
+        xdg_toplevel,
         size_constraints,
         edges,
         initial_root_pos,
@@ -401,17 +373,16 @@ fn start_interactive_tiled_resize(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     client_id: ClientId,
-    root_surface_object_id: ObjectId,
+    root_surface: Resolved<WlSurfaceId>,
     edges: u32,
 ) -> bool {
-    let Some(resize_state) = state.begin_tiled_root_surface_resize(root_surface_object_id, edges)
-    else {
+    let Some(resize_state) = state.begin_tiled_root_surface_resize(root_surface, edges) else {
         return false;
     };
     begin_compositor_pointer_grab(state, dispatcher, resize_cursor_icon_names(edges));
     state
         .seat
-        .start_toplevel_tiled_resize(client_id, root_surface_object_id, edges, resize_state);
+        .start_toplevel_tiled_resize(client_id, root_surface, edges, resize_state);
     true
 }
 
@@ -424,7 +395,7 @@ fn clear_pointer_focus_for_compositor_grab(state: &mut State, dispatcher: &mut D
     dispatch_client_event(
         dispatcher,
         old_focus.target.client_id(),
-        SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface_id() },
+        SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface },
     );
     dispatch_client_event(dispatcher, old_focus.target.client_id(), SeatClientEvent::PointerFrame);
     state.seat.clear_pointer_enter();

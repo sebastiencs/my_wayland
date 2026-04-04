@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser},
     protocol_generated::{
         ext_workspace_group_handle_v1, wl_display, ExtWorkspaceGroupHandleV1Id,
@@ -17,10 +17,10 @@ use crate::{
 #[derive(Debug)]
 pub struct ExtWorkspaceGroupHandleV1 {
     id: ExtWorkspaceGroupHandleV1Id,
-    manager_id: ExtWorkspaceManagerV1Id,
+    manager: Resolved<ExtWorkspaceManagerV1Id>,
     group_id: WorkspaceGroupId,
     version: u32,
-    known_output_objects: BTreeSet<WlOutputId>,
+    known_output_objects: BTreeSet<Resolved<WlOutputId>>,
     known_workspaces: BTreeSet<WorkspaceId>,
     sent_capabilities: Option<u32>,
     removed: bool,
@@ -29,13 +29,13 @@ pub struct ExtWorkspaceGroupHandleV1 {
 impl ExtWorkspaceGroupHandleV1 {
     pub fn new(
         id: ExtWorkspaceGroupHandleV1Id,
-        manager_id: ExtWorkspaceManagerV1Id,
+        manager: Resolved<ExtWorkspaceManagerV1Id>,
         group_id: WorkspaceGroupId,
         version: u32,
     ) -> Self {
         Self {
             id,
-            manager_id,
+            manager,
             group_id,
             version,
             known_output_objects: BTreeSet::new(),
@@ -61,7 +61,7 @@ impl ExtWorkspaceGroupHandleV1 {
         client: &Client,
         state: &State,
         dispatcher: &mut ClientDispatcher,
-        workspace_handles: &BTreeMap<WorkspaceId, ExtWorkspaceHandleV1Id>,
+        workspace_handles: &BTreeMap<WorkspaceId, Resolved<ExtWorkspaceHandleV1Id>>,
     ) {
         let Some(group) = state.workspace_groups.try_get(self.group_id) else {
             if !self.removed {
@@ -70,7 +70,7 @@ impl ExtWorkspaceGroupHandleV1 {
                     if let Some(handle_id) = workspace_handles.get(&workspace_id).copied() {
                         self.send_event(
                             ext_workspace_group_handle_v1::Event::WorkspaceLeave {
-                                workspace: handle_id,
+                                workspace: handle_id.wayland_id(),
                             },
                             dispatcher,
                         );
@@ -97,7 +97,7 @@ impl ExtWorkspaceGroupHandleV1 {
         }
 
         self.known_output_objects
-            .retain(|output_id| client.object_id_for_wayland(*output_id).is_some());
+            .retain(|output| output.exists(state));
         let current_output_objects = group
             .outputs
             .iter()
@@ -105,7 +105,7 @@ impl ExtWorkspaceGroupHandleV1 {
             .collect::<BTreeSet<_>>();
         for output in current_output_objects.difference(&self.known_output_objects) {
             self.send_event(
-                ext_workspace_group_handle_v1::Event::OutputEnter { output: *output },
+                ext_workspace_group_handle_v1::Event::OutputEnter { output: output.wayland_id() },
                 dispatcher,
             );
         }
@@ -114,7 +114,7 @@ impl ExtWorkspaceGroupHandleV1 {
             .difference(&current_output_objects)
         {
             self.send_event(
-                ext_workspace_group_handle_v1::Event::OutputLeave { output: *output },
+                ext_workspace_group_handle_v1::Event::OutputLeave { output: output.wayland_id() },
                 dispatcher,
             );
         }
@@ -126,7 +126,9 @@ impl ExtWorkspaceGroupHandleV1 {
                 continue;
             };
             self.send_event(
-                ext_workspace_group_handle_v1::Event::WorkspaceEnter { workspace: handle_id },
+                ext_workspace_group_handle_v1::Event::WorkspaceEnter {
+                    workspace: handle_id.wayland_id(),
+                },
                 dispatcher,
             );
         }
@@ -135,7 +137,9 @@ impl ExtWorkspaceGroupHandleV1 {
                 continue;
             };
             self.send_event(
-                ext_workspace_group_handle_v1::Event::WorkspaceLeave { workspace: handle_id },
+                ext_workspace_group_handle_v1::Event::WorkspaceLeave {
+                    workspace: handle_id.wayland_id(),
+                },
                 dispatcher,
             );
         }
@@ -162,13 +166,7 @@ impl Object for ExtWorkspaceGroupHandleV1 {
                 if self.removed {
                     return Ok(());
                 }
-                let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) else {
-                    return Ok(());
-                };
-                let Some(mut manager) = state
-                    .objects
-                    .try_grab_object::<ExtWorkspaceManagerV1>(manager_object_id)
-                else {
+                let Some(mut manager) = self.manager.try_grab(state) else {
                     return Ok(());
                 };
                 manager.queue_request(PendingWorkspaceRequest::CreateWorkspace {
@@ -177,13 +175,8 @@ impl Object for ExtWorkspaceGroupHandleV1 {
                 });
             }
             Destroy => {
-                if let Some(manager_object_id) = client.object_id_for_wayland(self.manager_id) {
-                    if let Some(mut manager) = state
-                        .objects
-                        .try_grab_object::<ExtWorkspaceManagerV1>(manager_object_id)
-                    {
-                        manager.release_group_handle(self.group_id);
-                    }
+                if let Some(mut manager) = self.manager.try_grab(state) {
+                    manager.release_group_handle(self.group_id);
                 }
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }

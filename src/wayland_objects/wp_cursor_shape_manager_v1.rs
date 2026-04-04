@@ -68,16 +68,8 @@ impl Object for WpCursorShapeManagerV1 {
             }
             GetPointer { cursor_shape_device, pointer } => {
                 let cursor_shape_device = WpCursorShapeDeviceV1Id::from(cursor_shape_device);
-                let pointer = WlPointerId::from(pointer);
-                if !client.object_is(pointer, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        pointer.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "invalid wl_pointer for cursor shape device",
-                    );
-                    return Ok(());
-                }
+                let pointer =
+                    client.resolve_or_disconnect(WlPointerId::from(pointer), state, dispatcher)?;
                 client.insert_object(
                     state,
                     WpCursorShapeDeviceV1::new_pointer(cursor_shape_device, pointer, self.version),

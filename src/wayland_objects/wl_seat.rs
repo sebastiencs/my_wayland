@@ -76,8 +76,8 @@ impl Object for WlSeat {
             GetPointer { id } => {
                 let id = WlPointerId::from(id);
                 let wl_pointer = WlPointer::new(id, self.version);
-                state.seat.register_pointer(client.client_id(), id);
-                client.insert_object(state, wl_pointer);
+                let (pointer, _) = client.insert_object(state, wl_pointer);
+                state.seat.register_pointer(pointer);
             }
             GetKeyboard { id } => {
                 let wl_keyboard = WlKeyboard::new(id);
@@ -89,8 +89,8 @@ impl Object for WlSeat {
                     wl_keyboard.send_repeat_info(dispatcher);
                 }
 
-                state.seat.register_keyboard(client.client_id(), id);
-                client.insert_object(state, wl_keyboard);
+                let (keyboard, _) = client.insert_object(state, wl_keyboard);
+                state.seat.register_keyboard(keyboard);
             }
             GetTouch { id } => todo!(),
             Release => {

@@ -26,7 +26,7 @@ pub(crate) use {
         scene_pick_for_pointer, surface_focus_pick_at,
     },
     types::{
-        ActiveGrabState, HitSemantics, InteractionIntent, InteractionStartOptions, PointerFocus,
+        ActiveGrabState, HitSemantics, InteractionIntent, InteractionStartOptions,
         PointerInteractiveGrab, ScenePick, SurfaceFocusPick, SurfaceRect, WindowHit,
         WindowRoleSnapshot, WindowSnapshot, WindowTarget, POINTER_INTERACTION_START_OPTIONS,
         PROTOCOL_INTERACTION_START_OPTIONS,

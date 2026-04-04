@@ -7,8 +7,8 @@ use crate::{
     drm::schedule_outputs_for_points,
     input::{
         maybe_dismiss_popup_grab_on_button, popup_keyboard_focus, refresh_drag_focus,
-        set_keyboard_focus, surface_focus_pick_at, ActiveGrabState, HitSemantics, PointerFocus,
-        PointerInteractiveGrab, ScenePick, SurfaceFocusPick, WindowHit,
+        set_keyboard_focus, ActiveGrabState, PointerInteractiveGrab, ScenePick, SurfaceFocusPick,
+        WindowHit,
     },
     protocol_generated::{
         Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlKeyboardId, WlPointerId, WlSeatId,
@@ -16,8 +16,7 @@ use crate::{
     },
     runner::Dispatcher,
     state::{
-        DragNegotiationState, DragPhase, DragState, DragTargetState, ObjectId,
-        SelectionSourceState, State,
+        DragNegotiationState, DragPhase, DragState, DragTargetState, SelectionSourceState, State,
     },
     tiling::TiledResizeState,
     wayland_objects::{
@@ -28,7 +27,10 @@ use crate::{
 };
 
 pub use crate::input::SurfaceFocus;
-pub(crate) use crate::input::SurfaceRect;
+#[cfg(test)]
+pub(crate) use crate::input::{
+    surface_focus_pick_at, types::PointerFocus, HitSemantics, SurfaceRect,
+};
 
 const POINTER_MOVE_CURSOR_ICON_NAMES: &[&str] = &["grab", "grabbing", "move"];
 const POINTER_RESIZE_NW_CURSOR_ICON_NAMES: &[&str] = &["nw-resize", "size_fdiag"];
@@ -40,18 +42,17 @@ const POINTER_RESIZE_S_CURSOR_ICON_NAMES: &[&str] = &["s-resize", "size_ver"];
 const POINTER_RESIZE_W_CURSOR_ICON_NAMES: &[&str] = &["w-resize", "size_hor"];
 const POINTER_RESIZE_E_CURSOR_ICON_NAMES: &[&str] = &["e-resize", "size_hor"];
 
-// TODO: Use Resolved
 #[derive(Clone, Debug)]
 pub enum SeatClientEvent {
     PointerEnter {
         serial: u32,
-        surface: WlSurfaceId,
+        surface: Resolved<WlSurfaceId>,
         x: f32,
         y: f32,
     },
     PointerLeave {
         serial: u32,
-        surface: WlSurfaceId,
+        surface: Resolved<WlSurfaceId>,
     },
     PointerMotion {
         time: u32,
@@ -67,12 +68,12 @@ pub enum SeatClientEvent {
     PointerFrame,
     KeyboardEnter {
         serial: u32,
-        surface: WlSurfaceId,
+        surface: Resolved<WlSurfaceId>,
         keys: Array,
     },
     KeyboardLeave {
         serial: u32,
-        surface: WlSurfaceId,
+        surface: Resolved<WlSurfaceId>,
     },
     KeyboardKey {
         serial: u32,
@@ -92,7 +93,7 @@ pub enum SeatClientEvent {
 #[derive(Clone, Debug)]
 struct PopupGrabState {
     client_id: ClientId,
-    popup_stack: Vec<(XdgPopupId, Resolved<WlSurfaceId>)>,
+    popup_stack: Vec<(Resolved<XdgPopupId>, Resolved<WlSurfaceId>)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -140,12 +141,12 @@ pub struct SeatState {
     popup_grab: Option<PopupGrabState>,
     pub(crate) pointer_interactive_grab: Option<ActiveGrabState>,
     client_serials: BTreeMap<ClientId, VecDeque<SerialRange>>,
-    data_device_resources: BTreeMap<ClientId, Vec<WlDataDeviceId>>,
+    data_device_resources: BTreeMap<ClientId, Vec<Resolved<WlDataDeviceId>>>,
     selection_source: Option<SelectionSourceState>,
     selection_serial: u32,
     active_drag: Option<DragState>,
-    pointer_resources: BTreeMap<ClientId, Vec<WlPointerId>>,
-    keyboard_resources: BTreeMap<ClientId, Vec<WlKeyboardId>>,
+    pointer_resources: BTreeMap<ClientId, Vec<Resolved<WlPointerId>>>,
+    keyboard_resources: BTreeMap<ClientId, Vec<Resolved<WlKeyboardId>>>,
     intercepted_keyboard_keys: BTreeSet<u32>,
     intercepted_pointer_buttons: BTreeSet<u32>,
 }
@@ -180,54 +181,63 @@ impl Default for SeatState {
 }
 
 impl SeatState {
-    pub fn register_pointer(&mut self, client_id: ClientId, pointer_id: WlPointerId) {
-        let resources = self.pointer_resources.entry(client_id).or_default();
-        if !resources.contains(&pointer_id) {
-            resources.push(pointer_id);
+    pub fn register_pointer(&mut self, pointer: Resolved<WlPointerId>) {
+        let resources = self
+            .pointer_resources
+            .entry(pointer.client_id())
+            .or_default();
+        if !resources.contains(&pointer) {
+            resources.push(pointer);
         }
     }
 
-    pub fn unregister_pointer(&mut self, client_id: ClientId, pointer_id: WlPointerId) {
-        remove_resource(&mut self.pointer_resources, client_id, pointer_id);
+    pub fn unregister_pointer(&mut self, pointer: Resolved<WlPointerId>) {
+        remove_resource(&mut self.pointer_resources, pointer.client_id(), pointer);
     }
 
-    pub fn register_keyboard(&mut self, client_id: ClientId, keyboard_id: WlKeyboardId) {
-        let resources = self.keyboard_resources.entry(client_id).or_default();
-        if !resources.contains(&keyboard_id) {
-            resources.push(keyboard_id);
+    pub fn register_keyboard(&mut self, keyboard: Resolved<WlKeyboardId>) {
+        let resources = self
+            .keyboard_resources
+            .entry(keyboard.client_id())
+            .or_default();
+        if !resources.contains(&keyboard) {
+            resources.push(keyboard);
         }
     }
 
-    pub fn unregister_keyboard(&mut self, client_id: ClientId, keyboard_id: WlKeyboardId) {
-        remove_resource(&mut self.keyboard_resources, client_id, keyboard_id);
+    pub fn unregister_keyboard(&mut self, keyboard: Resolved<WlKeyboardId>) {
+        remove_resource(&mut self.keyboard_resources, keyboard.client_id(), keyboard);
     }
 
-    pub fn register_data_device(&mut self, client_id: ClientId, data_device_id: WlDataDeviceId) {
-        let resources = self.data_device_resources.entry(client_id).or_default();
-        if !resources.contains(&data_device_id) {
-            resources.push(data_device_id);
+    pub fn register_data_device(&mut self, data_device: Resolved<WlDataDeviceId>) {
+        let resources = self
+            .data_device_resources
+            .entry(data_device.client_id())
+            .or_default();
+        if !resources.contains(&data_device) {
+            resources.push(data_device);
         }
     }
 
-    pub fn unregister_data_device(&mut self, client_id: ClientId, data_device_id: WlDataDeviceId) {
-        remove_resource(&mut self.data_device_resources, client_id, data_device_id);
+    pub fn unregister_data_device(&mut self, data_device: Resolved<WlDataDeviceId>) {
+        remove_resource(&mut self.data_device_resources, data_device.client_id(), data_device);
     }
 
-    pub fn pointer_resources(&self, client_id: ClientId) -> Vec<WlPointerId> {
+    pub fn pointer_resources(&self, client_id: ClientId) -> Vec<Resolved<WlPointerId>> {
         self.pointer_resources
             .get(&client_id)
             .cloned()
             .unwrap_or_default()
     }
 
-    pub fn keyboard_resources(&self, client_id: ClientId) -> Vec<WlKeyboardId> {
+    pub fn keyboard_resources(&self, client_id: ClientId) -> Vec<Resolved<WlKeyboardId>> {
         self.keyboard_resources
             .get(&client_id)
             .cloned()
             .unwrap_or_default()
     }
 
-    pub fn data_device_resources(&self, client_id: ClientId) -> Vec<WlDataDeviceId> {
+    pub fn data_device_resources(&self, client_id: ClientId) -> Vec<Resolved<WlDataDeviceId>> {
         self.data_device_resources
             .get(&client_id)
             .cloned()
@@ -258,15 +268,12 @@ impl SeatState {
 
     pub fn validate_data_transfer_serial(
         &self,
-        client_id: ClientId,
-        surface_id: WlSurfaceId,
+        origin_surface: Resolved<WlSurfaceId>,
         serial: u32,
     ) -> bool {
         self.pointer_button_count > 0
             && self.last_pointer_press.is_some_and(|press| {
-                press.serial == serial
-                    && press.focus.client_id() == client_id
-                    && press.focus.surface_id() == surface_id
+                press.serial == serial && press.focus.surface == origin_surface
             })
     }
 
@@ -321,7 +328,7 @@ impl SeatState {
     pub fn register_active_drag_offer(
         &mut self,
         target_client_id: ClientId,
-        offer_id: WlDataOfferId,
+        offer: Resolved<WlDataOfferId>,
         has_finish_capable_offer: bool,
     ) -> bool {
         let Some(drag) = self.active_drag.as_mut() else {
@@ -333,10 +340,10 @@ impl SeatState {
         {
             return false;
         }
-        if drag.negotiation.offer_ids.contains(&offer_id) {
+        if drag.negotiation.offer_ids.contains(&offer) {
             return false;
         }
-        drag.negotiation.offer_ids.push(offer_id);
+        drag.negotiation.offer_ids.push(offer);
         drag.negotiation.has_finish_capable_offer |= has_finish_capable_offer;
         true
     }
@@ -344,7 +351,7 @@ impl SeatState {
     pub fn unregister_active_drag_offer(
         &mut self,
         target_client_id: ClientId,
-        offer_id: WlDataOfferId,
+        offer: Resolved<WlDataOfferId>,
     ) -> bool {
         let Some(drag) = self.active_drag.as_mut() else {
             return false;
@@ -358,23 +365,26 @@ impl SeatState {
         let len_before = drag.negotiation.offer_ids.len();
         drag.negotiation
             .offer_ids
-            .retain(|candidate| *candidate != offer_id);
+            .retain(|candidate| *candidate != offer);
         len_before != drag.negotiation.offer_ids.len()
     }
 
     pub fn active_drag_contains_offer(
         &self,
         target_client_id: ClientId,
-        offer_id: WlDataOfferId,
+        offer: Resolved<WlDataOfferId>,
     ) -> bool {
         self.active_drag.as_ref().is_some_and(|drag| {
             drag.target
                 .is_some_and(|target| target.client_id() == target_client_id)
-                && drag.negotiation.offer_ids.contains(&offer_id)
+                && drag.negotiation.offer_ids.contains(&offer)
         })
     }
 
-    pub fn active_drag_offer_ids(&self, target_client_id: ClientId) -> Vec<WlDataOfferId> {
+    pub fn active_drag_offer_ids(
+        &self,
+        target_client_id: ClientId,
+    ) -> Vec<Resolved<WlDataOfferId>> {
         self.active_drag
             .as_ref()
             .and_then(|drag| {
@@ -388,7 +398,7 @@ impl SeatState {
     pub fn set_active_drag_accepted_mime(
         &mut self,
         target_client_id: ClientId,
-        offer_id: WlDataOfferId,
+        offer: Resolved<WlDataOfferId>,
         accepted_mime: Option<String>,
     ) -> bool {
         let Some(drag) = self.active_drag.as_mut() else {
@@ -397,7 +407,7 @@ impl SeatState {
         if drag
             .target
             .is_none_or(|target| target.client_id() != target_client_id)
-            || !drag.negotiation.offer_ids.contains(&offer_id)
+            || !drag.negotiation.offer_ids.contains(&offer)
         {
             return false;
         }
@@ -411,7 +421,7 @@ impl SeatState {
     pub fn set_active_drag_negotiation_actions(
         &mut self,
         target_client_id: ClientId,
-        offer_id: WlDataOfferId,
+        offer: Resolved<WlDataOfferId>,
         destination_actions: u32,
         preferred_action: u32,
         chosen_action: u32,
@@ -422,7 +432,7 @@ impl SeatState {
         if drag
             .target
             .is_none_or(|target| target.client_id() != target_client_id)
-            || !drag.negotiation.offer_ids.contains(&offer_id)
+            || !drag.negotiation.offer_ids.contains(&offer)
         {
             return false;
         }
@@ -462,7 +472,7 @@ impl SeatState {
     pub fn set_active_drag_finished(
         &mut self,
         target_client_id: ClientId,
-        offer_id: WlDataOfferId,
+        offer: Resolved<WlDataOfferId>,
         finished: bool,
     ) -> bool {
         let Some(drag) = self.active_drag.as_mut() else {
@@ -471,7 +481,7 @@ impl SeatState {
         if drag
             .target
             .is_none_or(|target| target.client_id() != target_client_id)
-            || !drag.negotiation.offer_ids.contains(&offer_id)
+            || !drag.negotiation.offer_ids.contains(&offer)
         {
             return false;
         }
@@ -545,12 +555,10 @@ impl SeatState {
         if self
             .pointer_interactive_grab
             .is_some_and(|grab| match grab {
-                PointerInteractiveGrab::Move { client_id: grab_client_id, .. }
-                | PointerInteractiveGrab::Resize { client_id: grab_client_id, .. } => {
-                    grab_client_id == client_id
-                }
-                PointerInteractiveGrab::ResizeTiled { client_id: grab_client_id, .. } => {
-                    grab_client_id == client_id
+                PointerInteractiveGrab::Move { root_surface, .. }
+                | PointerInteractiveGrab::Resize { root_surface, .. }
+                | PointerInteractiveGrab::ResizeTiled { root_surface, .. } => {
+                    root_surface.client_id() == client_id
                 }
             })
         {
@@ -665,12 +673,17 @@ impl SeatState {
         self.cursor.clear_for_client(client_id)
     }
 
-    pub fn clear_cursor_surface(&mut self, object_id: ObjectId) -> bool {
-        self.cursor.clear_surface(object_id)
+    pub fn clear_cursor_surface(&mut self, surface: Resolved<WlSurfaceId>) -> bool {
+        self.cursor.clear_surface(surface)
     }
 
-    pub fn apply_cursor_surface_offset(&mut self, object_id: ObjectId, dx: i32, dy: i32) -> bool {
-        self.cursor.apply_surface_offset(object_id, dx, dy)
+    pub fn apply_cursor_surface_offset(
+        &mut self,
+        surface: Resolved<WlSurfaceId>,
+        dx: i32,
+        dy: i32,
+    ) -> bool {
+        self.cursor.apply_surface_offset(surface, dx, dy)
     }
 
     pub fn visible_cursor_source_at(&self, now_msec: u32) -> Option<CursorSourceRef<'_>> {
@@ -730,19 +743,19 @@ impl SeatState {
     pub(crate) fn validate_implicit_grab_serial(
         &self,
         client_id: ClientId,
-        surface_id: WlSurfaceId,
+        surface: Resolved<WlSurfaceId>,
         serial: u32,
     ) -> bool {
         (self.pointer_button_count > 0
             && self.last_pointer_press.is_some_and(|press| {
                 press.serial == serial
                     && press.focus.client_id() == client_id
-                    && press.focus.surface_id() == surface_id
+                    && press.focus.surface == surface
             }))
             || self.last_keyboard_trigger.is_some_and(|trigger| {
                 trigger.serial == serial
                     && trigger.focus.client_id() == client_id
-                    && trigger.focus.surface_id() == surface_id
+                    && trigger.focus.surface == surface
             })
     }
 
@@ -770,7 +783,7 @@ impl SeatState {
     pub(crate) fn start_popup_grab(
         &mut self,
         client_id: ClientId,
-        popup_id: XdgPopupId,
+        popup: Resolved<XdgPopupId>,
         popup_surface: Resolved<WlSurfaceId>,
     ) {
         let grab = self
@@ -780,41 +793,40 @@ impl SeatState {
             *grab = PopupGrabState { client_id, popup_stack: Vec::new() };
         }
         grab.popup_stack
-            .retain(|(candidate, _)| *candidate != popup_id);
-        grab.popup_stack.push((popup_id, popup_surface));
+            .retain(|(candidate, _)| *candidate != popup);
+        grab.popup_stack.push((popup, popup_surface));
     }
 
-    pub(crate) fn remove_popup_grab(&mut self, popup_id: XdgPopupId) {
+    pub(crate) fn remove_popup_grab(&mut self, popup: Resolved<XdgPopupId>) {
         let Some(grab) = self.popup_grab.as_mut() else {
             return;
         };
         grab.popup_stack
-            .retain(|(candidate, _)| *candidate != popup_id);
+            .retain(|(candidate, _)| *candidate != popup);
         if grab.popup_stack.is_empty() {
             self.popup_grab = None;
         }
     }
 
-    pub(crate) fn dismiss_popup_grab(&mut self) -> Option<(ClientId, Vec<XdgPopupId>)> {
+    pub(crate) fn dismiss_popup_grab(&mut self) -> Option<(ClientId, Vec<Resolved<XdgPopupId>>)> {
         let grab = self.popup_grab.take()?;
         Some((
             grab.client_id,
             grab.popup_stack
                 .into_iter()
-                .map(|(popup_id, _)| popup_id)
+                .map(|(popup, _)| popup)
                 .collect(),
         ))
     }
 
     pub(crate) fn start_toplevel_move(
         &mut self,
-        client_id: ClientId,
-        root_surface_object_id: ObjectId,
+        _client_id: ClientId,
+        root_surface: Resolved<WlSurfaceId>,
         initial_root_pos: (i32, i32),
     ) {
         self.pointer_interactive_grab = Some(PointerInteractiveGrab::Move {
-            client_id,
-            root_surface_object_id,
+            root_surface,
             initial_pointer_pos: self.pointer_pos,
             initial_root_pos,
         });
@@ -822,18 +834,17 @@ impl SeatState {
 
     pub(crate) fn start_toplevel_resize(
         &mut self,
-        client_id: ClientId,
-        root_surface_object_id: ObjectId,
-        xdg_toplevel_id: XdgToplevelId,
+        _client_id: ClientId,
+        root_surface: Resolved<WlSurfaceId>,
+        xdg_toplevel: Resolved<XdgToplevelId>,
         size_constraints: InteractiveSizeConstraints,
         edges: u32,
         initial_root_pos: (i32, i32),
         initial_size: (i32, i32),
     ) {
         self.pointer_interactive_grab = Some(PointerInteractiveGrab::Resize {
-            client_id,
-            root_surface_object_id,
-            xdg_toplevel_id,
+            root_surface,
+            xdg_toplevel,
             size_constraints,
             edges,
             initial_pointer_pos: self.pointer_pos,
@@ -845,14 +856,13 @@ impl SeatState {
 
     pub(crate) fn start_toplevel_tiled_resize(
         &mut self,
-        client_id: ClientId,
-        root_surface_object_id: ObjectId,
+        _client_id: ClientId,
+        root_surface: Resolved<WlSurfaceId>,
         edges: u32,
         resize_state: TiledResizeState,
     ) {
         self.pointer_interactive_grab = Some(PointerInteractiveGrab::ResizeTiled {
-            client_id,
-            root_surface_object_id,
+            root_surface,
             edges,
             initial_pointer_pos: self.pointer_pos,
             resize_state,
@@ -1114,11 +1124,11 @@ pub fn resolve_activation_target(
 pub fn validate_activation_serial(
     state: &State,
     client: &Client,
-    seat_id: WlSeatId,
-    surface_id: WlSurfaceId,
+    seat: Resolved<WlSeatId>,
+    surface: Resolved<WlSurfaceId>,
     serial: u32,
 ) -> bool {
-    crate::input::validate_activation_serial(state, client, seat_id, surface_id, serial)
+    crate::input::validate_activation_serial(state, client, seat, surface, serial)
 }
 
 pub fn set_keyboard_focus_from_surface(
@@ -1165,7 +1175,7 @@ pub fn finish_active_drag(state: &mut State, dispatcher: &mut Dispatcher) {
     let Some(drag) = state.seat.clear_active_drag() else {
         return;
     };
-    if drag.icon_surface_object_id.is_some() {
+    if drag.icon_surface.is_some() {
         dispatch_client_action(
             dispatcher,
             drag.source.initiator_client_id(),
@@ -1186,7 +1196,7 @@ pub fn cancel_active_drag(
     let Some(drag) = state.seat.clear_active_drag() else {
         return;
     };
-    if drag.icon_surface_object_id.is_some() {
+    if drag.icon_surface.is_some() {
         dispatch_client_action(
             dispatcher,
             drag.source.initiator_client_id(),
@@ -1225,7 +1235,9 @@ pub(crate) fn abort_pointer_interactive_grab(
     crate::input::abort_pointer_interactive_grab(state, dispatcher, time)
 }
 
-pub(crate) fn tiled_resize_active_root_surfaces(state: &State) -> BTreeSet<ObjectId> {
+pub(crate) fn tiled_resize_active_root_surfaces(
+    state: &State,
+) -> BTreeSet<crate::clients::Resolved<crate::protocol_generated::WlSurfaceId>> {
     crate::input::tiled_resize_active_root_surfaces(state)
 }
 
@@ -1354,10 +1366,10 @@ fn visible_cursor_owner_client(state: &State) -> Option<ClientId> {
 }
 
 fn visible_dnd_icon_owner_client(state: &State) -> Option<ClientId> {
-    state.seat.active_drag().and_then(|drag| {
-        drag.icon_surface_object_id
-            .map(|_| drag.source.initiator_client_id())
-    })
+    state
+        .seat
+        .active_drag()
+        .and_then(|drag| drag.icon_surface.map(|_| drag.source.initiator_client_id()))
 }
 
 fn refresh_visible_cursor_surface_outputs(state: &State, dispatcher: &mut Dispatcher) {
@@ -1380,12 +1392,10 @@ pub fn begin_popup_grab(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     client_id: ClientId,
-    popup_id: XdgPopupId,
+    popup: Resolved<XdgPopupId>,
     popup_surface: Resolved<WlSurfaceId>,
 ) {
-    state
-        .seat
-        .start_popup_grab(client_id, popup_id, popup_surface);
+    state.seat.start_popup_grab(client_id, popup, popup_surface);
     if let Some(focus) = popup_keyboard_focus(state) {
         set_keyboard_focus(state, dispatcher, Some(focus));
     }
@@ -1395,33 +1405,25 @@ pub fn request_popup_grab(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     client_id: ClientId,
-    _parent_surface_id: WlSurfaceId,
+    _parent_surface: Resolved<WlSurfaceId>,
     _serial: u32,
-    popup_id: XdgPopupId,
-    popup_surface_id: WlSurfaceId,
+    popup: Resolved<XdgPopupId>,
+    popup_surface: Resolved<WlSurfaceId>,
 ) -> bool {
-    let Some(popup_surface_object_id) =
-        state.surface_object_id_for_client(client_id, popup_surface_id)
-    else {
+    if popup_surface.client_id() != client_id || !popup_surface.exists(state) {
         return false;
-    };
-    begin_popup_grab(
-        state,
-        dispatcher,
-        client_id,
-        popup_id,
-        Resolved::new(client_id, popup_surface_id, popup_surface_object_id),
-    );
+    }
+    begin_popup_grab(state, dispatcher, client_id, popup, popup_surface);
     true
 }
 
 pub fn remove_popup_grab(
     state: &mut State,
     dispatcher: &mut Dispatcher,
-    popup_id: XdgPopupId,
+    popup: Resolved<XdgPopupId>,
     fallback_focus: Option<SurfaceFocus>,
 ) {
-    state.seat.remove_popup_grab(popup_id);
+    state.seat.remove_popup_grab(popup);
     if let Some(focus) = popup_keyboard_focus(state) {
         set_keyboard_focus(state, dispatcher, Some(focus));
     } else if state.seat.popup_grab.is_none() {
@@ -1437,9 +1439,9 @@ pub fn request_toplevel_move(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     client_id: ClientId,
-    surface_id: WlSurfaceId,
+    surface: Resolved<WlSurfaceId>,
     serial: u32,
-    root_surface_object_id: ObjectId,
+    root_surface: Resolved<WlSurfaceId>,
     is_maximized: bool,
     is_fullscreen: bool,
 ) -> bool {
@@ -1447,9 +1449,9 @@ pub fn request_toplevel_move(
         state,
         dispatcher,
         client_id,
-        surface_id,
+        surface,
         serial,
-        root_surface_object_id,
+        root_surface,
         is_maximized,
         is_fullscreen,
     )
@@ -1459,10 +1461,10 @@ pub fn request_toplevel_resize(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     client_id: ClientId,
-    surface_id: WlSurfaceId,
+    surface: Resolved<WlSurfaceId>,
     serial: u32,
-    root_surface_object_id: ObjectId,
-    xdg_toplevel_id: XdgToplevelId,
+    root_surface: Resolved<WlSurfaceId>,
+    xdg_toplevel: Resolved<XdgToplevelId>,
     size_constraints: InteractiveSizeConstraints,
     is_maximized: bool,
     is_fullscreen: bool,
@@ -1472,10 +1474,10 @@ pub fn request_toplevel_resize(
         state,
         dispatcher,
         client_id,
-        surface_id,
+        surface,
         serial,
-        root_surface_object_id,
-        xdg_toplevel_id,
+        root_surface,
+        xdg_toplevel,
         size_constraints,
         is_maximized,
         is_fullscreen,
@@ -1525,12 +1527,12 @@ mod surface_tree_hit_test_tests {
     use {
         super::surface_focus_pick_at,
         crate::{
-            clients::ClientId,
+            clients::{ClientId, Resolved},
             egl::EGL,
             globals::Globals,
             protocol_generated::{WlSubsurfaceId, WlSurfaceId},
             state::{ObjectId, State},
-            wayland_objects::wl_surface::WlSurface,
+            wayland_objects::{wl_subsurface::WlSubsurface, wl_surface::WlSurface},
             xkb::Xkb,
         },
     };
@@ -1543,7 +1545,6 @@ mod surface_tree_hit_test_tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -1567,6 +1568,17 @@ mod surface_tree_hit_test_tests {
         }
     }
 
+    fn root(
+        state: &State,
+        object_id: ObjectId,
+    ) -> crate::clients::Resolved<crate::protocol_generated::WlSurfaceId> {
+        let surface = state
+            .objects
+            .try_ref_object::<crate::wayland_objects::wl_surface::WlSurface>(object_id)
+            .unwrap();
+        crate::clients::Resolved::new(surface.client_id(), surface.surface_id(), object_id)
+    }
+
     fn insert_surface(state: &mut State, id: u32) -> ObjectId {
         let object_id = state
             .insert_object(WlSurface::new(WlSurfaceId::from(id), ClientId::from_raw(1), 6))
@@ -1575,24 +1587,47 @@ mod surface_tree_hit_test_tests {
         object_id
     }
 
+    fn insert_subsurface(
+        state: &mut State,
+        id: WlSubsurfaceId,
+        surface_object_id: ObjectId,
+        parent_object_id: ObjectId,
+    ) -> Resolved<WlSubsurfaceId> {
+        let object_id = state
+            .insert_object(WlSubsurface::new(
+                id,
+                root(state, surface_object_id),
+                root(state, parent_object_id),
+            ))
+            .1;
+        Resolved::new(ClientId::from_raw(1), id, object_id)
+    }
+
     #[test]
     fn hit_test_prefers_above_then_parent_then_below() {
         let mut state = make_state();
-        let root = insert_surface(&mut state, 1);
+        let root_object_id = insert_surface(&mut state, 1);
         let below = insert_surface(&mut state, 2);
         let above = insert_surface(&mut state, 3);
+        let root_resolved = root(&state, root_object_id);
+        let below_resolved = root(&state, below);
+        let above_resolved = root(&state, above);
+        let below_subsurface =
+            insert_subsurface(&mut state, WlSubsurfaceId::from(31), below, root_object_id);
+        let above_subsurface =
+            insert_subsurface(&mut state, WlSubsurfaceId::from(32), above, root_object_id);
 
         {
             let root_surface = state
                 .objects
-                .get_mut(root)
+                .get_mut(root_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
             root_surface.test_map(ObjectId::from(200usize), 0, 0, 20, 20);
-            root_surface.add_pending_child(below);
-            root_surface.add_pending_child(above);
-            assert!(root_surface.restack_child_relative(below, None, false));
-            assert!(root_surface.restack_child_relative(above, None, true));
+            root_surface.add_pending_child(below_resolved);
+            root_surface.add_pending_child(above_resolved);
+            assert!(root_surface.restack_child_relative(below_resolved, None, false));
+            assert!(root_surface.restack_child_relative(above_resolved, None, true));
         }
         {
             let below_surface = state
@@ -1600,10 +1635,7 @@ mod surface_tree_hit_test_tests {
                 .get_mut(below)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            below_surface.assign_subsurface(
-                WlSubsurfaceId::from(31),
-                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
-            );
+            below_surface.assign_subsurface(below_subsurface, root_resolved);
             below_surface.set_subsurface_position(0, 0);
             below_surface.test_map(ObjectId::from(201usize), 0, 0, 20, 20);
         }
@@ -1613,15 +1645,12 @@ mod surface_tree_hit_test_tests {
                 .get_mut(above)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            above_surface.assign_subsurface(
-                WlSubsurfaceId::from(32),
-                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
-            );
+            above_surface.assign_subsurface(above_subsurface, root_resolved);
             above_surface.set_subsurface_position(0, 0);
             above_surface.test_map(ObjectId::from(202usize), 0, 0, 20, 20);
         }
         {
-            let mut root_surface = state.objects.grab_object::<WlSurface>(root);
+            let mut root_surface = state.objects.grab_object::<WlSurface>(root_object_id);
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
 
@@ -1632,19 +1661,26 @@ mod surface_tree_hit_test_tests {
     #[test]
     fn hit_test_uses_nested_offsets_and_falls_back_when_child_rejects_input() {
         let mut state = make_state();
-        let root = insert_surface(&mut state, 1);
+        let root_object_id = insert_surface(&mut state, 1);
         let child = insert_surface(&mut state, 2);
         let grandchild = insert_surface(&mut state, 3);
+        let root_resolved = root(&state, root_object_id);
+        let child_resolved = root(&state, child);
+        let grandchild_resolved = root(&state, grandchild);
+        let child_subsurface =
+            insert_subsurface(&mut state, WlSubsurfaceId::from(41), child, root_object_id);
+        let grandchild_subsurface =
+            insert_subsurface(&mut state, WlSubsurfaceId::from(42), grandchild, child);
 
         {
             let root_surface = state
                 .objects
-                .get_mut(root)
+                .get_mut(root_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
             root_surface.test_map(ObjectId::from(210usize), 50, 60, 100, 100);
-            root_surface.add_pending_child(child);
-            assert!(root_surface.restack_child_relative(child, None, true));
+            root_surface.add_pending_child(child_resolved);
+            assert!(root_surface.restack_child_relative(child_resolved, None, true));
         }
         {
             let child_surface = state
@@ -1652,13 +1688,10 @@ mod surface_tree_hit_test_tests {
                 .get_mut(child)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_surface.assign_subsurface(
-                WlSubsurfaceId::from(41),
-                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
-            );
+            child_surface.assign_subsurface(child_subsurface, root_resolved);
             child_surface.set_subsurface_position(10, 10);
             child_surface.test_map(ObjectId::from(211usize), 0, 0, 40, 40);
-            child_surface.add_pending_child(grandchild);
+            child_surface.add_pending_child(grandchild_resolved);
         }
         {
             let grandchild_surface = state
@@ -1666,16 +1699,13 @@ mod surface_tree_hit_test_tests {
                 .get_mut(grandchild)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            grandchild_surface.assign_subsurface(
-                WlSubsurfaceId::from(42),
-                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(2), child),
-            );
+            grandchild_surface.assign_subsurface(grandchild_subsurface, child_resolved);
             grandchild_surface.set_subsurface_position(5, 6);
             grandchild_surface.test_map(ObjectId::from(212usize), 0, 0, 20, 20);
             grandchild_surface.test_set_input_region(crate::region::RegionValue::empty());
         }
         {
-            let mut root_surface = state.objects.grab_object::<WlSurface>(root);
+            let mut root_surface = state.objects.grab_object::<WlSurface>(root_object_id);
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
         {
@@ -1730,7 +1760,7 @@ mod xdg_seat_tests {
             window_hit_at, HitSemantics, SeatClientEvent, SeatState, SurfaceFocus,
         },
         crate::{
-            clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent},
+            clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent, Resolved},
             config::RuntimeConfig,
             cursor::CursorSourceRef,
             egl::EGL,
@@ -1747,6 +1777,7 @@ mod xdg_seat_tests {
             },
             wayland_objects::{
                 wl_seat::WlSeat,
+                wl_subsurface::WlSubsurface,
                 wl_surface::{Role, WlSurface},
                 xdg_popup::XdgPopup,
                 xdg_positioner::{PositionerState, XdgPositioner},
@@ -1768,7 +1799,6 @@ mod xdg_seat_tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -1792,6 +1822,17 @@ mod xdg_seat_tests {
         }
     }
 
+    fn root(
+        state: &State,
+        object_id: ObjectId,
+    ) -> crate::clients::Resolved<crate::protocol_generated::WlSurfaceId> {
+        let surface = state
+            .objects
+            .try_ref_object::<crate::wayland_objects::wl_surface::WlSurface>(object_id)
+            .unwrap();
+        crate::clients::Resolved::new(surface.client_id(), surface.surface_id(), object_id)
+    }
+
     fn make_client() -> (Client, Dispatcher) {
         (Client::new_for_tests(ClientId::from_raw(7)), Dispatcher::default())
     }
@@ -1805,10 +1846,28 @@ mod xdg_seat_tests {
     }
 
     fn insert_surface(state: &mut State, client: &mut Client, surface_id: WlSurfaceId) -> ObjectId {
-        let ((_, object_id), _) =
+        let (resolved, _) =
             client.insert_object(state, WlSurface::new(surface_id, client.client_id(), 6));
+        let object_id = resolved.object_id();
         state.register_root_surface(object_id);
         object_id
+    }
+
+    fn insert_subsurface(
+        state: &mut State,
+        client_id: ClientId,
+        id: WlSubsurfaceId,
+        surface_object_id: ObjectId,
+        parent_object_id: ObjectId,
+    ) -> Resolved<WlSubsurfaceId> {
+        let object_id = state
+            .insert_object(WlSubsurface::new(
+                id,
+                root(state, surface_object_id),
+                root(state, parent_object_id),
+            ))
+            .1;
+        Resolved::new(client_id, id, object_id)
     }
 
     fn focus_for_surface(
@@ -1838,12 +1897,35 @@ mod xdg_seat_tests {
                 .downcast_mut::<WlSurface>()
                 .unwrap();
             assert!(wl_surface.set_role(Role::XdgSurface, dispatcher).is_ok());
-            wl_surface.set_xdg_surface_impl(xdg_surface_id);
         }
-        let ((_, xdg_surface_object_id), _) = client.insert_object(
+        let (xdg_surface_resolved, _) = client.insert_object(
             state,
-            XdgSurface::new(xdg_surface_id, XdgWmBaseId::from(1), wl_surface_id, 7),
+            XdgSurface::new(
+                xdg_surface_id,
+                crate::clients::Resolved::new(
+                    client.client_id(),
+                    XdgWmBaseId::from(1),
+                    ObjectId::from(1usize),
+                ),
+                crate::clients::Resolved::new(
+                    client.client_id(),
+                    wl_surface_id,
+                    wl_surface_object_id,
+                ),
+                7,
+            ),
         );
+        let xdg_surface_object_id = xdg_surface_resolved.object_id();
+        state
+            .objects
+            .get_mut(wl_surface_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_xdg_surface_impl(crate::clients::Resolved::new(
+                client.client_id(),
+                xdg_surface_id,
+                xdg_surface_object_id,
+            ));
         (wl_surface_object_id, xdg_surface_object_id)
     }
 
@@ -1995,7 +2077,7 @@ mod xdg_seat_tests {
             XdgSurfaceId::from(20),
             XdgToplevelId::from(30),
         );
-        let (popup_wl_surface_object_id, _popup_xdg_surface_object_id) = insert_xdg_surface(
+        let (popup_wl_surface_object_id, popup_xdg_surface_object_id) = insert_xdg_surface(
             &mut state,
             &mut client,
             &mut client_dispatcher,
@@ -2003,16 +2085,25 @@ mod xdg_seat_tests {
             XdgSurfaceId::from(21),
         );
 
-        let ((_, popup_object_id), _) = client.insert_object(
+        let (popup_resolved, _) = client.insert_object(
             &mut state,
             XdgPopup::new(
                 XdgPopupId::from(40),
-                XdgSurfaceId::from(21),
-                Some(XdgSurfaceId::from(20)),
+                crate::clients::Resolved::new(
+                    client.client_id(),
+                    XdgSurfaceId::from(21),
+                    popup_xdg_surface_object_id,
+                ),
+                Some(crate::clients::Resolved::new(
+                    client.client_id(),
+                    XdgSurfaceId::from(20),
+                    parent_xdg_surface_object_id,
+                )),
                 PositionerState::default(),
                 XdgWmBase::INTERFACE_VERSION,
             ),
         );
+        let popup_object_id = popup_resolved.object_id();
 
         {
             let mut popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
@@ -2034,7 +2125,11 @@ mod xdg_seat_tests {
         assert_eq!(
             state.seat.popup_grab.as_ref().unwrap().popup_stack,
             vec![(
-                XdgPopupId::from(40),
+                crate::clients::Resolved::new(
+                    client.client_id(),
+                    XdgPopupId::from(40),
+                    popup_object_id,
+                ),
                 crate::clients::Resolved::new(
                     client.client_id(),
                     WlSurfaceId::from(11),
@@ -2083,16 +2178,25 @@ mod xdg_seat_tests {
             XdgSurfaceId::from(21),
         );
 
-        let ((_, popup_object_id), _) = client.insert_object(
+        let (popup_resolved, _) = client.insert_object(
             &mut state,
             XdgPopup::new(
                 XdgPopupId::from(40),
-                XdgSurfaceId::from(21),
-                Some(XdgSurfaceId::from(20)),
+                crate::clients::Resolved::new(
+                    client.client_id(),
+                    XdgSurfaceId::from(21),
+                    popup_xdg_surface_object_id,
+                ),
+                Some(crate::clients::Resolved::new(
+                    client.client_id(),
+                    XdgSurfaceId::from(20),
+                    parent_xdg_surface_object_id,
+                )),
                 PositionerState::default(),
                 XdgWmBase::INTERFACE_VERSION,
             ),
         );
+        let popup_object_id = popup_resolved.object_id();
 
         let parent_focus = focus_for_surface(
             client.client_id(),
@@ -2122,7 +2226,11 @@ mod xdg_seat_tests {
         assert_eq!(
             state.seat.popup_grab.as_ref().unwrap().popup_stack,
             vec![(
-                XdgPopupId::from(40),
+                crate::clients::Resolved::new(
+                    client.client_id(),
+                    XdgPopupId::from(40),
+                    popup_object_id,
+                ),
                 crate::clients::Resolved::new(
                     client.client_id(),
                     WlSurfaceId::from(11),
@@ -2150,7 +2258,7 @@ mod xdg_seat_tests {
             .get(popup_xdg_surface_object_id)
             .downcast_ref::<XdgSurface>()
             .unwrap();
-        assert_eq!(popup_xdg_surface.wl_surface_id(), WlSurfaceId::from(11));
+        assert_eq!(popup_xdg_surface.wl_surface().wayland_id(), WlSurfaceId::from(11));
     }
 
     #[test]
@@ -2182,8 +2290,9 @@ mod xdg_seat_tests {
             XdgToplevelId::from(30),
         );
 
-        let ((_, positioner_object_id), _) =
+        let (positioner_resolved, _) =
             client.insert_object(&mut state, XdgPositioner::new(XdgPositionerId::from(50)));
+        let positioner_object_id = positioner_resolved.object_id();
         {
             let mut positioner = state
                 .objects
@@ -2224,7 +2333,11 @@ mod xdg_seat_tests {
         client.dismiss_popup_ids(
             &mut state,
             &mut client_dispatcher,
-            vec![XdgPopupId::from(40)],
+            vec![crate::clients::Resolved::new(
+                client.client_id(),
+                XdgPopupId::from(40),
+                client.object_id(XdgPopupId::from(40)),
+            )],
             None,
         );
 
@@ -2234,7 +2347,12 @@ mod xdg_seat_tests {
             .get(popup_xdg_surface_object_id)
             .downcast_ref::<XdgSurface>()
             .unwrap();
-        assert_eq!(popup_xdg_surface.popup_role_id(), Some(XdgPopupId::from(40)));
+        assert_eq!(
+            popup_xdg_surface
+                .popup_role()
+                .map(|popup| popup.wayland_id()),
+            Some(XdgPopupId::from(40))
+        );
 
         {
             let popup_object_id = client.object_id(XdgPopupId::from(40));
@@ -2254,7 +2372,7 @@ mod xdg_seat_tests {
             .get(popup_xdg_surface_object_id)
             .downcast_ref::<XdgSurface>()
             .unwrap();
-        assert_eq!(popup_xdg_surface.popup_role_id(), None);
+        assert_eq!(popup_xdg_surface.popup_role(), None);
     }
 
     #[test]
@@ -2269,7 +2387,11 @@ mod xdg_seat_tests {
             &mut state,
             &mut dispatcher,
             parent_focus.client_id(),
-            XdgPopupId::from(60),
+            crate::clients::Resolved::new(
+                parent_focus.client_id(),
+                XdgPopupId::from(60),
+                ObjectId::from(60usize),
+            ),
             *popup_focus,
         );
         state.seat.pointer_focus = Some(super::PointerFocus {
@@ -2354,7 +2476,7 @@ mod xdg_seat_tests {
                     action,
                     ClientAction::SeatEvent {
                         event: SeatClientEvent::PointerLeave { surface, .. },
-                    } if *surface == WlSurfaceId::from(170)
+                    } if surface.wayland_id() == WlSurfaceId::from(170)
                 )
             }
         ));
@@ -2437,7 +2559,11 @@ mod xdg_seat_tests {
                 .objects
                 .get_mut(
                     state
-                        .xdg_toplevel_object_id(client.client_id(), XdgSurfaceId::from(181))
+                        .xdg_toplevel_object_id(Resolved::new(
+                            client.client_id(),
+                            XdgSurfaceId::from(181),
+                            xdg_surface_object_id,
+                        ))
                         .unwrap(),
                 )
                 .downcast_mut::<XdgToplevel>()
@@ -2549,7 +2675,11 @@ mod xdg_seat_tests {
                 .objects
                 .get_mut(
                     state
-                        .xdg_toplevel_object_id(client.client_id(), XdgSurfaceId::from(211))
+                        .xdg_toplevel_object_id(Resolved::new(
+                            client.client_id(),
+                            XdgSurfaceId::from(211),
+                            xdg_surface_object_id,
+                        ))
                         .unwrap(),
                 )
                 .downcast_mut::<XdgToplevel>()
@@ -2605,33 +2735,36 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(952usize), 40, 50, 120, 80);
         }
-        let ((_, child_object_id), _) = client.insert_object(
+        let (child_resolved_insert, _) = client.insert_object(
             &mut state,
             WlSurface::new(WlSurfaceId::from(231), client.client_id(), 6),
         );
+        let child_object_id = child_resolved_insert.object_id();
+        let child_resolved = root(&state, child_object_id);
         {
             let root_surface = state
                 .objects
                 .get_mut(wl_surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            root_surface.add_pending_child(child_object_id);
-            assert!(root_surface.restack_child_relative(child_object_id, None, true));
+            root_surface.add_pending_child(child_resolved);
+            assert!(root_surface.restack_child_relative(child_resolved, None, true));
         }
+        let child_subsurface = insert_subsurface(
+            &mut state,
+            ClientId::from_raw(1),
+            WlSubsurfaceId::from(232),
+            child_object_id,
+            wl_surface_object_id,
+        );
+        let parent_resolved = root(&state, wl_surface_object_id);
         {
             let child_surface = state
                 .objects
                 .get_mut(child_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_surface.assign_subsurface(
-                WlSubsurfaceId::from(232),
-                crate::clients::Resolved::new(
-                    ClientId::from_raw(1),
-                    WlSurfaceId::from(1),
-                    wl_surface_object_id,
-                ),
-            );
+            child_surface.assign_subsurface(child_subsurface, parent_resolved);
             child_surface.set_subsurface_position(-6, -12);
             child_surface.test_map(ObjectId::from(954usize), 0, 0, 126, 92);
         }
@@ -2656,7 +2789,7 @@ mod xdg_seat_tests {
         let target = scene_pick_at(&state, (36.0, 44.0))
             .window_target
             .expect("target on CSD chrome");
-        assert_eq!(target.root_surface_object_id, wl_surface_object_id);
+        assert_eq!(target.root_surface.object_id(), wl_surface_object_id);
         assert_eq!(target.interactive_rect, RectI::new(34, 38, 126, 92).unwrap());
     }
 
@@ -2691,7 +2824,7 @@ mod xdg_seat_tests {
         }
 
         let hit = window_hit_at(&state, (80.0, 90.0)).expect("content hit");
-        assert_eq!(hit.target.root_surface_object_id, wl_surface_object_id);
+        assert_eq!(hit.target.root_surface.object_id(), wl_surface_object_id);
         assert_eq!(hit.semantics, HitSemantics::SurfaceContent);
     }
 
@@ -2760,7 +2893,11 @@ mod xdg_seat_tests {
                 .objects
                 .get_mut(
                     state
-                        .xdg_toplevel_object_id(client.client_id(), XdgSurfaceId::from(276))
+                        .xdg_toplevel_object_id(Resolved::new(
+                            client.client_id(),
+                            XdgSurfaceId::from(276),
+                            xdg_surface_object_id,
+                        ))
                         .unwrap(),
                 )
                 .downcast_mut::<XdgToplevel>()
@@ -2816,7 +2953,11 @@ mod xdg_seat_tests {
                 .objects
                 .get_mut(
                     state
-                        .xdg_toplevel_object_id(client.client_id(), XdgSurfaceId::from(270))
+                        .xdg_toplevel_object_id(Resolved::new(
+                            client.client_id(),
+                            XdgSurfaceId::from(270),
+                            xdg_surface_object_id,
+                        ))
                         .unwrap(),
                 )
                 .downcast_mut::<XdgToplevel>()
@@ -2995,9 +3136,10 @@ mod xdg_seat_tests {
             active_workspace: Some(workspace_id),
         });
         state.workspaces.try_get_mut(workspace_id).unwrap().group = Some(group_id);
-        assert!(state.assign_root_surface_to_workspace(wl_surface_object_id, workspace_id));
+        assert!(state
+            .assign_root_surface_to_workspace(root(&state, wl_surface_object_id), workspace_id));
         set_toplevel_window_state(&mut state, toplevel_object_id, false, true);
-        assert!(state.set_root_surface_fullscreen(wl_surface_object_id, true));
+        assert!(state.set_root_surface_fullscreen(root(&state, wl_surface_object_id), true));
 
         state.config = RuntimeConfig::parse_for_test(
             r#"
@@ -3085,14 +3227,18 @@ mod xdg_seat_tests {
             active_workspace: Some(workspace_id),
         });
         state.workspaces.try_get_mut(workspace_id).unwrap().group = Some(group_id);
-        assert!(state.assign_root_surface_to_workspace(first_surface_object_id, workspace_id));
-        assert!(state.assign_root_surface_to_workspace(second_surface_object_id, workspace_id));
-        assert!(state.set_root_surface_floating(first_surface_object_id, true));
+        assert!(state
+            .assign_root_surface_to_workspace(root(&state, first_surface_object_id), workspace_id));
+        assert!(state.assign_root_surface_to_workspace(
+            root(&state, second_surface_object_id),
+            workspace_id
+        ));
+        assert!(state.set_root_surface_floating(root(&state, first_surface_object_id), true));
         set_toplevel_window_state(&mut state, first_toplevel_object_id, false, true);
         set_toplevel_window_state(&mut state, second_toplevel_object_id, false, false);
-        assert!(state.set_root_surface_fullscreen(first_surface_object_id, true));
-        assert!(state.set_root_surface_fullscreen(second_surface_object_id, true));
-        assert!(state.set_root_surface_fullscreen(second_surface_object_id, false));
+        assert!(state.set_root_surface_fullscreen(root(&state, first_surface_object_id), true));
+        assert!(state.set_root_surface_fullscreen(root(&state, second_surface_object_id), true));
+        assert!(state.set_root_surface_fullscreen(root(&state, second_surface_object_id), false));
 
         state.config = RuntimeConfig::parse_for_test(
             r#"
@@ -3233,8 +3379,11 @@ mod xdg_seat_tests {
         let (client, _dispatcher) = make_client();
 
         state.seat.pointer_interactive_grab = Some(super::PointerInteractiveGrab::ResizeTiled {
-            client_id: client.client_id(),
-            root_surface_object_id: ObjectId::from(999usize),
+            root_surface: crate::clients::Resolved::new(
+                client.client_id(),
+                WlSurfaceId::from(999u32),
+                ObjectId::from(999usize),
+            ),
             edges: xdg_toplevel::ResizeEdge::Right as u32,
             initial_pointer_pos: (10.0, 20.0),
             resize_state: crate::tiling::test_tiled_resize_state(),
@@ -3299,12 +3448,25 @@ mod xdg_seat_tests {
             &mut state,
             &mut dispatcher,
             parent_focus.client_id(),
-            XdgPopupId::from(60),
+            crate::clients::Resolved::new(
+                parent_focus.client_id(),
+                XdgPopupId::from(60),
+                ObjectId::from(60usize),
+            ),
             *popup_focus,
         );
         state.seat.keyboard_focus = Some(popup_focus);
 
-        remove_popup_grab(&mut state, &mut dispatcher, XdgPopupId::from(60), Some(parent_focus));
+        remove_popup_grab(
+            &mut state,
+            &mut dispatcher,
+            crate::clients::Resolved::new(
+                parent_focus.client_id(),
+                XdgPopupId::from(60),
+                ObjectId::from(60usize),
+            ),
+            Some(parent_focus),
+        );
 
         assert!(state.seat.popup_grab.is_none());
         assert_eq!(state.seat.keyboard_focus, Some(parent_focus));
@@ -3579,11 +3741,11 @@ mod xdg_seat_tests {
                 matches!(
                     action,
                     ClientAction::InteractiveResizeConfigure {
-                        xdg_toplevel_id,
+                        xdg_toplevel,
                         width,
                         height,
                         resizing,
-                    } if *xdg_toplevel_id == XdgToplevelId::from(150)
+                    } if xdg_toplevel.wayland_id() == XdgToplevelId::from(150)
                         && *width == 90
                         && *height == 80
                         && *resizing
@@ -3605,8 +3767,9 @@ mod xdg_seat_tests {
             WlSurfaceId::from(130),
             XdgSurfaceId::from(140),
         );
-        let ((_, positioner_object_id), _) =
+        let (positioner_resolved, _) =
             client.insert_object(&mut state, XdgPositioner::new(XdgPositionerId::from(150)));
+        let positioner_object_id = positioner_resolved.object_id();
 
         {
             let mut positioner = state
@@ -3783,8 +3946,12 @@ mod xdg_seat_tests {
 
         state.seat.set_active_drag(DragState {
             source: DragSource::None { initiator_client_id: target_client_id },
-            origin_surface_id: WlSurfaceId::from(10),
-            icon_surface_object_id: None,
+            origin_surface: crate::clients::Resolved::new(
+                target_client_id,
+                WlSurfaceId::from(10),
+                ObjectId::from(10usize),
+            ),
+            icon_surface: None,
             target: Some(DragTargetState {
                 surface: crate::clients::Resolved::new(
                     target_client_id,
@@ -3821,8 +3988,12 @@ mod xdg_seat_tests {
                     ObjectId::from(0usize),
                 ),
             },
-            origin_surface_id: WlSurfaceId::from(20),
-            icon_surface_object_id: None,
+            origin_surface: crate::clients::Resolved::new(
+                source_client_id,
+                WlSurfaceId::from(20),
+                ObjectId::from(20usize),
+            ),
+            icon_surface: None,
             target: Some(DragTargetState {
                 surface: crate::clients::Resolved::new(
                     target_client_id,
@@ -3859,8 +4030,16 @@ mod xdg_seat_tests {
 
         state.seat.set_active_drag(DragState {
             source: DragSource::None { initiator_client_id: source_client_id },
-            origin_surface_id: WlSurfaceId::from(30),
-            icon_surface_object_id: Some(ObjectId::from(123usize)),
+            origin_surface: crate::clients::Resolved::new(
+                source_client_id,
+                WlSurfaceId::from(30),
+                ObjectId::from(30usize),
+            ),
+            icon_surface: Some(crate::clients::Resolved::new(
+                source_client_id,
+                WlSurfaceId::from(31),
+                ObjectId::from(123usize),
+            )),
             target: None,
             negotiation: Default::default(),
             phase: DragPhase::Dragging,

@@ -67,29 +67,13 @@ impl Object for ZxdgOutputManagerV1 {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
             GetXdgOutput { id, output } => {
-                let Some(output_oid) = client.try_object_id(output, state) else {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        output.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "invalid wl_output for zxdg_output_v1",
-                    );
-                    return Ok(());
-                };
-                let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(output_oid) else {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        output.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "zxdg_output target is not a wl_output",
-                    );
-                    return Ok(());
-                };
+                let output = client.resolve_or_disconnect(output, state, dispatcher)?;
+                let wl_output = output.rref(state);
 
                 let Some(output_id) = wl_output.output_id() else {
                     client.protocol_violation_disconnect(
                         dispatcher,
-                        output.into(),
+                        output.wayland_id().into(),
                         wl_display::Error::InvalidObject as u32,
                         "wl_output is no longer associated with a live output node",
                     );

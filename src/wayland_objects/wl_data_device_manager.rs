@@ -68,9 +68,8 @@ impl Object for WlDataDeviceManager {
                     WlDataDevice::new(WlDataDeviceId::from(id), seat, self.version),
                 );
                 let data_device_id = WlDataDeviceId::from(id);
-                state
-                    .seat
-                    .register_data_device(client.client_id(), data_device_id);
+                let data_device = client.resolve(data_device_id, state).unwrap();
+                state.seat.register_data_device(data_device);
                 if state
                     .seat
                     .keyboard_focus()
@@ -113,7 +112,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),

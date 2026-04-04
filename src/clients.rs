@@ -18,12 +18,12 @@ use crate::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted, RingId},
     },
-    object::{AbortRequest, IdToObject, Object, Parser, ParserError, PostAction},
+    object::{AbortRequest, IdToObject, Object, ObjectWithId, Parser, ParserError, PostAction},
     protocol_generated::{
         wl_data_device_manager::DndAction, wl_data_offer, wl_display, Array, Constants,
-        HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId, WlDataSourceId, WlOutputId,
-        WlSurfaceId, WpPresentationFeedbackId, XdgPopupId, XdgToplevelId, ZwlrGammaControlV1Id,
-        ZwlrLayerSurfaceV1Id,
+        ExtWorkspaceManagerV1Id, HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId,
+        WlDataSourceId, WlOutputId, WlRegistryId, WlSurfaceId, WpPresentationFeedbackId,
+        XdgPopupId, XdgToplevelId, ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id, ZxdgOutputV1Id,
     },
     region::RectI,
     runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
@@ -32,22 +32,12 @@ use crate::{
     sync::AcquireReadyWaiterId,
     udev::Udev,
     wayland_objects::{
-        ext_workspace_manager_v1::{publish_workspace_state_changed, ExtWorkspaceManagerV1},
-        hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1,
-        wl_data_offer::WlDataOffer,
-        wl_data_source::WlDataSource,
-        wl_display::WlDisplay,
-        wl_keyboard::WlKeyboard,
-        wl_output::WlOutput,
-        wl_pointer::WlPointer,
-        wl_registry::WlRegistry,
-        wl_surface::WlSurface,
+        ext_workspace_manager_v1::publish_workspace_state_changed,
+        hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1, wl_data_offer::WlDataOffer,
+        wl_display::WlDisplay, wl_output::WlOutput, wl_surface::WlSurface,
         wp_presentation_feedback::WpPresentationFeedback,
-        xdg_popup::XdgPopup,
-        xdg_surface::{xdg_toplevel::XdgToplevel, XdgSurface},
         zwlr_gamma_control_v1::ZwlrGammaControlV1,
-        zwlr_layer_surface_v1::relayout_client_layer_surfaces,
-        zxdg_output_v1::ZxdgOutputV1,
+        zwlr_layer_surface_v1::relayout_client_layer_surfaces, zxdg_output_v1::ZxdgOutputV1,
     },
 };
 
@@ -92,7 +82,6 @@ impl<K> Resolved<K> {
 impl<K> Resolved<K>
 where
     K: IdToObject,
-    K::Object: Object,
 {
     pub fn try_ref<'a>(self, state: &'a State) -> Option<&'a K::Object> {
         state.objects.try_ref_object::<K::Object>(self.object_id)
@@ -357,7 +346,7 @@ pub enum ClientAction {
     RefreshDataDeviceSelection,
     DataDeviceDragEnter {
         serial: u32,
-        surface: WlSurfaceId,
+        surface: Resolved<WlSurfaceId>,
         x: f32,
         y: f32,
         source: Option<Resolved<WlDataSourceId>>,
@@ -397,11 +386,11 @@ pub enum ClientAction {
         buffer_id: crate::protocol_generated::WlBufferId,
     },
     CompleteSurfaceFrameCallbacks {
-        surface_ids: Vec<WlSurfaceId>,
+        surfaces: Vec<Resolved<WlSurfaceId>>,
         time_msec: u32,
     },
     PresentationFeedbackPresented {
-        feedback_ids: Vec<WpPresentationFeedbackId>,
+        feedbacks: Vec<Resolved<WpPresentationFeedbackId>>,
         output_id: Option<OutputId>,
         tv_sec_hi: u32,
         tv_sec_lo: u32,
@@ -412,20 +401,20 @@ pub enum ClientAction {
         flags: u32,
     },
     PresentationFeedbackDiscarded {
-        feedback_ids: Vec<WpPresentationFeedbackId>,
+        feedbacks: Vec<Resolved<WpPresentationFeedbackId>>,
     },
     DiscardSurfacePresentationFeedbacksForBackend {
         drm_id: DrmId,
     },
     CancelBlockedSurface {
-        surface_object_id: ObjectId,
+        surface: Resolved<WlSurfaceId>,
         waiter_id: AcquireReadyWaiterId,
     },
     DismissPopupGrab {
-        popup_ids: Vec<XdgPopupId>,
+        popups: Vec<Resolved<XdgPopupId>>,
     },
     InteractiveResizeConfigure {
-        xdg_toplevel_id: XdgToplevelId,
+        xdg_toplevel: Resolved<XdgToplevelId>,
         width: i32,
         height: i32,
         resizing: bool,
@@ -521,8 +510,7 @@ impl Client {
 
     pub fn ref_object_mut<'a, K>(&self, id: K, state: &'a mut State) -> &'a mut K::Object
     where
-        K: Into<WaylandId> + IdToObject,
-        K::Object: Object,
+        K: IdToObject,
     {
         let id: WaylandId = id.into();
         let obj_id = self.objects[&id].object_id;
@@ -531,8 +519,7 @@ impl Client {
 
     pub fn ref_object<'a, K>(&self, id: K, state: &'a State) -> &'a K::Object
     where
-        K: Into<WaylandId> + IdToObject,
-        K::Object: Object,
+        K: IdToObject,
     {
         let id: WaylandId = id.into();
         let obj_id = self.objects[&id].object_id;
@@ -543,8 +530,7 @@ impl Client {
     /// expected interface type.
     pub fn resolve<K>(&self, id: K, state: &State) -> Option<Resolved<K>>
     where
-        K: Copy + Into<WaylandId> + IdToObject,
-        K::Object: Object,
+        K: IdToObject,
     {
         let wayland_id: WaylandId = id.into();
         let entry = self.objects.get(&wayland_id)?;
@@ -563,8 +549,8 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
     ) -> Result<Resolved<K>, AbortRequest>
     where
-        K: Copy + Into<WaylandId> + IdToObject,
-        K::Object: Object + Constants,
+        K: IdToObject,
+        K::Object: Constants,
     {
         let Some(resolved) = self.resolve(id, state) else {
             let requester_object_id = dispatcher
@@ -596,6 +582,7 @@ impl Client {
         state.objects.contains(object_id).then_some(object_id)
     }
 
+    /// Deprecated: Use `iter_resolved_of()` instead.
     fn iter_object_ids_of<'a, T: Object>(
         &'a self,
         state: &'a State,
@@ -607,6 +594,17 @@ impl Client {
         })
     }
 
+    fn iter_resolved_of<'a, K>(&'a self, state: &'a State) -> impl Iterator<Item = Resolved<K>> + 'a
+    where
+        K: IdToObject,
+    {
+        let type_id = TypeId::of::<K::Object>();
+        self.objects.iter().filter_map(move |(wayland_id, entry)| {
+            (entry.type_id == type_id && state.objects.contains(entry.object_id))
+                .then_some(Resolved::new(self.id, K::from(*wayland_id), entry.object_id))
+        })
+    }
+
     /// Return whether a client-visible Wayland id currently refers to a live
     /// object of the expected interface type `K::Object`.
     ///
@@ -615,16 +613,14 @@ impl Client {
     /// malformed ids with a protocol error instead of panicking in `get_object()`.
     pub fn object_is<K>(&self, id: K, state: &State) -> bool
     where
-        K: Copy + Into<WaylandId> + IdToObject,
-        K::Object: Object,
+        K: IdToObject,
     {
         self.resolve(id, state).is_some()
     }
 
     pub fn grab_object<K>(&self, id: K, state: &mut State) -> GrabbedObject<K::Object>
     where
-        K: Into<WaylandId> + IdToObject,
-        K::Object: Object,
+        K: IdToObject,
     {
         let id: WaylandId = id.into();
         let obj_id = self.objects[&id].object_id;
@@ -667,21 +663,25 @@ impl Client {
         }
     }
 
-    pub fn insert_object<'a, O: Object>(
+    pub fn insert_object<'a, O>(
         &mut self,
         state: &'a mut State,
         object: O,
-    ) -> ((WaylandId, ObjectId), &'a mut O) {
+    ) -> (Resolved<O::Id>, &'a mut O)
+    where
+        O: ObjectWithId,
+    {
         let (wayland_id, object_id) = state.insert_object(object);
         self.objects
             .insert(wayland_id, ClientObjectEntry { type_id: TypeId::of::<O>(), object_id });
         let object: &mut O = state.objects[object_id].downcast_mut::<O>().unwrap();
-        ((wayland_id, object_id), object)
+        let id = O::Id::from(wayland_id);
+        (Resolved::new(self.client_id(), id, object_id), object)
     }
 
     pub fn contains_object<K>(&self, id: K, state: &State) -> bool
     where
-        K: Into<WaylandId> + IdToObject,
+        K: IdToObject,
     {
         let id: WaylandId = id.into();
         let Some(obj_id) = self.objects.get(&id).map(|entry| entry.object_id) else {
@@ -706,49 +706,40 @@ impl Client {
         &mut self,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        popup_ids: Vec<XdgPopupId>,
+        popups: Vec<Resolved<XdgPopupId>>,
         detached_parent_layer_surface_id: Option<ZwlrLayerSurfaceV1Id>,
     ) {
-        for popup_id in popup_ids.into_iter().rev() {
-            if !self.contains_object(popup_id, state) {
+        for popup in popups.into_iter().rev() {
+            if !popup.exists(state) {
                 continue;
             }
 
-            crate::seat::remove_popup_grab(state, dispatcher, popup_id, None);
+            crate::seat::remove_popup_grab(state, dispatcher, popup, None);
 
-            let (xdg_surface_id, parent_surface_id, parent_layer_surface_id) = {
-                let popup_object_id = self.object_id(popup_id);
-                let Some(popup) = state.objects.try_ref_object::<XdgPopup>(popup_object_id) else {
-                    continue;
-                };
-                (popup.xdg_surface_id(), popup.parent_surface_id(), popup.parent_layer_surface_id())
+            let (xdg_surface_id, parent_surface_id, parent_layer_surface) = {
+                let popup = popup.rref(state);
+                (popup.xdg_surface(), popup.parent_surface(), popup.parent_layer_surface())
             };
 
             if let Some(parent_surface_id) = parent_surface_id {
-                if self.contains_object(parent_surface_id, state) {
-                    let mut parent_surface = self.grab_object(parent_surface_id, state);
-                    parent_surface.remove_popup_child(popup_id);
+                if parent_surface_id.exists(state) {
+                    let mut parent_surface = parent_surface_id.grab(state);
+                    parent_surface.remove_popup_child(popup);
                 }
             }
-            if let Some(parent_layer_surface_id) = parent_layer_surface_id {
-                if Some(parent_layer_surface_id) != detached_parent_layer_surface_id
-                    && self.contains_object(parent_layer_surface_id, state)
+            if let Some(parent_layer_surface) = parent_layer_surface {
+                if Some(parent_layer_surface.wayland_id()) != detached_parent_layer_surface_id
+                    && parent_layer_surface.exists(state)
                 {
-                    let mut parent_surface = self.grab_object(parent_layer_surface_id, state);
-                    parent_surface.remove_popup_child(popup_id);
+                    let mut parent_surface = parent_layer_surface.grab(state);
+                    parent_surface.remove_popup_child(popup);
                 }
             }
 
-            if self.contains_object(xdg_surface_id, state) {
+            if xdg_surface_id.exists(state) {
                 let wl_surface_id = {
-                    let xdg_surface_object_id = self.object_id(xdg_surface_id);
-                    let Some(xdg_surface) = state
-                        .objects
-                        .try_ref_object::<XdgSurface>(xdg_surface_object_id)
-                    else {
-                        continue;
-                    };
-                    xdg_surface.wl_surface_id()
+                    let xdg_surface = xdg_surface_id.rref(state);
+                    xdg_surface.wl_surface().wayland_id()
                 };
                 if self.contains_object(wl_surface_id, state) {
                     let mut wl_surface = self.grab_object(wl_surface_id, state);
@@ -757,7 +748,7 @@ impl Client {
             }
 
             {
-                let mut popup = self.grab_object(popup_id, state);
+                let mut popup = popup.grab(state);
                 popup.dismiss(dispatcher);
             }
         }
@@ -774,89 +765,89 @@ impl Client {
         }
         match event {
             SeatClientEvent::PointerEnter { serial, surface, x, y } => {
-                let pointers = state.seat.pointer_resources(self.id);
-                for pointer_id in pointers {
-                    if !self.contains_object(pointer_id, state) {
+                for pointer in state.seat.pointer_resources(self.id) {
+                    if !pointer.exists(state) {
                         continue;
                     }
                     state.seat.record_client_serial(self.id, serial);
-                    let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
-                    pointer.send_enter(serial, surface, x, y, dispatcher);
+                    pointer
+                        .ref_mut(state)
+                        .send_enter(serial, surface, x, y, dispatcher);
                 }
             }
             SeatClientEvent::PointerLeave { serial, surface } => {
-                let pointers = state.seat.pointer_resources(self.id);
-                for pointer_id in pointers {
-                    if !self.contains_object(pointer_id, state) {
+                for pointer in state.seat.pointer_resources(self.id) {
+                    if !pointer.exists(state) {
                         continue;
                     }
                     state.seat.record_client_serial(self.id, serial);
-                    let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
-                    pointer.send_leave(serial, surface, dispatcher);
+                    pointer
+                        .ref_mut(state)
+                        .send_leave(serial, surface, dispatcher);
                 }
             }
             SeatClientEvent::PointerMotion { time, x, y } => {
-                let pointers = state.seat.pointer_resources(self.id);
-                for pointer_id in pointers {
-                    if !self.contains_object(pointer_id, state) {
+                for pointer in state.seat.pointer_resources(self.id) {
+                    if !pointer.exists(state) {
                         continue;
                     }
-                    let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
-                    pointer.send_motion(time, x, y, dispatcher);
+                    pointer.ref_mut(state).send_motion(time, x, y, dispatcher);
                 }
             }
             SeatClientEvent::PointerButton { serial, time, button, state: button_state } => {
-                let pointers = state.seat.pointer_resources(self.id);
-                for pointer_id in pointers {
-                    if !self.contains_object(pointer_id, state) {
+                for pointer in state.seat.pointer_resources(self.id) {
+                    if !pointer.exists(state) {
                         continue;
                     }
                     state.seat.record_client_serial(self.id, serial);
-                    let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
-                    pointer.send_button(serial, time, button, button_state, dispatcher);
+                    pointer.ref_mut(state).send_button(
+                        serial,
+                        time,
+                        button,
+                        button_state,
+                        dispatcher,
+                    );
                 }
             }
             SeatClientEvent::PointerFrame => {
-                let pointers = state.seat.pointer_resources(self.id);
-                for pointer_id in pointers {
-                    if !self.contains_object(pointer_id, state) {
+                for pointer in state.seat.pointer_resources(self.id) {
+                    if !pointer.exists(state) {
                         continue;
                     }
-                    let pointer: &mut WlPointer = self.ref_object_mut(pointer_id, state);
-                    pointer.send_frame(dispatcher);
+                    pointer.ref_mut(state).send_frame(dispatcher);
                 }
             }
             SeatClientEvent::KeyboardEnter { serial, surface, keys } => {
-                let keyboards = state.seat.keyboard_resources(self.id);
-                for keyboard_id in keyboards {
-                    if !self.contains_object(keyboard_id, state) {
+                for keyboard in state.seat.keyboard_resources(self.id) {
+                    if !keyboard.exists(state) {
                         continue;
                     }
                     state.seat.record_client_serial(self.id, serial);
-                    let keyboard: &mut WlKeyboard = self.ref_object_mut(keyboard_id, state);
-                    keyboard.send_enter(serial, surface, keys.clone(), dispatcher);
+                    keyboard
+                        .ref_mut(state)
+                        .send_enter(serial, surface, keys.clone(), dispatcher);
                 }
             }
             SeatClientEvent::KeyboardLeave { serial, surface } => {
-                let keyboards = state.seat.keyboard_resources(self.id);
-                for keyboard_id in keyboards {
-                    if !self.contains_object(keyboard_id, state) {
+                for keyboard in state.seat.keyboard_resources(self.id) {
+                    if !keyboard.exists(state) {
                         continue;
                     }
                     state.seat.record_client_serial(self.id, serial);
-                    let keyboard: &mut WlKeyboard = self.ref_object_mut(keyboard_id, state);
-                    keyboard.send_leave(serial, surface, dispatcher);
+                    keyboard
+                        .ref_mut(state)
+                        .send_leave(serial, surface, dispatcher);
                 }
             }
             SeatClientEvent::KeyboardKey { serial, time, key, state: key_state } => {
-                let keyboards = state.seat.keyboard_resources(self.id);
-                for keyboard_id in keyboards {
-                    if !self.contains_object(keyboard_id, state) {
+                for keyboard in state.seat.keyboard_resources(self.id) {
+                    if !keyboard.exists(state) {
                         continue;
                     }
                     state.seat.record_client_serial(self.id, serial);
-                    let keyboard: &mut WlKeyboard = self.ref_object_mut(keyboard_id, state);
-                    keyboard.send_key(serial, time, key, key_state, dispatcher);
+                    keyboard
+                        .ref_mut(state)
+                        .send_key(serial, time, key, key_state, dispatcher);
                 }
             }
             SeatClientEvent::KeyboardModifiers {
@@ -866,14 +857,12 @@ impl Client {
                 mods_locked,
                 group,
             } => {
-                let keyboards = state.seat.keyboard_resources(self.id);
-                for keyboard_id in keyboards {
-                    if !self.contains_object(keyboard_id, state) {
+                for keyboard in state.seat.keyboard_resources(self.id) {
+                    if !keyboard.exists(state) {
                         continue;
                     }
                     state.seat.record_client_serial(self.id, serial);
-                    let keyboard: &mut WlKeyboard = self.ref_object_mut(keyboard_id, state);
-                    keyboard.send_modifiers(
+                    keyboard.ref_mut(state).send_modifiers(
                         serial,
                         mods_depressed,
                         mods_latched,
@@ -899,7 +888,7 @@ impl Client {
             return;
         }
         if let Some(mut offer_obj) = offer.try_grab(state) {
-            offer_obj.before_destroy(self.id, state, dispatcher);
+            offer_obj.before_destroy(self.id, offer, state, dispatcher);
         }
         self.delete_id(&WlDisplay::default(), state, dispatcher, offer.wayland_id().into());
     }
@@ -946,11 +935,10 @@ impl Client {
 
         let offer_id = self.allocate_server_object_id::<WlDataOfferId>();
         let offer = WlDataOffer::new(offer_id, device_version, role, Some(source));
-        let ((_, offer_object_id), _) = self.insert_object(state, offer);
-        let resolved_offer = Resolved::new(self.id, offer_id, offer_object_id);
+        let (resolved_offer, _) = self.insert_object(state, offer);
         {
             let device = self.ref_object(device_id, state);
-            device.send_data_offer(offer_id, dispatcher);
+            device.send_data_offer(resolved_offer, dispatcher);
         }
         for mime_type in mime_types {
             let offer = self.ref_object(offer_id, state);
@@ -979,13 +967,13 @@ impl Client {
             .then(|| state.seat.selection_source())
             .flatten();
 
-        for data_device_id in state.seat.data_device_resources(self.id) {
-            if !self.contains_object(data_device_id, state) {
+        for data_device in state.seat.data_device_resources(self.id) {
+            if !data_device.exists(state) {
                 continue;
             }
 
             let previous_offer = {
-                let data_device = self.ref_object_mut(data_device_id, state);
+                let data_device = data_device.ref_mut(state);
                 data_device.take_selection_offer()
             };
             if let Some(previous_offer) = previous_offer {
@@ -996,20 +984,15 @@ impl Client {
                 self.create_data_offer_for_device(
                     state,
                     dispatcher,
-                    data_device_id,
+                    data_device.wayland_id(),
                     selection.source,
                     DataOfferRole::Selection,
                 )
             });
 
-            let data_device = self.ref_object_mut(data_device_id, state);
+            let data_device = data_device.ref_mut(state);
             data_device.set_selection_offer(next_offer);
-            data_device.send_selection(
-                next_offer
-                    .map(|offer| offer.wayland_id())
-                    .unwrap_or_else(|| WlDataOfferId::from(0u32)),
-                dispatcher,
-            );
+            data_device.send_selection(next_offer, dispatcher);
         }
     }
 
@@ -1018,7 +1001,7 @@ impl Client {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
         serial: u32,
-        surface: WlSurfaceId,
+        surface: Resolved<WlSurfaceId>,
         x: f32,
         y: f32,
         source: Option<Resolved<WlDataSourceId>>,
@@ -1027,10 +1010,9 @@ impl Client {
             .seat
             .data_device_resources(self.id)
             .into_iter()
-            .filter(|data_device_id| self.contains_object(*data_device_id, state))
-            .any(|data_device_id| {
-                self.ref_object(data_device_id, state).version()
-                    < wl_data_offer::SOURCE_ACTIONS_SINCE
+            .filter(|data_device| data_device.exists(state))
+            .any(|data_device| {
+                data_device.rref(state).version() < wl_data_offer::SOURCE_ACTIONS_SINCE
             });
         if has_legacy_device
             && state
@@ -1039,11 +1021,9 @@ impl Client {
                 .is_some_and(|drag| drag.negotiation.chosen_action == 0)
         {
             let source_actions = source
-                .map(|source| source.object_id())
-                .and_then(|source_object_id| {
-                    state
-                        .objects
-                        .try_ref_object::<WlDataSource>(source_object_id)
+                .and_then(|source| {
+                    source
+                        .try_ref(state)
                         .map(|source| source.effective_dnd_actions())
                 })
                 .unwrap_or(0);
@@ -1053,14 +1033,14 @@ impl Client {
                     .set_active_drag_chosen_action(self.id, DndAction::Copy as u32);
             }
         }
-        for data_device_id in state.seat.data_device_resources(self.id) {
-            if !self.contains_object(data_device_id, state) {
+        for data_device in state.seat.data_device_resources(self.id) {
+            if !data_device.exists(state) {
                 continue;
             }
-            let device_version = self.ref_object(data_device_id, state).version();
+            let device_version = data_device.rref(state).version();
 
             let previous_offer = {
-                let data_device = self.ref_object_mut(data_device_id, state);
+                let data_device = data_device.ref_mut(state);
                 data_device.take_drag_offer()
             };
             if let Some(previous_offer) = previous_offer {
@@ -1071,7 +1051,7 @@ impl Client {
                 self.create_data_offer_for_device(
                     state,
                     dispatcher,
-                    data_device_id,
+                    data_device.wayland_id(),
                     source,
                     DataOfferRole::Drag,
                 )
@@ -1079,23 +1059,14 @@ impl Client {
             if let Some(offer) = offer {
                 let _ = state.seat.register_active_drag_offer(
                     self.id,
-                    offer.wayland_id(),
+                    offer,
                     device_version >= wl_data_offer::ACTION_SINCE,
                 );
             }
 
-            let data_device = self.ref_object_mut(data_device_id, state);
+            let data_device = data_device.ref_mut(state);
             data_device.set_drag_offer(offer);
-            data_device.send_enter(
-                serial,
-                surface,
-                x,
-                y,
-                offer
-                    .map(|offer| offer.wayland_id())
-                    .unwrap_or_else(|| WlDataOfferId::from(0u32)),
-                dispatcher,
-            );
+            data_device.send_enter(serial, surface, x, y, offer, dispatcher);
         }
     }
 
@@ -1104,12 +1075,12 @@ impl Client {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        for data_device_id in state.seat.data_device_resources(self.id) {
-            if !self.contains_object(data_device_id, state) {
+        for data_device in state.seat.data_device_resources(self.id) {
+            if !data_device.exists(state) {
                 continue;
             }
             let previous_offer = {
-                let data_device = self.ref_object_mut(data_device_id, state);
+                let data_device = data_device.ref_mut(state);
                 data_device.send_leave(dispatcher);
                 data_device.take_drag_offer()
             };
@@ -1127,12 +1098,11 @@ impl Client {
         x: f32,
         y: f32,
     ) {
-        for data_device_id in state.seat.data_device_resources(self.id) {
-            if !self.contains_object(data_device_id, state) {
+        for data_device in state.seat.data_device_resources(self.id) {
+            if !data_device.exists(state) {
                 continue;
             }
-            let data_device = self.ref_object(data_device_id, state);
-            data_device.send_motion(time, x, y, dispatcher);
+            data_device.rref(state).send_motion(time, x, y, dispatcher);
         }
     }
 
@@ -1141,12 +1111,11 @@ impl Client {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        for data_device_id in state.seat.data_device_resources(self.id) {
-            if !self.contains_object(data_device_id, state) {
+        for data_device in state.seat.data_device_resources(self.id) {
+            if !data_device.exists(state) {
                 continue;
             }
-            let data_device = self.ref_object(data_device_id, state);
-            data_device.send_drop(dispatcher);
+            data_device.rref(state).send_drop(dispatcher);
         }
 
         if let Some(drag) = state.seat.active_drag() {
@@ -1212,40 +1181,37 @@ impl Client {
         &mut self,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        surface_ids: Vec<WlSurfaceId>,
+        surfaces: Vec<Resolved<WlSurfaceId>>,
         time_msec: u32,
     ) {
         let display = WlDisplay::default();
-        for surface_id in surface_ids {
-            let Some(object_id) = self.object_id_for_wayland(surface_id) else {
+        for surface in surfaces {
+            if !surface.exists(state) {
                 continue;
-            };
+            }
             let callbacks = {
-                let Some(mut surface) = state.objects.try_grab_object::<WlSurface>(object_id)
-                else {
+                let Some(mut surface) = surface.try_grab(state) else {
                     continue;
                 };
                 surface.take_frame_callbacks()
             };
             for callback_id in callbacks {
-                if !self.contains_object(callback_id, state) {
+                if !callback_id.exists(state) {
                     continue;
                 }
                 {
-                    let callback = self.ref_object(callback_id, state);
+                    let callback = callback_id.rref(state);
                     callback.done(time_msec, dispatcher);
                 }
-                self.delete_id(&display, state, dispatcher, callback_id.into());
+                self.delete_id(&display, state, dispatcher, callback_id.wayland_id().into());
             }
         }
     }
 
     fn output_resources_for_feedback(&self, state: &State, output_id: OutputId) -> Vec<WaylandId> {
         let mut resources = Vec::new();
-        for object_id in self.iter_object_ids_of::<WlOutput>(state) {
-            let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(object_id) else {
-                continue;
-            };
+        for wl_output in self.iter_resolved_of::<WlOutputId>(state) {
+            let wl_output = wl_output.rref(state);
             if wl_output.matches_output(output_id) {
                 resources.push(wl_output.wl_output_id().into());
             }
@@ -1257,7 +1223,7 @@ impl Client {
         &mut self,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        feedback_ids: Vec<WpPresentationFeedbackId>,
+        feedbacks: Vec<Resolved<WpPresentationFeedbackId>>,
         output_id: Option<OutputId>,
         tv_sec_hi: u32,
         tv_sec_lo: u32,
@@ -1270,12 +1236,12 @@ impl Client {
         let display = WlDisplay::default();
         let sync_outputs =
             output_id.map(|output_id| self.output_resources_for_feedback(state, output_id));
-        for feedback_id in feedback_ids {
-            if !self.contains_object(feedback_id, state) {
+        for feedback in feedbacks {
+            if !feedback.exists(state) {
                 continue;
             }
             {
-                let feedback: &mut WpPresentationFeedback = self.ref_object_mut(feedback_id, state);
+                let feedback: &mut WpPresentationFeedback = feedback.ref_mut(state);
                 if let Some(sync_outputs) = sync_outputs.as_ref() {
                     for output in sync_outputs {
                         feedback.send_sync_output((*output).into(), dispatcher);
@@ -1285,7 +1251,7 @@ impl Client {
                     tv_sec_hi, tv_sec_lo, tv_nsec, refresh, seq_hi, seq_lo, flags, dispatcher,
                 );
             }
-            self.delete_id(&display, state, dispatcher, feedback_id.into());
+            self.delete_id(&display, state, dispatcher, feedback.wayland_id().into());
         }
     }
 
@@ -1293,18 +1259,18 @@ impl Client {
         &mut self,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        feedback_ids: Vec<WpPresentationFeedbackId>,
+        feedbacks: Vec<Resolved<WpPresentationFeedbackId>>,
     ) {
         let display = WlDisplay::default();
-        for feedback_id in feedback_ids {
-            if !self.contains_object(feedback_id, state) {
+        for feedback in feedbacks {
+            if !feedback.exists(state) {
                 continue;
             }
             {
-                let feedback = self.ref_object(feedback_id, state);
+                let feedback = feedback.rref(state);
                 feedback.send_discarded(dispatcher);
             }
-            self.delete_id(&display, state, dispatcher, feedback_id.into());
+            self.delete_id(&display, state, dispatcher, feedback.wayland_id().into());
         }
     }
 
@@ -1316,21 +1282,14 @@ impl Client {
     ) {
         let backend = crate::state::BackendOutputRef::new(drm_id);
         let surface_ids = self
-            .objects
-            .iter()
-            .filter_map(|(wayland_id, entry)| {
-                let surface = state.objects.try_ref_object::<WlSurface>(entry.object_id)?;
-                Some(
-                    (surface.client_id() == self.id)
-                        .then_some(WlSurfaceId::from(u32::from(*wayland_id)))?,
-                )
-            })
+            .iter_resolved_of::<WlSurfaceId>(state)
+            .map(|surface| surface.wayland_id())
             .collect::<Vec<_>>();
         for surface_id in surface_ids {
             if !self.contains_object(surface_id, state) {
                 continue;
             }
-            let mut surface = self.grab_object(surface_id, state);
+            let mut surface = self.resolve(surface_id, state).unwrap().grab(state);
             surface.discard_presentation_feedbacks_for_backend(self, state, dispatcher, backend);
         }
     }
@@ -1400,10 +1359,8 @@ impl Client {
         interface: String,
         version: u32,
     ) {
-        for object_id in self.iter_object_ids_of::<WlRegistry>(state) {
-            let Some(registry) = state.objects.try_ref_object::<WlRegistry>(object_id) else {
-                continue;
-            };
+        for registry in self.iter_resolved_of::<WlRegistryId>(state) {
+            let registry = registry.rref(state);
             registry.send_global(dispatcher, name, interface.clone(), version);
         }
     }
@@ -1414,10 +1371,8 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
         name: u32,
     ) {
-        for object_id in self.iter_object_ids_of::<WlRegistry>(state) {
-            let Some(registry) = state.objects.try_ref_object::<WlRegistry>(object_id) else {
-                continue;
-            };
+        for registry in self.iter_resolved_of::<WlRegistryId>(state) {
+            let registry = registry.rref(state);
             registry.send_global_remove(dispatcher, name);
         }
     }
@@ -1429,25 +1384,21 @@ impl Client {
         output_id: OutputId,
     ) {
         let xdg_output_ids = self
-            .iter_object_ids_of::<ZxdgOutputV1>(state)
+            .iter_resolved_of::<ZxdgOutputV1Id>(state)
             .collect::<Vec<_>>();
         let wl_output_ids = self
-            .iter_object_ids_of::<WlOutput>(state)
+            .iter_resolved_of::<WlOutputId>(state)
             .collect::<Vec<_>>();
 
-        for object_id in xdg_output_ids {
-            let Some(xdg_output) = state.objects.try_ref_object::<ZxdgOutputV1>(object_id) else {
-                continue;
-            };
+        for xdg_output in xdg_output_ids {
+            let xdg_output = xdg_output.rref(state);
             if xdg_output.matches_output(output_id) {
                 xdg_output.send_state(state, dispatcher);
             }
         }
 
-        for object_id in wl_output_ids {
-            let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(object_id) else {
-                continue;
-            };
+        for wl_output in wl_output_ids {
+            let wl_output = wl_output.rref(state);
             if wl_output.matches_output(output_id) {
                 wl_output.send_state(state, dispatcher);
             }
@@ -1458,17 +1409,14 @@ impl Client {
         &self,
         state: &State,
         output_id: OutputId,
-    ) -> Vec<WlOutputId> {
+    ) -> Vec<Resolved<WlOutputId>> {
         let mut output_object_ids = Vec::new();
         let object_ids = self
-            .iter_object_ids_of::<WlOutput>(state)
+            .iter_resolved_of::<WlOutputId>(state)
             .collect::<Vec<_>>();
-        for object_id in object_ids {
-            let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(object_id) else {
-                continue;
-            };
-            if wl_output.matches_output(output_id) {
-                output_object_ids.push(wl_output.wl_output_id());
+        for wl_output in object_ids {
+            if wl_output.rref(state).matches_output(output_id) {
+                output_object_ids.push(wl_output);
             }
         }
         output_object_ids
@@ -1478,30 +1426,24 @@ impl Client {
         &self,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        surface_object_id: ObjectId,
-        output_id: OutputId,
+        surface: Resolved<WlSurfaceId>,
+        output: Resolved<WlOutputId>,
         entered: bool,
     ) {
-        let output_object_ids = self.output_object_ids_for_output(state, output_id);
         log::debug!(
             "surface output event surface={:?} output={:?} entered={} wl_output_resources={:?}",
-            surface_object_id,
-            output_id,
+            surface.object_id(),
+            output.wayland_id(),
             entered,
-            output_object_ids
+            [output.wayland_id()]
         );
-        if output_object_ids.is_empty() {
-            return;
-        }
-        let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
+        let Some(surface) = surface.try_ref(state) else {
             return;
         };
-        for output_object_id in output_object_ids {
-            if entered {
-                surface.send_output_enter(output_object_id, dispatcher);
-            } else {
-                surface.send_output_leave(output_object_id, dispatcher);
-            }
+        if entered {
+            surface.send_output_enter(output, dispatcher);
+        } else {
+            surface.send_output_leave(output, dispatcher);
         }
     }
 
@@ -1511,13 +1453,10 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
     ) {
         let manager_object_ids = self
-            .iter_object_ids_of::<ExtWorkspaceManagerV1>(state)
+            .iter_resolved_of::<ExtWorkspaceManagerV1Id>(state)
             .collect::<Vec<_>>();
-        for object_id in manager_object_ids {
-            let Some(mut manager) = state
-                .objects
-                .try_grab_object::<ExtWorkspaceManagerV1>(object_id)
-            else {
+        for manager in manager_object_ids {
+            let Some(mut manager) = manager.try_grab(state) else {
                 continue;
             };
             manager.sync(self, state, dispatcher, true);
@@ -1531,25 +1470,22 @@ impl Client {
         output_id: OutputId,
     ) {
         let object_ids = self
-            .iter_object_ids_of::<WlSurface>(state)
+            .iter_resolved_of::<WlSurfaceId>(state)
             .collect::<Vec<_>>();
-        let mut surface_object_ids = Vec::new();
-        for object_id in object_ids {
-            let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
-                continue;
-            };
-            if surface.contains_output(output_id) {
-                surface_object_ids.push(object_id);
+        let mut surfaces = Vec::new();
+        for surface in object_ids {
+            let surface_ref = surface.rref(state);
+            if surface_ref.contains_output(output_id) {
+                surfaces.push(surface);
             }
         }
-        for surface_object_id in surface_object_ids {
-            self.send_surface_output_membership_event(
-                state,
-                dispatcher,
-                surface_object_id,
-                output_id,
-                true,
-            );
+        let output_objects = self.output_object_ids_for_output(state, output_id);
+        for surface in surfaces {
+            for output in &output_objects {
+                self.send_surface_output_membership_event(
+                    state, dispatcher, surface, *output, true,
+                );
+            }
         }
     }
 
@@ -1558,19 +1494,17 @@ impl Client {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let root_surface_ids = state.root_surface_ids();
-        let active_cursor_surface = active_cursor_surface_refresh_params(state, self.id)
-            .map(|(object_id, base_x, base_y)| (object_id, base_x, base_y));
-        let active_dnd_icon_surface = active_dnd_icon_surface_refresh_params(state, self.id)
-            .map(|(object_id, base_x, base_y)| (object_id, base_x, base_y));
+        let root_surface_ids = state.root_surfaces();
+        let active_cursor_surface = active_cursor_surface_refresh_params(state, self.id);
+        let active_dnd_icon_surface = active_dnd_icon_surface_refresh_params(state, self.id);
         log::debug!("refresh_surface_outputs client={:?} roots={:?}", self.id, root_surface_ids);
-        for surface_object_id in root_surface_ids {
-            let Some(surface) = state.objects.try_ref_object::<WlSurface>(surface_object_id) else {
+        for root_surface in root_surface_ids {
+            let Some(surface) = root_surface.try_ref(state) else {
                 continue;
             };
             log::debug!(
                 "refresh_surface_outputs root candidate object={:?} client={:?} is_root={}",
-                surface_object_id,
+                surface.object_id(),
                 surface.client_id(),
                 surface.is_root()
             );
@@ -1578,48 +1512,48 @@ impl Client {
                 continue;
             }
             if surface.has_cursor_role() {
-                if let Some((active_surface_object_id, base_x, base_y)) = active_cursor_surface {
-                    if active_surface_object_id == surface_object_id {
+                if let Some((active_surface, base_x, base_y)) = active_cursor_surface {
+                    if active_surface == root_surface {
                         refresh_surface_tree_outputs(
                             self,
                             state,
                             dispatcher,
-                            surface_object_id,
+                            root_surface,
                             base_x,
                             base_y,
                         );
                     } else {
-                        clear_surface_tree_outputs(self, state, dispatcher, surface_object_id);
+                        clear_surface_tree_outputs(self, state, dispatcher, root_surface);
                     }
                 } else {
-                    clear_surface_tree_outputs(self, state, dispatcher, surface_object_id);
+                    clear_surface_tree_outputs(self, state, dispatcher, root_surface);
                 }
                 continue;
             }
             if surface.has_dnd_icon_role() {
-                if let Some((active_surface_object_id, base_x, base_y)) = active_dnd_icon_surface {
-                    if active_surface_object_id == surface_object_id {
+                if let Some((active_surface, base_x, base_y)) = active_dnd_icon_surface {
+                    if active_surface == root_surface {
                         refresh_surface_tree_outputs(
                             self,
                             state,
                             dispatcher,
-                            surface_object_id,
+                            root_surface,
                             base_x,
                             base_y,
                         );
                     } else {
-                        clear_surface_tree_outputs(self, state, dispatcher, surface_object_id);
+                        clear_surface_tree_outputs(self, state, dispatcher, root_surface);
                     }
                 } else {
-                    clear_surface_tree_outputs(self, state, dispatcher, surface_object_id);
+                    clear_surface_tree_outputs(self, state, dispatcher, root_surface);
                 }
                 continue;
             }
-            if !state.root_surface_is_visible(surface_object_id) {
-                clear_surface_tree_outputs(self, state, dispatcher, surface_object_id);
+            if !state.root_surface_is_visible(root_surface) {
+                clear_surface_tree_outputs(self, state, dispatcher, root_surface);
                 continue;
             }
-            refresh_surface_tree_outputs(self, state, dispatcher, surface_object_id, 0, 0);
+            refresh_surface_tree_outputs(self, state, dispatcher, root_surface, 0, 0);
         }
     }
 
@@ -1630,64 +1564,45 @@ impl Client {
     ) {
         state.relayout_dirty_workspaces();
         let tiled_resize_surfaces = crate::seat::tiled_resize_active_root_surfaces(state);
-        let object_ids = self
-            .iter_object_ids_of::<XdgToplevel>(state)
+        let toplevels = self
+            .iter_resolved_of::<XdgToplevelId>(state)
             .collect::<Vec<_>>();
-        for object_id in object_ids {
-            let Some(toplevel_ref) = state.objects.try_ref_object::<XdgToplevel>(object_id) else {
+        for toplevel in toplevels {
+            let toplevel_ref = toplevel.rref(state);
+            let xdg_surface = toplevel_ref.xdg_surface();
+            let has_decoration_object = toplevel_ref.has_decoration_object();
+            let requested_decoration_mode = toplevel_ref.requested_decoration_mode(state);
+            let xdg_surface_ref = xdg_surface.rref(state);
+            let wl_surface = xdg_surface_ref.wl_surface();
+            let surface_ref = wl_surface.rref(state);
+            let Some(root_surface) = state.root_surface_for_surface(wl_surface) else {
                 continue;
             };
-            let xdg_surface_id = toplevel_ref.xdg_surface_id();
-            let toplevel_id = toplevel_ref.toplevel_id();
-            let Some(xdg_surface_object_id) = self.object_id_for_wayland(xdg_surface_id) else {
-                continue;
-            };
-            let Some(xdg_surface_ref) = state
-                .objects
-                .try_ref_object::<XdgSurface>(xdg_surface_object_id)
-            else {
-                continue;
-            };
-            let wl_surface_id = xdg_surface_ref.wl_surface_id();
-            let Some(wl_surface_object_id) = self.object_id_for_wayland(wl_surface_id) else {
-                continue;
-            };
-            let Some(surface_ref) = state
-                .objects
-                .try_ref_object::<WlSurface>(wl_surface_object_id)
-            else {
-                continue;
-            };
-            if !state.root_surface_is_visible(wl_surface_object_id) {
+            if !state.root_surface_is_visible(root_surface) {
                 continue;
             }
-            let tiled_rect = state.tiled_root_surface_frame_rect(wl_surface_object_id);
+            let tiled_rect = state.tiled_root_surface_frame_rect(root_surface);
             let tiled_edges = state
-                .tiled_root_surface_edges(wl_surface_object_id)
+                .tiled_root_surface_edges(root_surface)
                 .unwrap_or_default();
-            let fullscreen = state.root_surface_is_fullscreen(wl_surface_object_id);
-            let resizing = tiled_resize_surfaces.contains(&wl_surface_object_id);
+            let fullscreen = state.root_surface_is_fullscreen(root_surface);
+            let resizing = tiled_resize_surfaces.contains(&root_surface);
             let configure_bounds = tiled_rect
                 .map(|rect| (rect.width, rect.height))
-                .or_else(|| surface_ref.configure_bounds_for_object(state, wl_surface_object_id));
+                .or_else(|| surface_ref.configure_bounds_for_object(state, wl_surface));
             let pending_floating_restore = if tiled_rect.is_none() && !fullscreen {
-                state.take_pending_floating_rect_restore(wl_surface_object_id)
+                state.take_pending_floating_rect_restore(root_surface)
             } else {
                 None
             };
-            let desired_decoration_mode = state
-                .objects
-                .try_ref_object::<XdgToplevel>(object_id)
-                .map(|toplevel| {
-                    state.xdg_decoration_mode_for_surface(
-                        Some(wl_surface_object_id),
-                        toplevel.has_decoration_object(),
-                        toplevel.requested_decoration_mode(state),
-                    )
-                });
+            let desired_decoration_mode = Some(state.xdg_decoration_mode_for_surface(
+                Some(root_surface),
+                has_decoration_object,
+                requested_decoration_mode,
+            ));
 
-            let mut xdg_surface = self.grab_object(xdg_surface_id, state);
-            let mut toplevel = self.grab_object(toplevel_id, state);
+            let mut xdg_surface = xdg_surface.grab(state);
+            let mut toplevel = toplevel.grab(state);
             if let Some(mode) = desired_decoration_mode {
                 toplevel.schedule_decoration_mode(mode);
             }
@@ -1842,26 +1757,23 @@ fn refresh_surface_tree_outputs(
     client: &mut Client,
     state: &mut State,
     dispatcher: &mut ClientDispatcher,
-    surface_object_id: ObjectId,
+    surface: Resolved<WlSurfaceId>,
     base_x: i32,
     base_y: i32,
 ) {
     let (stack, child_base, delta) = {
-        let Some(mut surface) = state
-            .objects
-            .try_grab_object::<WlSurface>(surface_object_id)
-        else {
+        let Some(mut surface_obj) = surface.try_grab(state) else {
             return;
         };
-        let render_state = surface.render_state_at(base_x, base_y);
+        let render_state = surface_obj.render_state_at(base_x, base_y);
         let surface_origin = render_state
             .as_ref()
             .map(|render_state| (render_state.x, render_state.y))
             .unwrap_or_else(|| {
-                let (x, y) = surface.root_position();
+                let (x, y) = surface_obj.root_position();
                 (base_x + x, base_y + y)
             });
-        let current_position = surface.current_subsurface_position();
+        let current_position = surface_obj.current_subsurface_position();
         let next_outputs = render_state
             .as_ref()
             .map(|render_state| surface_intersecting_outputs(state, render_state))
@@ -1870,45 +1782,36 @@ fn refresh_surface_tree_outputs(
             (surface_origin.0 + current_position.0, surface_origin.1 + current_position.1);
         log::debug!(
             "surface output refresh surface={:?} render={:?} child_base={:?} next_outputs={:?}",
-            surface_object_id,
+            surface.object_id(),
             render_state.as_ref().map(|r| (r.x, r.y, r.width, r.height)),
             child_base,
             next_outputs
         );
-        let delta = surface.update_output_membership(next_outputs);
+        let delta = surface_obj.update_output_membership(next_outputs);
         log::debug!(
             "surface output delta surface={:?} entered={:?} left={:?} active_changed={}",
-            surface_object_id,
+            surface.object_id(),
             delta.entered,
             delta.left,
             delta.active_output_changed
         );
-        (surface.current_stack().to_vec(), child_base, delta)
+        (surface_obj.current_stack().to_vec(), child_base, delta)
     };
 
     for output_id in delta.left {
-        client.send_surface_output_membership_event(
-            state,
-            dispatcher,
-            surface_object_id,
-            output_id,
-            false,
-        );
+        for output in client.output_object_ids_for_output(state, output_id) {
+            client.send_surface_output_membership_event(state, dispatcher, surface, output, false);
+        }
     }
     for output_id in delta.entered {
-        client.send_surface_output_membership_event(
-            state,
-            dispatcher,
-            surface_object_id,
-            output_id,
-            true,
-        );
+        for output in client.output_object_ids_for_output(state, output_id) {
+            client.send_surface_output_membership_event(state, dispatcher, surface, output, true);
+        }
     }
 
-    let preferred_output = state
-        .objects
-        .try_ref_object::<WlSurface>(surface_object_id)
-        .and_then(|surface| surface.preferred_output_id_for_object(state, surface_object_id))
+    let preferred_output = surface
+        .try_ref(state)
+        .and_then(|surface_ref| surface_ref.preferred_output_id_for_object(state, surface))
         .and_then(|output_id| {
             state
                 .outputs
@@ -1916,25 +1819,20 @@ fn refresh_surface_tree_outputs(
                 .map(|output| (output.scale, output.legacy_scale().max(1), output.transform as u32))
         });
     if let Some((fractional_scale, scale, transform)) = preferred_output {
-        let Some(mut surface) = state
-            .objects
-            .try_grab_object::<WlSurface>(surface_object_id)
-        else {
+        let Some(mut surface_obj) = surface.try_grab(state) else {
             return;
         };
-        surface.send_preferred_fractional_scale_for_output(fractional_scale, state, dispatcher);
-        surface.send_preferred_buffer_state_for_output(scale, transform, dispatcher);
+        surface_obj.send_preferred_fractional_scale_for_output(fractional_scale, state, dispatcher);
+        surface_obj.send_preferred_buffer_state_for_output(scale, transform, dispatcher);
     }
 
     for entry in stack {
-        if let crate::wayland_objects::wl_surface::StackEntry::Child(child_surface_object_id) =
-            entry
-        {
+        if let crate::wayland_objects::wl_surface::StackEntry::Child(child_surface) = entry {
             refresh_surface_tree_outputs(
                 client,
                 state,
                 dispatcher,
-                child_surface_object_id,
+                child_surface,
                 child_base.0,
                 child_base.1,
             );
@@ -1946,34 +1844,25 @@ fn clear_surface_tree_outputs(
     client: &mut Client,
     state: &mut State,
     dispatcher: &mut ClientDispatcher,
-    surface_object_id: ObjectId,
+    surface: Resolved<WlSurfaceId>,
 ) {
     let (stack, delta) = {
-        let Some(mut surface) = state
-            .objects
-            .try_grab_object::<WlSurface>(surface_object_id)
-        else {
+        let Some(mut surface_obj) = surface.try_grab(state) else {
             return;
         };
-        let delta = surface.update_output_membership(Vec::new());
-        (surface.current_stack().to_vec(), delta)
+        let delta = surface_obj.update_output_membership(Vec::new());
+        (surface_obj.current_stack().to_vec(), delta)
     };
 
     for output_id in delta.left {
-        client.send_surface_output_membership_event(
-            state,
-            dispatcher,
-            surface_object_id,
-            output_id,
-            false,
-        );
+        for output in client.output_object_ids_for_output(state, output_id) {
+            client.send_surface_output_membership_event(state, dispatcher, surface, output, false);
+        }
     }
 
     for entry in stack {
-        if let crate::wayland_objects::wl_surface::StackEntry::Child(child_surface_object_id) =
-            entry
-        {
-            clear_surface_tree_outputs(client, state, dispatcher, child_surface_object_id);
+        if let crate::wayland_objects::wl_surface::StackEntry::Child(child_surface) = entry {
+            clear_surface_tree_outputs(client, state, dispatcher, child_surface);
         }
     }
 }
@@ -1981,7 +1870,7 @@ fn clear_surface_tree_outputs(
 fn active_cursor_surface_refresh_params(
     state: &State,
     client_id: ClientId,
-) -> Option<(ObjectId, i32, i32)> {
+) -> Option<(Resolved<WlSurfaceId>, i32, i32)> {
     let (pointer_x, pointer_y) = state.seat.pointer_position();
     let crate::cursor::CursorSourceRef::Surface { cursor } = state.seat.visible_cursor_source()?
     else {
@@ -1990,30 +1879,26 @@ fn active_cursor_surface_refresh_params(
     if cursor.surface.client_id() != client_id {
         return None;
     }
-    let surface = state
-        .objects
-        .try_ref_object::<WlSurface>(cursor.surface.object_id())?;
+    let surface = cursor.surface.try_ref(state)?;
     let (root_x, root_y) = surface.root_position();
     let base_x = pointer_x.round() as i32 - cursor.hotspot_x - root_x;
     let base_y = pointer_y.round() as i32 - cursor.hotspot_y - root_y;
-    Some((cursor.surface.object_id(), base_x, base_y))
+    Some((cursor.surface, base_x, base_y))
 }
 
 fn active_dnd_icon_surface_refresh_params(
     state: &State,
     client_id: ClientId,
-) -> Option<(ObjectId, i32, i32)> {
+) -> Option<(Resolved<WlSurfaceId>, i32, i32)> {
     let drag = state.seat.active_drag()?;
     if drag.source.initiator_client_id() != client_id {
         return None;
     }
-    let surface_object_id = drag.icon_surface_object_id?;
-    let surface = state
-        .objects
-        .try_ref_object::<WlSurface>(surface_object_id)?;
+    let icon_surface = drag.icon_surface?;
+    let surface = icon_surface.try_ref(state)?;
     let (pointer_x, pointer_y) = state.seat.pointer_position();
     let (root_x, root_y) = surface.root_position();
-    Some((surface_object_id, pointer_x.round() as i32 - root_x, pointer_y.round() as i32 - root_y))
+    Some((icon_surface, pointer_x.round() as i32 - root_x, pointer_y.round() as i32 - root_y))
 }
 
 /// A specialized `Dispatcher`
@@ -2131,7 +2016,7 @@ impl Model for Client {
                 );
 
                 let display: WlDisplay = WlDisplay::default();
-                self.insert_object(state, display);
+                let _ = self.insert_object(state, display);
 
                 let (client_reader_id, client_reader) =
                     ClientReader::new(self.fd.as_raw_fd(), self.id);
@@ -2212,16 +2097,11 @@ impl Model for Client {
                     buffer.send_release(&mut dispatcher);
                 }
             }
-            CompleteSurfaceFrameCallbacks { surface_ids, time_msec } => {
-                self.complete_surface_frame_callbacks(
-                    state,
-                    &mut dispatcher,
-                    surface_ids,
-                    time_msec,
-                );
+            CompleteSurfaceFrameCallbacks { surfaces, time_msec } => {
+                self.complete_surface_frame_callbacks(state, &mut dispatcher, surfaces, time_msec);
             }
             PresentationFeedbackPresented {
-                feedback_ids,
+                feedbacks,
                 output_id,
                 tv_sec_hi,
                 tv_sec_lo,
@@ -2234,7 +2114,7 @@ impl Model for Client {
                 self.present_feedback(
                     state,
                     &mut dispatcher,
-                    feedback_ids,
+                    feedbacks,
                     output_id,
                     tv_sec_hi,
                     tv_sec_lo,
@@ -2245,8 +2125,8 @@ impl Model for Client {
                     flags,
                 );
             }
-            PresentationFeedbackDiscarded { feedback_ids } => {
-                self.discard_presentation_feedback(state, &mut dispatcher, feedback_ids);
+            PresentationFeedbackDiscarded { feedbacks } => {
+                self.discard_presentation_feedback(state, &mut dispatcher, feedbacks);
             }
             DiscardSurfacePresentationFeedbacksForBackend { drm_id } => {
                 self.discard_surface_presentation_feedbacks_for_backend(
@@ -2255,51 +2135,36 @@ impl Model for Client {
                     drm_id,
                 );
             }
-            CancelBlockedSurface { surface_object_id, waiter_id } => {
-                let Some(mut surface) = state
-                    .objects
-                    .try_grab_object::<WlSurface>(surface_object_id)
-                else {
+            CancelBlockedSurface { surface, waiter_id } => {
+                let Some(mut surface) = surface.try_grab(state) else {
                     return Ok(());
                 };
                 surface.cancel_blocked_if_waiter_matches(waiter_id, self, state, &mut dispatcher);
             }
-            DismissPopupGrab { popup_ids } => {
-                self.dismiss_popup_ids(state, &mut dispatcher, popup_ids, None);
+            DismissPopupGrab { popups } => {
+                self.dismiss_popup_ids(state, &mut dispatcher, popups, None);
             }
-            InteractiveResizeConfigure { xdg_toplevel_id, width, height, resizing } => {
-                if !self.contains_object(xdg_toplevel_id, state) {
+            InteractiveResizeConfigure { xdg_toplevel, width, height, resizing } => {
+                let Some(xdg_surface) = xdg_toplevel
+                    .try_ref(state)
+                    .map(|toplevel| toplevel.xdg_surface())
+                else {
                     return Ok(());
-                }
-                let xdg_surface_id = {
-                    let toplevel_object_id = self.object_id(xdg_toplevel_id);
-                    let Some(toplevel) = state
-                        .objects
-                        .try_ref_object::<XdgToplevel>(toplevel_object_id)
-                    else {
-                        return Ok(());
-                    };
-                    toplevel.xdg_surface_id()
                 };
-                if !self.contains_object(xdg_surface_id, state) {
+                if !xdg_surface.exists(state) {
                     return Ok(());
                 }
                 let configure_bounds = {
-                    let xdg_surface_object_id = self.object_id(xdg_surface_id);
-                    state
-                        .objects
-                        .try_ref_object::<XdgSurface>(xdg_surface_object_id)
-                        .and_then(|xdg_surface| {
-                            let wl_surface_object_id =
-                                self.object_id_for_wayland(xdg_surface.wl_surface_id())?;
-                            let surface = state
-                                .objects
-                                .try_ref_object::<WlSurface>(wl_surface_object_id)?;
-                            surface.configure_bounds_for_object(state, wl_surface_object_id)
-                        })
+                    xdg_surface.try_ref(state).and_then(|xdg_surface| {
+                        let wl_surface = xdg_surface.wl_surface();
+                        let surface = state
+                            .objects
+                            .try_ref_object::<WlSurface>(wl_surface.object_id())?;
+                        surface.configure_bounds_for_object(state, wl_surface)
+                    })
                 };
-                let mut xdg_surface = self.grab_object(xdg_surface_id, state);
-                let mut toplevel = self.grab_object(xdg_toplevel_id, state);
+                let mut xdg_surface = xdg_surface.grab(state);
+                let mut toplevel = xdg_toplevel.grab(state);
                 toplevel.send_interactive_resize_configure(
                     self,
                     state,
@@ -2899,7 +2764,7 @@ mod clients_wire_tests {
 #[cfg(test)]
 mod surface_output_refresh_tests {
     use crate::{
-        clients::{Client, ClientId},
+        clients::{Client, ClientId, Resolved},
         egl::EGL,
         globals::Globals,
         io_uring::model::IoUringAction,
@@ -2917,7 +2782,6 @@ mod surface_output_refresh_tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -2972,17 +2836,25 @@ mod surface_output_refresh_tests {
         let output_id = state.insert_output(make_output(0, 0, 200, 120));
         let surface_id = crate::protocol_generated::WlSurfaceId::from(10u32);
         let fractional_id = crate::protocol_generated::WpFractionalScaleV1Id::from(11u32);
-        let ((_, surface_object_id), _) =
+        let (surface_resolved, _) =
             client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
+        let surface_object_id = surface_resolved.object_id();
         state.register_root_surface(surface_object_id);
 
         let fractional_object_id = state
-            .insert_object(WpFractionalScaleV1::new(fractional_id, surface_object_id))
+            .insert_object(WpFractionalScaleV1::new(
+                fractional_id,
+                Resolved::new(client.client_id(), surface_id, surface_object_id),
+            ))
             .1;
         {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             surface
-                .set_fractional_scale_object(fractional_object_id)
+                .set_fractional_scale_object(Resolved::new(
+                    client.client_id(),
+                    fractional_id,
+                    fractional_object_id,
+                ))
                 .unwrap();
             surface.test_map(ObjectId::from(999usize), 0, 0, 200, 120);
         }

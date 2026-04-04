@@ -25,31 +25,24 @@ impl WlSubsurface {
 
     fn sibling_target(
         &self,
-        client: &Client,
         state: &State,
-        sibling: WlSurfaceId,
-    ) -> Result<Option<ObjectId>, ()> {
-        let Some(sibling_object_id) = client.try_object_id(sibling, state) else {
-            return Err(());
-        };
-        let Some(sibling_surface) = state.objects.try_ref_object::<WlSurface>(sibling_object_id)
-        else {
-            return Err(());
-        };
-        if sibling_object_id == self.surface.object_id() {
+        sibling_surface: Resolved<WlSurfaceId>,
+    ) -> Result<Option<Resolved<WlSurfaceId>>, ()> {
+        let sibling_surface_ref = sibling_surface.rref(state);
+        if sibling_surface == self.surface {
             return Err(());
         }
-        if sibling_object_id == self.parent.object_id() {
+        if sibling_surface == self.parent {
             return Ok(None);
         }
-        if sibling_surface
+        if sibling_surface_ref
             .parent_surface()
             .map(|surface| surface.object_id())
             != Some(self.parent.object_id())
         {
             return Err(());
         }
-        Ok(Some(sibling_object_id))
+        Ok(Some(sibling_surface))
     }
 
     fn bad_surface(&self, client: &Client, dispatcher: &mut ClientDispatcher, message: &str) {
@@ -78,18 +71,12 @@ impl Object for WlSubsurface {
 
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
-                if let Some(mut surface) = state
-                    .objects
-                    .try_grab_object::<WlSurface>(self.surface.object_id())
-                {
+                if let Some(mut surface) = self.surface.try_grab(state) {
                     surface.unmap_due_to_parent_loss(client, state, dispatcher);
                     surface.destroy_subsurface_role();
                 }
-                if let Some(mut parent_surface) = state
-                    .objects
-                    .try_grab_object::<WlSurface>(self.parent.object_id())
-                {
-                    parent_surface.remove_child_from_tree(self.surface.object_id());
+                if let Some(mut parent_surface) = self.parent.try_grab(state) {
+                    parent_surface.remove_child_from_tree(self.surface);
                 }
                 state.register_root_surface(self.surface.object_id());
                 use crate::wayland_objects::wl_display::WlDisplay;
@@ -105,16 +92,14 @@ impl Object for WlSubsurface {
                 }
             }
             SetPosition { x, y } => {
-                let Some(mut surface) = state
-                    .objects
-                    .try_grab_object::<WlSurface>(self.surface.object_id())
-                else {
+                let Some(mut surface) = self.surface.try_grab(state) else {
                     return Ok(());
                 };
                 surface.set_subsurface_position(x, y);
             }
             PlaceAbove { sibling } => {
-                let Ok(sibling_object_id) = self.sibling_target(client, state, sibling) else {
+                let sibling = client.resolve_or_disconnect(sibling, state, dispatcher)?;
+                let Ok(sibling_surface) = self.sibling_target(state, sibling) else {
                     self.bad_surface(
                         client,
                         dispatcher,
@@ -122,17 +107,10 @@ impl Object for WlSubsurface {
                     );
                     return Ok(());
                 };
-                let Some(mut parent_surface) = state
-                    .objects
-                    .try_grab_object::<WlSurface>(self.parent.object_id())
-                else {
+                let Some(mut parent_surface) = self.parent.try_grab(state) else {
                     return Ok(());
                 };
-                if !parent_surface.restack_child_relative(
-                    self.surface.object_id(),
-                    sibling_object_id,
-                    true,
-                ) {
+                if !parent_surface.restack_child_relative(self.surface, sibling_surface, true) {
                     self.bad_surface(
                         client,
                         dispatcher,
@@ -141,7 +119,8 @@ impl Object for WlSubsurface {
                 }
             }
             PlaceBelow { sibling } => {
-                let Ok(sibling_object_id) = self.sibling_target(client, state, sibling) else {
+                let sibling = client.resolve_or_disconnect(sibling, state, dispatcher)?;
+                let Ok(sibling_surface) = self.sibling_target(state, sibling) else {
                     self.bad_surface(
                         client,
                         dispatcher,
@@ -149,17 +128,10 @@ impl Object for WlSubsurface {
                     );
                     return Ok(());
                 };
-                let Some(mut parent_surface) = state
-                    .objects
-                    .try_grab_object::<WlSurface>(self.parent.object_id())
-                else {
+                let Some(mut parent_surface) = self.parent.try_grab(state) else {
                     return Ok(());
                 };
-                if !parent_surface.restack_child_relative(
-                    self.surface.object_id(),
-                    sibling_object_id,
-                    false,
-                ) {
+                if !parent_surface.restack_child_relative(self.surface, sibling_surface, false) {
                     self.bad_surface(
                         client,
                         dispatcher,
@@ -168,19 +140,13 @@ impl Object for WlSubsurface {
                 }
             }
             SetSync => {
-                let Some(mut surface) = state
-                    .objects
-                    .try_grab_object::<WlSurface>(self.surface.object_id())
-                else {
+                let Some(mut surface) = self.surface.try_grab(state) else {
                     return Ok(());
                 };
                 surface.set_subsurface_sync_mode(true);
             }
             SetDesync => {
-                let Some(mut surface) = state
-                    .objects
-                    .try_grab_object::<WlSurface>(self.surface.object_id())
-                else {
+                let Some(mut surface) = self.surface.try_grab(state) else {
                     return Ok(());
                 };
                 surface.set_subsurface_sync_mode(false);
@@ -216,7 +182,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -259,19 +224,25 @@ mod tests {
         let (mut client, mut dispatcher) = make_client();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
-        let (_, parent_object_id) = client
-            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(10), client.client_id(), 6))
-            .0;
+        let (parent_resolved, _) = client.insert_object(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(10), client.client_id(), 6),
+        );
+        let parent_object_id = parent_resolved.object_id();
         state.register_root_surface(parent_object_id);
-        let (_, child_object_id) = client
-            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(11), client.client_id(), 6))
-            .0;
+        let (child_resolved, _) = client.insert_object(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(11), client.client_id(), 6),
+        );
+        let child_object_id = child_resolved.object_id();
         state.register_root_surface(child_object_id);
-        let (_, stranger_object_id) = client
-            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(12), client.client_id(), 6))
-            .0;
+        let (stranger_resolved, _) = client.insert_object(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(12), client.client_id(), 6),
+        );
+        let stranger_object_id = stranger_resolved.object_id();
         state.register_root_surface(stranger_object_id);
-        let ((_, subsurface_object_id), _) = client.insert_object(
+        let (subsurface_resolved, _) = client.insert_object(
             &mut state,
             WlSubsurface::new(
                 WlSubsurfaceId::from(30),
@@ -279,6 +250,11 @@ mod tests {
                 Resolved::new(client.client_id(), WlSurfaceId::from(10), parent_object_id),
             ),
         );
+        let subsurface_object_id = subsurface_resolved.object_id();
+        let subsurface =
+            Resolved::new(client.client_id(), WlSubsurfaceId::from(30), subsurface_object_id);
+        let child_resolved =
+            Resolved::new(client.client_id(), WlSurfaceId::from(11), child_object_id);
 
         {
             let parent = state
@@ -286,7 +262,7 @@ mod tests {
                 .get_mut(parent_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            parent.add_pending_child(child_object_id);
+            parent.add_pending_child(child_resolved);
         }
         {
             let child = state
@@ -295,7 +271,7 @@ mod tests {
                 .downcast_mut::<WlSurface>()
                 .unwrap();
             child.assign_subsurface(
-                WlSubsurfaceId::from(30),
+                subsurface,
                 Resolved::new(client.client_id(), WlSurfaceId::from(10), parent_object_id),
             );
         }
@@ -315,7 +291,7 @@ mod tests {
         assert!(parent.apply_pending_tree_state(&mut state));
         assert_eq!(
             parent.current_stack(),
-            &[StackEntry::Child(child_object_id), StackEntry::Parent]
+            &[StackEntry::Child(child_resolved), StackEntry::Parent]
         );
     }
 }

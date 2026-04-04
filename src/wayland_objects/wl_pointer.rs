@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser},
     protocol_generated::{wl_pointer, WaylandId, WlPointerId, WlSurfaceId},
     state::State,
@@ -21,19 +21,32 @@ impl WlPointer {
     pub fn send_enter(
         &self,
         serial: u32,
-        surface: WlSurfaceId,
+        surface: Resolved<WlSurfaceId>,
         x: f32,
         y: f32,
         dispatcher: &mut ClientDispatcher,
     ) {
         self.send_event(
-            wl_pointer::Event::Enter { serial, surface, surface_x: x, surface_y: y },
+            wl_pointer::Event::Enter {
+                serial,
+                surface: surface.wayland_id(),
+                surface_x: x,
+                surface_y: y,
+            },
             dispatcher,
         );
     }
 
-    pub fn send_leave(&self, serial: u32, surface: WlSurfaceId, dispatcher: &mut ClientDispatcher) {
-        self.send_event(wl_pointer::Event::Leave { serial, surface }, dispatcher);
+    pub fn send_leave(
+        &self,
+        serial: u32,
+        surface: Resolved<WlSurfaceId>,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.send_event(
+            wl_pointer::Event::Leave { serial, surface: surface.wayland_id() },
+            dispatcher,
+        );
     }
 
     pub fn send_motion(&self, time: u32, x: f32, y: f32, dispatcher: &mut ClientDispatcher) {
@@ -109,7 +122,9 @@ impl Object for WlPointer {
                 }
             }
             Release => {
-                state.seat.unregister_pointer(client.client_id(), self.id);
+                if let Some(pointer) = client.resolve(self.id, state) {
+                    state.seat.unregister_pointer(pointer);
+                }
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }

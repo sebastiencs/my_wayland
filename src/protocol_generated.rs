@@ -134,6 +134,9 @@ pub mod wl_display {
     impl crate::object::IdToObject for WlDisplayId {
         type Object = crate::wayland_objects::wl_display::WlDisplay;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_display::WlDisplay {
+        type Id = WlDisplayId;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Asynchronous roundtrip
@@ -284,6 +287,9 @@ pub mod wl_registry {
     impl crate::object::IdToObject for WlRegistryId {
         type Object = crate::wayland_objects::wl_registry::WlRegistry;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_registry::WlRegistry {
+        type Id = WlRegistryId;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Bind an object to the display
@@ -390,6 +396,9 @@ pub mod wl_callback {
     impl crate::object::IdToObject for WlCallbackId {
         type Object = crate::wayland_objects::wl_callback::WlCallback;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_callback::WlCallback {
+        type Id = WlCallbackId;
+    }
     #[derive(Debug)]
     pub enum Event {
         /// Done event
@@ -432,6 +441,9 @@ pub mod wl_compositor {
     }
     impl crate::object::IdToObject for WlCompositorId {
         type Object = crate::wayland_objects::wl_compositor::WlCompositor;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_compositor::WlCompositor {
+        type Id = WlCompositorId;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -481,6 +493,9 @@ pub mod wl_shm_pool {
     }
     impl crate::object::IdToObject for WlShmPoolId {
         type Object = crate::wayland_objects::wl_shm_pool::WlShmPool;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_shm_pool::WlShmPool {
+        type Id = WlShmPoolId;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -577,6 +592,9 @@ pub mod wl_shm {
     }
     impl crate::object::IdToObject for WlShmId {
         type Object = crate::wayland_objects::wl_shm::WlShm;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_shm::WlShm {
+        type Id = WlShmId;
     }
     /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 2;
@@ -937,6 +955,9 @@ pub mod wl_buffer {
     impl crate::object::IdToObject for WlBufferId {
         type Object = crate::wayland_objects::wl_buffer::WlBuffer;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_buffer::WlBuffer {
+        type Id = WlBufferId;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy a buffer
@@ -1012,6 +1033,9 @@ pub mod wl_data_offer {
     }
     impl crate::object::IdToObject for WlDataOfferId {
         type Object = crate::wayland_objects::wl_data_offer::WlDataOffer;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_data_offer::WlDataOffer {
+        type Id = WlDataOfferId;
     }
     /// Minimum interface version for the `finish` message (XML `since` / `version`).
     pub const FINISH_SINCE: u32 = 3;
@@ -1261,6 +1285,9 @@ pub mod wl_data_source {
     impl crate::object::IdToObject for WlDataSourceId {
         type Object = crate::wayland_objects::wl_data_source::WlDataSource;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_data_source::WlDataSource {
+        type Id = WlDataSourceId;
+    }
     /// Minimum interface version for the `set_actions` message (XML `since` / `version`).
     pub const SET_ACTIONS_SINCE: u32 = 3;
     #[derive(Debug)]
@@ -1480,6 +1507,9 @@ pub mod wl_data_device {
     }
     impl crate::object::IdToObject for WlDataDeviceId {
         type Object = crate::wayland_objects::wl_data_device::WlDataDevice;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_data_device::WlDataDevice {
+        type Id = WlDataDeviceId;
     }
     /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 2;
@@ -1729,6 +1759,11 @@ pub mod wl_data_device_manager {
     impl crate::object::IdToObject for WlDataDeviceManagerId {
         type Object = crate::wayland_objects::wl_data_device_manager::WlDataDeviceManager;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wl_data_device_manager::WlDataDeviceManager
+    {
+        type Id = WlDataDeviceManagerId;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Create a new data source
@@ -1818,6 +1853,9 @@ pub mod wl_shell {
     impl crate::object::IdToObject for WlShellId {
         type Object = crate::wayland_objects::wl_shell::WlShell;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_shell::WlShell {
+        type Id = WlShellId;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Create a shell surface from a surface
@@ -1873,6 +1911,9 @@ pub mod wl_shell_surface {
     }
     impl crate::object::IdToObject for WlShellSurfaceId {
         type Object = crate::wayland_objects::wl_shell_surface::WlShellSurface;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_shell_surface::WlShellSurface {
+        type Id = WlShellSurfaceId;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -2279,6 +2320,9 @@ pub mod wl_surface {
     }
     impl crate::object::IdToObject for WlSurfaceId {
         type Object = crate::wayland_objects::wl_surface::WlSurface;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_surface::WlSurface {
+        type Id = WlSurfaceId;
     }
     /// Minimum interface version for the `set_buffer_transform` message (XML `since` / `version`).
     pub const SET_BUFFER_TRANSFORM_SINCE: u32 = 2;
@@ -2816,6 +2860,9 @@ pub mod wl_seat {
     impl crate::object::IdToObject for WlSeatId {
         type Object = crate::wayland_objects::wl_seat::WlSeat;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_seat::WlSeat {
+        type Id = WlSeatId;
+    }
     /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 5;
     #[derive(Debug)]
@@ -3003,6 +3050,9 @@ pub mod wl_pointer {
     }
     impl crate::object::IdToObject for WlPointerId {
         type Object = crate::wayland_objects::wl_pointer::WlPointer;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_pointer::WlPointer {
+        type Id = WlPointerId;
     }
     /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 3;
@@ -3562,6 +3612,9 @@ pub mod wl_keyboard {
     impl crate::object::IdToObject for WlKeyboardId {
         type Object = crate::wayland_objects::wl_keyboard::WlKeyboard;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_keyboard::WlKeyboard {
+        type Id = WlKeyboardId;
+    }
     /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 3;
     #[derive(Debug)]
@@ -3833,6 +3886,9 @@ pub mod wl_touch {
     impl crate::object::IdToObject for WlTouchId {
         type Object = crate::wayland_objects::wl_touch::WlTouch;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_touch::WlTouch {
+        type Id = WlTouchId;
+    }
     /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 3;
     #[derive(Debug)]
@@ -4070,6 +4126,9 @@ pub mod wl_output {
     }
     impl crate::object::IdToObject for WlOutputId {
         type Object = crate::wayland_objects::wl_output::WlOutput;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_output::WlOutput {
+        type Id = WlOutputId;
     }
     /// Minimum interface version for the `release` message (XML `since` / `version`).
     pub const RELEASE_SINCE: u32 = 3;
@@ -4412,6 +4471,9 @@ pub mod wl_region {
     impl crate::object::IdToObject for WlRegionId {
         type Object = crate::wayland_objects::wl_region::WlRegion;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_region::WlRegion {
+        type Id = WlRegionId;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy region
@@ -4499,6 +4561,9 @@ pub mod wl_subcompositor {
     }
     impl crate::object::IdToObject for WlSubcompositorId {
         type Object = crate::wayland_objects::wl_subcompositor::WlSubcompositor;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_subcompositor::WlSubcompositor {
+        type Id = WlSubcompositorId;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -4621,6 +4686,9 @@ pub mod wl_subsurface {
     }
     impl crate::object::IdToObject for WlSubsurfaceId {
         type Object = crate::wayland_objects::wl_subsurface::WlSubsurface;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_subsurface::WlSubsurface {
+        type Id = WlSubsurfaceId;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -4755,6 +4823,9 @@ pub mod wl_fixes {
     impl crate::object::IdToObject for WlFixesId {
         type Object = crate::wayland_objects::wl_fixes::WlFixes;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wl_fixes::WlFixes {
+        type Id = WlFixesId;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroys this object
@@ -4818,6 +4889,9 @@ pub mod wp_presentation {
     }
     impl crate::object::IdToObject for WpPresentationId {
         type Object = crate::wayland_objects::wp_presentation::WpPresentation;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wp_presentation::WpPresentation {
+        type Id = WpPresentationId;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -4944,6 +5018,11 @@ pub mod wp_presentation_feedback {
     }
     impl crate::object::IdToObject for WpPresentationFeedbackId {
         type Object = crate::wayland_objects::wp_presentation_feedback::WpPresentationFeedback;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_presentation_feedback::WpPresentationFeedback
+    {
+        type Id = WpPresentationFeedbackId;
     }
     #[derive(Debug)]
     pub enum Event {
@@ -5127,6 +5206,9 @@ pub mod wp_viewporter {
     impl crate::object::IdToObject for WpViewporterId {
         type Object = crate::wayland_objects::wp_viewporter::WpViewporter;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wp_viewporter::WpViewporter {
+        type Id = WpViewporterId;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Unbind from the cropping and scaling interface
@@ -5232,6 +5314,9 @@ pub mod wp_viewport {
     impl crate::object::IdToObject for WpViewportId {
         type Object = crate::wayland_objects::wp_viewport::WpViewport;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wp_viewport::WpViewport {
+        type Id = WpViewportId;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Remove scaling and cropping from the surface
@@ -5326,6 +5411,9 @@ pub mod xdg_wm_base {
     }
     impl crate::object::IdToObject for XdgWmBaseId {
         type Object = crate::wayland_objects::xdg_wm_base::XdgWmBase;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::xdg_wm_base::XdgWmBase {
+        type Id = XdgWmBaseId;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -5470,6 +5558,9 @@ pub mod xdg_positioner {
     }
     impl crate::object::IdToObject for XdgPositionerId {
         type Object = crate::wayland_objects::xdg_positioner::XdgPositioner;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::xdg_positioner::XdgPositioner {
+        type Id = XdgPositionerId;
     }
     /// Minimum interface version for the `set_reactive` message (XML `since` / `version`).
     pub const SET_REACTIVE_SINCE: u32 = 3;
@@ -5815,6 +5906,9 @@ pub mod xdg_surface {
     impl crate::object::IdToObject for XdgSurfaceId {
         type Object = crate::wayland_objects::xdg_surface::XdgSurface;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::xdg_surface::XdgSurface {
+        type Id = XdgSurfaceId;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_surface
@@ -6034,6 +6128,9 @@ pub mod xdg_toplevel {
     }
     impl crate::object::IdToObject for XdgToplevelId {
         type Object = crate::wayland_objects::xdg_toplevel::XdgToplevel;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::xdg_toplevel::XdgToplevel {
+        type Id = XdgToplevelId;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -6697,6 +6794,9 @@ pub mod xdg_popup {
     impl crate::object::IdToObject for XdgPopupId {
         type Object = crate::wayland_objects::xdg_popup::XdgPopup;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::xdg_popup::XdgPopup {
+        type Id = XdgPopupId;
+    }
     /// Minimum interface version for the `reposition` message (XML `since` / `version`).
     pub const REPOSITION_SINCE: u32 = 3;
     #[derive(Debug)]
@@ -6908,6 +7008,11 @@ pub mod wp_content_type_manager_v1 {
     impl crate::object::IdToObject for WpContentTypeManagerV1Id {
         type Object = crate::wayland_objects::wp_content_type_manager_v1::WpContentTypeManagerV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_content_type_manager_v1::WpContentTypeManagerV1
+    {
+        type Id = WpContentTypeManagerV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the content type manager object
@@ -6959,6 +7064,9 @@ pub mod wp_content_type_v1 {
     }
     impl crate::object::IdToObject for WpContentTypeV1Id {
         type Object = crate::wayland_objects::wp_content_type_v1::WpContentTypeV1;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wp_content_type_v1::WpContentTypeV1 {
+        type Id = WpContentTypeV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7065,6 +7173,11 @@ pub mod wp_drm_lease_device_v1 {
     }
     impl crate::object::IdToObject for WpDrmLeaseDeviceV1Id {
         type Object = crate::wayland_objects::wp_drm_lease_device_v1::WpDrmLeaseDeviceV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_drm_lease_device_v1::WpDrmLeaseDeviceV1
+    {
+        type Id = WpDrmLeaseDeviceV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7192,6 +7305,11 @@ pub mod wp_drm_lease_connector_v1 {
     }
     impl crate::object::IdToObject for WpDrmLeaseConnectorV1Id {
         type Object = crate::wayland_objects::wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1
+    {
+        type Id = WpDrmLeaseConnectorV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7324,6 +7442,11 @@ pub mod wp_drm_lease_request_v1 {
     impl crate::object::IdToObject for WpDrmLeaseRequestV1Id {
         type Object = crate::wayland_objects::wp_drm_lease_request_v1::WpDrmLeaseRequestV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_drm_lease_request_v1::WpDrmLeaseRequestV1
+    {
+        type Id = WpDrmLeaseRequestV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Request a connector for this lease
@@ -7391,6 +7514,9 @@ pub mod wp_drm_lease_v1 {
     }
     impl crate::object::IdToObject for WpDrmLeaseV1Id {
         type Object = crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::wp_drm_lease_v1::WpDrmLeaseV1 {
+        type Id = WpDrmLeaseV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7485,6 +7611,11 @@ pub mod ext_idle_notifier_v1 {
     }
     impl crate::object::IdToObject for ExtIdleNotifierV1Id {
         type Object = crate::wayland_objects::ext_idle_notifier_v1::ExtIdleNotifierV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_idle_notifier_v1::ExtIdleNotifierV1
+    {
+        type Id = ExtIdleNotifierV1Id;
     }
     /// Minimum interface version for the `get_input_idle_notification` message (XML `since` / `version`).
     pub const GET_INPUT_IDLE_NOTIFICATION_SINCE: u32 = 2;
@@ -7582,6 +7713,11 @@ pub mod ext_idle_notification_v1 {
     impl crate::object::IdToObject for ExtIdleNotificationV1Id {
         type Object = crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_idle_notification_v1::ExtIdleNotificationV1
+    {
+        type Id = ExtIdleNotificationV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the notification object
@@ -7651,6 +7787,11 @@ pub mod ext_session_lock_manager_v1 {
     }
     impl crate::object::IdToObject for ExtSessionLockManagerV1Id {
         type Object = crate::wayland_objects::ext_session_lock_manager_v1::ExtSessionLockManagerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_session_lock_manager_v1::ExtSessionLockManagerV1
+    {
+        type Id = ExtSessionLockManagerV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7740,6 +7881,9 @@ pub mod ext_session_lock_v1 {
     }
     impl crate::object::IdToObject for ExtSessionLockV1Id {
         type Object = crate::wayland_objects::ext_session_lock_v1::ExtSessionLockV1;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::ext_session_lock_v1::ExtSessionLockV1 {
+        type Id = ExtSessionLockV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -7910,6 +8054,11 @@ pub mod ext_session_lock_surface_v1 {
     impl crate::object::IdToObject for ExtSessionLockSurfaceV1Id {
         type Object = crate::wayland_objects::ext_session_lock_surface_v1::ExtSessionLockSurfaceV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_session_lock_surface_v1::ExtSessionLockSurfaceV1
+    {
+        type Id = ExtSessionLockSurfaceV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the lock surface object
@@ -8031,6 +8180,11 @@ pub mod wp_fractional_scale_manager_v1 {
         type Object =
             crate::wayland_objects::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1
+    {
+        type Id = WpFractionalScaleManagerV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Unbind the fractional surface scale interface
@@ -8083,6 +8237,11 @@ pub mod wp_fractional_scale_v1 {
     }
     impl crate::object::IdToObject for WpFractionalScaleV1Id {
         type Object = crate::wayland_objects::wp_fractional_scale_v1::WpFractionalScaleV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_fractional_scale_v1::WpFractionalScaleV1
+    {
+        type Id = WpFractionalScaleV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -8150,6 +8309,11 @@ pub mod wp_single_pixel_buffer_manager_v1 {
     impl crate::object::IdToObject for WpSinglePixelBufferManagerV1Id {
         type Object =
             crate::wayland_objects::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1
+    {
+        type Id = WpSinglePixelBufferManagerV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -8237,6 +8401,11 @@ pub mod wp_tearing_control_manager_v1 {
         type Object =
             crate::wayland_objects::wp_tearing_control_manager_v1::WpTearingControlManagerV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_tearing_control_manager_v1::WpTearingControlManagerV1
+    {
+        type Id = WpTearingControlManagerV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy tearing control factory object
@@ -8291,6 +8460,11 @@ pub mod wp_tearing_control_v1 {
     }
     impl crate::object::IdToObject for WpTearingControlV1Id {
         type Object = crate::wayland_objects::wp_tearing_control_v1::WpTearingControlV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_tearing_control_v1::WpTearingControlV1
+    {
+        type Id = WpTearingControlV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -8354,6 +8528,9 @@ pub mod xdg_activation_v1 {
     }
     impl crate::object::IdToObject for XdgActivationV1Id {
         type Object = crate::wayland_objects::xdg_activation_v1::XdgActivationV1;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::xdg_activation_v1::XdgActivationV1 {
+        type Id = XdgActivationV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -8423,6 +8600,11 @@ pub mod xdg_activation_token_v1 {
     }
     impl crate::object::IdToObject for XdgActivationTokenV1Id {
         type Object = crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1
+    {
+        type Id = XdgActivationTokenV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -8556,6 +8738,9 @@ pub mod xwayland_shell_v1 {
     impl crate::object::IdToObject for XwaylandShellV1Id {
         type Object = crate::wayland_objects::xwayland_shell_v1::XwaylandShellV1;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::xwayland_shell_v1::XwaylandShellV1 {
+        type Id = XwaylandShellV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the Xwayland shell object
@@ -8614,6 +8799,11 @@ pub mod xwayland_surface_v1 {
     }
     impl crate::object::IdToObject for XwaylandSurfaceV1Id {
         type Object = crate::wayland_objects::xwayland_surface_v1::XwaylandSurfaceV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::xwayland_surface_v1::XwaylandSurfaceV1
+    {
+        type Id = XwaylandSurfaceV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -8693,6 +8883,11 @@ pub mod wp_cursor_shape_manager_v1 {
     impl crate::object::IdToObject for WpCursorShapeManagerV1Id {
         type Object = crate::wayland_objects::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1
+    {
+        type Id = WpCursorShapeManagerV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the manager
@@ -8743,6 +8938,11 @@ pub mod wp_cursor_shape_device_v1 {
     }
     impl crate::object::IdToObject for WpCursorShapeDeviceV1Id {
         type Object = crate::wayland_objects::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1
+    {
+        type Id = WpCursorShapeDeviceV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -8904,6 +9104,11 @@ pub mod wp_linux_drm_syncobj_manager_v1 {
         type Object =
             crate::wayland_objects::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1
+    {
+        type Id = WpLinuxDrmSyncobjManagerV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy explicit synchronization factory object
@@ -8981,6 +9186,11 @@ pub mod wp_linux_drm_syncobj_timeline_v1 {
         type Object =
             crate::wayland_objects::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1
+    {
+        type Id = WpLinuxDrmSyncobjTimelineV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the timeline
@@ -9043,6 +9253,11 @@ pub mod wp_linux_drm_syncobj_surface_v1 {
     impl crate::object::IdToObject for WpLinuxDrmSyncobjSurfaceV1Id {
         type Object =
             crate::wayland_objects::wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1
+    {
+        type Id = WpLinuxDrmSyncobjSurfaceV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -9258,6 +9473,9 @@ pub mod zwp_linux_dmabuf_v1 {
     impl crate::object::IdToObject for ZwpLinuxDmabufV1Id {
         type Object = crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 {
+        type Id = ZwpLinuxDmabufV1Id;
+    }
     /// Minimum interface version for the `get_default_feedback` message (XML `since` / `version`).
     pub const GET_DEFAULT_FEEDBACK_SINCE: u32 = 4;
     /// Minimum interface version for the `get_surface_feedback` message (XML `since` / `version`).
@@ -9415,6 +9633,11 @@ pub mod zwp_linux_buffer_params_v1 {
     }
     impl crate::object::IdToObject for ZwpLinuxBufferParamsV1Id {
         type Object = crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1
+    {
+        type Id = ZwpLinuxBufferParamsV1Id;
     }
     /// Minimum interface version for the `create_immed` message (XML `since` / `version`).
     pub const CREATE_IMMED_SINCE: u32 = 2;
@@ -9712,6 +9935,11 @@ pub mod zwp_linux_dmabuf_feedback_v1 {
         type Object =
             crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1
+    {
+        type Id = ZwpLinuxDmabufFeedbackV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the feedback object
@@ -9960,6 +10188,9 @@ pub mod zwp_linux_explicit_synchronization_v1 {
     impl crate::object::IdToObject for ZwpLinuxExplicitSynchronizationV1Id {
         type Object = crate::wayland_objects::zwp_linux_explicit_synchronization_v1::ZwpLinuxExplicitSynchronizationV1;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_linux_explicit_synchronization_v1::ZwpLinuxExplicitSynchronizationV1 {
+    type Id = ZwpLinuxExplicitSynchronizationV1Id;
+  }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy explicit synchronization factory object
@@ -10051,6 +10282,9 @@ pub mod zwp_linux_surface_synchronization_v1 {
     impl crate::object::IdToObject for ZwpLinuxSurfaceSynchronizationV1Id {
         type Object = crate::wayland_objects::zwp_linux_surface_synchronization_v1::ZwpLinuxSurfaceSynchronizationV1;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_linux_surface_synchronization_v1::ZwpLinuxSurfaceSynchronizationV1 {
+    type Id = ZwpLinuxSurfaceSynchronizationV1Id;
+  }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy synchronization object
@@ -10179,6 +10413,11 @@ pub mod zwp_linux_buffer_release_v1 {
     impl crate::object::IdToObject for ZwpLinuxBufferReleaseV1Id {
         type Object = crate::wayland_objects::zwp_linux_buffer_release_v1::ZwpLinuxBufferReleaseV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_linux_buffer_release_v1::ZwpLinuxBufferReleaseV1
+    {
+        type Id = ZwpLinuxBufferReleaseV1Id;
+    }
     #[derive(Debug)]
     pub enum Event {
         /// Release buffer with fence
@@ -10250,6 +10489,11 @@ pub mod zwp_tablet_manager_v2 {
     impl crate::object::IdToObject for ZwpTabletManagerV2Id {
         type Object = crate::wayland_objects::zwp_tablet_manager_v2::ZwpTabletManagerV2;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_tablet_manager_v2::ZwpTabletManagerV2
+    {
+        type Id = ZwpTabletManagerV2Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Get the tablet seat
@@ -10294,6 +10538,9 @@ pub mod zwp_tablet_seat_v2 {
     }
     impl crate::object::IdToObject for ZwpTabletSeatV2Id {
         type Object = crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2 {
+        type Id = ZwpTabletSeatV2Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -10412,6 +10659,9 @@ pub mod zwp_tablet_tool_v2 {
     }
     impl crate::object::IdToObject for ZwpTabletToolV2Id {
         type Object = crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2 {
+        type Id = ZwpTabletToolV2Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -10943,6 +11193,9 @@ pub mod zwp_tablet_v2 {
     impl crate::object::IdToObject for ZwpTabletV2Id {
         type Object = crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2;
     }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2 {
+        type Id = ZwpTabletV2Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the tablet object
@@ -11079,6 +11332,11 @@ pub mod zwp_tablet_pad_ring_v2 {
     }
     impl crate::object::IdToObject for ZwpTabletPadRingV2Id {
         type Object = crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2
+    {
+        type Id = ZwpTabletPadRingV2Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -11248,6 +11506,11 @@ pub mod zwp_tablet_pad_strip_v2 {
     }
     impl crate::object::IdToObject for ZwpTabletPadStripV2Id {
         type Object = crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2
+    {
+        type Id = ZwpTabletPadStripV2Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -11435,6 +11698,11 @@ pub mod zwp_tablet_pad_group_v2 {
     }
     impl crate::object::IdToObject for ZwpTabletPadGroupV2Id {
         type Object = crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2
+    {
+        type Id = ZwpTabletPadGroupV2Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -11630,6 +11898,9 @@ pub mod zwp_tablet_pad_v2 {
     }
     impl crate::object::IdToObject for ZwpTabletPadV2Id {
         type Object = crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2 {
+        type Id = ZwpTabletPadV2Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -11875,6 +12146,11 @@ pub mod zxdg_decoration_manager_v1 {
     impl crate::object::IdToObject for ZxdgDecorationManagerV1Id {
         type Object = crate::wayland_objects::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1
+    {
+        type Id = ZxdgDecorationManagerV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the decoration manager object
@@ -11923,6 +12199,11 @@ pub mod zxdg_toplevel_decoration_v1 {
     }
     impl crate::object::IdToObject for ZxdgToplevelDecorationV1Id {
         type Object = crate::wayland_objects::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1
+    {
+        type Id = ZxdgToplevelDecorationV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -12047,6 +12328,11 @@ pub mod zxdg_output_manager_v1 {
     impl crate::object::IdToObject for ZxdgOutputManagerV1Id {
         type Object = crate::wayland_objects::zxdg_output_manager_v1::ZxdgOutputManagerV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zxdg_output_manager_v1::ZxdgOutputManagerV1
+    {
+        type Id = ZxdgOutputManagerV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Destroy the xdg_output_manager object
@@ -12094,6 +12380,9 @@ pub mod zxdg_output_v1 {
     }
     impl crate::object::IdToObject for ZxdgOutputV1Id {
         type Object = crate::wayland_objects::zxdg_output_v1::ZxdgOutputV1;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zxdg_output_v1::ZxdgOutputV1 {
+        type Id = ZxdgOutputV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -12306,6 +12595,11 @@ pub mod ext_workspace_manager_v1 {
     impl crate::object::IdToObject for ExtWorkspaceManagerV1Id {
         type Object = crate::wayland_objects::ext_workspace_manager_v1::ExtWorkspaceManagerV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_workspace_manager_v1::ExtWorkspaceManagerV1
+    {
+        type Id = ExtWorkspaceManagerV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// All requests about the workspaces have been sent
@@ -12439,6 +12733,11 @@ pub mod ext_workspace_group_handle_v1 {
     impl crate::object::IdToObject for ExtWorkspaceGroupHandleV1Id {
         type Object =
             crate::wayland_objects::ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1
+    {
+        type Id = ExtWorkspaceGroupHandleV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -12601,6 +12900,11 @@ pub mod ext_workspace_handle_v1 {
     }
     impl crate::object::IdToObject for ExtWorkspaceHandleV1Id {
         type Object = crate::wayland_objects::ext_workspace_handle_v1::ExtWorkspaceHandleV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_workspace_handle_v1::ExtWorkspaceHandleV1
+    {
+        type Id = ExtWorkspaceHandleV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -12829,6 +13133,11 @@ pub mod zwlr_gamma_control_manager_v1 {
         type Object =
             crate::wayland_objects::zwlr_gamma_control_manager_v1::ZwlrGammaControlManagerV1;
     }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwlr_gamma_control_manager_v1::ZwlrGammaControlManagerV1
+    {
+        type Id = ZwlrGammaControlManagerV1Id;
+    }
     #[derive(Debug)]
     pub enum Request {
         /// Get a gamma control for an output
@@ -12876,6 +13185,11 @@ pub mod zwlr_gamma_control_v1 {
     }
     impl crate::object::IdToObject for ZwlrGammaControlV1Id {
         type Object = crate::wayland_objects::zwlr_gamma_control_v1::ZwlrGammaControlV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwlr_gamma_control_v1::ZwlrGammaControlV1
+    {
+        type Id = ZwlrGammaControlV1Id;
     }
     #[derive(Debug)]
     pub enum Request {
@@ -12978,6 +13292,9 @@ pub mod zwlr_layer_shell_v1 {
     }
     impl crate::object::IdToObject for ZwlrLayerShellV1Id {
         type Object = crate::wayland_objects::zwlr_layer_shell_v1::ZwlrLayerShellV1;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwlr_layer_shell_v1::ZwlrLayerShellV1 {
+        type Id = ZwlrLayerShellV1Id;
     }
     /// Minimum interface version for the `destroy` message (XML `since` / `version`).
     pub const DESTROY_SINCE: u32 = 3;
@@ -13091,6 +13408,11 @@ pub mod zwlr_layer_surface_v1 {
     }
     impl crate::object::IdToObject for ZwlrLayerSurfaceV1Id {
         type Object = crate::wayland_objects::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1
+    {
+        type Id = ZwlrLayerSurfaceV1Id;
     }
     /// Minimum interface version for the `set_layer` message (XML `since` / `version`).
     pub const SET_LAYER_SINCE: u32 = 2;
@@ -13421,6 +13743,11 @@ pub mod hyprland_ctm_control_manager_v1 {
     impl crate::object::IdToObject for HyprlandCtmControlManagerV1Id {
         type Object =
             crate::wayland_objects::hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1
+    {
+        type Id = HyprlandCtmControlManagerV1Id;
     }
     #[derive(Debug)]
     pub enum Request {

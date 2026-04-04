@@ -1,13 +1,13 @@
 use std::rc::Rc;
 
 use crate::{
-    clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest, Resolved},
     dmabuf::DmaBuf,
     drm::{Format, ARGB8888},
     egl::{EglContext, GlTexture},
     object::{Object, Parser},
     protocol_generated::{wl_buffer, WaylandId, WlBufferId},
-    state::State,
+    state::{ObjectId, State},
     sync::PlainRelease,
     transform,
 };
@@ -121,11 +121,11 @@ impl WlBuffer {
         self.send_event(wl_buffer::Event::Release, dispatcher);
     }
 
-    pub fn plain_release_target(&self) -> Option<PlainRelease> {
+    pub fn plain_release_target(&self, object_id: ObjectId) -> Option<PlainRelease> {
         if self.destroyed {
             return None;
         }
-        Some(PlainRelease { client_id: self.owner_client_id, buffer_id: self.id })
+        Some(Resolved::new(self.owner_client_id, self.id, object_id))
     }
 
     pub fn mark_destroyed(&mut self) {

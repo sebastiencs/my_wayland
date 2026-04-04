@@ -42,14 +42,14 @@ use crate::{
     wayland_objects::{
         wl_buffer::{CursorShmBuffer, WlBuffer},
         wl_surface::{StackEntry, SurfacePresentationFeedback, WlSurface},
-        zwlr_layer_surface_v1::ordered_scene_root_surface_ids,
+        zwlr_layer_surface_v1::ordered_scene_root_surfaces,
     },
     ENABLE_DAMAGE,
 };
 
 use crate::{
-    clients::{ClientAction, ClientId, ClientManagerAction},
-    protocol_generated::{WlSurfaceId, WpPresentationFeedbackId},
+    clients::{ClientAction, ClientId, ClientManagerAction, Resolved},
+    protocol_generated::{WlBufferId, WlSurfaceId, WpPresentationFeedbackId},
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -206,16 +206,12 @@ struct PendingColorBlobs {
     ctm_blob_id: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-struct SurfaceKey {
-    client_id: ClientId,
-    surface_id: WlSurfaceId,
-}
+type SurfaceKey = Resolved<WlSurfaceId>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum SceneItemKey {
     Surface(SurfaceKey),
-    SsdFrame { root_surface_object_id: ObjectId, segment: SsdFrameSegment },
+    SsdFrame { root_surface: Resolved<WlSurfaceId>, segment: SsdFrameSegment },
     Cursor,
 }
 
@@ -227,11 +223,18 @@ enum SsdFrameSegment {
     Bottom,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SceneItemContentKey {
+    Buffer(Resolved<WlBufferId>),
+    NamedCursor(CursorImageContentKey),
+    SsdFrame { focused: bool },
+}
+
 #[derive(Clone, Debug)]
 struct SceneItemState {
     key: SceneItemKey,
     surface_key: Option<SurfaceKey>,
-    buffer_object_id: ObjectId,
+    content_key: SceneItemContentKey,
     bounds: RectI,
     tex_transform: transform::Mat3,
 }
@@ -279,8 +282,8 @@ enum CursorPlaneContentKey {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CursorSurfaceContentKey {
-    surface_object_id: ObjectId,
-    buffer_object_id: ObjectId,
+    surface: Resolved<WlSurfaceId>,
+    buffer: Resolved<WlBufferId>,
     content_revision: u64,
     width: i32,
     height: i32,
@@ -392,8 +395,7 @@ struct OutputSubmission {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SubmissionPresentationFeedback {
-    client_id: ClientId,
-    feedback_id: WpPresentationFeedbackId,
+    feedback: Resolved<WpPresentationFeedbackId>,
     version: u32,
 }
 
@@ -3661,28 +3663,25 @@ impl DrmOutputModel {
 
 fn collect_surface_snapshots(
     state: &mut crate::state::State,
-    surface_object_id: ObjectId,
+    surface: Resolved<WlSurfaceId>,
     base_x: i32,
     base_y: i32,
     retired_candidates: &mut Vec<RetiredBufferCandidate>,
     snapshots: &mut Vec<crate::wayland_objects::wl_surface::SurfaceRenderState>,
 ) {
     let (stack, surface_state) = {
-        let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
-        retired_candidates.extend(surface.take_retired_buffers());
-        let Some(surface_state) = surface.take_render_state_at(base_x, base_y) else {
+        let mut surface_obj = state.objects.grab_object::<WlSurface>(surface.object_id());
+        retired_candidates.extend(surface_obj.take_retired_buffers());
+        let Some(surface_state) = surface_obj.take_render_state_at(surface, base_x, base_y) else {
             return;
         };
-        (surface.current_stack().to_vec(), surface_state)
+        (surface_obj.current_stack().to_vec(), surface_state)
     };
 
     for entry in &stack {
-        if let StackEntry::Child(child_surface_object_id) = *entry {
+        if let StackEntry::Child(child_surface_id) = *entry {
             let child_base = {
-                let Some(child_surface) = state
-                    .objects
-                    .try_ref_object::<WlSurface>(child_surface_object_id)
-                else {
+                let Some(child_surface) = child_surface_id.try_ref(state) else {
                     continue;
                 };
                 let (x, y) = child_surface.current_subsurface_position();
@@ -3690,7 +3689,7 @@ fn collect_surface_snapshots(
             };
             collect_surface_snapshots(
                 state,
-                child_surface_object_id,
+                child_surface_id,
                 child_base.0,
                 child_base.1,
                 retired_candidates,
@@ -3770,20 +3769,21 @@ fn dispatch_submission_frame_callbacks(
     frame_time_msec: u32,
     dispatcher: &mut Dispatcher,
 ) {
-    let mut per_client = BTreeMap::<ClientId, Vec<WlSurfaceId>>::new();
-    let mut seen = BTreeSet::<(ClientId, WlSurfaceId)>::new();
-    for surface in callback_surfaces {
-        let client_id = surface.client_id;
-        let surface_id = surface.surface_id;
-        if !seen.insert((client_id, surface_id)) {
+    let mut per_client = BTreeMap::<ClientId, Vec<Resolved<WlSurfaceId>>>::new();
+    let mut seen = BTreeSet::<SurfaceKey>::new();
+    for &surface in callback_surfaces {
+        if !seen.insert(surface) {
             continue;
         }
-        per_client.entry(client_id).or_default().push(surface_id);
+        per_client
+            .entry(surface.client_id())
+            .or_default()
+            .push(surface);
     }
-    for (client_id, surface_ids) in per_client {
+    for (client_id, surfaces) in per_client {
         dispatcher.dispatch_to(
             client_id,
-            ClientAction::CompleteSurfaceFrameCallbacks { surface_ids, time_msec: frame_time_msec },
+            ClientAction::CompleteSurfaceFrameCallbacks { surfaces, time_msec: frame_time_msec },
         );
     }
 }
@@ -3862,16 +3862,16 @@ fn dispatch_presentation_feedback_discarded(
     dispatcher: &mut Dispatcher,
     feedbacks: &[SubmissionPresentationFeedback],
 ) {
-    let mut per_client = BTreeMap::<ClientId, Vec<WpPresentationFeedbackId>>::new();
+    let mut per_client = BTreeMap::<ClientId, Vec<Resolved<WpPresentationFeedbackId>>>::new();
     for feedback in feedbacks {
         per_client
-            .entry(feedback.client_id)
+            .entry(feedback.feedback.client_id())
             .or_default()
-            .push(feedback.feedback_id);
+            .push(feedback.feedback);
     }
-    for (client_id, feedback_ids) in per_client {
+    for (client_id, feedbacks) in per_client {
         dispatcher
-            .dispatch_to(client_id, ClientAction::PresentationFeedbackDiscarded { feedback_ids });
+            .dispatch_to(client_id, ClientAction::PresentationFeedbackDiscarded { feedbacks });
     }
 }
 
@@ -3897,20 +3897,21 @@ fn dispatch_presentation_feedback_presented(
     let seq_lo = sequence as u32;
     let flags = presentation_feedback_flags(zero_copy);
 
-    let mut per_client = BTreeMap::<(ClientId, u32), Vec<WpPresentationFeedbackId>>::new();
+    let mut per_client =
+        BTreeMap::<(ClientId, u32), Vec<Resolved<WpPresentationFeedbackId>>>::new();
     for feedback in feedbacks {
         per_client
-            .entry((feedback.client_id, feedback.version))
+            .entry((feedback.feedback.client_id(), feedback.version))
             .or_default()
-            .push(feedback.feedback_id);
+            .push(feedback.feedback);
     }
 
-    for ((client_id, feedback_version), feedback_ids) in per_client {
+    for ((client_id, feedback_version), feedbacks) in per_client {
         let refresh = refresh_interval_ns_for_output(state, output_id, feedback_version);
         dispatcher.dispatch_to(
             client_id,
             ClientAction::PresentationFeedbackPresented {
-                feedback_ids,
+                feedbacks,
                 output_id,
                 tv_sec_hi,
                 tv_sec_lo,
@@ -3953,7 +3954,7 @@ fn build_frame_plan(
                 break;
             }
             if current.state.bounds != previous.bounds
-                || current.state.buffer_object_id != previous.buffer_object_id
+                || current.state.content_key != previous.content_key
                 || current.state.tex_transform != previous.tex_transform
             {
                 base_damage.add_rect(previous.bounds);
@@ -4052,7 +4053,7 @@ fn collect_named_cursor_render_item(
                     state: SceneItemState {
                         key: SceneItemKey::Cursor,
                         surface_key: None,
-                        buffer_object_id: ObjectId::from_parts(u32::MAX, 0),
+                        content_key: SceneItemContentKey::NamedCursor(image.content_key()),
                         bounds,
                         tex_transform: transform::Mat3::identity(),
                     },
@@ -4092,8 +4093,7 @@ fn collect_submission_metadata(
         }
         presentation_feedbacks.extend(item.presentation_feedbacks.iter().copied().map(
             |feedback| SubmissionPresentationFeedback {
-                client_id: surface_key.client_id,
-                feedback_id: feedback.id,
+                feedback: feedback.feedback,
                 version: feedback.version,
             },
         ));
@@ -4134,7 +4134,7 @@ fn push_scene_items_from_snapshots(
     allow_direct_scanout: bool,
 ) {
     for surface_state in snapshots {
-        let buffer_oid = surface_state.buffer_object_id;
+        let buffer_oid = surface_state.buffer.object_id();
         if !objects.contains(buffer_oid) {
             log::warn!("collect_render_items: buffer object {:?} missing (destroyed?)", buffer_oid);
             continue;
@@ -4144,7 +4144,7 @@ fn push_scene_items_from_snapshots(
             continue;
         };
 
-        let mut obj = objects.grab(surface_state.buffer_object_id);
+        let mut obj = objects.grab(surface_state.buffer.object_id());
         let Some(buffer) = obj.downcast_mut::<WlBuffer>() else {
             continue;
         };
@@ -4168,8 +4168,8 @@ fn push_scene_items_from_snapshots(
         opaque_region.intersect_rect(output_bounds);
         let Some(texture) = buffer.prepare_texture(&drm.egl_context, &surface_state.sync) else {
             log::warn!(
-                "collect_render_items: no prepared texture for buffer_object_id={:?}",
-                surface_state.buffer_object_id
+                "collect_render_items: no prepared texture for buffer={:?}",
+                surface_state.buffer
             );
             continue;
         };
@@ -4214,15 +4214,15 @@ fn push_scene_items_from_snapshots(
         } else {
             None
         };
-        let surface_key = SurfaceKey {
-            client_id: surface_state.surface_client_id,
-            surface_id: surface_state.surface_id,
-        };
+        let surface = surface_state
+            .surface
+            .expect("rendered surface snapshots carry their object id");
+        let surface_key = surface;
         items.push(SceneItem {
             state: SceneItemState {
                 key: SceneItemKey::Surface(surface_key),
                 surface_key: Some(surface_key),
-                buffer_object_id: surface_state.buffer_object_id,
+                content_key: SceneItemContentKey::Buffer(surface_state.buffer),
                 bounds,
                 tex_transform,
             },
@@ -4275,7 +4275,8 @@ fn ssd_frame_segments(layout: SsdFrameLayout) -> impl Iterator<Item = (SsdFrameS
 
 fn push_ssd_frame_scene_items(
     items: &mut Vec<SceneItem>,
-    root_surface_object_id: ObjectId,
+    root_surface: Resolved<WlSurfaceId>,
+    focused: bool,
     layout: SsdFrameLayout,
     texture_id: gl::Uint,
     owned_texture: &mut Option<GlTexture>,
@@ -4283,9 +4284,9 @@ fn push_ssd_frame_scene_items(
     for (index, (segment, bounds)) in ssd_frame_segments(layout).enumerate() {
         items.push(SceneItem {
             state: SceneItemState {
-                key: SceneItemKey::SsdFrame { root_surface_object_id, segment },
+                key: SceneItemKey::SsdFrame { root_surface, segment },
                 surface_key: None,
-                buffer_object_id: root_surface_object_id,
+                content_key: SceneItemContentKey::SsdFrame { focused },
                 bounds,
                 tex_transform: transform::Mat3::identity(),
             },
@@ -4323,7 +4324,7 @@ fn collect_cursor_surface_snapshots(
     let mut snapshots = Vec::new();
     collect_surface_snapshots(
         state,
-        cursor.surface.object_id(),
+        cursor.surface,
         base_x,
         base_y,
         retired_candidates,
@@ -4402,13 +4403,12 @@ fn build_surface_cursor_plane_request(
     if render_state.tex_transform != transform::Mat3::identity() {
         return None;
     }
-    let buffer_object_id = render_state.buffer_object_id;
     let content_revision = surface.content_revision();
-    let buffer = state.objects.try_ref_object::<WlBuffer>(buffer_object_id)?;
-    if buffer.dimensions() != (render_state.width, render_state.height) {
+    let buffer_ref = render_state.buffer.try_ref(state)?;
+    if buffer_ref.dimensions() != (render_state.width, render_state.height) {
         return None;
     }
-    let Some(buffer) = buffer.shm_cursor_argb8888() else {
+    let Some(buffer) = buffer_ref.shm_cursor_argb8888() else {
         return None;
     };
     Some(CursorPlaneRequest {
@@ -4419,8 +4419,8 @@ fn build_surface_cursor_plane_request(
         hotspot_x: cursor.hotspot_x,
         hotspot_y: cursor.hotspot_y,
         content_key: CursorPlaneContentKey::Surface(CursorSurfaceContentKey {
-            surface_object_id: cursor.surface.object_id(),
-            buffer_object_id,
+            surface: cursor.surface,
+            buffer: render_state.buffer,
             content_revision,
             width: render_state.width,
             height: render_state.height,
@@ -4457,11 +4457,14 @@ fn collect_render_items(
     let mut deferred_releases = Vec::new();
     let mut retired_candidates = Vec::new();
     let mut cursor_animation_delay_msec = None;
-    let focused_root_surface_object_id = state.focused_root_surface_object_id();
-    let root_surface_oids: Vec<_> = ordered_scene_root_surface_ids(state)
+    let focused_root_surface = state.focused_root_surface();
+    let root_surfaces: Vec<_> = ordered_scene_root_surfaces(state)
         .into_iter()
-        .filter(|object_id| {
-            let Some(surface) = state.objects.try_ref_object::<WlSurface>(*object_id) else {
+        .filter(|root_surface| {
+            let Some(surface) = state
+                .objects
+                .try_ref_object::<WlSurface>(root_surface.object_id())
+            else {
                 return false;
             };
             surface.is_root() && !surface.has_cursor_role()
@@ -4472,9 +4475,9 @@ fn collect_render_items(
     let focused_frame_texture_id = focused_frame_texture.as_ref().map(GlTexture::texture_id);
     let unfocused_frame_texture_id = unfocused_frame_texture.as_ref().map(GlTexture::texture_id);
     let mut snapshots = Vec::new();
-    for object_id in root_surface_oids {
-        if let Some(layout) = state.root_surface_ssd_layout(object_id) {
-            let focused = focused_root_surface_object_id == Some(object_id);
+    for root_surface in root_surfaces {
+        if let Some(layout) = state.root_surface_ssd_layout(root_surface) {
+            let focused = focused_root_surface == Some(root_surface);
             let (texture_id, owned_texture) = if focused {
                 (focused_frame_texture_id, &mut focused_frame_texture)
             } else {
@@ -4483,14 +4486,22 @@ fn collect_render_items(
             if let Some(texture_id) = texture_id {
                 push_ssd_frame_scene_items(
                     &mut items,
-                    object_id,
+                    root_surface,
+                    focused,
                     layout,
                     texture_id,
                     owned_texture,
                 );
             }
         }
-        collect_surface_snapshots(state, object_id, 0, 0, &mut retired_candidates, &mut snapshots);
+        collect_surface_snapshots(
+            state,
+            root_surface,
+            0,
+            0,
+            &mut retired_candidates,
+            &mut snapshots,
+        );
     }
 
     let cursor_plane = {
@@ -4691,11 +4702,11 @@ mod presentation_timing_tests {
             sanitize_present_timestamp, schedule_output, schedule_outputs_for_rects,
             select_cursor_upload_slot, select_presentation_output_for_scene,
             submitted_frame_feedbacks_for_discard, CursorPlaneContentKey, CursorSurfaceContentKey,
-            OutputSubmission, SceneItem, SceneItemKey, SceneItemState,
-            SubmissionPresentationFeedback, SubmittedFrame, SurfaceKey,
+            OutputSubmission, SceneItem, SceneItemContentKey, SceneItemKey, SceneItemState,
+            SubmissionPresentationFeedback, SubmittedFrame,
         },
         crate::{
-            clients::ClientId,
+            clients::{ClientId, Resolved},
             cursor::{CursorImageContentKey, CursorSurface},
             egl::EGL,
             globals::Globals,
@@ -4717,15 +4728,22 @@ mod presentation_timing_tests {
 
     fn submission_feedback(id: u32, version: u32) -> SubmissionPresentationFeedback {
         SubmissionPresentationFeedback {
-            client_id: ClientId::from_raw(1),
-            feedback_id: WpPresentationFeedbackId::from(id),
+            feedback: crate::clients::Resolved::new(
+                ClientId::from_raw(1),
+                WpPresentationFeedbackId::from(id),
+                crate::state::ObjectId::from(id as usize),
+            ),
             version,
         }
     }
 
     fn surface_feedback(id: u32, version: u32) -> SurfacePresentationFeedback {
         SurfacePresentationFeedback {
-            id: WpPresentationFeedbackId::from(id),
+            feedback: crate::clients::Resolved::new(
+                ClientId::from_raw(1),
+                WpPresentationFeedbackId::from(id),
+                crate::state::ObjectId::from(id as usize),
+            ),
             version,
             output_id: None,
         }
@@ -4739,7 +4757,6 @@ mod presentation_timing_tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -4799,15 +4816,21 @@ mod presentation_timing_tests {
         bounds: RectI,
         feedbacks: Vec<SurfacePresentationFeedback>,
     ) -> SceneItem {
-        let surface_key = SurfaceKey {
-            client_id: ClientId::from_raw(1),
-            surface_id: WlSurfaceId::from(surface_id),
-        };
+        let surface_key = Resolved::new(
+            ClientId::from_raw(1),
+            WlSurfaceId::from(surface_id),
+            ObjectId::from(surface_id as usize),
+        );
+        let buffer = Resolved::new(
+            ClientId::from_raw(1),
+            WlBufferId::from(surface_id.saturating_add(100)),
+            ObjectId::from((surface_id as usize) + 100usize),
+        );
         SceneItem {
             state: SceneItemState {
                 key: SceneItemKey::Surface(surface_key),
                 surface_key: Some(surface_key),
-                buffer_object_id: ObjectId::from((surface_id as usize) + 100usize),
+                content_key: SceneItemContentKey::Buffer(buffer),
                 bounds,
                 tex_transform: transform::Mat3::identity(),
             },
@@ -4937,8 +4960,16 @@ mod presentation_timing_tests {
         assert_eq!(
             request.content_key,
             CursorPlaneContentKey::Surface(CursorSurfaceContentKey {
-                surface_object_id,
-                buffer_object_id,
+                surface: Resolved::new(
+                    ClientId::from_raw(1),
+                    WlSurfaceId::from(2),
+                    surface_object_id,
+                ),
+                buffer: Resolved::new(
+                    ClientId::from_raw(1),
+                    WlBufferId::from(buffer_object_id.index()),
+                    buffer_object_id,
+                ),
                 content_revision: 1,
                 width: 16,
                 height: 12,
@@ -4958,7 +4989,11 @@ mod presentation_timing_tests {
                 .get_mut(surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            surface.add_pending_child(ObjectId::from(999usize));
+            surface.add_pending_child(crate::clients::Resolved::new(
+                ClientId::from_raw(1),
+                WlSurfaceId::from(999u32),
+                ObjectId::from(999usize),
+            ));
         }
         {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
@@ -4995,10 +5030,11 @@ mod presentation_timing_tests {
         assert_eq!(scene.len(), 1);
         assert_eq!(
             callback_surfaces,
-            vec![SurfaceKey {
-                client_id: ClientId::from_raw(1),
-                surface_id: WlSurfaceId::from(9),
-            }]
+            vec![Resolved::new(
+                ClientId::from_raw(1),
+                WlSurfaceId::from(9),
+                ObjectId::from(9usize),
+            )]
         );
         assert_eq!(presentation_feedbacks, vec![submission_feedback(7, 2)]);
     }
@@ -5063,16 +5099,14 @@ mod presentation_timing_tests {
         let backend = BackendOutputRef::new(drm_id);
         let left = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
         let right = state.insert_output(make_output(backend, 2, 100, 0, 100, 100));
+        let surface_key =
+            Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), ObjectId::from(1usize));
+        let buffer =
+            Resolved::new(ClientId::from_raw(1), WlBufferId::from(1), ObjectId::from(1usize));
         let scene = vec![SceneItemState {
-            key: SceneItemKey::Surface(SurfaceKey {
-                client_id: ClientId::from_raw(1),
-                surface_id: crate::protocol_generated::WlSurfaceId::from(1),
-            }),
-            surface_key: Some(SurfaceKey {
-                client_id: ClientId::from_raw(1),
-                surface_id: crate::protocol_generated::WlSurfaceId::from(1),
-            }),
-            buffer_object_id: crate::state::ObjectId::from(1usize),
+            key: SceneItemKey::Surface(surface_key),
+            surface_key: Some(surface_key),
+            content_key: SceneItemContentKey::Buffer(buffer),
             bounds: RectI::new(80, 0, 80, 100).unwrap(),
             tex_transform: transform::Mat3::identity(),
         }];
@@ -5142,12 +5176,12 @@ mod surface_tree_render_tests {
     use {
         super::{collect_cursor_surface_snapshots, collect_surface_snapshots},
         crate::{
-            clients::ClientId,
+            clients::{ClientId, Resolved},
             egl::EGL,
             globals::Globals,
             protocol_generated::{WlSubsurfaceId, WlSurfaceId},
             state::{ObjectId, State},
-            wayland_objects::wl_surface::WlSurface,
+            wayland_objects::{wl_subsurface::WlSubsurface, wl_surface::WlSurface},
             xkb::Xkb,
         },
     };
@@ -5160,7 +5194,6 @@ mod surface_tree_render_tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -5192,24 +5225,55 @@ mod surface_tree_render_tests {
         object_id
     }
 
+    fn root(state: &State, object_id: ObjectId) -> Resolved<WlSurfaceId> {
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(object_id)
+            .unwrap();
+        Resolved::new(surface.client_id(), surface.surface_id(), object_id)
+    }
+
+    fn insert_subsurface(
+        state: &mut State,
+        id: WlSubsurfaceId,
+        surface_object_id: ObjectId,
+        parent_object_id: ObjectId,
+    ) -> Resolved<WlSubsurfaceId> {
+        let object_id = state
+            .insert_object(WlSubsurface::new(
+                id,
+                root(state, surface_object_id),
+                root(state, parent_object_id),
+            ))
+            .1;
+        Resolved::new(ClientId::from_raw(1), id, object_id)
+    }
+
     #[test]
     fn collect_surface_snapshots_walks_below_self_above() {
         let mut state = make_state();
-        let root = insert_surface(&mut state, 1);
+        let root_object_id = insert_surface(&mut state, 1);
         let below = insert_surface(&mut state, 2);
         let above = insert_surface(&mut state, 3);
+        let root_resolved = root(&state, root_object_id);
+        let below_resolved = root(&state, below);
+        let above_resolved = root(&state, above);
+        let below_subsurface =
+            insert_subsurface(&mut state, WlSubsurfaceId::from(11), below, root_object_id);
+        let above_subsurface =
+            insert_subsurface(&mut state, WlSubsurfaceId::from(12), above, root_object_id);
 
         {
             let root_surface = state
                 .objects
-                .get_mut(root)
+                .get_mut(root_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
             root_surface.test_map(ObjectId::from(100usize), 10, 20, 50, 40);
-            root_surface.add_pending_child(below);
-            root_surface.add_pending_child(above);
-            assert!(root_surface.restack_child_relative(below, None, false));
-            assert!(root_surface.restack_child_relative(above, None, true));
+            root_surface.add_pending_child(below_resolved);
+            root_surface.add_pending_child(above_resolved);
+            assert!(root_surface.restack_child_relative(below_resolved, None, false));
+            assert!(root_surface.restack_child_relative(above_resolved, None, true));
         }
         {
             let below_surface = state
@@ -5217,10 +5281,7 @@ mod surface_tree_render_tests {
                 .get_mut(below)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            below_surface.assign_subsurface(
-                WlSubsurfaceId::from(11),
-                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
-            );
+            below_surface.assign_subsurface(below_subsurface, root_resolved);
             below_surface.set_subsurface_position(2, 3);
             below_surface.test_map(ObjectId::from(101usize), 0, 0, 10, 10);
         }
@@ -5230,25 +5291,23 @@ mod surface_tree_render_tests {
                 .get_mut(above)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            above_surface.assign_subsurface(
-                WlSubsurfaceId::from(12),
-                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
-            );
+            above_surface.assign_subsurface(above_subsurface, root_resolved);
             above_surface.set_subsurface_position(7, 8);
             above_surface.test_map(ObjectId::from(102usize), 0, 0, 10, 10);
         }
         {
-            let mut root_surface = state.objects.grab_object::<WlSurface>(root);
+            let mut root_surface = state.objects.grab_object::<WlSurface>(root_object_id);
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
 
         let mut retired = Vec::new();
         let mut snapshots = Vec::new();
-        collect_surface_snapshots(&mut state, root, 0, 0, &mut retired, &mut snapshots);
+        let root_resolved = root(&state, root_object_id);
+        collect_surface_snapshots(&mut state, root_resolved, 0, 0, &mut retired, &mut snapshots);
 
         let ids: Vec<_> = snapshots
             .iter()
-            .map(|snapshot| snapshot.buffer_object_id)
+            .map(|snapshot| snapshot.buffer.object_id())
             .collect();
         let positions: Vec<_> = snapshots
             .iter()
@@ -5264,17 +5323,21 @@ mod surface_tree_render_tests {
     #[test]
     fn new_subsurface_defaults_below_parent() {
         let mut state = make_state();
-        let root = insert_surface(&mut state, 1);
+        let root_object_id = insert_surface(&mut state, 1);
         let child = insert_surface(&mut state, 2);
+        let root_resolved = root(&state, root_object_id);
+        let child_resolved = root(&state, child);
+        let child_subsurface =
+            insert_subsurface(&mut state, WlSubsurfaceId::from(31), child, root_object_id);
 
         {
             let root_surface = state
                 .objects
-                .get_mut(root)
+                .get_mut(root_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
             root_surface.test_map(ObjectId::from(120usize), 10, 20, 50, 40);
-            root_surface.add_pending_child(child);
+            root_surface.add_pending_child(child_resolved);
         }
         {
             let child_surface = state
@@ -5282,24 +5345,22 @@ mod surface_tree_render_tests {
                 .get_mut(child)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_surface.assign_subsurface(
-                WlSubsurfaceId::from(31),
-                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
-            );
+            child_surface.assign_subsurface(child_subsurface, root_resolved);
             child_surface.set_subsurface_position(3, 4);
             child_surface.test_map(ObjectId::from(121usize), 0, 0, 10, 10);
         }
         {
-            let mut root_surface = state.objects.grab_object::<WlSurface>(root);
+            let mut root_surface = state.objects.grab_object::<WlSurface>(root_object_id);
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
 
         let mut retired = Vec::new();
         let mut snapshots = Vec::new();
-        collect_surface_snapshots(&mut state, root, 0, 0, &mut retired, &mut snapshots);
+        let root_resolved = root(&state, root_object_id);
+        collect_surface_snapshots(&mut state, root_resolved, 0, 0, &mut retired, &mut snapshots);
         let ids: Vec<_> = snapshots
             .iter()
-            .map(|snapshot| snapshot.buffer_object_id)
+            .map(|snapshot| snapshot.buffer.object_id())
             .collect();
         assert_eq!(ids, vec![ObjectId::from(121usize), ObjectId::from(120usize)]);
     }
@@ -5307,18 +5368,25 @@ mod surface_tree_render_tests {
     #[test]
     fn collect_surface_snapshots_accumulates_nested_subsurface_offsets() {
         let mut state = make_state();
-        let root = insert_surface(&mut state, 1);
+        let root_object_id = insert_surface(&mut state, 1);
         let child = insert_surface(&mut state, 2);
         let grandchild = insert_surface(&mut state, 3);
+        let root_resolved = root(&state, root_object_id);
+        let child_resolved = root(&state, child);
+        let grandchild_resolved = root(&state, grandchild);
+        let child_subsurface =
+            insert_subsurface(&mut state, WlSubsurfaceId::from(21), child, root_object_id);
+        let grandchild_subsurface =
+            insert_subsurface(&mut state, WlSubsurfaceId::from(22), grandchild, child);
 
         {
             let root_surface = state
                 .objects
-                .get_mut(root)
+                .get_mut(root_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
             root_surface.test_map(ObjectId::from(110usize), 100, 200, 40, 30);
-            root_surface.add_pending_child(child);
+            root_surface.add_pending_child(child_resolved);
         }
         {
             let child_surface = state
@@ -5326,13 +5394,10 @@ mod surface_tree_render_tests {
                 .get_mut(child)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_surface.assign_subsurface(
-                WlSubsurfaceId::from(21),
-                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
-            );
+            child_surface.assign_subsurface(child_subsurface, root_resolved);
             child_surface.set_subsurface_position(5, 7);
             child_surface.test_map(ObjectId::from(111usize), 1, 2, 20, 10);
-            child_surface.add_pending_child(grandchild);
+            child_surface.add_pending_child(grandchild_resolved);
         }
         {
             let grandchild_surface = state
@@ -5340,15 +5405,12 @@ mod surface_tree_render_tests {
                 .get_mut(grandchild)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            grandchild_surface.assign_subsurface(
-                WlSubsurfaceId::from(22),
-                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(2), child),
-            );
+            grandchild_surface.assign_subsurface(grandchild_subsurface, child_resolved);
             grandchild_surface.set_subsurface_position(11, 13);
             grandchild_surface.test_map(ObjectId::from(112usize), 3, 4, 8, 6);
         }
         {
-            let mut root_surface = state.objects.grab_object::<WlSurface>(root);
+            let mut root_surface = state.objects.grab_object::<WlSurface>(root_object_id);
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
         {
@@ -5358,7 +5420,8 @@ mod surface_tree_render_tests {
 
         let mut retired = Vec::new();
         let mut snapshots = Vec::new();
-        collect_surface_snapshots(&mut state, root, 0, 0, &mut retired, &mut snapshots);
+        let root_resolved = root(&state, root_object_id);
+        collect_surface_snapshots(&mut state, root_resolved, 0, 0, &mut retired, &mut snapshots);
 
         let positions: Vec<_> = snapshots
             .iter()
@@ -5370,18 +5433,22 @@ mod surface_tree_render_tests {
     #[test]
     fn collect_cursor_surface_snapshots_walks_cursor_subsurface_tree() {
         let mut state = make_state();
-        let root = insert_surface(&mut state, 1);
+        let root_object_id = insert_surface(&mut state, 1);
         let child = insert_surface(&mut state, 2);
+        let root_resolved = root(&state, root_object_id);
+        let child_resolved = root(&state, child);
+        let child_subsurface =
+            insert_subsurface(&mut state, WlSubsurfaceId::from(81), child, root_object_id);
 
         {
             let root_surface = state
                 .objects
-                .get_mut(root)
+                .get_mut(root_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
             root_surface.test_map(ObjectId::from(130usize), 10, 15, 20, 20);
-            root_surface.add_pending_child(child);
-            assert!(root_surface.restack_child_relative(child, None, true));
+            root_surface.add_pending_child(child_resolved);
+            assert!(root_surface.restack_child_relative(child_resolved, None, true));
         }
         {
             let child_surface = state
@@ -5389,20 +5456,21 @@ mod surface_tree_render_tests {
                 .get_mut(child)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_surface.assign_subsurface(
-                WlSubsurfaceId::from(81),
-                crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
-            );
+            child_surface.assign_subsurface(child_subsurface, root_resolved);
             child_surface.set_subsurface_position(4, 5);
             child_surface.test_map(ObjectId::from(131usize), 0, 0, 8, 9);
         }
         {
-            let mut root_surface = state.objects.grab_object::<WlSurface>(root);
+            let mut root_surface = state.objects.grab_object::<WlSurface>(root_object_id);
             assert!(root_surface.apply_pending_tree_state(&mut state));
         }
 
         state.seat.set_cursor_surface(
-            crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root),
+            crate::clients::Resolved::new(
+                ClientId::from_raw(1),
+                WlSurfaceId::from(1),
+                root_object_id,
+            ),
             3,
             4,
         );
@@ -5410,7 +5478,12 @@ mod surface_tree_render_tests {
 
         let ids: Vec<_> = snapshots
             .iter()
-            .map(|snapshot| snapshot.surface_id)
+            .map(|snapshot| {
+                snapshot
+                    .surface
+                    .expect("snapshot carries resolved surface")
+                    .wayland_id()
+            })
             .collect();
         assert_eq!(ids, vec![WlSurfaceId::from(1), WlSurfaceId::from(2)]);
     }

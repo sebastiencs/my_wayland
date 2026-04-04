@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest},
+    clients::{Client, ClientDispatcher, RawRequest, Resolved},
     object::{Object, Parser},
     protocol_generated::{
         wp_cursor_shape_device_v1, WaylandId, WlPointerId, WpCursorShapeDeviceV1Id,
@@ -13,7 +13,7 @@ const CURSOR_SHAPE_EXTENDED_ENUM_VALUES_SINCE: u32 = 2;
 
 #[derive(Clone, Copy, Debug)]
 enum DeviceKind {
-    Pointer { pointer_id: WlPointerId },
+    Pointer { pointer: Resolved<WlPointerId> },
     Inert,
 }
 
@@ -25,8 +25,12 @@ pub struct WpCursorShapeDeviceV1 {
 }
 
 impl WpCursorShapeDeviceV1 {
-    pub fn new_pointer(id: WpCursorShapeDeviceV1Id, pointer_id: WlPointerId, version: u32) -> Self {
-        Self { id, kind: DeviceKind::Pointer { pointer_id }, version }
+    pub fn new_pointer(
+        id: WpCursorShapeDeviceV1Id,
+        pointer: Resolved<WlPointerId>,
+        version: u32,
+    ) -> Self {
+        Self { id, kind: DeviceKind::Pointer { pointer }, version }
     }
 
     pub fn new_inert(id: WpCursorShapeDeviceV1Id, version: u32) -> Self {
@@ -53,10 +57,10 @@ impl Object for WpCursorShapeDeviceV1 {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
             SetShape { serial, shape } => {
-                let DeviceKind::Pointer { pointer_id } = self.kind else {
+                let DeviceKind::Pointer { pointer } = self.kind else {
                     return Ok(());
                 };
-                if !client.object_is(pointer_id, state) {
+                if pointer.try_ref(state).is_none() {
                     return Ok(());
                 }
                 if !state

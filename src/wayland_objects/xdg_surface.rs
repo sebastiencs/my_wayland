@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser},
     protocol_generated::{
         xdg_surface, xdg_wm_base, WaylandId, WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgToplevelId,
@@ -25,8 +25,8 @@ enum RoleKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RoleObject {
     None,
-    Toplevel(XdgToplevelId),
-    Popup(XdgPopupId),
+    Toplevel(Resolved<XdgToplevelId>),
+    Popup(Resolved<XdgPopupId>),
 }
 
 #[derive(Clone, Debug)]
@@ -65,8 +65,8 @@ pub(crate) struct CommitRoleChanges {
 #[derive(Debug)]
 pub struct XdgSurface {
     id: XdgSurfaceId,
-    wm_base_id: XdgWmBaseId,
-    wl_surface: WlSurfaceId,
+    wm_base: Resolved<XdgWmBaseId>,
+    wl_surface: Resolved<WlSurfaceId>,
     /// Negotiated `xdg_wm_base` version for this shell (from the factory that created us).
     wm_base_version: u32,
     role_kind: Option<RoleKind>,
@@ -77,19 +77,19 @@ pub struct XdgSurface {
     last_acked: Option<PendingConfigure>,
     pending_window_geometry: Option<RectI>,
     current_window_geometry: Option<RectI>,
-    popup_children: Vec<XdgPopupId>,
+    popup_children: Vec<Resolved<XdgPopupId>>,
 }
 
 impl XdgSurface {
     pub fn new(
         id: XdgSurfaceId,
-        wm_base_id: XdgWmBaseId,
-        wl_surface: WlSurfaceId,
+        wm_base: Resolved<XdgWmBaseId>,
+        wl_surface: Resolved<WlSurfaceId>,
         wm_base_version: u32,
     ) -> Self {
         Self {
             id,
-            wm_base_id,
+            wm_base,
             wl_surface,
             wm_base_version,
             role_kind: None,
@@ -104,11 +104,11 @@ impl XdgSurface {
         }
     }
 
-    pub(crate) fn xdg_wm_base_id(&self) -> XdgWmBaseId {
-        self.wm_base_id
+    pub(crate) fn xdg_wm_base(&self) -> Resolved<XdgWmBaseId> {
+        self.wm_base
     }
 
-    pub(crate) fn wl_surface_id(&self) -> WlSurfaceId {
+    pub(crate) fn wl_surface(&self) -> Resolved<WlSurfaceId> {
         self.wl_surface
     }
 
@@ -120,7 +120,7 @@ impl XdgSurface {
         self.initial_commit_complete
     }
 
-    pub(crate) fn popup_role_id(&self) -> Option<XdgPopupId> {
+    pub(crate) fn popup_role(&self) -> Option<Resolved<XdgPopupId>> {
         match self.role_object {
             RoleObject::Popup(id) => Some(id),
             _ => None,
@@ -136,15 +136,11 @@ impl XdgSurface {
     }
 
     pub(crate) fn popup_has_explicit_grab(&self, client: &Client, state: &State) -> bool {
-        let Some(popup_id) = self.popup_role_id() else {
+        let Some(popup) = self.popup_role() else {
             return false;
         };
-        let Some(popup_object_id) = client.object_id_for_wayland(popup_id) else {
-            return false;
-        };
-        state
-            .objects
-            .try_ref_object::<XdgPopup>(popup_object_id)
+        popup
+            .try_ref(state)
             .is_some_and(XdgPopup::has_explicit_grab)
     }
 
@@ -152,11 +148,8 @@ impl XdgSurface {
         matches!(self.role_object, RoleObject::Toplevel(_))
     }
 
-    pub(crate) fn parent_geometry(&self, client: &Client, state: &State) -> RectI {
-        let Some(surface_object_id) = client.object_id_for_wayland(self.wl_surface) else {
-            return RectI { x: 0, y: 0, width: 0, height: 0 };
-        };
-        self.effective_window_geometry(surface_object_id, state)
+    pub(crate) fn parent_geometry(&self, _client: &Client, state: &State) -> RectI {
+        self.effective_window_geometry(self.wl_surface, state)
     }
 
     /// Surface-local geometry for the whole interactive window (see `set_window_geometry`),
@@ -164,10 +157,10 @@ impl XdgSurface {
     /// but without needing a [`Client`] handle.
     pub(crate) fn window_geometry_rect_for_surface(
         &self,
-        surface_object_id: ObjectId,
+        surface: Resolved<WlSurfaceId>,
         state: &State,
     ) -> RectI {
-        self.effective_window_geometry(surface_object_id, state)
+        self.effective_window_geometry(surface, state)
     }
 
     #[cfg(test)]
@@ -197,7 +190,12 @@ impl XdgSurface {
         code: xdg_wm_base::Error,
         message: impl AsRef<str>,
     ) {
-        client.send_protocol_error(dispatcher, self.wm_base_id.into(), code as u32, message);
+        client.send_protocol_error(
+            dispatcher,
+            self.wm_base.wayland_id().into(),
+            code as u32,
+            message,
+        );
     }
 
     fn send_surface_error(
@@ -216,17 +214,12 @@ impl XdgSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        if let Some(mut wl_surface) = state
-            .objects
-            .try_grab_object::<WlSurface>(client.object_id(self.wl_surface))
-        {
-            wl_surface.clear_xdg_surface_role(self.id);
+        let this = client.resolve(self.id, state).unwrap();
+        if let Some(mut wl_surface) = self.wl_surface.try_ref_mut(state) {
+            wl_surface.clear_xdg_surface_role(this);
         }
-        if let Some(mut wm_base) = state
-            .objects
-            .try_grab_object::<XdgWmBase>(client.object_id(self.wm_base_id))
-        {
-            wm_base.unregister_surface(self.id);
+        if let Some(mut wm_base) = self.wm_base.try_ref_mut(state) {
+            wm_base.unregister_surface(this);
         }
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
     }
@@ -333,11 +326,10 @@ impl XdgSurface {
 
     pub(crate) fn effective_window_geometry(
         &self,
-        surface_object_id: ObjectId,
+        surface: Resolved<WlSurfaceId>,
         state: &State,
     ) -> RectI {
-        let Some(surface_bounds) = WlSurface::local_surface_tree_bounds(state, surface_object_id)
-        else {
+        let Some(surface_bounds) = WlSurface::local_surface_tree_bounds(state, surface) else {
             return self.current_window_geometry.unwrap_or(RectI {
                 x: 0,
                 y: 0,
@@ -362,16 +354,13 @@ impl XdgSurface {
                 self.current_window_geometry = self.pending_window_geometry.take();
             }
             if let RoleObject::Toplevel(id) = self.role_object {
-                if let Some(mut toplevel) = state
-                    .objects
-                    .try_grab_object::<xdg_toplevel::XdgToplevel>(client.object_id(id))
-                {
+                if let Some(mut toplevel) = id.try_grab(state) {
                     toplevel.set_window_geometry(self.current_window_geometry);
                 }
             }
             log::debug!(
                 "[DEBUG_TILING] xdg_surface_apply_window_geometry surface={:?} pending={:?} current={:?}",
-                client.object_id(self.wl_surface_id()),
+                self.wl_surface.object_id(),
                 self.pending_window_geometry,
                 self.current_window_geometry,
             );
@@ -381,17 +370,17 @@ impl XdgSurface {
         }
         if role_changes.map_popup {
             if let RoleObject::Popup(id) = self.role_object {
-                let mut popup = client.grab_object(id, state);
+                let mut popup = id.grab(state);
                 popup.mark_mapped();
             }
         }
         if role_changes.reset_on_unmap {
             if let RoleObject::Toplevel(id) = self.role_object {
-                let mut toplevel = client.grab_object(id, state);
+                let mut toplevel = id.grab(state);
                 toplevel.reset_on_unmap();
             }
             if let RoleObject::Popup(id) = self.role_object {
-                let mut popup = client.grab_object(id, state);
+                let mut popup = id.grab(state);
                 popup.mark_unmapped();
             }
             self.reset_configure_state();
@@ -408,7 +397,7 @@ impl XdgSurface {
         is_null_buffer_commit: bool,
         configure_bounds: Option<(i32, i32)>,
     ) -> Option<CommitRoleChanges> {
-        let surface_object_id = client.object_id(self.wl_surface_id());
+        let surface_id = self.wl_surface;
         let mut role_changes = CommitRoleChanges {
             apply_window_geometry: self.pending_window_geometry.is_some(),
             ..Default::default()
@@ -439,30 +428,22 @@ impl XdgSurface {
                         );
                         return None;
                     }
-                    let toplevel_object_id = client.object_id(id);
-                    let desired_decoration_mode = state
-                        .objects
-                        .try_ref_object::<xdg_toplevel::XdgToplevel>(toplevel_object_id)
-                        .map(|toplevel| {
-                            state.xdg_decoration_mode_for_surface(
-                                Some(surface_object_id),
-                                toplevel.has_decoration_object(),
-                                toplevel.requested_decoration_mode(state),
-                            )
-                        });
+                    let desired_decoration_mode = id.try_ref(state).map(|toplevel| {
+                        state.xdg_decoration_mode_for_surface(
+                            Some(surface_id),
+                            toplevel.has_decoration_object(),
+                            toplevel.requested_decoration_mode(state),
+                        )
+                    });
                     if let Some(mode) = desired_decoration_mode {
-                        if let Some(mut toplevel) = state
-                            .objects
-                            .try_grab_object::<xdg_toplevel::XdgToplevel>(toplevel_object_id)
-                        {
+                        if let Some(mut toplevel) = id.try_ref_mut(state) {
                             toplevel.schedule_decoration_mode(mode);
                         }
                     }
                     let fallback_decoration_insets = state.config.general.decoration_insets;
                     let committed_window_geometry = self.geometry_after_this_commit();
-                    let (target_min_size, surface_decoration_insets) = state
-                        .objects
-                        .try_ref_object::<xdg_toplevel::XdgToplevel>(toplevel_object_id)
+                    let (target_min_size, surface_decoration_insets) = id
+                        .try_ref(state)
                         .map(|toplevel| {
                             let insets = if toplevel.decoration_mode_for_configure()
                                 == xdg_toplevel::ToplevelDecorationMode::ServerSide
@@ -486,12 +467,12 @@ impl XdgSurface {
                     let initial_layout_configure =
                         crate::tiling::initial_layout_configure_for_surface(
                             state,
-                            surface_object_id,
+                            surface_id,
                             surface_decoration_insets,
                             target_min_size,
                             configure_bounds,
                         );
-                    let mut xdg_toplevel = client.grab_object(id, state);
+                    let mut xdg_toplevel = id.grab(state);
                     xdg_toplevel.send_initial_configure(
                         client,
                         state,
@@ -513,7 +494,7 @@ impl XdgSurface {
                         );
                         return None;
                     }
-                    let mut popup = client.grab_object(id, state);
+                    let mut popup = id.grab(state);
                     popup.send_initial_configure(self, client, state, dispatcher);
                     role_changes.initial_commit_complete = true;
                     return Some(role_changes);
@@ -534,32 +515,31 @@ impl XdgSurface {
         Some(role_changes)
     }
 
-    pub(crate) fn add_popup_child(&mut self, popup_id: XdgPopupId) {
-        self.popup_children.push(popup_id);
+    pub(crate) fn add_popup_child(&mut self, popup: Resolved<XdgPopupId>) {
+        self.popup_children.push(popup);
     }
 
-    pub(crate) fn remove_popup_child(&mut self, popup_id: XdgPopupId) {
-        self.popup_children
-            .retain(|candidate| *candidate != popup_id);
+    pub(crate) fn remove_popup_child(&mut self, popup: Resolved<XdgPopupId>) {
+        self.popup_children.retain(|candidate| *candidate != popup);
     }
 
-    pub(crate) fn has_popup_child(&self, popup_id: XdgPopupId) -> bool {
-        self.popup_children.contains(&popup_id)
+    pub(crate) fn has_popup_child(&self, popup: Resolved<XdgPopupId>) -> bool {
+        self.popup_children.contains(&popup)
     }
 
-    pub(crate) fn is_topmost_popup(&self, popup_id: XdgPopupId) -> bool {
-        self.popup_children.last().copied() == Some(popup_id)
+    pub(crate) fn is_topmost_popup(&self, popup: Resolved<XdgPopupId>) -> bool {
+        self.popup_children.last().copied() == Some(popup)
     }
 
-    pub(crate) fn destroy_toplevel_role(&mut self, toplevel_id: XdgToplevelId) {
-        if self.role_object == RoleObject::Toplevel(toplevel_id) {
+    pub(crate) fn destroy_toplevel_role(&mut self, toplevel: Resolved<XdgToplevelId>) {
+        if self.role_object == RoleObject::Toplevel(toplevel) {
             self.role_object = RoleObject::None;
             self.reset_configure_state();
         }
     }
 
-    pub(crate) fn destroy_popup_role(&mut self, popup_id: XdgPopupId) {
-        if self.role_object == RoleObject::Popup(popup_id) {
+    pub(crate) fn destroy_popup_role(&mut self, popup: Resolved<XdgPopupId>) {
+        if self.role_object == RoleObject::Popup(popup) {
             self.role_object = RoleObject::None;
             self.reset_configure_state();
         }
@@ -600,46 +580,24 @@ impl Object for XdgSurface {
                 {
                     return Ok(());
                 }
-                self.role_object = RoleObject::Toplevel(id);
-
+                let xdg_surface = client.resolve(self.id, state).unwrap();
                 let xdg_toplevel =
-                    xdg_toplevel::XdgToplevel::new(id, self.id, self.wm_base_version);
+                    xdg_toplevel::XdgToplevel::new(id, xdg_surface, self.wm_base_version);
                 xdg_toplevel.send_capabilities(dispatcher);
-                let ((_, object_id), _) = client.insert_object(state, xdg_toplevel);
-                state.register_xdg_toplevel_role(client.client_id(), self.id, object_id);
+                client.insert_object(state, xdg_toplevel);
+                let toplevel = client.resolve(id, state).unwrap();
+                self.role_object = RoleObject::Toplevel(toplevel);
+                state.register_xdg_toplevel_role(xdg_surface, toplevel);
             }
             GetPopup { id, parent, positioner } => {
-                if !client.object_is(positioner, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                        "xdg_surface.get_popup requires a live xdg_positioner",
-                    );
-                    return Ok(());
-                }
+                let positioner = client.resolve_or_disconnect(positioner, state, dispatcher)?;
 
                 let parent = match parent.to_opt() {
                     None => None,
-                    Some(parent) => {
-                        if !client.object_is(parent, state) {
-                            client.protocol_violation_disconnect(
-                                dispatcher,
-                                self.id.into(),
-                                crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                                "xdg_surface.get_popup requires a live parent xdg_surface",
-                            );
-                            return Ok(());
-                        }
-                        Some(parent)
-                    }
+                    Some(parent) => Some(client.resolve_or_disconnect(parent, state, dispatcher)?),
                 };
 
-                let positioner_state = state
-                    .objects
-                    .try_ref_object::<XdgPositioner>(client.object_id(positioner))
-                    .unwrap()
-                    .snapshot();
+                let positioner_state = positioner.rref(state).snapshot();
                 if !positioner_state.is_complete() {
                     self.send_wm_base_error(
                         client,
@@ -652,11 +610,7 @@ impl Object for XdgSurface {
 
                 if let Some(parent_surface_id) = parent {
                     let valid_parent = {
-                        let parent_surface_object_id = client.object_id(parent_surface_id);
-                        let parent_surface = state
-                            .objects
-                            .try_ref_object::<Self>(parent_surface_object_id)
-                            .unwrap();
+                        let parent_surface = parent_surface_id.try_ref(state).unwrap();
                         parent_surface.is_toplevel_parent()
                             || (parent_surface.is_popup_parent()
                                 && parent_surface.popup_has_explicit_grab(client, state))
@@ -670,31 +624,26 @@ impl Object for XdgSurface {
                         );
                         return Ok(());
                     }
-                    let mut parent_surface = client.grab_object(parent_surface_id, state);
-                    parent_surface.add_popup_child(id);
                 }
 
                 if self
                     .set_role_kind(RoleKind::Popup, client, dispatcher)
                     .is_err()
                 {
-                    if let Some(parent_surface_id) = parent {
-                        let mut parent_surface = client.grab_object(parent_surface_id, state);
-                        parent_surface.remove_popup_child(id);
-                    }
                     return Ok(());
                 }
-                self.role_object = RoleObject::Popup(id);
-                let popup =
-                    XdgPopup::new(id, self.id, parent, positioner_state, self.wm_base_version);
-                client.insert_object(state, popup);
+                let this = client.resolve(self.id, state).unwrap();
+                let popup_obj =
+                    XdgPopup::new(id, this, parent, positioner_state, self.wm_base_version);
+                let (popup, _) = client.insert_object(state, popup_obj);
+                self.role_object = RoleObject::Popup(popup);
                 if let Some(parent_surface_id) = parent {
-                    let popup_surface_object_id = client.object_id(self.wl_surface_id());
-                    let parent_surface_object_id = client.object_id(parent_surface_id);
-                    let _ = state.inherit_root_surface_workspace(
-                        popup_surface_object_id,
-                        parent_surface_object_id,
-                    );
+                    let popup_surface = self.wl_surface;
+                    let parent_xdg_surface = parent_surface_id.rref(state);
+                    let parent_surface = parent_xdg_surface.wl_surface();
+                    let _ = state.inherit_root_surface_workspace(popup_surface, parent_surface);
+                    let parent_surface = parent_surface_id.ref_mut(state);
+                    parent_surface.add_popup_child(popup);
                 }
             }
             SetWindowGeometry { x, y, width, height } => {
@@ -719,7 +668,7 @@ impl Object for XdgSurface {
                 self.pending_window_geometry = Some(window_geometry);
                 log::debug!(
                     "[DEBUG_TILING] xdg_surface_set_window_geometry surface={:?} pending={:?} current={:?}",
-                    client.object_id(self.wl_surface_id()),
+                    self.wl_surface.object_id(),
                     self.pending_window_geometry,
                     self.current_window_geometry,
                 );
@@ -751,13 +700,13 @@ impl Object for XdgSurface {
                         decoration_mode,
                     }) => {
                         if let RoleObject::Toplevel(id) = self.role_object {
-                            let mut toplevel = client.grab_object(id, state);
+                            let mut toplevel = id.ref_mut(state);
                             toplevel.apply_acked_configure(width, height, states, decoration_mode);
                         }
                     }
                     ConfigureState::Popup(PopupConfigureState { geometry }) => {
                         if let RoleObject::Popup(id) = self.role_object {
-                            let mut popup = client.grab_object(id, state);
+                            let mut popup = id.ref_mut(state);
                             popup.apply_acked_configure(geometry);
                         }
                     }
@@ -772,12 +721,14 @@ pub mod xdg_toplevel {
     use std::collections::BTreeSet;
 
     use crate::{
-        clients::{Client, ClientDispatcher, ClientManagerAction, EventWriter, RawRequest},
+        clients::{
+            Client, ClientDispatcher, ClientManagerAction, EventWriter, RawRequest, Resolved,
+        },
         drm::schedule_outputs,
         object::{Object, Parser},
         protocol_generated::{
             xdg_toplevel as proto_xdg_toplevel, zxdg_toplevel_decoration_v1, Array, WaylandId,
-            WlOutputId, WlSeatId, XdgToplevelId,
+            WlOutputId, WlSeatId, XdgToplevelId, ZxdgToplevelDecorationV1Id,
         },
         region::RectI,
         state::{ObjectId, State},
@@ -792,11 +743,11 @@ pub mod xdg_toplevel {
     #[derive(Debug)]
     pub struct XdgToplevel {
         id: XdgToplevelId,
-        xdg_surface_id: super::XdgSurfaceId,
+        xdg_surface: Resolved<super::XdgSurfaceId>,
         wm_base_version: u32,
         title: String,
         app_id: String,
-        parent: Option<XdgToplevelId>,
+        parent: Option<Resolved<XdgToplevelId>>,
         min_size: Option<(i32, i32)>,
         max_size: Option<(i32, i32)>,
         requested_fullscreen: bool,
@@ -807,7 +758,7 @@ pub mod xdg_toplevel {
         decoration_mode: ToplevelDecorationMode,
         pending_decoration_mode: Option<ToplevelDecorationMode>,
         window_geometry: Option<RectI>,
-        decoration_object_id: Option<ObjectId>,
+        decoration_object: Option<Resolved<ZxdgToplevelDecorationV1Id>>,
     }
 
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -849,12 +800,12 @@ pub mod xdg_toplevel {
     impl XdgToplevel {
         pub fn new(
             id: XdgToplevelId,
-            xdg_surface_id: super::XdgSurfaceId,
+            xdg_surface: Resolved<super::XdgSurfaceId>,
             wm_base_version: u32,
         ) -> Self {
             Self {
                 id,
-                xdg_surface_id,
+                xdg_surface,
                 wm_base_version,
                 title: String::new(),
                 app_id: String::new(),
@@ -869,7 +820,7 @@ pub mod xdg_toplevel {
                 decoration_mode: ToplevelDecorationMode::ClientSide,
                 pending_decoration_mode: None,
                 window_geometry: None,
-                decoration_object_id: None,
+                decoration_object: None,
             }
         }
 
@@ -954,17 +905,14 @@ pub mod xdg_toplevel {
         }
 
         pub(crate) fn configure_bounds_for_xdg_surface(
-            client: &Client,
+            _client: &Client,
             state: &State,
             xdg_surface: &XdgSurface,
         ) -> Option<(i32, i32)> {
-            let wl_surface_object_id = client.object_id_for_wayland(xdg_surface.wl_surface_id())?;
-            state
-                .objects
-                .try_ref_object::<WlSurface>(wl_surface_object_id)
-                .and_then(|surface| {
-                    surface.configure_bounds_for_object(state, wl_surface_object_id)
-                })
+            let wl_surface = xdg_surface.wl_surface();
+            wl_surface
+                .try_ref(state)
+                .and_then(|surface| surface.configure_bounds_for_object(state, wl_surface))
         }
 
         fn send_configure_bounds(
@@ -1097,8 +1045,8 @@ pub mod xdg_toplevel {
             self.pending_decoration_mode = None;
         }
 
-        pub fn xdg_surface_id(&self) -> super::XdgSurfaceId {
-            self.xdg_surface_id
+        pub fn xdg_surface(&self) -> Resolved<super::XdgSurfaceId> {
+            self.xdg_surface
         }
 
         pub fn toplevel_id(&self) -> XdgToplevelId {
@@ -1131,11 +1079,11 @@ pub mod xdg_toplevel {
         }
 
         pub fn requested_decoration_mode(&self, state: &State) -> Option<ToplevelDecorationMode> {
-            let decoration_object_id = self.decoration_object_id?;
-            state
-                .objects
-                .try_ref_object::<ZxdgToplevelDecorationV1>(decoration_object_id)
-                .and_then(ZxdgToplevelDecorationV1::requested_mode)
+            self.decoration_object.and_then(|decoration| {
+                decoration
+                    .try_ref(state)
+                    .and_then(ZxdgToplevelDecorationV1::requested_mode)
+            })
         }
 
         pub fn window_geometry(&self) -> Option<RectI> {
@@ -1171,24 +1119,30 @@ pub mod xdg_toplevel {
         }
 
         pub fn has_decoration_object(&self) -> bool {
-            self.decoration_object_id.is_some()
+            self.decoration_object.is_some()
         }
 
-        pub fn decoration_object_id(&self) -> Option<ObjectId> {
-            self.decoration_object_id
+        pub fn decoration_object(&self) -> Option<Resolved<ZxdgToplevelDecorationV1Id>> {
+            self.decoration_object
         }
 
-        pub fn set_decoration_object(&mut self, object_id: ObjectId) -> bool {
-            if self.decoration_object_id.is_some() {
+        pub fn set_decoration_object(
+            &mut self,
+            decoration: Resolved<ZxdgToplevelDecorationV1Id>,
+        ) -> bool {
+            if self.decoration_object.is_some() {
                 return false;
             }
-            self.decoration_object_id = Some(object_id);
+            self.decoration_object = Some(decoration);
             true
         }
 
-        pub fn clear_decoration_object(&mut self, object_id: ObjectId) {
-            if self.decoration_object_id == Some(object_id) {
-                self.decoration_object_id = None;
+        pub fn clear_decoration_object(
+            &mut self,
+            decoration: Resolved<ZxdgToplevelDecorationV1Id>,
+        ) {
+            if self.decoration_object == Some(decoration) {
+                self.decoration_object = None;
             }
         }
 
@@ -1197,12 +1151,9 @@ pub mod xdg_toplevel {
             state: &State,
             dispatcher: &mut ClientDispatcher,
         ) {
-            let Some(decoration_object_id) = self.decoration_object_id else {
-                return;
-            };
-            let Some(decoration) = state
-                .objects
-                .try_ref_object::<ZxdgToplevelDecorationV1>(decoration_object_id)
+            let Some(decoration) = self
+                .decoration_object
+                .and_then(|decoration| decoration.try_ref(state))
             else {
                 return;
             };
@@ -1233,14 +1184,17 @@ pub mod xdg_toplevel {
             state: &mut State,
             dispatcher: &mut ClientDispatcher,
         ) {
-            let xdg_surface = client.ref_object(self.xdg_surface_id, state);
-            let surface_object_id = client.object_id(xdg_surface.wl_surface_id());
-            if !state.is_tiled_root_surface(surface_object_id)
-                && !state.root_surface_is_fullscreen(surface_object_id)
+            let xdg_surface = self.xdg_surface.rref(state);
+            let surface = xdg_surface.wl_surface();
+            let Some(root_surface) = state.root_surface_for_surface(surface) else {
+                return;
+            };
+            if !state.is_tiled_root_surface(root_surface)
+                && !state.root_surface_is_fullscreen(root_surface)
             {
                 return;
             }
-            let Some(workspace_id) = state.root_surface_workspace(surface_object_id) else {
+            let Some(workspace_id) = state.root_surface_workspace(root_surface) else {
                 return;
             };
             let affected_outputs = state.workspace_output_ids(workspace_id);
@@ -1357,28 +1311,21 @@ pub mod xdg_toplevel {
             );
         }
 
-        fn validate_parent(
-            &self,
-            parent: Option<XdgToplevelId>,
-            client: &Client,
-            state: &State,
-        ) -> bool {
+        fn validate_parent(&self, parent: Option<Resolved<XdgToplevelId>>, state: &State) -> bool {
             let Some(mut current) = parent else {
                 return true;
             };
-            if current == self.id {
+            if current.wayland_id() == self.id {
                 return false;
             }
             loop {
-                if current == self.id {
+                if current.wayland_id() == self.id {
                     return false;
                 }
-                let Some(object_id) = client.object_id_for_wayland(current) else {
+                if !current.exists(state) {
                     return true;
-                };
-                let Some(toplevel) = state.objects.try_ref_object::<Self>(object_id) else {
-                    return true;
-                };
+                }
+                let toplevel = current.rref(state);
                 let Some(next) = toplevel.parent else {
                     return true;
                 };
@@ -1486,11 +1433,9 @@ pub mod xdg_toplevel {
 
             match client.parse::<Self>(req).unwrap() {
                 Destroy => {
-                    if let Some(decoration_object_id) = self.decoration_object_id() {
-                        let decoration_id = state
-                            .objects
-                            .try_ref_object::<ZxdgToplevelDecorationV1>(decoration_object_id)
-                            .map(|decoration| decoration.id());
+                    if let Some(decoration) = self.decoration_object() {
+                        let decoration_id =
+                            decoration.try_ref(state).map(|decoration| decoration.id());
                         if let Some(decoration_id) = decoration_id {
                             client.protocol_violation_disconnect(
                                 dispatcher,
@@ -1499,36 +1444,24 @@ pub mod xdg_toplevel {
                                 "xdg_toplevel destroyed before xdg_toplevel_decoration",
                             );
                         }
-                        self.decoration_object_id = None;
+                        self.decoration_object = None;
                     }
-                    let object_id = client.object_id(self.id);
-                    state.unregister_xdg_toplevel_role(
-                        client.client_id(),
-                        self.xdg_surface_id,
-                        object_id,
-                    );
-                    let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
-                    xdg_surface.destroy_toplevel_role(self.id);
+                    if let Some(toplevel) = client.resolve(self.id, state) {
+                        state.unregister_xdg_toplevel_role(self.xdg_surface, toplevel);
+                    }
+                    let mut xdg_surface = self.xdg_surface.grab(state);
+                    let this = client.resolve(self.id, state).unwrap();
+                    xdg_surface.destroy_toplevel_role(this);
                     self.delete_self(client, state, dispatcher);
                 }
                 SetParent { parent } => {
                     let parent = match parent.to_opt() {
                         None => None,
                         Some(parent) => {
-                            if !client.object_is(parent, state) {
-                                client.protocol_violation_disconnect(
-                                    dispatcher,
-                                    self.id.into(),
-                                    crate::protocol_generated::wl_display::Error::InvalidObject
-                                        as u32,
-                                    "xdg_toplevel.set_parent requires a live xdg_toplevel",
-                                );
-                                return Ok(());
-                            }
-                            Some(parent)
+                            Some(client.resolve_or_disconnect(parent, state, dispatcher)?)
                         }
                     };
-                    if !self.validate_parent(parent, client, state) {
+                    if !self.validate_parent(parent, state) {
                         self.send_error(
                             client,
                             dispatcher,
@@ -1549,32 +1482,22 @@ pub mod xdg_toplevel {
                     log::debug!("xdg_toplevel.show_window_menu is not integrated yet");
                 }
                 Move { seat, serial } => {
-                    if !client.object_is(seat, state) {
-                        client.protocol_violation_disconnect(
-                            dispatcher,
-                            self.id.into(),
-                            crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                            "xdg_toplevel.move requires a live wl_seat",
-                        );
-                        return Ok(());
-                    }
-                    let xdg_surface = client.ref_object(self.xdg_surface_id, state);
-                    let surface_id = xdg_surface.wl_surface_id();
-                    let surface_object_id = client.object_id(surface_id);
-                    let Some(surface) =
-                        state.objects.try_ref_object::<WlSurface>(surface_object_id)
-                    else {
+                    let _seat = client.resolve_or_disconnect(seat, state, dispatcher)?;
+                    let xdg_surface = self.xdg_surface.rref(state);
+                    let surface = xdg_surface.wl_surface();
+                    let Some(surface_ref) = surface.try_ref(state) else {
                         return Ok(());
                     };
+                    let root_surface = state.root_surface_for_surface(surface).unwrap_or(surface);
                     if !crate::input::request_toplevel_move(
                         state,
                         dispatcher,
                         client.client_id(),
-                        surface_id,
+                        surface,
                         serial,
-                        surface_object_id,
+                        root_surface,
                         self.is_maximized(),
-                        state.root_surface_is_fullscreen(surface_object_id),
+                        state.root_surface_is_fullscreen(root_surface),
                     ) {
                         log::debug!(
                             "xdg_toplevel.move ignored due to invalid pointer grab serial {}",
@@ -1601,38 +1524,31 @@ pub mod xdg_toplevel {
                         );
                         return Ok(());
                     }
-                    if !client.object_is(seat, state) {
-                        client.protocol_violation_disconnect(
-                            dispatcher,
-                            self.id.into(),
-                            crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                            "xdg_toplevel.resize requires a live wl_seat",
-                        );
-                        return Ok(());
-                    }
-                    let xdg_surface = client.ref_object(self.xdg_surface_id, state);
-                    let surface_id = xdg_surface.wl_surface_id();
-                    let surface_object_id = client.object_id(surface_id);
-                    let Some(surface) =
-                        state.objects.try_ref_object::<WlSurface>(surface_object_id)
-                    else {
+                    let _seat = client.resolve_or_disconnect(seat, state, dispatcher)?;
+                    let xdg_surface = self.xdg_surface.rref(state);
+                    let surface = xdg_surface.wl_surface();
+                    let Some(surface_ref) = surface.try_ref(state) else {
                         return Ok(());
                     };
-                    if surface.logical_size().is_none() {
+                    if surface_ref.logical_size().is_none() {
                         log::debug!("xdg_toplevel.resize ignored for unmapped surface");
                         return Ok(());
                     }
+                    let root_surface = state.root_surface_for_surface(surface).unwrap_or(surface);
+                    let Some(xdg_toplevel) = client.resolve(self.id, state) else {
+                        return Ok(());
+                    };
                     if !crate::input::request_toplevel_resize(
                         state,
                         dispatcher,
                         client.client_id(),
-                        surface_id,
+                        surface,
                         serial,
-                        surface_object_id,
-                        self.id,
+                        root_surface,
+                        xdg_toplevel,
                         self.interactive_size_constraints(),
                         self.is_maximized(),
-                        state.root_surface_is_fullscreen(surface_object_id),
+                        state.root_surface_is_fullscreen(root_surface),
                         edges,
                     ) {
                         log::debug!(
@@ -1655,7 +1571,7 @@ pub mod xdg_toplevel {
                 }
                 SetMaximized => {
                     self.requested_maximized = true;
-                    let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
+                    let mut xdg_surface = self.xdg_surface.grab(state);
                     let configure_bounds =
                         Self::configure_bounds_for_xdg_surface(client, state, &xdg_surface);
                     self.schedule_configure(
@@ -1668,7 +1584,7 @@ pub mod xdg_toplevel {
                 }
                 UnsetMaximized => {
                     self.requested_maximized = false;
-                    let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
+                    let mut xdg_surface = self.xdg_surface.grab(state);
                     let configure_bounds =
                         Self::configure_bounds_for_xdg_surface(client, state, &xdg_surface);
                     self.schedule_configure(
@@ -1681,13 +1597,16 @@ pub mod xdg_toplevel {
                 }
                 SetFullscreen { output: _ } => {
                     self.requested_fullscreen = true;
-                    let xdg_surface = client.ref_object(self.xdg_surface_id, state);
-                    let surface_object_id = client.object_id(xdg_surface.wl_surface_id());
+                    let xdg_surface = self.xdg_surface.rref(state);
+                    let surface = xdg_surface.wl_surface();
+                    let Some(root_surface) = state.root_surface_for_surface(surface) else {
+                        return Ok(());
+                    };
                     let affected_outputs = state
-                        .root_surface_workspace(surface_object_id)
+                        .root_surface_workspace(root_surface)
                         .map(|workspace_id| state.workspace_output_ids(workspace_id))
                         .unwrap_or_default();
-                    if state.set_root_surface_fullscreen(surface_object_id, true) {
+                    if state.set_root_surface_fullscreen(root_surface, true) {
                         if !affected_outputs.is_empty() {
                             schedule_outputs(state, affected_outputs.into_iter(), dispatcher);
                         }
@@ -1697,13 +1616,16 @@ pub mod xdg_toplevel {
                 }
                 UnsetFullscreen => {
                     self.requested_fullscreen = false;
-                    let xdg_surface = client.ref_object(self.xdg_surface_id, state);
-                    let surface_object_id = client.object_id(xdg_surface.wl_surface_id());
+                    let xdg_surface = self.xdg_surface.rref(state);
+                    let surface = xdg_surface.wl_surface();
+                    let Some(root_surface) = state.root_surface_for_surface(surface) else {
+                        return Ok(());
+                    };
                     let affected_outputs = state
-                        .root_surface_workspace(surface_object_id)
+                        .root_surface_workspace(root_surface)
                         .map(|workspace_id| state.workspace_output_ids(workspace_id))
                         .unwrap_or_default();
-                    if state.set_root_surface_fullscreen(surface_object_id, false) {
+                    if state.set_root_surface_fullscreen(root_surface, false) {
                         if !affected_outputs.is_empty() {
                             schedule_outputs(state, affected_outputs.into_iter(), dispatcher);
                         }
@@ -1725,8 +1647,15 @@ pub mod xdg_toplevel {
 
         #[test]
         fn layout_states_strip_maximized_from_tiled_configures() {
-            let mut toplevel =
-                XdgToplevel::new(XdgToplevelId::from(1), super::super::XdgSurfaceId::from(2), 7);
+            let mut toplevel = XdgToplevel::new(
+                XdgToplevelId::from(1),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    super::super::XdgSurfaceId::from(2),
+                    ObjectId::from(2usize),
+                ),
+                7,
+            );
             toplevel.test_set_maximized(true);
 
             let states = toplevel.layout_states(
@@ -1742,8 +1671,15 @@ pub mod xdg_toplevel {
 
         #[test]
         fn layout_states_strip_maximized_from_fullscreen_layout_configures() {
-            let mut toplevel =
-                XdgToplevel::new(XdgToplevelId::from(3), super::super::XdgSurfaceId::from(4), 7);
+            let mut toplevel = XdgToplevel::new(
+                XdgToplevelId::from(3),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    super::super::XdgSurfaceId::from(4),
+                    ObjectId::from(4usize),
+                ),
+                7,
+            );
             toplevel.test_set_maximized(true);
 
             let states = toplevel.layout_states(0, true, false);
@@ -1754,8 +1690,15 @@ pub mod xdg_toplevel {
 
         #[test]
         fn layout_states_include_resizing_for_interactive_tiled_resize() {
-            let toplevel =
-                XdgToplevel::new(XdgToplevelId::from(5), super::super::XdgSurfaceId::from(6), 7);
+            let toplevel = XdgToplevel::new(
+                XdgToplevelId::from(5),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    super::super::XdgSurfaceId::from(6),
+                    ObjectId::from(6usize),
+                ),
+                7,
+            );
 
             let states = toplevel.layout_states(crate::tiling::EDGE_RIGHT, false, true);
 
@@ -1765,8 +1708,15 @@ pub mod xdg_toplevel {
 
         #[test]
         fn effective_states_drop_stale_fullscreen_from_acked_state() {
-            let mut toplevel =
-                XdgToplevel::new(XdgToplevelId::from(7), super::super::XdgSurfaceId::from(8), 7);
+            let mut toplevel = XdgToplevel::new(
+                XdgToplevelId::from(7),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    super::super::XdgSurfaceId::from(8),
+                    ObjectId::from(8usize),
+                ),
+                7,
+            );
             toplevel.apply_acked_configure(
                 800,
                 600,
@@ -1785,8 +1735,15 @@ pub mod xdg_toplevel {
 
         #[test]
         fn reset_on_unmap_restores_default_decoration_mode() {
-            let mut toplevel =
-                XdgToplevel::new(XdgToplevelId::from(9), super::super::XdgSurfaceId::from(10), 7);
+            let mut toplevel = XdgToplevel::new(
+                XdgToplevelId::from(9),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    super::super::XdgSurfaceId::from(10),
+                    ObjectId::from(10usize),
+                ),
+                7,
+            );
             toplevel.set_decoration_mode(ToplevelDecorationMode::ClientSide);
             toplevel.set_window_geometry(Some(RectI { x: 1, y: 2, width: 3, height: 4 }));
 
@@ -1825,7 +1782,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -1847,6 +1803,14 @@ mod tests {
             keyboard,
             xkb,
         }
+    }
+
+    fn root(state: &State, object_id: ObjectId) -> Resolved<WlSurfaceId> {
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(object_id)
+            .unwrap();
+        Resolved::new(surface.client_id(), surface.surface_id(), object_id)
     }
 
     fn make_output(width: i32, height: i32) -> Output {
@@ -1886,25 +1850,28 @@ mod tests {
         let xdg_surface_id = XdgSurfaceId::from(11u32);
         let toplevel_id = XdgToplevelId::from(12u32);
 
-        let ((_, surface_object_id), _) =
+        let (surface_resolved, _) =
             client.insert_object(&mut state, WlSurface::new(wl_surface_id, client.client_id(), 6));
+        let surface_object_id = surface_resolved.object_id();
         {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             assert!(surface
                 .set_role(Role::XdgSurface, &mut client_dispatcher)
                 .is_ok());
-            surface.set_xdg_surface_impl(xdg_surface_id);
-            surface.test_map(ObjectId::from(950usize), 0, 0, 80, 60);
         }
         state.register_root_surface(surface_object_id);
 
         let xdg_surface = XdgSurface {
             id: xdg_surface_id,
-            wm_base_id: XdgWmBaseId::from(1),
-            wl_surface: wl_surface_id,
+            wm_base: Resolved::new(
+                client.client_id(),
+                XdgWmBaseId::from(1),
+                ObjectId::from(1usize),
+            ),
+            wl_surface: Resolved::new(client.client_id(), wl_surface_id, surface_object_id),
             wm_base_version: 7,
             role_kind: Some(RoleKind::Toplevel),
-            role_object: RoleObject::Toplevel(toplevel_id),
+            role_object: RoleObject::None,
             initial_commit_complete: true,
             next_configure_serial: 1,
             pending_configures: VecDeque::new(),
@@ -1913,12 +1880,37 @@ mod tests {
             current_window_geometry: None,
             popup_children: Vec::new(),
         };
-        client.insert_object(&mut state, xdg_surface);
-        let ((_, toplevel_object_id), _) =
-            client.insert_object(&mut state, XdgToplevel::new(toplevel_id, xdg_surface_id, 7));
-        state.register_xdg_toplevel_role(client.client_id(), xdg_surface_id, toplevel_object_id);
+        let (xdg_surface_resolved, _) = client.insert_object(&mut state, xdg_surface);
+        let xdg_surface_object_id = xdg_surface_resolved.object_id();
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.set_xdg_surface_impl(Resolved::new(
+                client.client_id(),
+                xdg_surface_id,
+                xdg_surface_object_id,
+            ));
+            surface.test_map(ObjectId::from(950usize), 0, 0, 80, 60);
+        }
+        let (toplevel_resolved, _) = client.insert_object(
+            &mut state,
+            XdgToplevel::new(
+                toplevel_id,
+                Resolved::new(client.client_id(), xdg_surface_id, xdg_surface_object_id),
+                7,
+            ),
+        );
+        state.register_xdg_toplevel_role(xdg_surface_resolved, toplevel_resolved);
+        state
+            .objects
+            .get_mut(xdg_surface_object_id)
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .role_object = RoleObject::Toplevel(toplevel_resolved);
 
-        assert_eq!(state.root_surface_workspace(surface_object_id), Some(workspace_id));
+        assert_eq!(
+            state.root_surface_workspace(root(&state, surface_object_id)),
+            Some(workspace_id)
+        );
         state.relayout_dirty_workspaces();
         let surface = state
             .objects
@@ -1955,7 +1947,7 @@ mod tests {
 
         let toplevel = state
             .objects
-            .try_ref_object::<XdgToplevel>(toplevel_object_id)
+            .try_ref_object::<XdgToplevel>(toplevel_resolved.object_id())
             .unwrap();
         assert_eq!(toplevel.window_geometry(), Some(RectI { x: 0, y: -12, width: 80, height: 72 }));
     }
@@ -1964,8 +1956,8 @@ mod tests {
     fn reset_configure_state_clears_window_geometry() {
         let mut xdg_surface = XdgSurface::new(
             XdgSurfaceId::from(20),
-            XdgWmBaseId::from(21),
-            WlSurfaceId::from(22),
+            Resolved::new(ClientId::from_raw(1), XdgWmBaseId::from(21), ObjectId::from(21usize)),
+            Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(22), ObjectId::from(22usize)),
             7,
         );
         xdg_surface.pending_window_geometry = Some(RectI { x: 1, y: 2, width: 3, height: 4 });
@@ -1989,33 +1981,61 @@ mod tests {
         let toplevel_id = XdgToplevelId::from(32u32);
         let decoration_id = crate::protocol_generated::ZxdgToplevelDecorationV1Id::from(33u32);
 
-        let ((_, surface_object_id), _) =
+        let (surface_resolved, _) =
             client.insert_object(&mut state, WlSurface::new(wl_surface_id, client.client_id(), 6));
+        let surface_object_id = surface_resolved.object_id();
         {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             assert!(surface
                 .set_role(Role::XdgSurface, &mut client_dispatcher)
                 .is_ok());
-            surface.set_xdg_surface_impl(xdg_surface_id);
         }
-        client.insert_object(
+        let (xdg_surface_resolved, _) = client.insert_object(
             &mut state,
-            XdgSurface::new(xdg_surface_id, XdgWmBaseId::from(1), wl_surface_id, 7),
+            XdgSurface::new(
+                xdg_surface_id,
+                Resolved::new(client.client_id(), XdgWmBaseId::from(1), ObjectId::from(1usize)),
+                Resolved::new(client.client_id(), wl_surface_id, surface_object_id),
+                7,
+            ),
         );
-        let ((_, toplevel_object_id), _) =
-            client.insert_object(&mut state, XdgToplevel::new(toplevel_id, xdg_surface_id, 7));
-        state.register_xdg_toplevel_role(client.client_id(), xdg_surface_id, toplevel_object_id);
-        let ((_, decoration_object_id), _) = client.insert_object(
+        let xdg_surface_object_id = xdg_surface_resolved.object_id();
+        state
+            .objects
+            .get_mut(surface_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_xdg_surface_impl(Resolved::new(
+                client.client_id(),
+                xdg_surface_id,
+                xdg_surface_object_id,
+            ));
+        let (toplevel_resolved, _) = client.insert_object(
             &mut state,
-            ZxdgToplevelDecorationV1::new(decoration_id, toplevel_object_id),
+            XdgToplevel::new(
+                toplevel_id,
+                Resolved::new(client.client_id(), xdg_surface_id, xdg_surface_object_id),
+                7,
+            ),
         );
+        let toplevel_object_id = toplevel_resolved.object_id();
+        state.register_xdg_toplevel_role(xdg_surface_resolved, toplevel_resolved);
+        let (decoration_resolved, _) = client.insert_object(
+            &mut state,
+            ZxdgToplevelDecorationV1::new(decoration_id, toplevel_resolved),
+        );
+        let decoration_object_id = decoration_resolved.object_id();
         {
             let toplevel = state
                 .objects
                 .get_mut(toplevel_object_id)
                 .downcast_mut::<XdgToplevel>()
                 .unwrap();
-            assert!(toplevel.set_decoration_object(decoration_object_id));
+            assert!(toplevel.set_decoration_object(Resolved::new(
+                client.client_id(),
+                decoration_id,
+                decoration_object_id,
+            )));
         }
 
         let destroy_request: RawRequest<'static> =
@@ -2051,27 +2071,30 @@ mod tests {
         let xdg_surface_id = XdgSurfaceId::from(41u32);
         let toplevel_id = XdgToplevelId::from(42u32);
 
-        let ((_, surface_object_id), _) =
+        let (surface_resolved, _) =
             client.insert_object(&mut state, WlSurface::new(wl_surface_id, client.client_id(), 6));
+        let surface_object_id = surface_resolved.object_id();
         {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             assert!(surface
                 .set_role(Role::XdgSurface, &mut client_dispatcher)
                 .is_ok());
-            surface.set_xdg_surface_impl(xdg_surface_id);
-            surface.test_map(ObjectId::from(951usize), 0, 0, 80, 60);
         }
         state.register_root_surface(surface_object_id);
 
-        client.insert_object(
+        let (xdg_surface_resolved, _) = client.insert_object(
             &mut state,
             XdgSurface {
                 id: xdg_surface_id,
-                wm_base_id: XdgWmBaseId::from(1),
-                wl_surface: wl_surface_id,
+                wm_base: Resolved::new(
+                    client.client_id(),
+                    XdgWmBaseId::from(1),
+                    ObjectId::from(1usize),
+                ),
+                wl_surface: Resolved::new(client.client_id(), wl_surface_id, surface_object_id),
                 wm_base_version: 7,
                 role_kind: Some(RoleKind::Toplevel),
-                role_object: RoleObject::Toplevel(toplevel_id),
+                role_object: RoleObject::None,
                 initial_commit_complete: true,
                 next_configure_serial: 1,
                 pending_configures: VecDeque::new(),
@@ -2081,13 +2104,38 @@ mod tests {
                 popup_children: Vec::new(),
             },
         );
-        let ((_, toplevel_object_id), _) =
-            client.insert_object(&mut state, XdgToplevel::new(toplevel_id, xdg_surface_id, 7));
-        state.register_xdg_toplevel_role(client.client_id(), xdg_surface_id, toplevel_object_id);
+        let xdg_surface_object_id = xdg_surface_resolved.object_id();
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.set_xdg_surface_impl(Resolved::new(
+                client.client_id(),
+                xdg_surface_id,
+                xdg_surface_object_id,
+            ));
+            surface.test_map(ObjectId::from(951usize), 0, 0, 80, 60);
+        }
+        let (toplevel_resolved, _) = client.insert_object(
+            &mut state,
+            XdgToplevel::new(
+                toplevel_id,
+                Resolved::new(client.client_id(), xdg_surface_id, xdg_surface_object_id),
+                7,
+            ),
+        );
+        state.register_xdg_toplevel_role(xdg_surface_resolved, toplevel_resolved);
+        state
+            .objects
+            .get_mut(xdg_surface_object_id)
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .role_object = RoleObject::Toplevel(toplevel_resolved);
 
-        assert_eq!(state.root_surface_workspace(surface_object_id), Some(workspace_id));
+        assert_eq!(
+            state.root_surface_workspace(root(&state, surface_object_id)),
+            Some(workspace_id)
+        );
         state.relayout_dirty_workspaces();
-        assert!(state.is_tiled_root_surface(surface_object_id));
+        assert!(state.is_tiled_root_surface(root(&state, surface_object_id)));
 
         let set_min_size_request: RawRequest<'static> = (&*{
             let mut event = RawEvent::new(toplevel_id.into(), 8, 2);

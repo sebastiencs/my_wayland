@@ -228,7 +228,7 @@ mod tests {
             clients::{Client, ClientAction, ClientId, DataSourceClientEvent, Resolved},
             egl::EGL,
             globals::Globals,
-            protocol_generated::WlDataSourceId,
+            protocol_generated::{WlDataSourceId, WlSurfaceId},
             runner::Dispatcher,
             seat::{set_keyboard_focus_from_surface, SurfaceFocus},
             state::{
@@ -248,7 +248,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -276,6 +275,14 @@ mod tests {
         let _ = state.insert_object(WlSurface::new(surface_id.into(), client_id, 6));
     }
 
+    fn fake_surface(
+        client_id: ClientId,
+        surface_id: u32,
+        object_id: ObjectId,
+    ) -> Resolved<WlSurfaceId> {
+        Resolved::new(client_id, surface_id.into(), object_id)
+    }
+
     #[test]
     fn source_disconnect_clears_selection_and_refreshes_focused_client() {
         let mut state = make_state();
@@ -283,8 +290,9 @@ mod tests {
         let focused_client_id = ClientId::from_raw(2);
         let owner_client_id = owner.client_id();
         let source_id = WlDataSourceId::from(10);
-        let ((_, source_object_id), _) =
+        let (source_resolved, _) =
             owner.insert_object(&mut state, WlDataSource::new(source_id, owner_client_id, 3));
+        let source_object_id = source_resolved.object_id();
         insert_surface(&mut state, focused_client_id, 55);
 
         {
@@ -328,17 +336,18 @@ mod tests {
         let target_client_id = ClientId::from_raw(2);
         let owner_client_id = owner.client_id();
         let source_id = WlDataSourceId::from(10);
-        let ((_, source_object_id), _) =
+        let (source_resolved, _) =
             owner.insert_object(&mut state, WlDataSource::new(source_id, owner_client_id, 3));
+        let source_object_id = source_resolved.object_id();
 
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
                 source: Resolved::new(owner.client_id(), source_id, source_object_id),
             },
-            origin_surface_id: 20u32.into(),
-            icon_surface_object_id: None,
+            origin_surface: fake_surface(owner.client_id(), 20, ObjectId::from(20usize)),
+            icon_surface: None,
             target: Some(DragTargetState {
-                surface: Resolved::new(target_client_id, 21u32.into(), ObjectId::from(0usize)),
+                surface: fake_surface(target_client_id, 21, ObjectId::from(0usize)),
             }),
             negotiation: Default::default(),
             phase: DragPhase::Dragging,

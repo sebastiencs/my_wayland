@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest},
+    clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
     object::{Object, Parser},
     protocol_generated::{
@@ -46,7 +46,7 @@ pub struct XdgWmBase {
     id: XdgWmBaseId,
     /// Client's negotiated `xdg_wm_base` version (caps which xdg_toplevel events we may send).
     version: u32,
-    surfaces: Vec<XdgSurfaceId>,
+    surfaces: Vec<Resolved<XdgSurfaceId>>,
 }
 
 impl XdgWmBase {
@@ -58,8 +58,8 @@ impl XdgWmBase {
         }
     }
 
-    pub fn unregister_surface(&mut self, id: XdgSurfaceId) {
-        self.surfaces.retain(|candidate| *candidate != id);
+    pub fn unregister_surface(&mut self, surface: Resolved<XdgSurfaceId>) {
+        self.surfaces.retain(|candidate| *candidate != surface);
     }
 }
 
@@ -95,33 +95,31 @@ impl Object for XdgWmBase {
                 client.insert_object(state, XdgPositioner::new(id));
             }
             GetXdgSurface { id, surface } => {
-                if !client.object_is(surface, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "get_xdg_surface requires a live wl_surface",
-                    );
-                    return Ok(());
+                let surface = client.resolve_or_disconnect(surface, state, dispatcher)?;
+                {
+                    let wl_surface = surface.ref_mut(state);
+                    if wl_surface.has_attached_or_committed_buffer() {
+                        client.send_protocol_error(
+                            dispatcher,
+                            self.id.into(),
+                            xdg_wm_base::Error::InvalidSurfaceState as u32,
+                            "wl_surface must not have an attached or committed buffer before get_xdg_surface",
+                        );
+                        return Ok(());
+                    }
+                    if wl_surface.set_role(Role::XdgSurface, dispatcher).is_err() {
+                        return Ok(());
+                    }
                 }
-                let wl_surface = client.ref_object_mut(surface, state);
-                if wl_surface.has_attached_or_committed_buffer() {
-                    client.send_protocol_error(
-                        dispatcher,
-                        self.id.into(),
-                        xdg_wm_base::Error::InvalidSurfaceState as u32,
-                        "wl_surface must not have an attached or committed buffer before get_xdg_surface",
-                    );
-                    return Ok(());
-                }
-                if wl_surface.set_role(Role::XdgSurface, dispatcher).is_err() {
-                    return Ok(());
-                }
-                wl_surface.set_xdg_surface_impl(id);
 
-                let xdg_surface = XdgSurface::new(id, self.id, surface, self.version);
+                let wm_base = client.resolve(self.id, state).unwrap();
+                let xdg_surface = XdgSurface::new(id, wm_base, surface, self.version);
                 client.insert_object(state, xdg_surface);
-                self.surfaces.push(id);
+                let xdg_surface_resolved = client.resolve(id, state).unwrap();
+                surface
+                    .ref_mut(state)
+                    .set_xdg_surface_impl(xdg_surface_resolved);
+                self.surfaces.push(xdg_surface_resolved);
             }
             Pong { serial: _ } => {}
         }

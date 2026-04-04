@@ -1,5 +1,8 @@
 //! Protocol codegen for `src/protocol_generated.rs`.
 //!
+//! Emits, per interface: `Constants`, [`crate::object::IdToObject`], and
+//! [`crate::object::ObjectWithId`] (same pairing as `IdToObject::Object` / `ObjectWithId::Id`).
+//!
 //! Run `cargo test regenerate_protocol_generated -- --ignored` to rewrite that file.
 //! **Note:** `/usr/share/wayland/wayland.xml` (and other XML paths in `gen()`) must match
 //! what this compositor implements; a newer core Wayland can add interfaces (e.g. `wl_fixes`)
@@ -327,6 +330,15 @@ fn write_constants(f: &mut impl Write, interface: &Interface) -> std::io::Result
         interface.name,
         interface.name.to_upper_camel_case()
     )?;
+    writeln!(f, "  }}")?;
+
+    writeln!(
+        f,
+        "  impl crate::object::ObjectWithId for crate::wayland_objects::{}::{} {{",
+        interface.name,
+        interface.name.to_upper_camel_case()
+    )?;
+    writeln!(f, "    type Id = {};", interface_name_to_id(&interface.name))?;
     writeln!(f, "  }}")?;
 
     Ok(())

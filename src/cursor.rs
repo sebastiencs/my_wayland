@@ -9,7 +9,6 @@ use xcursor::{parser, CursorTheme};
 use crate::{
     clients::{ClientId, Resolved},
     protocol_generated::WlSurfaceId,
-    state::ObjectId,
 };
 
 const DEFAULT_ICON_NAMES: &[&str] = &["default", "left_ptr"];
@@ -234,21 +233,26 @@ impl CursorState {
         changed
     }
 
-    pub fn clear_surface(&mut self, object_id: ObjectId) -> bool {
+    pub fn clear_surface(&mut self, surface: Resolved<WlSurfaceId>) -> bool {
         let Some(CursorSource::Surface { cursor, .. }) = self.source.as_ref() else {
             return false;
         };
-        if cursor.surface.object_id() != object_id {
+        if cursor.surface != surface {
             return false;
         }
         self.clear()
     }
 
-    pub fn apply_surface_offset(&mut self, object_id: ObjectId, dx: i32, dy: i32) -> bool {
+    pub fn apply_surface_offset(
+        &mut self,
+        surface: Resolved<WlSurfaceId>,
+        dx: i32,
+        dy: i32,
+    ) -> bool {
         let Some(CursorSource::Surface { cursor, .. }) = self.source.as_mut() else {
             return false;
         };
-        if cursor.surface.object_id() != object_id || (dx == 0 && dy == 0) {
+        if cursor.surface != surface || (dx == 0 && dy == 0) {
             return false;
         }
         cursor.hotspot_x = clamp_i64_to_i32(i64::from(cursor.hotspot_x) - i64::from(dx));
@@ -513,8 +517,16 @@ mod tests {
             0,
             0,
         );
-        assert!(!cursor.clear_surface(ObjectId::from(12usize)));
-        assert!(cursor.clear_surface(ObjectId::from(11usize)));
+        assert!(!cursor.clear_surface(crate::clients::Resolved::new(
+            ClientId::from_raw(2),
+            WlSurfaceId::from(99),
+            ObjectId::from(12usize),
+        )));
+        assert!(cursor.clear_surface(crate::clients::Resolved::new(
+            ClientId::from_raw(2),
+            WlSurfaceId::from(7),
+            ObjectId::from(11usize),
+        )));
         assert!(cursor.source().is_none());
     }
 
@@ -531,7 +543,15 @@ mod tests {
             15,
         );
 
-        assert!(cursor.apply_surface_offset(ObjectId::from(14usize), 3, -2));
+        assert!(cursor.apply_surface_offset(
+            crate::clients::Resolved::new(
+                ClientId::from_raw(3),
+                WlSurfaceId::from(9),
+                ObjectId::from(14usize),
+            ),
+            3,
+            -2,
+        ));
         match cursor.source().unwrap() {
             CursorSourceRef::Surface { cursor, .. } => {
                 assert_eq!(cursor.hotspot_x, 9);

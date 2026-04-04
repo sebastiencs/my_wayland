@@ -44,14 +44,14 @@ impl Object for WlDisplay {
 
         match client.parse::<Self>(request).unwrap() {
             Sync { callback } => {
-                let ((id, _), callback) = client.insert_object(state, WlCallback::new(callback));
+                let (resolved, callback) = client.insert_object(state, WlCallback::new(callback));
                 callback.done(monotonic_time_msec(), dispatcher);
-                client.delete_id(self, state, dispatcher, id);
+                client.delete_id(self, state, dispatcher, resolved.wayland_id().into());
             }
             GetRegistry { registry } => {
                 let registry = WlRegistry::new(registry);
                 registry.list_global_objects(state, dispatcher);
-                client.insert_object(state, registry);
+                let _ = client.insert_object(state, registry);
             }
         }
         Ok(())

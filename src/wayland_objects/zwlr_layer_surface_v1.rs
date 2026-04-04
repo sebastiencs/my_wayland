@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::{
-    clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, ParserError},
     protocol_generated::{
         wl_display, zwlr_layer_shell_v1, zwlr_layer_surface_v1, Constants, WaylandId, WlSurfaceId,
@@ -123,8 +123,7 @@ pub struct LayerPlacement {
 
 #[derive(Clone, Copy, Debug)]
 struct LayerSnapshot {
-    surface_object_id: ObjectId,
-    client_id: ClientId,
+    root_surface: Resolved<WlSurfaceId>,
     root_index: usize,
     output_id: OutputId,
     mapped: bool,
@@ -141,38 +140,38 @@ struct LayerSnapshot {
 
 #[derive(Debug, Default)]
 struct ComputedLayerLayout {
-    placements: BTreeMap<ObjectId, LayerPlacement>,
+    placements: BTreeMap<Resolved<WlSurfaceId>, LayerPlacement>,
     usable_by_output: BTreeMap<OutputId, RectI>,
-    background_roots: Vec<ObjectId>,
-    bottom_roots: Vec<ObjectId>,
-    top_roots: Vec<ObjectId>,
-    overlay_roots: Vec<ObjectId>,
+    background_roots: Vec<Resolved<WlSurfaceId>>,
+    bottom_roots: Vec<Resolved<WlSurfaceId>>,
+    top_roots: Vec<Resolved<WlSurfaceId>>,
+    overlay_roots: Vec<Resolved<WlSurfaceId>>,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct LayerLayoutObjectSnapshot<'a> {
-    pub surface_object_id: ObjectId,
+    pub root_surface: Resolved<WlSurfaceId>,
     pub surface: &'a WlSurface,
-    pub layer_surface_object_id: Option<ObjectId>,
+    pub resolved_layer_surface: Option<Resolved<ZwlrLayerSurfaceV1Id>>,
     pub layer_surface: Option<&'a ZwlrLayerSurfaceV1>,
 }
 
 impl<'a> LayerLayoutObjectSnapshot<'a> {
-    pub fn for_surface(surface_object_id: ObjectId, surface: &'a WlSurface) -> Self {
+    pub fn for_surface(root_surface: Resolved<WlSurfaceId>, surface: &'a WlSurface) -> Self {
         Self {
-            surface_object_id,
+            root_surface,
             surface,
-            layer_surface_object_id: None,
+            resolved_layer_surface: None,
             layer_surface: None,
         }
     }
 
     pub fn with_layer_surface(
         mut self,
-        layer_surface_object_id: ObjectId,
+        resolved_layer_surface: Resolved<ZwlrLayerSurfaceV1Id>,
         layer_surface: &'a ZwlrLayerSurfaceV1,
     ) -> Self {
-        self.layer_surface_object_id = Some(layer_surface_object_id);
+        self.resolved_layer_surface = Some(resolved_layer_surface);
         self.layer_surface = Some(layer_surface);
         self
     }
@@ -181,11 +180,9 @@ impl<'a> LayerLayoutObjectSnapshot<'a> {
 #[derive(Debug)]
 pub struct ZwlrLayerSurfaceV1 {
     id: ZwlrLayerSurfaceV1Id,
-    manager_id: ZwlrLayerShellV1Id,
-    client_id: ClientId,
+    manager: Resolved<ZwlrLayerShellV1Id>,
     version: u32,
-    surface_id: WlSurfaceId,
-    surface_object_id: ObjectId,
+    surface: Resolved<WlSurfaceId>,
     requested_output_id: Option<OutputId>,
     assigned_output_id: Option<OutputId>,
     namespace: String,
@@ -200,28 +197,24 @@ pub struct ZwlrLayerSurfaceV1 {
     pending_configures: VecDeque<LayerConfigure>,
     last_acked: Option<LayerConfigure>,
     last_sent_configure_size: Option<(u32, u32)>,
-    popup_children: Vec<XdgPopupId>,
+    popup_children: Vec<Resolved<XdgPopupId>>,
 }
 
 impl ZwlrLayerSurfaceV1 {
     pub fn new(
         id: ZwlrLayerSurfaceV1Id,
-        manager_id: ZwlrLayerShellV1Id,
-        client_id: ClientId,
+        manager: Resolved<ZwlrLayerShellV1Id>,
         version: u32,
-        surface_id: WlSurfaceId,
-        surface_object_id: ObjectId,
+        surface: Resolved<WlSurfaceId>,
         requested_output_id: Option<OutputId>,
         layer: LayerShellLayer,
         namespace: String,
     ) -> Self {
         Self {
             id,
-            manager_id,
-            client_id,
+            manager,
             version,
-            surface_id,
-            surface_object_id,
+            surface,
             requested_output_id,
             assigned_output_id: requested_output_id,
             namespace,
@@ -241,15 +234,23 @@ impl ZwlrLayerSurfaceV1 {
     }
 
     pub fn client_id(&self) -> ClientId {
-        self.client_id
+        self.surface.client_id()
     }
 
     pub fn surface_id(&self) -> WlSurfaceId {
-        self.surface_id
+        self.surface.wayland_id()
     }
 
     pub fn surface_object_id(&self) -> ObjectId {
-        self.surface_object_id
+        self.surface.object_id()
+    }
+
+    pub fn surface(&self) -> Resolved<WlSurfaceId> {
+        self.surface
+    }
+
+    pub fn manager(&self) -> Resolved<ZwlrLayerShellV1Id> {
+        self.manager
     }
 
     pub fn requested_output_id(&self) -> Option<OutputId> {
@@ -294,21 +295,20 @@ impl ZwlrLayerSurfaceV1 {
         &self.namespace
     }
 
-    pub fn add_popup_child(&mut self, popup_id: XdgPopupId) {
-        self.popup_children.push(popup_id);
+    pub fn add_popup_child(&mut self, popup: Resolved<XdgPopupId>) {
+        self.popup_children.push(popup);
     }
 
-    pub fn remove_popup_child(&mut self, popup_id: XdgPopupId) {
-        self.popup_children
-            .retain(|candidate| *candidate != popup_id);
+    pub fn remove_popup_child(&mut self, popup: Resolved<XdgPopupId>) {
+        self.popup_children.retain(|candidate| *candidate != popup);
     }
 
-    pub fn has_popup_child(&self, popup_id: XdgPopupId) -> bool {
-        self.popup_children.contains(&popup_id)
+    pub fn has_popup_child(&self, popup: Resolved<XdgPopupId>) -> bool {
+        self.popup_children.contains(&popup)
     }
 
-    pub fn is_topmost_popup(&self, popup_id: XdgPopupId) -> bool {
-        self.popup_children.last().copied() == Some(popup_id)
+    pub fn is_topmost_popup(&self, popup: Resolved<XdgPopupId>) -> bool {
+        self.popup_children.last().copied() == Some(popup)
     }
 
     fn dismiss_popup_children(
@@ -317,18 +317,23 @@ impl ZwlrLayerSurfaceV1 {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let popup_ids = std::mem::take(&mut self.popup_children);
-        if popup_ids.is_empty() {
+        let popups = std::mem::take(&mut self.popup_children);
+        if popups.is_empty() {
             return;
         }
-        client.dismiss_popup_ids(state, dispatcher, popup_ids, Some(self.id));
+        client.dismiss_popup_ids(
+            state,
+            dispatcher,
+            popups
+                .into_iter()
+                .filter(|popup| popup.exists(state))
+                .collect(),
+            Some(self.id),
+        );
     }
 
     pub fn popup_anchor_geometry(&self, state: &State) -> RectI {
-        let Some(surface) = state
-            .objects
-            .try_ref_object::<WlSurface>(self.surface_object_id)
-        else {
+        let Some(surface) = self.surface.try_ref(state) else {
             return RectI { x: 0, y: 0, width: 0, height: 0 };
         };
         surface
@@ -407,14 +412,8 @@ impl ZwlrLayerSurfaceV1 {
         );
     }
 
-    fn unregister_from_manager(&self, client: &Client, state: &mut State) {
-        let Some(manager_object_id) = client.try_object_id(self.manager_id, state) else {
-            return;
-        };
-        let Some(mut manager) = state
-            .objects
-            .try_grab_object::<ZwlrLayerShellV1>(manager_object_id)
-        else {
+    fn unregister_from_manager(&self, state: &mut State) {
+        let Some(mut manager) = self.manager.try_grab(state) else {
             return;
         };
         manager.unregister_surface(self.id);
@@ -540,9 +539,7 @@ impl ZwlrLayerSurfaceV1 {
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        surface_object_id: ObjectId,
         surface: &WlSurface,
-        layer_surface_object_id: ObjectId,
         has_pending_buffer_attach: bool,
         is_null_buffer_commit: bool,
     ) -> bool {
@@ -576,9 +573,11 @@ impl ZwlrLayerSurfaceV1 {
                 was_layer,
                 self,
             ) {
-                let layout_snapshot =
-                    LayerLayoutObjectSnapshot::for_surface(surface_object_id, surface)
-                        .with_layer_surface(layer_surface_object_id, self);
+                let layout_snapshot = LayerLayoutObjectSnapshot::for_surface(self.surface, surface)
+                    .with_layer_surface(
+                        Resolved::new(self.client_id(), self.id, client.object_id(self.id)),
+                        self,
+                    );
                 refresh_keyboard_focus_with_snapshot(state, dispatcher, Some(layout_snapshot));
             }
             return true;
@@ -609,9 +608,11 @@ impl ZwlrLayerSurfaceV1 {
             was_layer,
             self,
         ) {
-            let layout_snapshot =
-                LayerLayoutObjectSnapshot::for_surface(surface_object_id, surface)
-                    .with_layer_surface(layer_surface_object_id, self);
+            let layout_snapshot = LayerLayoutObjectSnapshot::for_surface(self.surface, surface)
+                .with_layer_surface(
+                    Resolved::new(self.client_id(), self.id, client.object_id(self.id)),
+                    self,
+                );
             refresh_keyboard_focus_with_snapshot(state, dispatcher, Some(layout_snapshot));
         }
 
@@ -644,16 +645,14 @@ impl ZwlrLayerSurfaceV1 {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
+        let this = client.resolve(self.id, state).unwrap();
         self.dismiss_popup_children(client, state, dispatcher);
-        if let Some(mut surface) = state
-            .objects
-            .try_grab_object::<WlSurface>(self.surface_object_id)
-        {
+        if let Some(mut surface) = self.surface.try_grab(state) {
             surface.force_unmap_for_role_dismissal(client, state, dispatcher);
-            surface.clear_layer_surface_role(self.id);
+            surface.clear_layer_surface_role(this);
         }
-        state.unregister_layer_surface_object(self.id);
-        self.unregister_from_manager(client, state);
+        state.unregister_layer_surface_object(this);
+        self.unregister_from_manager(state);
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
         dispatcher.dispatch(crate::clients::ClientManagerAction::LayerShellLayoutChanged);
         refresh_keyboard_focus(state, dispatcher);
@@ -672,10 +671,7 @@ impl ZwlrLayerSurfaceV1 {
                 .is_some_and(|output_id| state.output_bounds(output_id).is_none());
         if requested_output_missing {
             self.dismiss_popup_children(client, state, dispatcher);
-            if let Some(mut surface) = state
-                .objects
-                .try_grab_object::<WlSurface>(self.surface_object_id)
-            {
+            if let Some(mut surface) = self.surface.try_grab(state) {
                 surface.force_unmap_for_role_dismissal(client, state, dispatcher);
             }
             self.send_closed(dispatcher);
@@ -688,10 +684,7 @@ impl ZwlrLayerSurfaceV1 {
             return;
         };
 
-        if let Some(mut surface) = state
-            .objects
-            .try_grab_object::<WlSurface>(self.surface_object_id)
-        {
+        if let Some(mut surface) = self.surface.try_grab(state) {
             surface.set_root_position(placement.rect.x, placement.rect.y);
         }
 
@@ -709,23 +702,22 @@ impl ZwlrLayerSurfaceV1 {
     fn snapshot(
         &self,
         state: &State,
-        _object_id: ObjectId,
+        root_surface: Resolved<WlSurfaceId>,
         root_index: usize,
     ) -> Option<LayerSnapshot> {
         if self.closed {
             return None;
         }
         let output_id = self.resolved_output_id(state)?;
-        let actual_size = state
-            .objects
-            .try_ref_object::<WlSurface>(self.surface_object_id)
+        let actual_size = self
+            .surface
+            .try_ref(state)
             .and_then(WlSurface::logical_size);
         let (actual_width, actual_height) = actual_size
             .map(|size| (size.width, size.height))
             .unwrap_or((self.current.desired_width.max(0), self.current.desired_height.max(0)));
         Some(LayerSnapshot {
-            surface_object_id: self.surface_object_id,
-            client_id: self.client_id,
+            root_surface,
             root_index,
             output_id,
             mapped: self.mapped,
@@ -920,22 +912,22 @@ fn popup_parent_layer_surface_keyboard_focus(
     state: &State,
     surface: &WlSurface,
 ) -> Option<LayerKeyboardFocus> {
-    let parent_layer_surface_id = surface.popup_parent_layer_surface_id()?;
-    let parent_layer_surface_object_id = state.layer_surface_object_id(parent_layer_surface_id)?;
+    let parent_layer_surface_id = surface.popup_parent_layer_surface()?;
+    let parent_layer_surface = state.layer_surface(parent_layer_surface_id)?;
     let parent_layer_surface = state
         .objects
-        .try_ref_object::<ZwlrLayerSurfaceV1>(parent_layer_surface_object_id)?;
+        .try_ref_object::<ZwlrLayerSurfaceV1>(parent_layer_surface.object_id())?;
     Some(keyboard_focus_from_layer_surface(parent_layer_surface))
 }
 
 #[derive(Debug)]
 struct OutputLayerLayout {
-    placements: BTreeMap<ObjectId, LayerPlacement>,
+    placements: BTreeMap<Resolved<WlSurfaceId>, LayerPlacement>,
     usable: RectI,
-    background_roots: Vec<ObjectId>,
-    bottom_roots: Vec<ObjectId>,
-    top_roots: Vec<ObjectId>,
-    overlay_roots: Vec<ObjectId>,
+    background_roots: Vec<Resolved<WlSurfaceId>>,
+    bottom_roots: Vec<Resolved<WlSurfaceId>>,
+    top_roots: Vec<Resolved<WlSurfaceId>>,
+    overlay_roots: Vec<Resolved<WlSurfaceId>>,
 }
 
 fn compute_output_layout(
@@ -967,7 +959,7 @@ fn compute_output_layout(
         };
         let rect = anchored_rect(placement_bounds, snapshot, actual_width, actual_height);
         output_layout.placements.insert(
-            snapshot.surface_object_id,
+            snapshot.root_surface,
             LayerPlacement {
                 output_id: snapshot.output_id,
                 rect,
@@ -977,16 +969,12 @@ fn compute_output_layout(
         );
         if snapshot.mapped {
             match snapshot.layer {
-                LayerShellLayer::Background => output_layout
-                    .background_roots
-                    .push(snapshot.surface_object_id),
-                LayerShellLayer::Bottom => {
-                    output_layout.bottom_roots.push(snapshot.surface_object_id)
+                LayerShellLayer::Background => {
+                    output_layout.background_roots.push(snapshot.root_surface)
                 }
-                LayerShellLayer::Top => output_layout.top_roots.push(snapshot.surface_object_id),
-                LayerShellLayer::Overlay => {
-                    output_layout.overlay_roots.push(snapshot.surface_object_id)
-                }
+                LayerShellLayer::Bottom => output_layout.bottom_roots.push(snapshot.root_surface),
+                LayerShellLayer::Top => output_layout.top_roots.push(snapshot.root_surface),
+                LayerShellLayer::Overlay => output_layout.overlay_roots.push(snapshot.root_surface),
             }
         }
         usable = reserve_usable_bounds_for_snapshot(usable, snapshot);
@@ -999,59 +987,58 @@ fn compute_output_layout(
 pub(crate) fn lookup_snapshot_surface<'a>(
     state: &'a State,
     snapshot: Option<LayerLayoutObjectSnapshot<'a>>,
-    object_id: ObjectId,
+    root_surface: Resolved<WlSurfaceId>,
 ) -> Option<&'a WlSurface> {
     snapshot
-        .filter(|snapshot| snapshot.surface_object_id == object_id)
+        .filter(|snapshot| snapshot.root_surface == root_surface)
         .map(|snapshot| snapshot.surface)
-        .or_else(|| state.objects.try_ref_object::<WlSurface>(object_id))
+        .or_else(|| root_surface.try_ref(state))
 }
 
 fn snapshot_layer_surface<'a>(
     state: &'a State,
     snapshot: Option<LayerLayoutObjectSnapshot<'a>>,
-    object_id: ObjectId,
+    layer_surface: Resolved<ZwlrLayerSurfaceV1Id>,
 ) -> Option<&'a ZwlrLayerSurfaceV1> {
     snapshot
-        .filter(|snapshot| snapshot.layer_surface_object_id == Some(object_id))
-        .and_then(|snapshot| snapshot.layer_surface)
-        .or_else(|| {
-            state
-                .objects
-                .try_ref_object::<ZwlrLayerSurfaceV1>(object_id)
+        .filter(|snapshot| {
+            snapshot
+                .resolved_layer_surface
+                .is_some_and(|resolved| resolved == layer_surface)
         })
+        .and_then(|snapshot| snapshot.layer_surface)
+        .or_else(|| layer_surface.try_ref(state))
 }
 
 fn compute_layer_layout(
     state: &State,
     snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
 ) -> ComputedLayerLayout {
-    let live_root_ids = state.root_surface_ids();
+    let live_root_ids = state.root_surfaces();
     let root_order = live_root_ids
         .iter()
         .enumerate()
-        .map(|(index, object_id)| (*object_id, index))
+        .map(|(index, surface)| (*surface, index))
         .collect::<BTreeMap<_, _>>();
     let mut snapshots_by_output = BTreeMap::<OutputId, Vec<LayerSnapshot>>::new();
 
-    for object_id in live_root_ids.iter().copied() {
-        let Some(surface) = lookup_snapshot_surface(state, snapshot, object_id) else {
+    for root_surface in live_root_ids.iter().copied() {
+        let Some(surface) = lookup_snapshot_surface(state, snapshot, root_surface) else {
             continue;
         };
-        let Some(layer_surface_id) = surface.layer_surface_id() else {
+        let Some(layer_surface_id) = surface.layer_surface() else {
             continue;
         };
-        let Some(layer_surface_object_id) = state.layer_surface_object_id(layer_surface_id) else {
+        let Some(layer_surface) = state.layer_surface(layer_surface_id) else {
             continue;
         };
-        let Some(layer_surface) = snapshot_layer_surface(state, snapshot, layer_surface_object_id)
-        else {
+        let Some(layer_surface_ref) = snapshot_layer_surface(state, snapshot, layer_surface) else {
             continue;
         };
-        let Some(&root_index) = root_order.get(&layer_surface.surface_object_id()) else {
+        let Some(&root_index) = root_order.get(&root_surface) else {
             continue;
         };
-        let Some(snapshot) = layer_surface.snapshot(state, object_id, root_index) else {
+        let Some(snapshot) = layer_surface_ref.snapshot(state, root_surface, root_index) else {
             continue;
         };
         snapshots_by_output
@@ -1098,39 +1085,42 @@ pub fn output_usable_bounds_with_snapshot(
         .or_else(|| state.output_bounds(output_id))
 }
 
-pub fn ordered_scene_root_surface_ids(state: &State) -> Vec<ObjectId> {
-    ordered_scene_root_surface_ids_with_snapshot(state, None)
+pub fn ordered_scene_root_surfaces(state: &State) -> Vec<Resolved<WlSurfaceId>> {
+    ordered_scene_root_surfaces_with_snapshot(state, None)
 }
 
-pub fn ordered_scene_root_surface_ids_with_snapshot(
+pub fn ordered_scene_root_surfaces_with_snapshot(
     state: &State,
     snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
-) -> Vec<ObjectId> {
+) -> Vec<Resolved<WlSurfaceId>> {
     let layout = compute_layer_layout(state, snapshot);
     let mut ordered = Vec::new();
     ordered.extend(layout.background_roots);
     ordered.extend(layout.bottom_roots);
-    let managed_roots = state.tiling_scene_root_surface_ids();
+    let managed_roots = state
+        .tiling_scene_root_surfaces()
+        .into_iter()
+        .collect::<Vec<_>>();
     let managed_set = managed_roots
         .iter()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
-    for object_id in managed_roots.into_iter().chain(
+    for root_surface in managed_roots.into_iter().chain(
         state
-            .root_surface_ids()
+            .root_surfaces()
             .into_iter()
-            .filter(|object_id| !managed_set.contains(object_id)),
+            .filter(|surface| !managed_set.contains(surface)),
     ) {
-        let Some(surface) = lookup_snapshot_surface(state, snapshot, object_id) else {
+        let Some(surface) = lookup_snapshot_surface(state, snapshot, root_surface) else {
             continue;
         };
         if surface.role() == crate::wayland_objects::wl_surface::Role::LayerSurface {
             continue;
         }
-        if !state.root_surface_is_visible(object_id) {
+        if !state.root_surface_is_visible(root_surface) {
             continue;
         }
-        ordered.push(object_id);
+        ordered.push(root_surface);
     }
     ordered.extend(layout.top_roots);
     ordered.extend(layout.overlay_roots);
@@ -1139,42 +1129,27 @@ pub fn ordered_scene_root_surface_ids_with_snapshot(
 
 pub fn layer_surface_keyboard_focus(
     state: &State,
-    surface_object_id: ObjectId,
+    root_surface: Resolved<WlSurfaceId>,
 ) -> Option<LayerKeyboardFocus> {
-    layer_surface_keyboard_focus_with_snapshot(state, surface_object_id, None)
+    layer_surface_keyboard_focus_with_snapshot(state, root_surface, None)
 }
 
 pub fn layer_surface_keyboard_focus_with_snapshot(
     state: &State,
-    surface_object_id: ObjectId,
+    root_surface: Resolved<WlSurfaceId>,
     snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
 ) -> Option<LayerKeyboardFocus> {
-    let surface = lookup_snapshot_surface(state, snapshot, surface_object_id)?;
-    let Some(layer_surface_id) = surface.layer_surface_id() else {
+    let surface = lookup_snapshot_surface(state, snapshot, root_surface)?;
+    let Some(layer_surface_id) = surface.layer_surface() else {
         return popup_parent_layer_surface_keyboard_focus(state, surface);
     };
-    let Some(layer_surface_object_id) = state.layer_surface_object_id(layer_surface_id) else {
+    let Some(layer_surface) = state.layer_surface(layer_surface_id) else {
         return Some(LayerKeyboardFocus::None);
     };
-    let Some(layer_surface) = snapshot_layer_surface(state, snapshot, layer_surface_object_id)
-    else {
+    let Some(layer_surface) = snapshot_layer_surface(state, snapshot, layer_surface) else {
         return Some(LayerKeyboardFocus::None);
     };
     Some(keyboard_focus_from_layer_surface(layer_surface))
-}
-
-pub fn layer_surface_accepts_keyboard_focus(state: &State, surface_object_id: ObjectId) -> bool {
-    if state
-        .objects
-        .try_ref_object::<WlSurface>(surface_object_id)
-        .is_none()
-    {
-        return false;
-    }
-    !matches!(
-        layer_surface_keyboard_focus(state, surface_object_id),
-        Some(LayerKeyboardFocus::None)
-    )
 }
 
 pub fn relayout_client_layer_surfaces(
@@ -1212,10 +1187,8 @@ pub fn relayout_client_layer_surfaces(
         else {
             continue;
         };
-        let placement = layout
-            .placements
-            .get(&layer_surface.surface_object_id())
-            .copied();
+        let root_surface = layer_surface.surface();
+        let placement = layout.placements.get(&root_surface).copied();
         layer_surface.apply_layout(client, state, dispatcher, placement);
     }
 }
@@ -1281,18 +1254,10 @@ impl Object for ZwlrLayerSurfaceV1 {
                 self.pending.keyboard_interactivity = Some(keyboard_interactivity);
             }
             GetPopup { popup } => {
-                if !client.object_is(popup, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        wl_display::Error::InvalidObject as u32,
-                        "zwlr_layer_surface_v1.get_popup requires a live xdg_popup",
-                    );
-                    return Ok(());
-                }
-                let popup_id = popup;
-                let mut popup = client.grab_object(popup, state);
-                if let Err(err) = popup.assign_layer_parent(self.id) {
+                let popup = client.resolve_or_disconnect(popup, state, dispatcher)?;
+                let mut popup_object = popup.grab(state);
+                let this = client.resolve(self.id, state).unwrap();
+                if let Err(err) = popup_object.assign_layer_parent(this) {
                     let message = match err {
                         AssignLayerParentError::AlreadyHasParent => {
                             "zwlr_layer_surface_v1.get_popup requires an unparented xdg_popup"
@@ -1310,12 +1275,12 @@ impl Object for ZwlrLayerSurfaceV1 {
                     return Ok(());
                 }
                 let popup_surface_id = {
-                    let xdg_surface = client.ref_object(popup.xdg_surface_id(), state);
-                    xdg_surface.wl_surface_id()
+                    let xdg_surface = popup_object.xdg_surface().rref(state);
+                    xdg_surface.wl_surface()
                 };
-                let mut popup_surface = client.grab_object(popup_surface_id, state);
-                popup_surface.set_popup_parent_layer_surface(Some(self.id));
-                self.add_popup_child(popup_id);
+                let mut popup_surface = popup_surface_id.ref_mut(state);
+                popup_surface.set_popup_parent_layer_surface(Some(this));
+                self.add_popup_child(popup);
             }
             AckConfigure { serial } => {
                 let Some(position) = self
@@ -1394,15 +1359,13 @@ impl Object for ZwlrLayerSurfaceV1 {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
+        let this = client.resolve(self.id, state).unwrap();
         self.dismiss_popup_children(client, state, dispatcher);
-        if let Some(mut surface) = state
-            .objects
-            .try_grab_object::<WlSurface>(self.surface_object_id)
-        {
-            surface.clear_layer_surface_role(self.id);
+        if let Some(mut surface) = self.surface.try_ref_mut(state) {
+            surface.clear_layer_surface_role(this);
         }
-        state.unregister_layer_surface_object(self.id);
-        self.unregister_from_manager(client, state);
+        state.unregister_layer_surface_object(this);
+        self.unregister_from_manager(state);
         dispatcher.dispatch(crate::clients::ClientManagerAction::LayerShellLayoutChanged);
         refresh_keyboard_focus(state, dispatcher);
     }
@@ -1432,7 +1395,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -1507,10 +1469,47 @@ mod tests {
         (&*event.into_bytes()).try_into().unwrap()
     }
 
+    fn fake_surface(raw: usize) -> Resolved<WlSurfaceId> {
+        Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(raw as u32), ObjectId::from(raw))
+    }
+
+    fn fake_layer_manager(raw: usize) -> Resolved<ZwlrLayerShellV1Id> {
+        Resolved::new(
+            ClientId::from_raw(3),
+            ZwlrLayerShellV1Id::from(raw as u32),
+            ObjectId::from(raw),
+        )
+    }
+
+    fn fake_layer_surface_handle(surface_id: u32, object_raw: usize) -> Resolved<WlSurfaceId> {
+        Resolved::new(
+            ClientId::from_raw(3),
+            WlSurfaceId::from(surface_id),
+            ObjectId::from(object_raw),
+        )
+    }
+
+    fn make_test_layer_surface(
+        id: ZwlrLayerSurfaceV1Id,
+        version: u32,
+        requested_output_id: Option<OutputId>,
+        layer: LayerShellLayer,
+        namespace: &str,
+    ) -> ZwlrLayerSurfaceV1 {
+        ZwlrLayerSurfaceV1::new(
+            id,
+            fake_layer_manager(2),
+            version,
+            fake_layer_surface_handle(4, 5),
+            requested_output_id,
+            layer,
+            namespace.to_string(),
+        )
+    }
+
     fn snapshot_with_zone(zone: i32, margin: LayerMargins) -> LayerSnapshot {
         LayerSnapshot {
-            surface_object_id: ObjectId::from(1usize),
-            client_id: ClientId::from_raw(1),
+            root_surface: fake_surface(1),
             root_index: 0,
             output_id: OutputId::from(0usize),
             mapped: true,
@@ -1532,8 +1531,7 @@ mod tests {
         exclusive_zone: i32,
     ) -> LayerSnapshot {
         LayerSnapshot {
-            surface_object_id: ObjectId::from(surface_object_id),
-            client_id: ClientId::from_raw(1),
+            root_surface: fake_surface(surface_object_id),
             root_index,
             output_id: OutputId::from(0usize),
             mapped: true,
@@ -1593,8 +1591,8 @@ mod tests {
             vec![top_panel_snapshot(1, 0, 10), top_panel_snapshot(2, 1, 10)],
         );
 
-        assert_eq!(output_layout.placements[&ObjectId::from(1usize)].rect.y, 0);
-        assert_eq!(output_layout.placements[&ObjectId::from(2usize)].rect.y, 10);
+        assert_eq!(output_layout.placements[&fake_surface(1)].rect.y, 0);
+        assert_eq!(output_layout.placements[&fake_surface(2)].rect.y, 10);
         assert_eq!(output_layout.usable, RectI { x: 0, y: 20, width: 100, height: 80 });
     }
 
@@ -1605,8 +1603,8 @@ mod tests {
             vec![top_panel_snapshot(1, 0, 0), top_panel_snapshot(2, 1, 10)],
         );
 
-        assert_eq!(output_layout.placements[&ObjectId::from(2usize)].rect.y, 0);
-        assert_eq!(output_layout.placements[&ObjectId::from(1usize)].rect.y, 10);
+        assert_eq!(output_layout.placements[&fake_surface(2)].rect.y, 0);
+        assert_eq!(output_layout.placements[&fake_surface(1)].rect.y, 10);
         assert_eq!(output_layout.usable, RectI { x: 0, y: 10, width: 100, height: 90 });
     }
 
@@ -1618,16 +1616,12 @@ mod tests {
 
     #[test]
     fn reset_after_unmap_keeps_pending_configures() {
-        let mut layer_surface = ZwlrLayerSurfaceV1::new(
+        let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
-            ZwlrLayerShellV1Id::from(2u32),
-            ClientId::from_raw(3),
             5,
-            WlSurfaceId::from(4u32),
-            ObjectId::from(5usize),
             None,
             LayerShellLayer::Top,
-            "panel".to_string(),
+            "panel",
         );
         layer_surface.pending_configures.push_back(LayerConfigure {
             serial: 7,
@@ -1649,16 +1643,12 @@ mod tests {
 
     #[test]
     fn send_closed_makes_surface_inert() {
-        let mut layer_surface = ZwlrLayerSurfaceV1::new(
+        let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
-            ZwlrLayerShellV1Id::from(2u32),
-            ClientId::from_raw(3),
             5,
-            WlSurfaceId::from(4u32),
-            ObjectId::from(5usize),
             Some(OutputId::from(6usize)),
             LayerShellLayer::Overlay,
-            "lock".to_string(),
+            "lock",
         );
         layer_surface.pending_configures.push_back(LayerConfigure {
             serial: 11,
@@ -1689,16 +1679,12 @@ mod tests {
         let mut state = make_state();
         let _active_output = state.insert_output(make_output(1, 0, 0, 1920, 1080));
         let missing_output = OutputId::from(99usize);
-        let layer_surface = ZwlrLayerSurfaceV1::new(
+        let layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
-            ZwlrLayerShellV1Id::from(2u32),
-            ClientId::from_raw(3),
             5,
-            WlSurfaceId::from(4u32),
-            ObjectId::from(5usize),
             Some(missing_output),
             LayerShellLayer::Top,
-            "panel".to_string(),
+            "panel",
         );
 
         assert_eq!(layer_surface.resolved_output_id(&state), None);
@@ -1706,16 +1692,12 @@ mod tests {
 
     #[test]
     fn focus_refresh_is_not_needed_for_unmapped_pending_state_changes() {
-        let layer_surface = ZwlrLayerSurfaceV1::new(
+        let layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
-            ZwlrLayerShellV1Id::from(2u32),
-            ClientId::from_raw(3),
             5,
-            WlSurfaceId::from(4u32),
-            ObjectId::from(5usize),
             None,
             LayerShellLayer::Bottom,
-            "panel".to_string(),
+            "panel",
         );
 
         let needs_refresh = should_refresh_focus_after_commit(
@@ -1730,16 +1712,12 @@ mod tests {
 
     #[test]
     fn focus_refresh_is_needed_when_layer_surface_maps() {
-        let mut layer_surface = ZwlrLayerSurfaceV1::new(
+        let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
-            ZwlrLayerShellV1Id::from(2u32),
-            ClientId::from_raw(3),
             5,
-            WlSurfaceId::from(4u32),
-            ObjectId::from(5usize),
             None,
             LayerShellLayer::Bottom,
-            "panel".to_string(),
+            "panel",
         );
         layer_surface.mapped = true;
 
@@ -1755,16 +1733,12 @@ mod tests {
 
     #[test]
     fn focus_refresh_is_needed_for_mapped_interactivity_changes() {
-        let mut layer_surface = ZwlrLayerSurfaceV1::new(
+        let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
-            ZwlrLayerShellV1Id::from(2u32),
-            ClientId::from_raw(3),
             5,
-            WlSurfaceId::from(4u32),
-            ObjectId::from(5usize),
             None,
             LayerShellLayer::Bottom,
-            "panel".to_string(),
+            "panel",
         );
         layer_surface.mapped = true;
         layer_surface.current.keyboard_interactivity =
@@ -1782,16 +1756,12 @@ mod tests {
 
     #[test]
     fn focus_refresh_is_needed_for_mapped_layer_changes() {
-        let mut layer_surface = ZwlrLayerSurfaceV1::new(
+        let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
-            ZwlrLayerShellV1Id::from(2u32),
-            ClientId::from_raw(3),
             5,
-            WlSurfaceId::from(4u32),
-            ObjectId::from(5usize),
             None,
             LayerShellLayer::Bottom,
-            "panel".to_string(),
+            "panel",
         );
         layer_surface.mapped = true;
         layer_surface.current.layer = LayerShellLayer::Overlay;
@@ -1809,16 +1779,12 @@ mod tests {
     #[test]
     fn set_layer_reports_error_for_version_one_objects() {
         let mut state = make_state();
-        let mut layer_surface = ZwlrLayerSurfaceV1::new(
+        let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
-            ZwlrLayerShellV1Id::from(2u32),
-            ClientId::from_raw(3),
             1,
-            WlSurfaceId::from(4u32),
-            ObjectId::from(5usize),
             None,
             LayerShellLayer::Bottom,
-            "panel".to_string(),
+            "panel",
         );
         let mut client = Client::new_for_tests(ClientId::from_raw(3));
         let mut dispatcher = Dispatcher::default();
@@ -1849,16 +1815,12 @@ mod tests {
     #[test]
     fn set_anchor_rejects_invalid_bits_immediately() {
         let mut state = make_state();
-        let mut layer_surface = ZwlrLayerSurfaceV1::new(
+        let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
-            ZwlrLayerShellV1Id::from(2u32),
-            ClientId::from_raw(3),
             5,
-            WlSurfaceId::from(4u32),
-            ObjectId::from(5usize),
             None,
             LayerShellLayer::Bottom,
-            "panel".to_string(),
+            "panel",
         );
         let mut client = Client::new_for_tests(ClientId::from_raw(3));
         let mut dispatcher = Dispatcher::default();
@@ -1885,16 +1847,12 @@ mod tests {
     #[test]
     fn set_keyboard_interactivity_rejects_invalid_values_immediately() {
         let mut state = make_state();
-        let mut layer_surface = ZwlrLayerSurfaceV1::new(
+        let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
-            ZwlrLayerShellV1Id::from(2u32),
-            ClientId::from_raw(3),
             5,
-            WlSurfaceId::from(4u32),
-            ObjectId::from(5usize),
             None,
             LayerShellLayer::Bottom,
-            "panel".to_string(),
+            "panel",
         );
         let mut client = Client::new_for_tests(ClientId::from_raw(3));
         let mut dispatcher = Dispatcher::default();
@@ -1937,16 +1895,12 @@ mod tests {
     #[test]
     fn set_exclusive_edge_reports_invalid_method_before_version_five() {
         let mut state = make_state();
-        let mut layer_surface = ZwlrLayerSurfaceV1::new(
+        let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
-            ZwlrLayerShellV1Id::from(2u32),
-            ClientId::from_raw(3),
             4,
-            WlSurfaceId::from(4u32),
-            ObjectId::from(5usize),
             None,
             LayerShellLayer::Bottom,
-            "panel".to_string(),
+            "panel",
         );
         let mut client = Client::new_for_tests(ClientId::from_raw(3));
         let mut dispatcher = Dispatcher::default();
@@ -1977,17 +1931,7 @@ mod tests {
         let layer_surface_id = ZwlrLayerSurfaceV1Id::from(1u32);
         client.insert_object(
             &mut state,
-            ZwlrLayerSurfaceV1::new(
-                layer_surface_id,
-                ZwlrLayerShellV1Id::from(2u32),
-                ClientId::from_raw(3),
-                5,
-                WlSurfaceId::from(4u32),
-                ObjectId::from(5usize),
-                None,
-                LayerShellLayer::Top,
-                "panel".to_string(),
-            ),
+            make_test_layer_surface(layer_surface_id, 5, None, LayerShellLayer::Top, "panel"),
         );
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -2011,17 +1955,7 @@ mod tests {
         let layer_surface_id = ZwlrLayerSurfaceV1Id::from(1u32);
         client.insert_object(
             &mut state,
-            ZwlrLayerSurfaceV1::new(
-                layer_surface_id,
-                ZwlrLayerShellV1Id::from(2u32),
-                ClientId::from_raw(3),
-                5,
-                WlSurfaceId::from(4u32),
-                ObjectId::from(5usize),
-                None,
-                LayerShellLayer::Top,
-                "panel".to_string(),
-            ),
+            make_test_layer_surface(layer_surface_id, 5, None, LayerShellLayer::Top, "panel"),
         );
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);

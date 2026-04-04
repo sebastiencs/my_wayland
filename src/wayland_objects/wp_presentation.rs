@@ -1,7 +1,7 @@
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_display, wp_presentation, Constants, NewId, WaylandId, WlSurfaceId,
         WpPresentationFeedbackId, WpPresentationId,
@@ -72,7 +72,7 @@ impl Object for WpPresentation {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
             Feedback { surface, callback } => {
-                self.on_feedback(client, state, dispatcher, surface, callback);
+                self.on_feedback(client, state, dispatcher, surface, callback)?;
             }
         }
         Ok(())
@@ -92,20 +92,15 @@ impl WpPresentation {
         dispatcher: &mut ClientDispatcher,
         surface: WlSurfaceId,
         callback: WpPresentationFeedbackId,
-    ) {
-        if !client.object_is(surface, state) {
-            client.protocol_violation_disconnect(
-                dispatcher,
-                self.id.into(),
-                wl_display::Error::InvalidObject as u32,
-                "wp_presentation.feedback requires a live wl_surface",
-            );
-            return;
-        }
+    ) -> RequestResult {
+        let surface = client.resolve_or_disconnect(surface, state, dispatcher)?;
 
         client.insert_object(state, WpPresentationFeedback::new(callback, self.version));
+        let feedback = client.resolve(callback, state).unwrap();
 
-        let mut surface = client.grab_object(surface, state);
-        surface.queue_presentation_feedback(callback, self.version, None);
+        let mut surface = surface.grab(state);
+        surface.queue_presentation_feedback(feedback, self.version, None);
+
+        Ok(())
     }
 }

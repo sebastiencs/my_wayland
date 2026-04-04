@@ -11,14 +11,14 @@ use {
 };
 
 use crate::{
-    clients::{Client, ClientDispatcher, ClientId},
+    clients::{ClientDispatcher, Resolved},
     drm::{schedule_active_output, schedule_outputs_for_rect, DrmFd},
     egl::EglContext,
     io_uring::{model::IoUringAction, ring::RingId},
-    protocol_generated::WlBufferId,
+    protocol_generated::{WlBufferId, WlSurfaceId},
     runner::{Dispatcher, Model, Redispatcher},
-    state::{ObjectId, State},
-    wayland_objects::{wl_buffer::WlBuffer, wl_surface::WlSurface},
+    state::State,
+    wayland_objects::wl_buffer::WlBuffer,
 };
 
 #[derive(Debug)]
@@ -91,22 +91,18 @@ pub struct SurfaceSyncState {
 
 #[derive(Debug, Clone)]
 pub struct RetiredBufferCandidate {
-    pub buffer_object_id: ObjectId,
+    pub buffer: Resolved<WlBufferId>,
     pub sync: SurfaceSyncState,
 }
 
 #[derive(Debug, Clone)]
 pub struct DeferredRelease {
-    pub buffer_object_id: ObjectId,
+    pub buffer: Resolved<WlBufferId>,
     pub plain_release: Option<PlainRelease>,
     pub release: ReleasePoint,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct PlainRelease {
-    pub client_id: ClientId,
-    pub buffer_id: WlBufferId,
-}
+pub type PlainRelease = Resolved<WlBufferId>;
 
 impl AcquireSync {
     pub fn from_sync_file(fd: OwnedFd) -> Self {
@@ -244,11 +240,11 @@ impl DeferredRelease {
     pub fn from_candidate(state: &State, candidate: RetiredBufferCandidate) -> Self {
         let plain_release = state
             .objects
-            .try_ref_object::<WlBuffer>(candidate.buffer_object_id)
-            .and_then(|buffer| buffer.plain_release_target());
+            .try_ref_object::<WlBuffer>(candidate.buffer.object_id())
+            .and_then(|buffer| buffer.plain_release_target(candidate.buffer.object_id()));
 
         Self {
-            buffer_object_id: candidate.buffer_object_id,
+            buffer: candidate.buffer,
             plain_release,
             release: candidate.sync.release,
         }
@@ -257,9 +253,11 @@ impl DeferredRelease {
     pub fn resolve(self, state: &mut State, dispatcher: &mut Dispatcher) {
         self.release.signal();
 
-        if let Some(PlainRelease { client_id, buffer_id }) = self.plain_release {
-            dispatcher
-                .dispatch_to(client_id, crate::clients::ClientAction::ReleaseBuffer { buffer_id });
+        if let Some(buffer) = self.plain_release {
+            dispatcher.dispatch_to(
+                buffer.client_id(),
+                crate::clients::ClientAction::ReleaseBuffer { buffer_id: buffer.wayland_id() },
+            );
         }
 
         let _ = state;
@@ -320,8 +318,7 @@ pub fn fresh_waiter_id() -> AcquireReadyWaiterId {
 
 pub struct AcquireReadyWaiter {
     waiter_id: AcquireReadyWaiterId,
-    client_id: ClientId,
-    surface_object_id: ObjectId,
+    surface: Resolved<WlSurfaceId>,
     poll_fd: OwnedFd,
     read_op_id: Option<RingId>,
 }
@@ -367,10 +364,7 @@ impl Model for AcquireReadyWaiter {
             AcquireReadyWaiterAction::Ready => {
                 self.read_op_id = None;
                 let became_active = {
-                    let Some(mut surface) = state
-                        .objects
-                        .try_grab_object::<WlSurface>(self.surface_object_id)
-                    else {
+                    let Some(mut surface) = self.surface.try_grab(state) else {
                         dispatcher.stop_model(self.waiter_id);
                         return Ok(());
                     };
@@ -379,15 +373,13 @@ impl Model for AcquireReadyWaiter {
 
                 if became_active {
                     log::debug!(
-                        "surface acquire waiter fired: waiter_id={:?} surface_object_id={:?}",
+                        "surface acquire waiter fired: waiter_id={:?} surface={:?}",
                         self.waiter_id,
-                        self.surface_object_id
+                        self.surface
                     );
-                    if let Some(bounds) = state
-                        .objects
-                        .try_ref_object::<crate::wayland_objects::wl_surface::WlSurface>(
-                            self.surface_object_id,
-                        )
+                    if let Some(bounds) = self
+                        .surface
+                        .try_ref(state)
                         .and_then(|surface| surface.global_logical_bounds())
                     {
                         schedule_outputs_for_rect(state, bounds, dispatcher);
@@ -400,9 +392,9 @@ impl Model for AcquireReadyWaiter {
             AcquireReadyWaiterAction::Failed => {
                 self.read_op_id = None;
                 dispatcher.dispatch_to(
-                    self.client_id,
+                    self.surface.client_id(),
                     crate::clients::ClientAction::CancelBlockedSurface {
-                        surface_object_id: self.surface_object_id,
+                        surface: self.surface,
                         waiter_id: self.waiter_id,
                     },
                 );
@@ -422,35 +414,26 @@ impl Model for AcquireReadyWaiter {
 impl AcquireReadyWaiter {
     pub fn new(
         waiter_id: AcquireReadyWaiterId,
-        client_id: ClientId,
-        surface_object_id: ObjectId,
+        surface: Resolved<WlSurfaceId>,
         poll_fd: OwnedFd,
     ) -> Self {
-        Self {
-            waiter_id,
-            client_id,
-            surface_object_id,
-            poll_fd,
-            read_op_id: None,
-        }
+        Self { waiter_id, surface, poll_fd, read_op_id: None }
     }
 }
 
 pub fn resolve_unused_candidate_immediately(
-    client: &mut Client,
     state: &mut State,
     dispatcher: &mut ClientDispatcher,
     candidate: RetiredBufferCandidate,
 ) {
     candidate.sync.release.signal();
-    let Some(buffer) = state
-        .objects
-        .try_ref_object::<WlBuffer>(candidate.buffer_object_id)
-    else {
+    let Some(buffer) = candidate.buffer.try_ref_mut(state) else {
         return;
     };
-    if let Some(PlainRelease { buffer_id, .. }) = buffer.plain_release_target() {
-        let buffer = client.ref_object_mut(buffer_id, state);
+    if buffer
+        .plain_release_target(candidate.buffer.object_id())
+        .is_some()
+    {
         buffer.send_release(dispatcher);
     }
 }

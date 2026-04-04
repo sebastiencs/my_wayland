@@ -52,12 +52,26 @@ pub mod zxdg_output_v1;
 pub mod zxdg_toplevel_decoration_v1;
 
 macro_rules! fake_obj {
-    ($({$module:ident, $name:ident },)+) => ($(
+    ($({$module:ident, $name:ident},)+) => ($(
         pub mod $module {
+            use crate::clients::{Client, ClientDispatcher, RawRequest};
+            use crate::object::{Object, RequestResult};
             use crate::protocol_generated::WaylandId;
+            use crate::state::State;
             pub struct $name;
-            impl $name {
-                pub fn id(&self) -> WaylandId { todo!() }
+            impl Object for $name {
+                fn id(&self) -> WaylandId {
+                    todo!()
+                }
+                fn on(
+                    &mut self,
+                    _client: &mut Client,
+                    _state: &mut State,
+                    _request: RawRequest,
+                    _dispatcher: &mut ClientDispatcher,
+                ) -> RequestResult {
+                    todo!()
+                }
             }
         }
     )+)
@@ -103,8 +117,7 @@ fake_obj! {
     { xwayland_shell_v1, XwaylandShellV1 },
     { ext_session_lock_surface_v1, ExtSessionLockSurfaceV1 },
     { xwayland_surface_v1, XwaylandSurfaceV1 },
-    { xdg_toplevel_drag_manager_v1, XdgToplevelDragManagerV1 },
-    { xdg_toplevel_drag_v1, XdgToplevelDragV1 },
+    // xdg-toplevel-drag not in protocol_generated
     { zwp_linux_buffer_release_v1, ZwpLinuxBufferReleaseV1 },
     { zwp_linux_dmabuf_feedback_v1, ZwpLinuxDmabufFeedbackV1 },
     { zwp_linux_explicit_synchronization_v1, ZwpLinuxExplicitSynchronizationV1 },

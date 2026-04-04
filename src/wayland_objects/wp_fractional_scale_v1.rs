@@ -1,20 +1,20 @@
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser},
-    protocol_generated::{wp_fractional_scale_v1, WaylandId, WpFractionalScaleV1Id},
-    state::{ObjectId, State},
+    protocol_generated::{wp_fractional_scale_v1, WaylandId, WlSurfaceId, WpFractionalScaleV1Id},
+    state::State,
     wayland_objects::{wl_display::WlDisplay, wl_surface::WlSurface},
 };
 
 #[derive(Debug)]
 pub struct WpFractionalScaleV1 {
     id: WpFractionalScaleV1Id,
-    surface_object_id: ObjectId,
+    surface: Resolved<WlSurfaceId>,
 }
 
 impl WpFractionalScaleV1 {
-    pub fn new(id: WpFractionalScaleV1Id, surface_object_id: ObjectId) -> Self {
-        Self { id, surface_object_id }
+    pub fn new(id: WpFractionalScaleV1Id, surface: Resolved<WlSurfaceId>) -> Self {
+        Self { id, surface }
     }
 
     pub fn send_preferred_scale(&self, scale: u32, dispatcher: &mut ClientDispatcher) {
@@ -38,11 +38,9 @@ impl Object for WpFractionalScaleV1 {
 
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
-                if let Some(mut surface) = state
-                    .objects
-                    .try_grab_object::<WlSurface>(self.surface_object_id)
-                {
-                    surface.clear_fractional_scale_object(client.object_id(self.id));
+                let object = client.resolve(self.id, state).unwrap();
+                if let Some(mut surface) = self.surface.try_grab(state) {
+                    surface.clear_fractional_scale_object(object);
                 }
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
@@ -56,13 +54,10 @@ impl Object for WpFractionalScaleV1 {
         state: &mut State,
         _dispatcher: &mut ClientDispatcher,
     ) {
-        let Some(object_id) = client.try_object_id(self.id, state) else {
+        let Some(object_id) = client.resolve(self.id, state) else {
             return;
         };
-        if let Some(mut surface) = state
-            .objects
-            .try_grab_object::<WlSurface>(self.surface_object_id)
-        {
+        if let Some(mut surface) = self.surface.try_grab(state) {
             surface.clear_fractional_scale_object(object_id);
         }
     }

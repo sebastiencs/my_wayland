@@ -9,10 +9,11 @@ use crate::{
     protocol_generated::{
         wl_pointer, wl_surface, wp_fractional_scale_v1, wp_linux_drm_syncobj_surface_v1,
         wp_viewport, xdg_wm_base, WaylandId, WlBufferId, WlCallbackId, WlOutputId, WlRegionId,
-        WlSubsurfaceId, WlSurfaceId, WpPresentationFeedbackId, XdgSurfaceId, ZwlrLayerSurfaceV1Id,
+        WlSubsurfaceId, WlSurfaceId, WpFractionalScaleV1Id, WpLinuxDrmSyncobjSurfaceV1Id,
+        WpPresentationFeedbackId, WpViewportId, XdgSurfaceId, ZwlrLayerSurfaceV1Id,
     },
     region::{DamageRegion, RectI, RegionValue},
-    state::{FractionalScale, ObjectId, OutputId, State},
+    state::{FractionalScale, IndexMapKey, ObjectId, OutputId, State},
     sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
     transform::{self, BufferTransform, SizeI, SurfaceViewport},
     wayland_objects::{
@@ -43,7 +44,7 @@ fn monotonic_time_msec() -> u32 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SurfacePresentationFeedback {
-    pub id: WpPresentationFeedbackId,
+    pub feedback: Resolved<WpPresentationFeedbackId>,
     pub version: u32,
     pub output_id: Option<OutputId>,
 }
@@ -60,14 +61,14 @@ pub enum Role {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShellSurfaceObject {
-    XdgSurface(XdgSurfaceId),
-    LayerSurface(ZwlrLayerSurfaceV1Id),
+    XdgSurface(Resolved<XdgSurfaceId>),
+    LayerSurface(Resolved<ZwlrLayerSurfaceV1Id>),
 }
 
 #[derive(Clone, Debug)]
 struct CachedCommit {
     payload: SurfaceCommitPayload,
-    frame_callbacks: Vec<WlCallbackId>,
+    frame_callbacks: Vec<Resolved<WlCallbackId>>,
     presentation_feedbacks: Vec<SurfacePresentationFeedback>,
 }
 
@@ -79,7 +80,7 @@ enum SubsurfaceSyncMode {
 
 #[derive(Clone, Debug)]
 struct SubsurfaceState {
-    object_id: WlSubsurfaceId,
+    object: Resolved<WlSubsurfaceId>,
     parent_surface: Resolved<WlSurfaceId>,
     pending_position: (i32, i32),
     current_position: (i32, i32),
@@ -89,7 +90,7 @@ struct SubsurfaceState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StackEntry {
     Parent,
-    Child(ObjectId),
+    Child(Resolved<WlSurfaceId>),
 }
 
 #[derive(Clone, Debug)]
@@ -111,7 +112,7 @@ pub struct WlSurface {
     client_id: ClientId,
     role: Role,
     shell_surface: Option<ShellSurfaceObject>,
-    popup_parent_layer_surface: Option<ZwlrLayerSurfaceV1Id>,
+    popup_parent_layer_surface: Option<Resolved<ZwlrLayerSurfaceV1Id>>,
     version: u32,
     /// back buffer
     pending: Pending,
@@ -119,12 +120,12 @@ pub struct WlSurface {
     on_screen: OnScreen,
     blocked: Option<BlockedSurfaceState>,
     blocked_waiter_id: Option<crate::sync::AcquireReadyWaiterId>,
-    syncobj_surface_object: Option<crate::protocol_generated::WpLinuxDrmSyncobjSurfaceV1Id>,
-    fractional_scale_object: Option<ObjectId>,
-    viewport_object: Option<crate::protocol_generated::WpViewportId>,
+    syncobj_surface_object: Option<Resolved<WpLinuxDrmSyncobjSurfaceV1Id>>,
+    fractional_scale_object: Option<Resolved<WpFractionalScaleV1Id>>,
+    viewport_object: Option<Resolved<WpViewportId>>,
     retired_buffers: Vec<RetiredBufferCandidate>,
     /// `wl_surface.frame` callbacks to complete on the next `commit`.
-    pending_frame_callbacks: Vec<WlCallbackId>,
+    pending_frame_callbacks: Vec<Resolved<WlCallbackId>>,
     pending_presentation_feedbacks: Vec<SurfacePresentationFeedback>,
     cached_commit: Option<CachedCommit>,
     subsurface: Option<SubsurfaceState>,
@@ -139,7 +140,7 @@ pub struct WlSurface {
 #[derive(Clone, Debug)]
 struct Pending {
     /// `None` = no attach this commit; `Some(None)` = detach; `Some(Some(id))` = attach.
-    buffer: Option<Option<ObjectId>>,
+    buffer: Option<Option<Resolved<WlBufferId>>>,
     offset: (i32, i32),
     sync: SurfaceSyncState,
     buffer_transform: BufferTransform,
@@ -170,7 +171,7 @@ impl Default for Pending {
 
 #[derive(Clone, Debug)]
 struct SurfaceCommitPayload {
-    buffer: Option<Option<ObjectId>>,
+    buffer: Option<Option<Resolved<WlBufferId>>>,
     offset: (i32, i32),
     sync: SurfaceSyncState,
     buffer_transform: BufferTransform,
@@ -184,7 +185,7 @@ struct SurfaceCommitPayload {
 
 #[derive(Clone, Debug)]
 struct OnScreen {
-    buffer_object_id: Option<ObjectId>,
+    buffer_object_id: Option<Resolved<WlBufferId>>,
     content_revision: u64,
     x: i32,
     y: i32,
@@ -195,7 +196,7 @@ struct OnScreen {
     logical_size: Option<SizeI>,
     sample_transform: transform::Mat3,
     damage: DamageRegion,
-    frame_callbacks: Vec<WlCallbackId>,
+    frame_callbacks: Vec<Resolved<WlCallbackId>>,
     presentation_feedbacks: Vec<SurfacePresentationFeedback>,
     input_region: RegionValue,
     opaque_region: RegionValue,
@@ -225,9 +226,8 @@ impl Default for OnScreen {
 
 #[derive(Clone, Debug)]
 pub struct SurfaceRenderState {
-    pub surface_client_id: ClientId,
-    pub surface_id: WlSurfaceId,
-    pub buffer_object_id: ObjectId,
+    pub surface: Option<Resolved<WlSurfaceId>>,
+    pub buffer: Resolved<WlBufferId>,
     pub x: i32,
     pub y: i32,
     pub width: i32,
@@ -241,14 +241,14 @@ pub struct SurfaceRenderState {
 
 #[derive(Clone, Debug)]
 struct BlockedSurfaceState {
-    buffer_object_id: ObjectId,
+    buffer_object_id: Resolved<WlBufferId>,
     x: i32,
     y: i32,
     width: i32,
     height: i32,
     tex_transform: transform::Mat3,
     sync: SurfaceSyncState,
-    frame_callbacks: Vec<WlCallbackId>,
+    frame_callbacks: Vec<Resolved<WlCallbackId>>,
     presentation_feedbacks: Vec<SurfacePresentationFeedback>,
     buffer_transform: BufferTransform,
     buffer_scale: i32,
@@ -289,7 +289,10 @@ impl WlSurface {
             .expect("union of non-empty rects should stay valid")
     }
 
-    fn local_surface_tree_bounds_from_ref(state: &State, surface: &Self) -> Option<RectI> {
+    pub(crate) fn local_surface_tree_bounds_from_ref(
+        state: &State,
+        surface: &Self,
+    ) -> Option<RectI> {
         let mut bounds = surface.logical_size().map(|size| RectI {
             x: 0,
             y: 0,
@@ -300,19 +303,16 @@ impl WlSurface {
             .current_stack()
             .iter()
             .filter_map(|entry| {
-                let StackEntry::Child(child_surface_object_id) = *entry else {
+                let StackEntry::Child(child_surface_id) = *entry else {
                     return None;
                 };
-                let child_surface = state
-                    .objects
-                    .try_ref_object::<Self>(child_surface_object_id)?;
-                Some((child_surface_object_id, child_surface.current_subsurface_position()))
+                let child_surface = child_surface_id.try_ref(state)?;
+                Some((child_surface_id, child_surface.current_subsurface_position()))
             })
             .collect::<Vec<_>>();
 
-        for (child_surface_object_id, (dx, dy)) in child_entries {
-            let Some(child_bounds) =
-                Self::local_surface_tree_bounds(state, child_surface_object_id)
+        for (child_surface_id, (dx, dy)) in child_entries {
+            let Some(child_bounds) = Self::local_surface_tree_bounds(state, child_surface_id)
             else {
                 continue;
             };
@@ -326,16 +326,11 @@ impl WlSurface {
         bounds
     }
 
-    pub fn local_surface_tree_bounds_with_surface(
+    pub fn local_surface_tree_bounds(
         state: &State,
-        _surface_object_id: ObjectId,
-        surface: &Self,
+        surface: Resolved<WlSurfaceId>,
     ) -> Option<RectI> {
-        Self::local_surface_tree_bounds_from_ref(state, surface)
-    }
-
-    pub fn local_surface_tree_bounds(state: &State, surface_object_id: ObjectId) -> Option<RectI> {
-        let surface = state.objects.try_ref_object::<Self>(surface_object_id)?;
+        let surface = surface.try_ref(state)?;
         Self::local_surface_tree_bounds_from_ref(state, surface)
     }
 
@@ -370,7 +365,7 @@ impl WlSurface {
 
     pub fn set_syncobj_surface_object(
         &mut self,
-        object: crate::protocol_generated::WpLinuxDrmSyncobjSurfaceV1Id,
+        object: Resolved<WpLinuxDrmSyncobjSurfaceV1Id>,
     ) -> Result<(), ()> {
         if self.syncobj_surface_object.is_some() {
             return Err(());
@@ -379,25 +374,25 @@ impl WlSurface {
         Ok(())
     }
 
-    pub fn clear_syncobj_surface_object(
-        &mut self,
-        object: crate::protocol_generated::WpLinuxDrmSyncobjSurfaceV1Id,
-    ) {
+    pub fn clear_syncobj_surface_object(&mut self, object: Resolved<WpLinuxDrmSyncobjSurfaceV1Id>) {
         if self.syncobj_surface_object == Some(object) {
             self.syncobj_surface_object = None;
         }
     }
 
-    pub fn set_fractional_scale_object(&mut self, object_id: ObjectId) -> Result<(), ()> {
+    pub fn set_fractional_scale_object(
+        &mut self,
+        object: Resolved<WpFractionalScaleV1Id>,
+    ) -> Result<(), ()> {
         if self.fractional_scale_object.is_some() {
             return Err(());
         }
-        self.fractional_scale_object = Some(object_id);
+        self.fractional_scale_object = Some(object);
         Ok(())
     }
 
-    pub fn clear_fractional_scale_object(&mut self, object_id: ObjectId) {
-        if self.fractional_scale_object == Some(object_id) {
+    pub fn clear_fractional_scale_object(&mut self, object: Resolved<WpFractionalScaleV1Id>) {
+        if self.fractional_scale_object == Some(object) {
             self.fractional_scale_object = None;
             self.preferred_fractional_scale_sent = None;
         }
@@ -411,8 +406,9 @@ impl WlSurface {
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        id: WaylandId,
+        id: impl Into<WaylandId>,
     ) {
+        let id = id.into();
         if client.object_id_for_wayland(id).is_some() {
             use crate::wayland_objects::wl_display::WlDisplay;
             client.delete_id(&WlDisplay::default(), state, dispatcher, id);
@@ -427,29 +423,20 @@ impl WlSurface {
     ) {
         if let Some(object_id) = self.fractional_scale_object.take() {
             self.preferred_fractional_scale_sent = None;
-            let fractional_id = state
-                .objects
-                .try_ref_object::<WpFractionalScaleV1>(object_id)
-                .map(|object| object.id());
-            if let Some(fractional_id) = fractional_id {
-                Self::delete_owned_object(client, state, dispatcher, fractional_id);
-            }
+            Self::delete_owned_object(client, state, dispatcher, object_id.wayland_id());
         }
 
         if let Some(viewport_id) = self.viewport_object.take() {
             self.pending.viewport = SurfaceViewport::default();
-            Self::delete_owned_object(client, state, dispatcher, viewport_id.into());
+            Self::delete_owned_object(client, state, dispatcher, viewport_id.wayland_id());
         }
 
         if let Some(syncobj_surface_id) = self.syncobj_surface_object.take() {
-            Self::delete_owned_object(client, state, dispatcher, syncobj_surface_id.into());
+            Self::delete_owned_object(client, state, dispatcher, syncobj_surface_id.wayland_id());
         }
     }
 
-    pub fn set_viewport_object(
-        &mut self,
-        object: crate::protocol_generated::WpViewportId,
-    ) -> Result<(), ()> {
+    pub fn set_viewport_object(&mut self, object: Resolved<WpViewportId>) -> Result<(), ()> {
         if self.viewport_object.is_some() {
             return Err(());
         }
@@ -457,7 +444,7 @@ impl WlSurface {
         Ok(())
     }
 
-    pub fn clear_viewport_object(&mut self, object: crate::protocol_generated::WpViewportId) {
+    pub fn clear_viewport_object(&mut self, object: Resolved<WpViewportId>) {
         if self.viewport_object == Some(object) {
             self.viewport_object = None;
             self.pending.viewport = SurfaceViewport::default();
@@ -492,22 +479,22 @@ impl WlSurface {
         self.has_pending_buffer_attach() || self.has_committed_buffer()
     }
 
-    pub fn xdg_surface_id(&self) -> Option<XdgSurfaceId> {
+    pub fn xdg_surface(&self) -> Option<Resolved<XdgSurfaceId>> {
         match self.shell_surface {
             Some(ShellSurfaceObject::XdgSurface(id)) => Some(id),
             _ => None,
         }
     }
 
-    pub fn layer_surface_id(&self) -> Option<ZwlrLayerSurfaceV1Id> {
+    pub fn layer_surface(&self) -> Option<Resolved<ZwlrLayerSurfaceV1Id>> {
         match self.shell_surface {
             Some(ShellSurfaceObject::LayerSurface(id)) => Some(id),
             _ => None,
         }
     }
 
-    pub fn clear_xdg_surface_role(&mut self, xdg_surface_id: XdgSurfaceId) {
-        if self.shell_surface == Some(ShellSurfaceObject::XdgSurface(xdg_surface_id)) {
+    pub fn clear_xdg_surface_role(&mut self, xdg_surface: Resolved<XdgSurfaceId>) {
+        if self.shell_surface == Some(ShellSurfaceObject::XdgSurface(xdg_surface)) {
             self.shell_surface = None;
             self.popup_parent_layer_surface = None;
             if self.role == Role::XdgSurface {
@@ -516,8 +503,8 @@ impl WlSurface {
         }
     }
 
-    pub fn clear_layer_surface_role(&mut self, layer_surface_id: ZwlrLayerSurfaceV1Id) {
-        if self.shell_surface == Some(ShellSurfaceObject::LayerSurface(layer_surface_id)) {
+    pub fn clear_layer_surface_role(&mut self, layer_surface: Resolved<ZwlrLayerSurfaceV1Id>) {
+        if self.shell_surface == Some(ShellSurfaceObject::LayerSurface(layer_surface)) {
             self.shell_surface = None;
             if self.role == Role::LayerSurface {
                 self.role = Role::None;
@@ -527,23 +514,23 @@ impl WlSurface {
 
     pub fn set_popup_parent_layer_surface(
         &mut self,
-        layer_surface_id: Option<ZwlrLayerSurfaceV1Id>,
+        layer_surface: Option<Resolved<ZwlrLayerSurfaceV1Id>>,
     ) {
-        self.popup_parent_layer_surface = layer_surface_id;
+        self.popup_parent_layer_surface = layer_surface;
     }
 
-    pub fn popup_parent_layer_surface_id(&self) -> Option<ZwlrLayerSurfaceV1Id> {
+    pub fn popup_parent_layer_surface(&self) -> Option<Resolved<ZwlrLayerSurfaceV1Id>> {
         self.popup_parent_layer_surface
     }
 
-    pub fn assign_subsurface(
+    pub(crate) fn assign_subsurface(
         &mut self,
-        object_id: WlSubsurfaceId,
+        object: Resolved<WlSubsurfaceId>,
         parent_surface: Resolved<WlSurfaceId>,
     ) {
         self.role = Role::Subsurface;
         self.subsurface = Some(SubsurfaceState {
-            object_id,
+            object,
             parent_surface,
             pending_position: (0, 0),
             current_position: (0, 0),
@@ -551,10 +538,8 @@ impl WlSurface {
         });
     }
 
-    pub fn subsurface_object(&self) -> Option<WlSubsurfaceId> {
-        self.subsurface
-            .as_ref()
-            .map(|subsurface| subsurface.object_id)
+    pub fn subsurface_object(&self) -> Option<Resolved<WlSubsurfaceId>> {
+        self.subsurface.as_ref().map(|subsurface| subsurface.object)
     }
 
     pub fn parent_surface(&self) -> Option<&Resolved<WlSurfaceId>> {
@@ -627,39 +612,47 @@ impl WlSurface {
         SurfaceOutputDelta { entered, left, active_output_changed }
     }
 
-    pub fn send_output_enter(&self, output: WlOutputId, dispatcher: &mut ClientDispatcher) {
+    pub fn send_output_enter(
+        &self,
+        output: Resolved<WlOutputId>,
+        dispatcher: &mut ClientDispatcher,
+    ) {
         log::debug!("sending wl_surface.enter surface={:?} output={:?}", self.id, output);
-        self.send_event(wl_surface::Event::Enter { output }, dispatcher);
+        self.send_event(wl_surface::Event::Enter { output: output.wayland_id() }, dispatcher);
     }
 
-    pub fn send_output_leave(&self, output: WlOutputId, dispatcher: &mut ClientDispatcher) {
+    pub fn send_output_leave(
+        &self,
+        output: Resolved<WlOutputId>,
+        dispatcher: &mut ClientDispatcher,
+    ) {
         log::debug!("sending wl_surface.leave surface={:?} output={:?}", self.id, output);
-        self.send_event(wl_surface::Event::Leave { output }, dispatcher);
+        self.send_event(wl_surface::Event::Leave { output: output.wayland_id() }, dispatcher);
     }
 
     pub fn preferred_output_id_for_object(
         &self,
         state: &State,
-        surface_object_id: ObjectId,
+        surface: Resolved<WlSurfaceId>,
     ) -> Option<OutputId> {
-        state.output_id_for_surface_object(surface_object_id, self)
+        state.output_id_for_surface_object(surface.object_id(), self)
     }
 
     pub fn configure_bounds_for_object(
         &self,
         state: &State,
-        surface_object_id: ObjectId,
+        surface: Resolved<WlSurfaceId>,
     ) -> Option<(i32, i32)> {
-        self.configure_bounds_with_snapshot_for_object(state, surface_object_id, None)
+        self.configure_bounds_with_snapshot_for_object(state, surface, None)
     }
 
     pub fn configure_bounds_with_snapshot_for_object(
         &self,
         state: &State,
-        surface_object_id: ObjectId,
+        surface: Resolved<WlSurfaceId>,
         snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
     ) -> Option<(i32, i32)> {
-        self.preferred_output_id_for_object(state, surface_object_id)
+        self.preferred_output_id_for_object(state, surface)
             .and_then(|output_id| output_usable_bounds_with_snapshot(state, output_id, snapshot))
             .map(|bounds| (bounds.width, bounds.height))
     }
@@ -667,10 +660,10 @@ impl WlSurface {
     pub fn send_preferred_buffer_state_for_object(
         &mut self,
         state: &State,
-        surface_object_id: ObjectId,
+        surface: Resolved<WlSurfaceId>,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let preferred_output_id = self.preferred_output_id_for_object(state, surface_object_id);
+        let preferred_output_id = self.preferred_output_id_for_object(state, surface);
         self.send_preferred_buffer_state_with_output(preferred_output_id, state, dispatcher);
     }
 
@@ -695,10 +688,10 @@ impl WlSurface {
     pub fn send_preferred_fractional_scale_for_object(
         &mut self,
         state: &State,
-        surface_object_id: ObjectId,
+        surface: Resolved<WlSurfaceId>,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let preferred_output_id = self.preferred_output_id_for_object(state, surface_object_id);
+        let preferred_output_id = self.preferred_output_id_for_object(state, surface);
         self.send_preferred_fractional_scale_with_output(preferred_output_id, state, dispatcher);
     }
 
@@ -729,10 +722,7 @@ impl WlSurface {
         if self.preferred_fractional_scale_sent == Some(scale) {
             return;
         }
-        let Some(object) = state
-            .objects
-            .try_ref_object::<WpFractionalScaleV1>(object_id)
-        else {
+        let Some(object) = object_id.try_ref(state) else {
             return;
         };
         object.send_preferred_scale(scale, dispatcher);
@@ -809,9 +799,9 @@ impl WlSurface {
         }
     }
 
-    pub fn add_pending_child(&mut self, child_surface_object_id: ObjectId) {
+    pub fn add_pending_child(&mut self, child_surface: Resolved<WlSurfaceId>) {
         self.ensure_pending_stack_parent();
-        Self::remove_child_from_stack(&mut self.tree.pending_stack, child_surface_object_id);
+        Self::remove_child_from_stack(&mut self.tree.pending_stack, child_surface);
         let parent_index = self
             .tree
             .pending_stack
@@ -820,31 +810,31 @@ impl WlSurface {
             .unwrap_or(self.tree.pending_stack.len());
         self.tree
             .pending_stack
-            .insert(parent_index, StackEntry::Child(child_surface_object_id));
+            .insert(parent_index, StackEntry::Child(child_surface));
     }
 
-    pub fn remove_child_from_tree(&mut self, child_surface_object_id: ObjectId) {
-        Self::remove_child_from_stack(&mut self.tree.pending_stack, child_surface_object_id);
-        Self::remove_child_from_stack(&mut self.tree.current_stack, child_surface_object_id);
+    pub fn remove_child_from_tree(&mut self, child_surface: Resolved<WlSurfaceId>) {
+        Self::remove_child_from_stack(&mut self.tree.pending_stack, child_surface);
+        Self::remove_child_from_stack(&mut self.tree.current_stack, child_surface);
         self.ensure_pending_stack_parent();
         self.ensure_current_stack_parent();
     }
 
     pub fn restack_child_relative(
         &mut self,
-        child_surface_object_id: ObjectId,
-        sibling_surface_object_id: Option<ObjectId>,
+        child_surface: Resolved<WlSurfaceId>,
+        sibling_surface: Option<Resolved<WlSurfaceId>>,
         place_above: bool,
     ) -> bool {
         self.ensure_pending_stack_parent();
-        let target = match sibling_surface_object_id {
-            Some(object_id) => StackEntry::Child(object_id),
+        let target = match sibling_surface {
+            Some(surface) => StackEntry::Child(surface),
             None => StackEntry::Parent,
         };
         if !self.tree.pending_stack.contains(&target) {
             return false;
         }
-        Self::remove_child_from_stack(&mut self.tree.pending_stack, child_surface_object_id);
+        Self::remove_child_from_stack(&mut self.tree.pending_stack, child_surface);
         let Some(index) = self
             .tree
             .pending_stack
@@ -856,7 +846,7 @@ impl WlSurface {
         let insert_at = if place_above { index + 1 } else { index };
         self.tree
             .pending_stack
-            .insert(insert_at, StackEntry::Child(child_surface_object_id));
+            .insert(insert_at, StackEntry::Child(child_surface));
         true
     }
 
@@ -894,7 +884,7 @@ impl WlSurface {
             );
             return;
         };
-        client.send_protocol_error(dispatcher, viewport.into(), code, message);
+        client.send_protocol_error(dispatcher, viewport.wayland_id().into(), code, message);
     }
 
     pub fn pending_sync_mut(&mut self) -> &mut SurfaceSyncState {
@@ -907,6 +897,10 @@ impl WlSurface {
 
     pub fn has_syncobj_surface_object(&self) -> bool {
         self.syncobj_surface_object.is_some()
+    }
+
+    pub fn has_viewport_object(&self) -> bool {
+        self.viewport_object.is_some()
     }
 
     fn send_syncobj_surface_error(
@@ -924,7 +918,7 @@ impl WlSurface {
             );
             return;
         };
-        client.send_protocol_error(dispatcher, syncobj_surface.into(), code, message);
+        client.send_protocol_error(dispatcher, syncobj_surface.wayland_id().into(), code, message);
     }
 
     pub fn set_role(
@@ -964,12 +958,12 @@ impl WlSurface {
         Ok(())
     }
 
-    pub fn set_xdg_surface_impl(&mut self, id: XdgSurfaceId) {
-        self.shell_surface = Some(ShellSurfaceObject::XdgSurface(id));
+    pub fn set_xdg_surface_impl(&mut self, xdg_surface: Resolved<XdgSurfaceId>) {
+        self.shell_surface = Some(ShellSurfaceObject::XdgSurface(xdg_surface));
     }
 
-    pub fn set_layer_surface_impl(&mut self, id: ZwlrLayerSurfaceV1Id) {
-        self.shell_surface = Some(ShellSurfaceObject::LayerSurface(id));
+    pub fn set_layer_surface_impl(&mut self, layer_surface: Resolved<ZwlrLayerSurfaceV1Id>) {
+        self.shell_surface = Some(ShellSurfaceObject::LayerSurface(layer_surface));
     }
 
     fn on_attach(
@@ -994,50 +988,35 @@ impl WlSurface {
             self.pending.offset = (x, y);
         }
 
-        let raw: u32 = buffer_id.into();
-        if raw == 0 {
+        let Some(buffer_id) = buffer_id.to_opt() else {
             self.pending.buffer = Some(None);
             return Ok(());
-        }
+        };
 
-        if !client.contains_object(buffer_id, state) {
-            client.protocol_violation_disconnect(
-                dispatcher,
-                self.id.into(),
-                wl_display::Error::InvalidObject as u32,
-                "invalid wl_buffer for wl_surface.attach",
-            );
-            return Ok(());
-        }
-
-        self.pending.buffer = Some(Some(client.object_id(buffer_id)));
+        let buffer = match client.resolve_or_disconnect(buffer_id, state, dispatcher) {
+            Ok(buffer) => buffer,
+            Err(_) => return Ok(()),
+        };
+        self.pending.buffer = Some(Some(buffer));
 
         Ok(())
     }
 
     fn snapshot_region_request(
-        &self,
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
         region_id: WlRegionId,
         null_region: RegionValue,
-        request_name: &'static str,
     ) -> Option<RegionValue> {
-        let raw: u32 = region_id.into();
-        if raw == 0 {
+        let Some(region_id) = region_id.to_opt() else {
             return Some(null_region);
-        }
-        if !client.object_is(region_id, state) {
-            client.protocol_violation_disconnect(
-                dispatcher,
-                self.id.into(),
-                wl_display::Error::InvalidObject as u32,
-                format!("invalid wl_region for {request_name}"),
-            );
-            return None;
-        }
-        Some(client.ref_object(region_id, state).snapshot())
+        };
+        let region = match client.resolve_or_disconnect(region_id, state, dispatcher) {
+            Ok(region) => region,
+            Err(_) => return None,
+        };
+        Some(region.rref(state).snapshot())
     }
 
     fn on_set_opaque_region(
@@ -1047,13 +1026,12 @@ impl WlSurface {
         region_id: WlRegionId,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let Some(region) = self.snapshot_region_request(
+        let Some(region) = Self::snapshot_region_request(
             client,
             state,
             dispatcher,
             region_id,
             RegionValue::empty(),
-            "wl_surface.set_opaque_region",
         ) else {
             return;
         };
@@ -1067,13 +1045,12 @@ impl WlSurface {
         region_id: WlRegionId,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let Some(region) = self.snapshot_region_request(
+        let Some(region) = Self::snapshot_region_request(
             client,
             state,
             dispatcher,
             region_id,
             RegionValue::infinite(),
-            "wl_surface.set_input_region",
         ) else {
             return;
         };
@@ -1092,19 +1069,19 @@ impl WlSurface {
         }
     }
 
-    fn remove_child_from_stack(stack: &mut Vec<StackEntry>, child_surface_object_id: ObjectId) {
-        stack.retain(|entry| *entry != StackEntry::Child(child_surface_object_id));
+    fn remove_child_from_stack(stack: &mut Vec<StackEntry>, child_surface: Resolved<WlSurfaceId>) {
+        stack.retain(|entry| *entry != StackEntry::Child(child_surface));
     }
 
-    fn child_surface_ids(&self) -> Vec<ObjectId> {
+    fn child_surface_ids(&self) -> Vec<Resolved<WlSurfaceId>> {
         let mut children = Vec::new();
         for stack in [&self.tree.pending_stack, &self.tree.current_stack] {
             for entry in stack {
-                let StackEntry::Child(child_surface_object_id) = *entry else {
+                let StackEntry::Child(child_surface_id) = *entry else {
                     continue;
                 };
-                if !children.contains(&child_surface_object_id) {
-                    children.push(child_surface_object_id);
+                if !children.contains(&child_surface_id) {
+                    children.push(child_surface_id);
                 }
             }
         }
@@ -1165,7 +1142,7 @@ impl WlSurface {
     fn cache_commit_payload(
         &mut self,
         payload: SurfaceCommitPayload,
-        frame_callbacks: Vec<WlCallbackId>,
+        frame_callbacks: Vec<Resolved<WlCallbackId>>,
         presentation_feedbacks: Vec<SurfacePresentationFeedback>,
     ) -> Vec<SurfacePresentationFeedback> {
         // Follow a Smithay-like "compose cached state until the apply root commits"
@@ -1233,7 +1210,7 @@ impl WlSurface {
         client: &Client,
         state: &State,
         dispatcher: &mut ClientDispatcher,
-        buffer: Option<Option<ObjectId>>,
+        buffer: Option<Option<Resolved<WlBufferId>>>,
         buffer_transform: BufferTransform,
         buffer_scale: i32,
         viewport: SurfaceViewport,
@@ -1241,7 +1218,7 @@ impl WlSurface {
         let Some(buffer_object_id) = buffer.flatten().or(self.on_screen.buffer_object_id) else {
             return true;
         };
-        let Some(buffer) = state.objects.try_ref_object::<WlBuffer>(buffer_object_id) else {
+        let Some(buffer) = buffer_object_id.try_ref(state) else {
             return true;
         };
 
@@ -1286,12 +1263,12 @@ impl WlSurface {
     fn mapped_state_for_buffer(
         &self,
         state: &State,
-        buffer_object_id: ObjectId,
+        buffer_object_id: Resolved<WlBufferId>,
         x: i32,
         y: i32,
         payload: &SurfaceCommitPayload,
     ) -> Option<BlockedSurfaceState> {
-        let buffer = state.objects.try_ref_object::<WlBuffer>(buffer_object_id)?;
+        let buffer = buffer_object_id.try_ref(state)?;
         let buffer_size = buffer.dimensions();
         let buffer_size = SizeI { width: buffer_size.0, height: buffer_size.1 };
         let logical_size = transform::derive_logical_size(
@@ -1327,11 +1304,11 @@ impl WlSurface {
     fn pending_damage_scaffold(
         &self,
         state: &State,
-        buffer_object_id: ObjectId,
+        buffer_object_id: Resolved<WlBufferId>,
         logical_size: SizeI,
         payload: &SurfaceCommitPayload,
     ) -> Option<DamageScaffold> {
-        let buffer = state.objects.try_ref_object::<WlBuffer>(buffer_object_id)?;
+        let buffer = buffer_object_id.try_ref(state)?;
         let raw_size = buffer.dimensions();
         let raw_size = SizeI { width: raw_size.0, height: raw_size.1 };
         let surface_to_buffer = payload
@@ -1388,7 +1365,7 @@ impl WlSurface {
         state: &State,
         payload: &SurfaceCommitPayload,
         logical_size: SizeI,
-        buffer_object_id: ObjectId,
+        buffer_object_id: Resolved<WlBufferId>,
     ) -> DamageRegion {
         let mut damage = DamageRegion::new();
         for rect in &payload.damage_surface {
@@ -1460,26 +1437,13 @@ impl WlSurface {
 
     pub(crate) fn apply_pending_tree_state(&mut self, state: &mut State) -> bool {
         let order_changed = self.tree.pending_stack != self.tree.current_stack;
-        let mut child_ids = Vec::new();
-        for stack in [&self.tree.pending_stack, &self.tree.current_stack] {
-            for entry in stack {
-                let StackEntry::Child(child_surface_object_id) = *entry else {
-                    continue;
-                };
-                if !child_ids.contains(&child_surface_object_id) {
-                    child_ids.push(child_surface_object_id);
-                }
-            }
-        }
+        let child_ids = self.child_surface_ids();
         self.tree.current_stack = self.tree.pending_stack.clone();
         self.ensure_current_stack_parent();
 
         let mut position_changed = false;
-        for child_surface_object_id in child_ids {
-            let Some(mut child_surface) = state
-                .objects
-                .try_grab_object::<WlSurface>(child_surface_object_id)
-            else {
+        for child_surface_id in child_ids {
+            let Some(mut child_surface) = child_surface_id.try_grab(state) else {
                 continue;
             };
             let old_position = child_surface.current_subsurface_position();
@@ -1497,7 +1461,7 @@ impl WlSurface {
 
     fn flush_frame_callbacks_list(
         &mut self,
-        callbacks: Vec<WlCallbackId>,
+        callbacks: Vec<Resolved<WlCallbackId>>,
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
@@ -1507,10 +1471,10 @@ impl WlSurface {
         let time_msec = monotonic_time_msec();
         for cb in callbacks {
             {
-                let callback = client.ref_object(cb, state);
+                let callback = cb.rref(state);
                 callback.done(time_msec, dispatcher);
             }
-            client.delete_id(&display, state, dispatcher, cb.into());
+            client.delete_id(&display, state, dispatcher, cb.wayland_id().into());
         }
     }
 
@@ -1568,8 +1532,7 @@ impl WlSurface {
                     commit_blocked = true;
                     if let Err(error) = self.install_blocked_surface(
                         next.clone(),
-                        self.client_id,
-                        client.object_id(self.id),
+                        Resolved::new(self.client_id, self.id, client.object_id(self.id)),
                         dispatcher,
                     ) {
                         log::warn!(
@@ -1696,14 +1659,11 @@ impl WlSurface {
         let mut changed = false;
         let stack = self.tree.current_stack.clone();
         for entry in stack {
-            let StackEntry::Child(child_surface_object_id) = entry else {
+            let StackEntry::Child(child_surface_id) = entry else {
                 continue;
             };
             let child_behaves_synchronized = {
-                let Some(child_surface) = state
-                    .objects
-                    .try_ref_object::<WlSurface>(child_surface_object_id)
-                else {
+                let Some(child_surface) = child_surface_id.try_ref(state) else {
                     continue;
                 };
                 surface_behaves_synchronized
@@ -1712,10 +1672,7 @@ impl WlSurface {
             if !child_behaves_synchronized {
                 continue;
             }
-            let Some(mut child_surface) = state
-                .objects
-                .try_grab_object::<WlSurface>(child_surface_object_id)
-            else {
+            let Some(mut child_surface) = child_surface_id.try_grab(state) else {
                 continue;
             };
             changed |= child_surface.apply_cached_commit(
@@ -1734,16 +1691,15 @@ impl WlSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
         payload: SurfaceCommitPayload,
-        frame_callbacks: Vec<WlCallbackId>,
+        frame_callbacks: Vec<Resolved<WlCallbackId>>,
         presentation_feedbacks: Vec<SurfacePresentationFeedback>,
         surface_behaves_synchronized: bool,
     ) -> (bool, bool) {
         let mut changed = self.apply_surface_payload(client, state, dispatcher, &payload);
-        changed |= state.seat.apply_cursor_surface_offset(
-            client.object_id(self.id),
-            payload.offset.0,
-            payload.offset.1,
-        );
+        let this = client.resolve(self.id, state).unwrap();
+        changed |= state
+            .seat
+            .apply_cursor_surface_offset(this, payload.offset.0, payload.offset.1);
         changed |= self.apply_pending_tree_state(state);
         changed |= self.release_synchronized_children(
             client,
@@ -1766,28 +1722,28 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         let was_mapped = self.global_logical_bounds().is_some();
-        let surface_object_id = client.object_id(self.id);
+        let resolved_surface = client.resolve(self.id, state).unwrap();
         let mut pending_xdg_role_changes = None;
         let old_effective_insets = (self.is_root()
             && self.role == Role::XdgSurface
             && !self.has_cursor_role()
             && !self.has_dnd_icon_role())
         .then(|| {
-            crate::tiling::effective_decoration_insets_for_surface(state, surface_object_id, self)
+            crate::tiling::effective_decoration_insets_for_surface(state, resolved_surface, self)
         });
         if let Some(shell_surface) = self.shell_surface {
-            self.send_preferred_fractional_scale_for_object(state, surface_object_id, dispatcher);
-            self.send_preferred_buffer_state_for_object(state, surface_object_id, dispatcher);
+            self.send_preferred_fractional_scale_for_object(state, resolved_surface, dispatcher);
+            self.send_preferred_buffer_state_for_object(state, resolved_surface, dispatcher);
             match shell_surface {
                 ShellSurfaceObject::XdgSurface(xdg_surface_id) => {
                     let layout_snapshot =
-                        LayerLayoutObjectSnapshot::for_surface(surface_object_id, self);
+                        LayerLayoutObjectSnapshot::for_surface(resolved_surface, self);
                     let configure_bounds = self.configure_bounds_with_snapshot_for_object(
                         state,
-                        surface_object_id,
+                        resolved_surface,
                         Some(layout_snapshot),
                     );
-                    let mut xdg_surface = client.grab_object(xdg_surface_id, state);
+                    let mut xdg_surface = xdg_surface_id.grab(state);
                     let Some(role_changes) = xdg_surface.on_commit(
                         client,
                         state,
@@ -1804,16 +1760,12 @@ impl WlSurface {
                     pending_xdg_role_changes = Some((xdg_surface_id, role_changes));
                 }
                 ShellSurfaceObject::LayerSurface(layer_surface_id) => {
-                    let surface_object_id = client.object_id(self.id);
-                    let layer_surface_object_id = client.object_id(layer_surface_id);
-                    let mut layer_surface = client.grab_object(layer_surface_id, state);
+                    let mut layer_surface = layer_surface_id.grab(state);
                     if !layer_surface.on_commit(
                         client,
                         state,
                         dispatcher,
-                        surface_object_id,
                         self,
-                        layer_surface_object_id,
                         self.has_pending_buffer_attach(),
                         matches!(self.pending.buffer, Some(None)),
                     ) {
@@ -1873,7 +1825,7 @@ impl WlSurface {
         };
 
         if let Some((xdg_surface_id, role_changes)) = pending_xdg_role_changes {
-            let mut xdg_surface = client.grab_object(xdg_surface_id, state);
+            let mut xdg_surface = xdg_surface_id.grab(state);
             xdg_surface.apply_commit_role_changes(client, state, dispatcher, role_changes);
         }
 
@@ -1892,14 +1844,14 @@ impl WlSurface {
         if let Some(old_effective_insets) = old_effective_insets {
             let new_effective_insets = crate::tiling::effective_decoration_insets_for_surface(
                 state,
-                surface_object_id,
+                resolved_surface,
                 self,
             );
             if old_effective_insets != new_effective_insets
-                && (state.is_tiled_root_surface(surface_object_id)
-                    || state.root_surface_is_fullscreen(surface_object_id))
+                && (state.is_tiled_root_surface(resolved_surface)
+                    || state.root_surface_is_fullscreen(resolved_surface))
             {
-                if let Some(workspace_id) = state.root_surface_workspace(surface_object_id) {
+                if let Some(workspace_id) = state.root_surface_workspace(resolved_surface) {
                     crate::tiling::mark_workspace_dirty(state, workspace_id);
                     dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
                 }
@@ -1910,31 +1862,29 @@ impl WlSurface {
             && !self.has_cursor_role()
             && !self.has_dnd_icon_role()
         {
-            let surface_bounds =
-                Self::local_surface_tree_bounds_with_surface(state, surface_object_id, self);
-            let window_geometry = self.xdg_surface_id().and_then(|xdg_surface_id| {
+            let surface_bounds = Self::local_surface_tree_bounds_from_ref(state, self);
+            let window_geometry = self.xdg_surface().and_then(|xdg_surface_id| {
                 state
                     .objects
-                    .try_ref_object::<XdgSurface>(client.object_id(xdg_surface_id))
-                    .map(|xdg_surface| {
+                    .try_ref_object::<XdgSurface>(xdg_surface_id.object_id())
+                    .and_then(|xdg_surface| {
                         crate::tiling::effective_window_geometry_for_surface(
                             state,
-                            surface_object_id,
+                            resolved_surface,
                             self,
                             xdg_surface.current_window_geometry(),
                         )
                     })
-                    .flatten()
             });
             log::debug!(
                 "[DEBUG_TILING] wl_surface_commit surface={:?} root={:?} logical_size={:?} global_bounds={:?} surface_bounds={:?} window_geometry={:?} effective_insets={:?} mapped={} changed={} needs_frame={}",
-                surface_object_id,
+                resolved_surface,
                 self.root_position(),
                 self.logical_size(),
                 self.global_logical_bounds(),
                 surface_bounds,
                 window_geometry,
-                crate::tiling::effective_decoration_insets_for_surface(state, surface_object_id, self),
+                crate::tiling::effective_decoration_insets_for_surface(state, resolved_surface, self),
                 self.global_logical_bounds().is_some(),
                 changed,
                 needs_frame,
@@ -1943,15 +1893,14 @@ impl WlSurface {
         let is_mapped = self.global_logical_bounds().is_some();
         if was_mapped != is_mapped {
             if let Some(ShellSurfaceObject::XdgSurface(xdg_surface_id)) = self.shell_surface {
-                let surface_object_id = client.object_id(self.id);
-                let xdg_surface_object_id = client.object_id(xdg_surface_id);
+                let xdg_surface_object_id = xdg_surface_id.object_id();
                 if state
                     .objects
                     .try_ref_object::<XdgSurface>(xdg_surface_object_id)
                     .is_some_and(XdgSurface::is_toplevel_parent)
                 {
                     if is_mapped {
-                        state.confirm_root_surface_mapped(surface_object_id);
+                        state.confirm_root_surface_mapped(resolved_surface);
                     }
                     dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
                 }
@@ -2011,8 +1960,8 @@ impl WlSurface {
             return true;
         };
 
-        let Some(buffer) = state.objects.try_ref_object::<WlBuffer>(buffer_object_id) else {
-            let msg = if state.objects.contains(buffer_object_id) {
+        let Some(buffer) = buffer_object_id.try_ref(state) else {
+            let msg = if state.objects.contains(buffer_object_id.object_id()) {
                 "pending buffer object is not a wl_buffer"
             } else {
                 "pending wl_buffer disappeared before commit"
@@ -2085,7 +2034,10 @@ impl WlSurface {
         self.flush_frame_callbacks_list(callbacks, client, state, dispatcher);
     }
 
-    fn route_frame_callbacks(&mut self, callbacks: Vec<WlCallbackId>) -> (Vec<WlCallbackId>, bool) {
+    fn route_frame_callbacks(
+        &mut self,
+        callbacks: Vec<Resolved<WlCallbackId>>,
+    ) -> (Vec<Resolved<WlCallbackId>>, bool) {
         if callbacks.is_empty() {
             return (Vec::new(), false);
         }
@@ -2129,14 +2081,19 @@ impl WlSurface {
         use crate::wayland_objects::wl_display::WlDisplay;
 
         for feedback in feedbacks {
-            if !client.contains_object(feedback.id, state) {
+            if !feedback.feedback.exists(state) {
                 continue;
             }
             {
-                let feedback_object = client.ref_object(feedback.id, state);
+                let feedback_object = feedback.feedback.rref(state);
                 feedback_object.send_discarded(dispatcher);
             }
-            client.delete_id(&WlDisplay::default(), state, dispatcher, feedback.id.into());
+            client.delete_id(
+                &WlDisplay::default(),
+                state,
+                dispatcher,
+                feedback.feedback.wayland_id().into(),
+            );
         }
     }
 
@@ -2212,7 +2169,7 @@ impl WlSurface {
         self.render_state_at(0, 0)
     }
 
-    pub fn take_frame_callbacks(&mut self) -> Vec<WlCallbackId> {
+    pub fn take_frame_callbacks(&mut self) -> Vec<Resolved<WlCallbackId>> {
         std::mem::take(&mut self.on_screen.frame_callbacks)
     }
 
@@ -2222,9 +2179,8 @@ impl WlSurface {
         let y = base_y + self.on_screen.y;
         let local_bounds = RectI::new(0, 0, logical_size.width, logical_size.height)?;
         Some(SurfaceRenderState {
-            surface_client_id: self.client_id,
-            surface_id: self.id,
-            buffer_object_id: self.on_screen.buffer_object_id?,
+            surface: None,
+            buffer: self.on_screen.buffer_object_id?,
             x,
             y,
             width: logical_size.width,
@@ -2241,8 +2197,14 @@ impl WlSurface {
         })
     }
 
-    pub fn take_render_state_at(&mut self, base_x: i32, base_y: i32) -> Option<SurfaceRenderState> {
+    pub fn take_render_state_at(
+        &mut self,
+        surface: Resolved<WlSurfaceId>,
+        base_x: i32,
+        base_y: i32,
+    ) -> Option<SurfaceRenderState> {
         let mut state = self.render_state_at(base_x, base_y)?;
+        state.surface = Some(surface);
         state.presentation_feedbacks = std::mem::take(&mut self.on_screen.presentation_feedbacks);
         self.on_screen.damage.clear();
         Some(state)
@@ -2307,7 +2269,11 @@ impl WlSurface {
         height: i32,
     ) {
         self.on_screen = OnScreen {
-            buffer_object_id: Some(buffer_object_id),
+            buffer_object_id: Some(Resolved::new(
+                self.client_id,
+                WlBufferId::from(buffer_object_id.index()),
+                buffer_object_id,
+            )),
             content_revision: 1,
             x,
             y,
@@ -2348,8 +2314,7 @@ impl WlSurface {
     fn install_blocked_surface(
         &mut self,
         next: BlockedSurfaceState,
-        client_id: ClientId,
-        surface_object_id: ObjectId,
+        surface: Resolved<WlSurfaceId>,
         dispatcher: &mut ClientDispatcher,
     ) -> std::io::Result<()> {
         self.blocked = Some(next);
@@ -2365,10 +2330,7 @@ impl WlSurface {
         }
         let waiter_id = sync::fresh_waiter_id();
         self.blocked_waiter_id = Some(waiter_id);
-        dispatcher.start_model(
-            waiter_id,
-            AcquireReadyWaiter::new(waiter_id, client_id, surface_object_id, poll_fd),
-        );
+        dispatcher.start_model(waiter_id, AcquireReadyWaiter::new(waiter_id, surface, poll_fd));
         Ok(())
     }
 
@@ -2401,7 +2363,7 @@ impl WlSurface {
     fn retire_current(&mut self) {
         if let Some(buffer_object_id) = self.on_screen.buffer_object_id.take() {
             self.retired_buffers.push(RetiredBufferCandidate {
-                buffer_object_id,
+                buffer: buffer_object_id,
                 sync: self.on_screen.sync.clone(),
             });
         }
@@ -2434,13 +2396,9 @@ impl WlSurface {
             blocked.presentation_feedbacks,
         );
         sync::resolve_unused_candidate_immediately(
-            client,
             state,
             dispatcher,
-            RetiredBufferCandidate {
-                buffer_object_id: blocked.buffer_object_id,
-                sync: blocked.sync,
-            },
+            RetiredBufferCandidate { buffer: blocked.buffer_object_id, sync: blocked.sync },
         );
     }
 
@@ -2482,49 +2440,43 @@ impl WlSurface {
     }
 
     fn detach_subsurface_tree(
-        child_surface_object_id: ObjectId,
+        child_surface: Resolved<WlSurfaceId>,
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
         let (grandchildren, subsurface_object_id) = {
-            let Some(child_surface) = state
-                .objects
-                .try_ref_object::<WlSurface>(child_surface_object_id)
-            else {
+            let Some(child_surface_ref) = child_surface.try_ref(state) else {
                 return;
             };
-            (child_surface.child_surface_ids(), child_surface.subsurface_object())
+            (child_surface_ref.child_surface_ids(), child_surface_ref.subsurface_object())
         };
 
-        for grandchild_surface_object_id in grandchildren {
-            Self::detach_subsurface_tree(grandchild_surface_object_id, client, state, dispatcher);
+        for grandchild_surface in grandchildren {
+            Self::detach_subsurface_tree(grandchild_surface, client, state, dispatcher);
         }
 
         {
-            let Some(mut child_surface) = state
-                .objects
-                .try_grab_object::<WlSurface>(child_surface_object_id)
-            else {
+            let Some(mut child_surface_ref) = child_surface.try_grab(state) else {
                 return;
             };
-            child_surface.unmap_due_to_parent_loss(client, state, dispatcher);
-            child_surface.destroy_subsurface_role();
+            child_surface_ref.unmap_due_to_parent_loss(client, state, dispatcher);
+            child_surface_ref.destroy_subsurface_role();
         }
 
         if let Some(subsurface_object_id) = subsurface_object_id {
             use crate::wayland_objects::wl_display::WlDisplay;
-            if client.contains_object(subsurface_object_id, state) {
+            if subsurface_object_id.exists(state) {
                 client.delete_id(
                     &WlDisplay::default(),
                     state,
                     dispatcher,
-                    subsurface_object_id.into(),
+                    subsurface_object_id.wayland_id().into(),
                 );
             }
         }
 
-        state.register_root_surface(child_surface_object_id);
+        state.register_root_surface(child_surface.object_id());
     }
 
     pub fn delete_self(
@@ -2533,19 +2485,19 @@ impl WlSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let object_id = client.object_id(self.id);
-        state.seat.clear_cursor_surface(object_id);
+        let object = client.resolve(self.id, state).unwrap();
+        state.seat.clear_cursor_surface(object);
         self.discard_all_presentation_feedbacks(client, state, dispatcher);
-        for child_surface_object_id in self.child_surface_ids() {
-            Self::detach_subsurface_tree(child_surface_object_id, client, state, dispatcher);
+        for child_surface in self.child_surface_ids() {
+            Self::detach_subsurface_tree(child_surface, client, state, dispatcher);
         }
         if let Some(parent_surface) = self.parent_surface() {
             if let Some(parent_surface) = parent_surface.try_ref_mut(state) {
-                parent_surface.remove_child_from_tree(client.object_id(self.id));
+                parent_surface.remove_child_from_tree(object);
             }
         }
         self.cleanup_extension_objects(client, state, dispatcher);
-        state.unregister_root_surface(object_id);
+        state.unregister_root_surface(object);
         use crate::wayland_objects::wl_display::WlDisplay;
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
         if let Some(bounds) = self.global_logical_bounds() {
@@ -2567,12 +2519,12 @@ impl WlSurface {
 
     pub fn queue_presentation_feedback(
         &mut self,
-        feedback: WpPresentationFeedbackId,
+        feedback: Resolved<WpPresentationFeedbackId>,
         version: u32,
         output_id: Option<OutputId>,
     ) {
         self.pending_presentation_feedbacks
-            .push(SurfacePresentationFeedback { id: feedback, version, output_id });
+            .push(SurfacePresentationFeedback { feedback, version, output_id });
     }
 }
 
@@ -2602,7 +2554,8 @@ impl Object for WlSurface {
             }
             Frame { callback } => {
                 client.insert_object(state, WlCallback::new(callback));
-                self.pending_frame_callbacks.push(callback);
+                self.pending_frame_callbacks
+                    .push(client.resolve(callback, state).unwrap());
             }
             SetOpaqueRegion { region } => {
                 self.on_set_opaque_region(client, state, region, dispatcher);
@@ -2727,6 +2680,7 @@ mod tests {
             wayland_objects::{
                 wl_buffer::{NewWlBufferParams, WlBuffer},
                 wl_shm_pool::shared_memory_from_bytes,
+                wl_subsurface::WlSubsurface,
                 wp_fractional_scale_v1::WpFractionalScaleV1,
                 wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
                 wp_viewport::WpViewport,
@@ -2742,7 +2696,7 @@ mod tests {
     fn make_surface() -> WlSurface {
         let mut surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(7), 6);
         surface.on_screen = OnScreen {
-            buffer_object_id: Some(ObjectId::from(1usize)),
+            buffer_object_id: Some(resolved_buffer(ObjectId::from(1usize))),
             content_revision: 1,
             x: 10,
             y: 20,
@@ -2769,7 +2723,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -2791,6 +2744,37 @@ mod tests {
             keyboard,
             xkb,
         }
+    }
+
+    fn root(state: &State, object_id: ObjectId) -> Resolved<WlSurfaceId> {
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(object_id)
+            .unwrap();
+        Resolved::new(surface.client_id(), surface.surface_id(), object_id)
+    }
+
+    fn insert_subsurface_object(
+        state: &mut State,
+        id: WlSubsurfaceId,
+        surface: Resolved<WlSurfaceId>,
+        parent: Resolved<WlSurfaceId>,
+    ) -> Resolved<WlSubsurfaceId> {
+        let object_id = state
+            .insert_object(WlSubsurface::new(id, surface, parent))
+            .1;
+        Resolved::new(surface.client_id(), id, object_id)
+    }
+
+    fn insert_client_subsurface_object(
+        client: &mut Client,
+        state: &mut State,
+        id: WlSubsurfaceId,
+        surface: Resolved<WlSurfaceId>,
+        parent: Resolved<WlSurfaceId>,
+    ) -> Resolved<WlSubsurfaceId> {
+        let (subsurface, _) = client.insert_object(state, WlSubsurface::new(id, surface, parent));
+        subsurface
     }
 
     fn make_output(
@@ -2831,14 +2815,18 @@ mod tests {
     }
 
     fn attach_fractional_scale_object(state: &mut State, surface_object_id: ObjectId) -> ObjectId {
+        let fractional_id = WpFractionalScaleV1Id::from(77);
         let object_id = state
-            .insert_object(WpFractionalScaleV1::new(
-                WpFractionalScaleV1Id::from(77),
-                surface_object_id,
-            ))
+            .insert_object(WpFractionalScaleV1::new(fractional_id, root(state, surface_object_id)))
             .1;
         let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
-        surface.set_fractional_scale_object(object_id).unwrap();
+        surface
+            .set_fractional_scale_object(Resolved::new(
+                ClientId::from_raw(1),
+                fractional_id,
+                object_id,
+            ))
+            .unwrap();
         object_id
     }
 
@@ -2854,10 +2842,26 @@ mod tests {
 
     fn feedback(id: u32, version: u32) -> SurfacePresentationFeedback {
         SurfacePresentationFeedback {
-            id: WpPresentationFeedbackId::from(id),
+            feedback: Resolved::new(
+                ClientId::from_raw(1),
+                WpPresentationFeedbackId::from(id),
+                ObjectId::from(id as usize),
+            ),
             version,
             output_id: None,
         }
+    }
+
+    fn resolved_buffer(object_id: ObjectId) -> Resolved<WlBufferId> {
+        Resolved::new(ClientId::from_raw(1), WlBufferId::from(object_id.index()), object_id)
+    }
+
+    fn resolved_callback(id: u32) -> Resolved<crate::protocol_generated::WlCallbackId> {
+        Resolved::new(
+            ClientId::from_raw(1),
+            crate::protocol_generated::WlCallbackId::from(id),
+            ObjectId::from(id as usize),
+        )
     }
 
     fn get_toplevel_request(
@@ -2914,8 +2918,9 @@ mod tests {
         toplevel_id: XdgToplevelId,
     ) -> ObjectId {
         let mut client_dispatcher = client.test_dispatcher(dispatcher);
-        let ((_, surface_object_id), _) =
+        let (surface_resolved, _) =
             client.insert_object(state, WlSurface::new(surface_id, client.client_id(), 6));
+        let surface_object_id = surface_resolved.object_id();
         state.register_root_surface(surface_object_id);
         {
             let surface = state
@@ -2926,12 +2931,31 @@ mod tests {
             assert!(surface
                 .set_role(Role::XdgSurface, &mut client_dispatcher)
                 .is_ok());
-            surface.set_xdg_surface_impl(xdg_surface_id);
         }
-        client.insert_object(
+        let (xdg_surface_resolved, _) = client.insert_object(
             state,
-            XdgSurface::new(xdg_surface_id, XdgWmBaseId::from(1), surface_id, 7),
+            XdgSurface::new(
+                xdg_surface_id,
+                crate::clients::Resolved::new(
+                    client.client_id(),
+                    XdgWmBaseId::from(1),
+                    crate::state::ObjectId::from(1usize),
+                ),
+                crate::clients::Resolved::new(client.client_id(), surface_id, surface_object_id),
+                7,
+            ),
         );
+        let xdg_surface_object_id = xdg_surface_resolved.object_id();
+        state
+            .objects
+            .get_mut(surface_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_xdg_surface_impl(Resolved::new(
+                client.client_id(),
+                xdg_surface_id,
+                xdg_surface_object_id,
+            ));
         {
             let mut xdg_surface = client.grab_object(xdg_surface_id, state);
             xdg_surface.on(
@@ -2989,8 +3013,9 @@ mod tests {
         let mut state = make_state();
         let (mut client, mut dispatcher) = make_client();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-        let ((_, object_id), _) = client
+        let (surface_resolved, _) = client
             .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(5), client.client_id(), 6));
+        let object_id = surface_resolved.object_id();
         state.register_root_surface(object_id);
         let surface_id = WlSurfaceId::from(5);
 
@@ -3017,36 +3042,68 @@ mod tests {
         let mut state = make_state();
         let (mut client, mut dispatcher) = make_client();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-        let ((_, surface_object_id), _) = client
-            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(5), client.client_id(), 6));
+        let surface_id = WlSurfaceId::from(5);
+        let (surface_resolved, _) =
+            client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
+        let surface_object_id = surface_resolved.object_id();
         state.register_root_surface(surface_object_id);
 
         let fractional_id = WpFractionalScaleV1Id::from(6);
-        let ((_, fractional_object_id), _) = client
-            .insert_object(&mut state, WpFractionalScaleV1::new(fractional_id, surface_object_id));
-        let viewport_id = WpViewportId::from(7);
-        let ((_, viewport_object_id), _) =
-            client.insert_object(&mut state, WpViewport::new(viewport_id, surface_object_id));
-        let syncobj_surface_id = WpLinuxDrmSyncobjSurfaceV1Id::from(8);
-        let ((_, syncobj_surface_object_id), _) = client.insert_object(
+        let (fractional_resolved, _) = client.insert_object(
             &mut state,
-            WpLinuxDrmSyncobjSurfaceV1::new(syncobj_surface_id, surface_object_id),
+            WpFractionalScaleV1::new(
+                fractional_id,
+                Resolved::new(client.client_id(), surface_id, surface_object_id),
+            ),
         );
+        let fractional_object_id = fractional_resolved.object_id();
+        let viewport_id = WpViewportId::from(7);
+        let (viewport_resolved, _) = client.insert_object(
+            &mut state,
+            WpViewport::new(
+                viewport_id,
+                Resolved::new(client.client_id(), surface_id, surface_object_id),
+            ),
+        );
+        let viewport_object_id = viewport_resolved.object_id();
+        let syncobj_surface_id = WpLinuxDrmSyncobjSurfaceV1Id::from(8);
+        let (syncobj_surface_resolved, _) = client.insert_object(
+            &mut state,
+            WpLinuxDrmSyncobjSurfaceV1::new(
+                syncobj_surface_id,
+                Resolved::new(client.client_id(), surface_id, surface_object_id),
+            ),
+        );
+        let syncobj_surface_object_id = syncobj_surface_resolved.object_id();
 
         {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             surface
-                .set_fractional_scale_object(fractional_object_id)
+                .set_fractional_scale_object(Resolved::new(
+                    client.client_id(),
+                    fractional_id,
+                    fractional_object_id,
+                ))
                 .unwrap();
-            surface.set_viewport_object(viewport_id).unwrap();
             surface
-                .set_syncobj_surface_object(syncobj_surface_id)
+                .set_viewport_object(Resolved::new(
+                    client.client_id(),
+                    viewport_id,
+                    viewport_object_id,
+                ))
+                .unwrap();
+            surface
+                .set_syncobj_surface_object(Resolved::new(
+                    client.client_id(),
+                    syncobj_surface_id,
+                    syncobj_surface_object_id,
+                ))
                 .unwrap();
             surface.delete_self(&mut client, &mut state, &mut client_dispatcher);
         }
         drop(client_dispatcher);
 
-        assert!(!client.contains_object(WlSurfaceId::from(5), &state));
+        assert!(!client.contains_object(surface_id, &state));
         assert!(!client.contains_object(fractional_id, &state));
         assert!(!client.contains_object(viewport_id, &state));
         assert!(!client.contains_object(syncobj_surface_id, &state));
@@ -3096,7 +3153,7 @@ mod tests {
                 .get_mut(surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            surface.pending.buffer = Some(Some(buffer_object_id));
+            surface.pending.buffer = Some(Some(resolved_buffer(buffer_object_id)));
         }
 
         {
@@ -3151,7 +3208,7 @@ mod tests {
             states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledBottom as u32))
         );
         assert!(state
-            .managed_root_surface_state(surface_object_id)
+            .managed_root_surface_state(root(&state, surface_object_id))
             .is_some_and(|managed| managed.pending_initial_layout));
     }
 
@@ -3203,7 +3260,7 @@ mod tests {
             XdgSurfaceId::from(91),
             XdgToplevelId::from(92),
         );
-        assert!(state.set_root_surface_floating(surface_object_id, true));
+        assert!(state.set_root_surface_floating(root(&state, surface_object_id), true));
 
         commit_initial_xdg_toplevel(
             &mut state,
@@ -3223,7 +3280,7 @@ mod tests {
             !states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledLeft as u32))
         );
         assert!(!state
-            .managed_root_surface_state(surface_object_id)
+            .managed_root_surface_state(root(&state, surface_object_id))
             .is_some_and(|managed| managed.pending_initial_layout));
     }
 
@@ -3242,7 +3299,7 @@ mod tests {
             XdgSurfaceId::from(101),
             XdgToplevelId::from(102),
         );
-        assert!(state.set_root_surface_fullscreen(surface_object_id, true));
+        assert!(state.set_root_surface_fullscreen(root(&state, surface_object_id), true));
 
         commit_initial_xdg_toplevel(
             &mut state,
@@ -3286,7 +3343,7 @@ mod tests {
             XdgSurfaceId::from(111),
         );
         assert!(state
-            .managed_root_surface_state(surface_object_id)
+            .managed_root_surface_state(root(&state, surface_object_id))
             .is_some_and(|managed| managed.pending_initial_layout));
 
         let buffer_object_id = insert_test_buffer(&mut state, client.client_id());
@@ -3296,7 +3353,7 @@ mod tests {
                 .get_mut(surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            surface.pending.buffer = Some(Some(buffer_object_id));
+            surface.pending.buffer = Some(Some(resolved_buffer(buffer_object_id)));
         }
         {
             let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -3305,7 +3362,7 @@ mod tests {
         }
 
         assert!(!state
-            .managed_root_surface_state(surface_object_id)
+            .managed_root_surface_state(root(&state, surface_object_id))
             .is_some_and(|managed| managed.pending_initial_layout));
     }
 
@@ -3332,28 +3389,35 @@ mod tests {
             XdgSurfaceId::from(141),
         );
 
-        let ((_, child_surface_object_id), _) = client.insert_object(
+        let (child_surface_resolved, _) = client.insert_object(
             &mut state,
             WlSurface::new(WlSurfaceId::from(145), client.client_id(), 6),
         );
+        let child_surface_object_id = child_surface_resolved.object_id();
+        let surface_resolved = root(&state, surface_object_id);
+        let child_surface_resolved = root(&state, child_surface_object_id);
         {
             let root_surface = state
                 .objects
                 .get_mut(surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            root_surface.add_pending_child(child_surface_object_id);
+            root_surface.add_pending_child(child_surface_resolved);
         }
+        let child_subsurface = insert_client_subsurface_object(
+            &mut client,
+            &mut state,
+            WlSubsurfaceId::from(146),
+            child_surface_resolved,
+            surface_resolved,
+        );
         {
             let child_surface = state
                 .objects
                 .get_mut(child_surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_surface.assign_subsurface(
-                crate::protocol_generated::WlSubsurfaceId::from(146),
-                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), surface_object_id),
-            );
+            child_surface.assign_subsurface(child_subsurface, surface_resolved);
             child_surface.set_subsurface_position(2, 0);
             child_surface.test_map(ObjectId::from(903usize), 0, 0, 2, 2);
         }
@@ -3370,7 +3434,7 @@ mod tests {
                 .get_mut(surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            surface.pending.buffer = Some(Some(initial_buffer_object_id));
+            surface.pending.buffer = Some(Some(resolved_buffer(initial_buffer_object_id)));
         }
         {
             let toplevel = state
@@ -3405,14 +3469,14 @@ mod tests {
 
         assert_eq!(
             state
-                .tiled_root_surface_content_rect(surface_object_id)
+                .tiled_root_surface_content_rect(root(&state, surface_object_id))
                 .unwrap()
                 .width,
             1278
         );
         assert_eq!(
             state
-                .tiled_root_surface_frame_rect(surface_object_id)
+                .tiled_root_surface_frame_rect(root(&state, surface_object_id))
                 .unwrap()
                 .width,
             1280
@@ -3426,7 +3490,7 @@ mod tests {
                 .get_mut(surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            surface.pending.buffer = Some(Some(resized_buffer_object_id));
+            surface.pending.buffer = Some(Some(resolved_buffer(resized_buffer_object_id)));
         }
         {
             let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -3440,14 +3504,14 @@ mod tests {
 
         assert_eq!(
             state
-                .tiled_root_surface_content_rect(surface_object_id)
+                .tiled_root_surface_content_rect(root(&state, surface_object_id))
                 .unwrap()
                 .width,
             1280
         );
         assert_eq!(
             state
-                .tiled_root_surface_frame_rect(surface_object_id)
+                .tiled_root_surface_frame_rect(root(&state, surface_object_id))
                 .unwrap()
                 .width,
             1280
@@ -3477,7 +3541,7 @@ mod tests {
             XdgSurfaceId::from(121),
         );
         assert!(state
-            .managed_root_surface_state(first_surface_object_id)
+            .managed_root_surface_state(root(&state, first_surface_object_id))
             .is_some_and(|managed| managed.pending_initial_layout));
 
         let second_surface_object_id = create_root_xdg_toplevel(
@@ -3544,7 +3608,7 @@ mod tests {
                 .get_mut(surface_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            surface.pending.buffer = Some(Some(buffer_object_id));
+            surface.pending.buffer = Some(Some(resolved_buffer(buffer_object_id)));
             surface.pending.viewport.src =
                 Some(crate::transform::RectF { x: 0.0, y: 0.0, width: 10.0, height: 10.0 });
         }
@@ -3625,11 +3689,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            surface.preferred_output_id_for_object(&state, surface_object_id),
+            surface.preferred_output_id_for_object(
+                &state,
+                Resolved::new(ClientId::from_raw(4), WlSurfaceId::from(3), surface_object_id),
+            ),
             Some(output_id)
         );
         assert_eq!(
-            surface.configure_bounds_for_object(&state, surface_object_id),
+            surface.configure_bounds_for_object(
+                &state,
+                Resolved::new(ClientId::from_raw(4), WlSurfaceId::from(3), surface_object_id),
+            ),
             Some((200, 120))
         );
     }
@@ -3649,14 +3719,10 @@ mod tests {
             state.insert_object(WlSurface::new(WlSurfaceId::from(11u32), ClientId::from_raw(4), 6));
 
         let surface = state.objects.grab_object::<WlSurface>(surface_object_id);
-        assert_eq!(
-            surface.preferred_output_id_for_object(&state, surface_object_id),
-            Some(output_id)
-        );
-        assert_eq!(
-            surface.configure_bounds_for_object(&state, surface_object_id),
-            Some((200, 120))
-        );
+        let resolved =
+            Resolved::new(ClientId::from_raw(4), WlSurfaceId::from(11u32), surface_object_id);
+        assert_eq!(surface.preferred_output_id_for_object(&state, resolved), Some(output_id));
+        assert_eq!(surface.configure_bounds_for_object(&state, resolved), Some((200, 120)));
     }
 
     #[test]
@@ -3685,7 +3751,7 @@ mod tests {
 
         surface.send_preferred_buffer_state_for_object(
             &state,
-            surface_object_id,
+            Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(9), surface_object_id),
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
@@ -3701,7 +3767,7 @@ mod tests {
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
         surface.send_preferred_buffer_state_for_object(
             &state,
-            surface_object_id,
+            Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(9), surface_object_id),
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
@@ -3733,14 +3799,18 @@ mod tests {
 
         let mut surface = WlSurface::new(WlSurfaceId::from(10), ClientId::from_raw(6), 6);
         surface.update_output_membership(vec![output_id]);
-        surface.fractional_scale_object = Some(fractional_object_id);
+        surface.fractional_scale_object = Some(Resolved::new(
+            ClientId::from_raw(1),
+            WpFractionalScaleV1Id::from(77),
+            fractional_object_id,
+        ));
 
         let (client, mut dispatcher) = make_client();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         surface.send_preferred_fractional_scale_for_object(
             &state,
-            surface_object_id,
+            Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(10), surface_object_id),
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
@@ -3758,7 +3828,7 @@ mod tests {
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
         surface.send_preferred_fractional_scale_for_object(
             &state,
-            surface_object_id,
+            Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(10), surface_object_id),
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
@@ -3798,14 +3868,18 @@ mod tests {
         let fractional_object_id = attach_fractional_scale_object(&mut state, surface_object_id);
 
         let mut surface = WlSurface::new(WlSurfaceId::from(11), ClientId::from_raw(7), 6);
-        surface.fractional_scale_object = Some(fractional_object_id);
+        surface.fractional_scale_object = Some(Resolved::new(
+            ClientId::from_raw(1),
+            WpFractionalScaleV1Id::from(77),
+            fractional_object_id,
+        ));
         surface.update_output_membership(vec![left_output]);
 
         let (client, mut dispatcher) = make_client();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
         surface.send_preferred_fractional_scale_for_object(
             &state,
-            surface_object_id,
+            Resolved::new(ClientId::from_raw(7), WlSurfaceId::from(11), surface_object_id),
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
@@ -3816,7 +3890,7 @@ mod tests {
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
         surface.send_preferred_fractional_scale_for_object(
             &state,
-            surface_object_id,
+            Resolved::new(ClientId::from_raw(7), WlSurfaceId::from(11), surface_object_id),
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
@@ -3856,6 +3930,21 @@ mod tests {
             &mut state,
             WlSurface::new(WlSurfaceId::from(3), ClientId::from_raw(1), 6),
         );
+        let parent_resolved = root(&state, parent_object_id);
+        let child_a_resolved = root(&state, child_a_object_id);
+        let child_b_resolved = root(&state, child_b_object_id);
+        let child_a_subsurface = insert_subsurface_object(
+            &mut state,
+            WlSubsurfaceId::from(10),
+            child_a_resolved,
+            parent_resolved,
+        );
+        let child_b_subsurface = insert_subsurface_object(
+            &mut state,
+            WlSubsurfaceId::from(11),
+            child_b_resolved,
+            parent_resolved,
+        );
 
         {
             let parent = state
@@ -3863,8 +3952,8 @@ mod tests {
                 .get_mut(parent_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            parent.add_pending_child(child_a_object_id);
-            parent.add_pending_child(child_b_object_id);
+            parent.add_pending_child(child_a_resolved);
+            parent.add_pending_child(child_b_resolved);
         }
         {
             let child_a = state
@@ -3872,10 +3961,7 @@ mod tests {
                 .get_mut(child_a_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_a.assign_subsurface(
-                crate::protocol_generated::WlSubsurfaceId::from(10),
-                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
-            );
+            child_a.assign_subsurface(child_a_subsurface, parent_resolved);
             child_a.set_subsurface_position(20, 30);
         }
         {
@@ -3884,10 +3970,7 @@ mod tests {
                 .get_mut(child_b_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_b.assign_subsurface(
-                crate::protocol_generated::WlSubsurfaceId::from(11),
-                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
-            );
+            child_b.assign_subsurface(child_b_subsurface, parent_resolved);
             child_b.set_subsurface_position(-5, 7);
         }
 
@@ -3897,7 +3980,7 @@ mod tests {
                 .get_mut(parent_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            assert!(parent.restack_child_relative(child_a_object_id, None, false));
+            assert!(parent.restack_child_relative(child_a_resolved, None, false));
         }
         {
             let mut parent = state.objects.grab_object::<WlSurface>(parent_object_id);
@@ -3905,8 +3988,8 @@ mod tests {
             assert_eq!(
                 parent.current_stack(),
                 &[
-                    super::StackEntry::Child(child_b_object_id),
-                    super::StackEntry::Child(child_a_object_id),
+                    super::StackEntry::Child(child_b_resolved),
+                    super::StackEntry::Child(child_a_resolved),
                     super::StackEntry::Parent,
                 ]
             );
@@ -3941,6 +4024,21 @@ mod tests {
             &mut state,
             WlSurface::new(WlSurfaceId::from(3), ClientId::from_raw(1), 6),
         );
+        let root_resolved = root(&state, root_object_id);
+        let child_resolved = root(&state, child_object_id);
+        let grandchild_resolved = root(&state, grandchild_object_id);
+        let child_subsurface = insert_subsurface_object(
+            &mut state,
+            WlSubsurfaceId::from(20),
+            child_resolved,
+            root_resolved,
+        );
+        let grandchild_subsurface = insert_subsurface_object(
+            &mut state,
+            WlSubsurfaceId::from(21),
+            grandchild_resolved,
+            child_resolved,
+        );
 
         {
             let child = state
@@ -3948,10 +4046,7 @@ mod tests {
                 .get_mut(child_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child.assign_subsurface(
-                crate::protocol_generated::WlSubsurfaceId::from(20),
-                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), root_object_id),
-            );
+            child.assign_subsurface(child_subsurface, root_resolved);
             child.set_subsurface_sync_mode(true);
         }
         {
@@ -3960,10 +4055,7 @@ mod tests {
                 .get_mut(grandchild_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            grandchild.assign_subsurface(
-                crate::protocol_generated::WlSubsurfaceId::from(21),
-                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(2), child_object_id),
-            );
+            grandchild.assign_subsurface(grandchild_subsurface, child_resolved);
             grandchild.set_subsurface_sync_mode(false);
         }
 
@@ -4022,6 +4114,28 @@ mod tests {
             &mut state,
             WlSurface::new(WlSurfaceId::from(4), ClientId::from_raw(1), 6),
         );
+        let parent_resolved = root(&state, parent_object_id);
+        let child_a_resolved = root(&state, child_a_object_id);
+        let child_b_resolved = root(&state, child_b_object_id);
+        let child_c_resolved = root(&state, child_c_object_id);
+        let child_a_subsurface = insert_subsurface_object(
+            &mut state,
+            WlSubsurfaceId::from(41),
+            child_a_resolved,
+            parent_resolved,
+        );
+        let child_b_subsurface = insert_subsurface_object(
+            &mut state,
+            WlSubsurfaceId::from(42),
+            child_b_resolved,
+            parent_resolved,
+        );
+        let child_c_subsurface = insert_subsurface_object(
+            &mut state,
+            WlSubsurfaceId::from(43),
+            child_c_resolved,
+            parent_resolved,
+        );
 
         {
             let parent = state
@@ -4029,19 +4143,11 @@ mod tests {
                 .get_mut(parent_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            parent.add_pending_child(child_a_object_id);
-            parent.add_pending_child(child_b_object_id);
-            parent.add_pending_child(child_c_object_id);
-            assert!(parent.restack_child_relative(
-                child_c_object_id,
-                Some(child_a_object_id),
-                false
-            ));
-            assert!(parent.restack_child_relative(
-                child_b_object_id,
-                Some(child_c_object_id),
-                true
-            ));
+            parent.add_pending_child(child_a_resolved);
+            parent.add_pending_child(child_b_resolved);
+            parent.add_pending_child(child_c_resolved);
+            assert!(parent.restack_child_relative(child_c_resolved, Some(child_a_resolved), false));
+            assert!(parent.restack_child_relative(child_b_resolved, Some(child_c_resolved), true));
         }
         {
             let child_a = state
@@ -4049,10 +4155,7 @@ mod tests {
                 .get_mut(child_a_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_a.assign_subsurface(
-                crate::protocol_generated::WlSubsurfaceId::from(41),
-                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
-            );
+            child_a.assign_subsurface(child_a_subsurface, parent_resolved);
         }
         {
             let child_b = state
@@ -4060,10 +4163,7 @@ mod tests {
                 .get_mut(child_b_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_b.assign_subsurface(
-                crate::protocol_generated::WlSubsurfaceId::from(42),
-                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
-            );
+            child_b.assign_subsurface(child_b_subsurface, parent_resolved);
         }
         {
             let child_c = state
@@ -4071,10 +4171,7 @@ mod tests {
                 .get_mut(child_c_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child_c.assign_subsurface(
-                crate::protocol_generated::WlSubsurfaceId::from(43),
-                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
-            );
+            child_c.assign_subsurface(child_c_subsurface, parent_resolved);
         }
         {
             let mut parent = state.objects.grab_object::<WlSurface>(parent_object_id);
@@ -4082,9 +4179,9 @@ mod tests {
             assert_eq!(
                 parent.current_stack(),
                 &[
-                    super::StackEntry::Child(child_c_object_id),
-                    super::StackEntry::Child(child_b_object_id),
-                    super::StackEntry::Child(child_a_object_id),
+                    super::StackEntry::Child(child_c_resolved),
+                    super::StackEntry::Child(child_b_resolved),
+                    super::StackEntry::Child(child_a_resolved),
                     super::StackEntry::Parent,
                 ]
             );
@@ -4102,6 +4199,14 @@ mod tests {
             &mut state,
             WlSurface::new(WlSurfaceId::from(2), ClientId::from_raw(1), 6),
         );
+        let parent_resolved = root(&state, parent_object_id);
+        let child_resolved = root(&state, child_object_id);
+        let child_subsurface = insert_subsurface_object(
+            &mut state,
+            WlSubsurfaceId::from(51),
+            child_resolved,
+            parent_resolved,
+        );
 
         {
             let parent = state
@@ -4109,7 +4214,7 @@ mod tests {
                 .get_mut(parent_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            parent.add_pending_child(child_object_id);
+            parent.add_pending_child(child_resolved);
         }
         {
             let child = state
@@ -4117,10 +4222,7 @@ mod tests {
                 .get_mut(child_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child.assign_subsurface(
-                crate::protocol_generated::WlSubsurfaceId::from(51),
-                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
-            );
+            child.assign_subsurface(child_subsurface, parent_resolved);
             child.set_subsurface_position(12, 34);
         }
         {
@@ -4138,7 +4240,7 @@ mod tests {
         let mut surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(1), 6);
         let discarded = surface.cache_commit_payload(
             SurfaceCommitPayload {
-                buffer: Some(Some(ObjectId::from(1usize))),
+                buffer: Some(Some(resolved_buffer(ObjectId::from(1usize)))),
                 offset: (10, 20),
                 sync: SurfaceSyncState::default(),
                 buffer_transform: BufferTransform::Normal,
@@ -4149,13 +4251,13 @@ mod tests {
                 input_region: RegionValue::infinite(),
                 opaque_region: RegionValue::empty(),
             },
-            vec![crate::protocol_generated::WlCallbackId::from(7)],
+            vec![resolved_callback(7)],
             vec![feedback(17, 2)],
         );
         assert!(discarded.is_empty());
         let discarded = surface.cache_commit_payload(
             SurfaceCommitPayload {
-                buffer: Some(Some(ObjectId::from(2usize))),
+                buffer: Some(Some(resolved_buffer(ObjectId::from(2usize)))),
                 offset: (30, 40),
                 sync: SurfaceSyncState::default(),
                 buffer_transform: BufferTransform::FlipRotate180,
@@ -4166,24 +4268,18 @@ mod tests {
                 input_region: RegionValue::empty(),
                 opaque_region: RegionValue::infinite(),
             },
-            vec![crate::protocol_generated::WlCallbackId::from(8)],
+            vec![resolved_callback(8)],
             vec![feedback(18, 2)],
         );
         assert_eq!(discarded, vec![feedback(17, 2)]);
 
         let cached = surface.cached_commit.as_ref().unwrap();
-        assert_eq!(cached.payload.buffer, Some(Some(ObjectId::from(2usize))));
+        assert_eq!(cached.payload.buffer, Some(Some(resolved_buffer(ObjectId::from(2usize)))));
         assert_eq!(cached.payload.offset, (30, 40));
         assert_eq!(cached.payload.buffer_transform, BufferTransform::FlipRotate180);
         assert_eq!(cached.payload.buffer_scale, 2);
         assert_eq!(cached.payload.damage_surface.len(), 2);
-        assert_eq!(
-            cached.frame_callbacks,
-            vec![
-                crate::protocol_generated::WlCallbackId::from(7),
-                crate::protocol_generated::WlCallbackId::from(8),
-            ]
-        );
+        assert_eq!(cached.frame_callbacks, vec![resolved_callback(7), resolved_callback(8),]);
         assert_eq!(cached.presentation_feedbacks, vec![feedback(18, 2)]);
     }
 
@@ -4214,7 +4310,13 @@ mod tests {
         let mut surface = make_surface();
         surface.on_screen.presentation_feedbacks = vec![feedback(31, 2), feedback(32, 1)];
 
-        let render_state = surface.take_render_state_at(0, 0).unwrap();
+        let render_state = surface
+            .take_render_state_at(
+                Resolved::new(ClientId::from_raw(7), WlSurfaceId::from(1), ObjectId::from(31usize)),
+                0,
+                0,
+            )
+            .unwrap();
 
         assert_eq!(render_state.presentation_feedbacks, vec![feedback(31, 2), feedback(32, 1)]);
         assert!(surface.on_screen.presentation_feedbacks.is_empty());
@@ -4245,18 +4347,35 @@ mod tests {
         let (mut client, mut dispatcher) = make_client();
         let mut dispatcher = client.test_dispatcher(&mut dispatcher);
 
-        let (_, parent_object_id) = client
-            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(1), client.client_id(), 6))
-            .0;
+        let (parent_resolved_insert, _) = client
+            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(1), client.client_id(), 6));
+        let parent_object_id = parent_resolved_insert.object_id();
         state.register_root_surface(parent_object_id);
-        let (_, child_object_id) = client
-            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(2), client.client_id(), 6))
-            .0;
+        let (child_resolved_insert, _) = client
+            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(2), client.client_id(), 6));
+        let child_object_id = child_resolved_insert.object_id();
         state.register_root_surface(child_object_id);
-        let (_, grandchild_object_id) = client
-            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(3), client.client_id(), 6))
-            .0;
+        let (grandchild_resolved_insert, _) = client
+            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(3), client.client_id(), 6));
+        let grandchild_object_id = grandchild_resolved_insert.object_id();
         state.register_root_surface(grandchild_object_id);
+        let parent_resolved = root(&state, parent_object_id);
+        let child_resolved = root(&state, child_object_id);
+        let grandchild_resolved = root(&state, grandchild_object_id);
+        let child_subsurface = insert_client_subsurface_object(
+            &mut client,
+            &mut state,
+            WlSubsurfaceId::from(61),
+            child_resolved,
+            parent_resolved,
+        );
+        let grandchild_subsurface = insert_client_subsurface_object(
+            &mut client,
+            &mut state,
+            WlSubsurfaceId::from(62),
+            grandchild_resolved,
+            child_resolved,
+        );
 
         {
             let parent = state
@@ -4264,7 +4383,7 @@ mod tests {
                 .get_mut(parent_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            parent.add_pending_child(child_object_id);
+            parent.add_pending_child(child_resolved);
             parent.test_map(ObjectId::from(300usize), 0, 0, 40, 40);
         }
         {
@@ -4273,12 +4392,9 @@ mod tests {
                 .get_mut(child_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            child.assign_subsurface(
-                WlSubsurfaceId::from(61),
-                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), parent_object_id),
-            );
+            child.assign_subsurface(child_subsurface, parent_resolved);
             child.set_subsurface_position(5, 6);
-            child.add_pending_child(grandchild_object_id);
+            child.add_pending_child(grandchild_resolved);
             child.test_map(ObjectId::from(301usize), 0, 0, 20, 20);
         }
         {
@@ -4287,10 +4403,7 @@ mod tests {
                 .get_mut(grandchild_object_id)
                 .downcast_mut::<WlSurface>()
                 .unwrap();
-            grandchild.assign_subsurface(
-                WlSubsurfaceId::from(62),
-                Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(2), child_object_id),
-            );
+            grandchild.assign_subsurface(grandchild_subsurface, child_resolved);
             grandchild.set_subsurface_position(7, 8);
             grandchild.test_map(ObjectId::from(302usize), 0, 0, 10, 10);
         }

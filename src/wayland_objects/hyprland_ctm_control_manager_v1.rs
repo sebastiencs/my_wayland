@@ -53,7 +53,7 @@ impl Global for HyprlandCtmControlManagerV1Global {
                 .downcast_ref::<HyprlandCtmControlManagerV1>()
                 .is_some_and(|manager| !manager.is_blocked())
         });
-        let ((_, _object_id), manager) =
+        let (_, manager) =
             client.insert_object(state, HyprlandCtmControlManagerV1::new(id, version, blocked));
         if blocked {
             manager.send_blocked(dispatcher);

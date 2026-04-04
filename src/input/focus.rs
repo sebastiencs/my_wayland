@@ -3,11 +3,11 @@ use crate::{
     protocol_generated::{WlSeatId, WlSurfaceId},
     runner::Dispatcher,
     seat::{dispatch_client_event, SeatClientEvent},
-    state::{DragPhase, DragTargetState, ObjectId, State},
+    state::{DragPhase, DragTargetState, State},
     wayland_objects::zwlr_layer_surface_v1::{
         layer_surface_keyboard_focus_with_snapshot, lookup_snapshot_surface,
-        ordered_scene_root_surface_ids_with_snapshot, LayerKeyboardFocus,
-        LayerLayoutObjectSnapshot, LayerShellLayer,
+        ordered_scene_root_surfaces_with_snapshot, LayerKeyboardFocus, LayerLayoutObjectSnapshot,
+        LayerShellLayer,
     },
 };
 
@@ -35,7 +35,7 @@ pub(crate) fn set_keyboard_focus(
         dispatch_client_event(
             dispatcher,
             old_focus.client_id(),
-            SeatClientEvent::KeyboardLeave { serial, surface: old_focus.surface_id() },
+            SeatClientEvent::KeyboardLeave { serial, surface: old_focus.surface },
         );
     }
 
@@ -44,7 +44,7 @@ pub(crate) fn set_keyboard_focus(
         dispatch_client_event(
             dispatcher,
             new_focus.client_id(),
-            SeatClientEvent::KeyboardEnter { serial, surface: new_focus.surface_id(), keys },
+            SeatClientEvent::KeyboardEnter { serial, surface: new_focus.surface, keys },
         );
         dispatch_modifiers(dispatcher, new_focus.client_id(), serial, state.keyboard.modifiers());
     }
@@ -83,14 +83,16 @@ pub(crate) fn resolve_activation_target(
 pub(crate) fn validate_activation_serial(
     state: &State,
     client: &Client,
-    seat_id: WlSeatId,
-    surface_id: WlSurfaceId,
+    seat: Resolved<WlSeatId>,
+    surface: Resolved<WlSurfaceId>,
     serial: u32,
 ) -> bool {
-    client.object_is(seat_id, state)
+    client.object_is(seat.wayland_id(), state)
+        && seat.client_id() == client.client_id()
+        && surface.client_id() == client.client_id()
         && state
             .seat
-            .validate_implicit_grab_serial(client.client_id(), surface_id, serial)
+            .validate_implicit_grab_serial(client.client_id(), surface, serial)
 }
 
 pub(crate) fn refresh_keyboard_focus(state: &mut State, dispatcher: &mut Dispatcher) {
@@ -136,10 +138,10 @@ pub(crate) fn maybe_dismiss_popup_grab_on_button(
     if inside_popup_stack {
         return false;
     }
-    let Some((client_id, popup_ids)) = state.seat.dismiss_popup_grab() else {
+    let Some((client_id, popups)) = state.seat.dismiss_popup_grab() else {
         return false;
     };
-    dispatcher.dispatch_to(client_id, ClientAction::DismissPopupGrab { popup_ids });
+    dispatcher.dispatch_to(client_id, ClientAction::DismissPopupGrab { popups });
     refresh_pointer_focus(state, dispatcher, time, false);
     set_keyboard_focus(state, dispatcher, state.seat.pointer_focus.map(|focus| focus.target));
     true
@@ -177,7 +179,7 @@ pub(crate) fn refresh_pointer_focus(
             dispatch_client_event(
                 dispatcher,
                 old_focus.target.client_id(),
-                SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface_id() },
+                SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface },
             );
             dispatch_client_event(
                 dispatcher,
@@ -194,12 +196,7 @@ pub(crate) fn refresh_pointer_focus(
             dispatch_client_event(
                 dispatcher,
                 new_focus.target.client_id(),
-                SeatClientEvent::PointerEnter {
-                    serial,
-                    surface: new_focus.target.surface_id(),
-                    x,
-                    y,
-                },
+                SeatClientEvent::PointerEnter { serial, surface: new_focus.target.surface, x, y },
             );
             if send_motion {
                 dispatch_client_event(
@@ -286,7 +283,7 @@ pub(crate) fn refresh_drag_focus(
                 new_target.client_id(),
                 ClientAction::DataDeviceDragEnter {
                     serial,
-                    surface: new_target.surface_id(),
+                    surface: new_target.surface,
                     x,
                     y,
                     source: active_drag.source.resolved(),
@@ -354,8 +351,8 @@ fn normalize_keyboard_focus_with_snapshot(
     snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
 ) -> Option<SurfaceFocus> {
     let requested_focus = requested_focus.and_then(|focus| {
-        let surface_object_id = surface_object_id_for_focus(state, focus)?;
-        match layer_surface_keyboard_focus_with_snapshot(state, surface_object_id, snapshot) {
+        let root_surface = root_surface_for_focus(state, focus)?;
+        match layer_surface_keyboard_focus_with_snapshot(state, root_surface, snapshot) {
             Some(LayerKeyboardFocus::None) => None,
             _ => Some(focus),
         }
@@ -374,33 +371,29 @@ fn topmost_exclusive_layer_focus_with_snapshot(
     state: &State,
     snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
 ) -> Option<SurfaceFocus> {
-    for object_id in ordered_scene_root_surface_ids_with_snapshot(state, snapshot)
+    for root_surface in ordered_scene_root_surfaces_with_snapshot(state, snapshot)
         .into_iter()
         .rev()
     {
-        let Some(surface) = lookup_snapshot_surface(state, snapshot, object_id) else {
+        let Some(_surface) = lookup_snapshot_surface(state, snapshot, root_surface) else {
             continue;
         };
         let Some(LayerKeyboardFocus::Exclusive { layer }) =
-            layer_surface_keyboard_focus_with_snapshot(state, object_id, snapshot)
+            layer_surface_keyboard_focus_with_snapshot(state, root_surface, snapshot)
         else {
             continue;
         };
         if !matches!(layer, LayerShellLayer::Top | LayerShellLayer::Overlay) {
             continue;
         }
-        return Some(SurfaceFocus::new(Resolved::new(
-            surface.client_id(),
-            surface.surface_id(),
-            object_id,
-        )));
+        return Some(SurfaceFocus::new(root_surface));
     }
 
     None
 }
 
-fn surface_object_id_for_focus(state: &State, focus: SurfaceFocus) -> Option<ObjectId> {
-    focus.exists(state).then_some(focus.object_id())
+fn root_surface_for_focus(state: &State, focus: SurfaceFocus) -> Option<Resolved<WlSurfaceId>> {
+    focus.exists(state).then_some(focus.surface)
 }
 
 fn monotonic_time_msec() -> u32 {

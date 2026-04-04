@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser},
     protocol_generated::{wl_keyboard, Array, WaylandId, WlKeyboardId, WlSurfaceId},
     seat::empty_keys,
@@ -35,7 +35,9 @@ impl Object for WlKeyboard {
 
         match client.parse::<Self>(req).unwrap() {
             Release => {
-                state.seat.unregister_keyboard(client.client_id(), self.id);
+                if let Some(keyboard) = client.resolve(self.id, state) {
+                    state.seat.unregister_keyboard(keyboard);
+                }
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
@@ -64,15 +66,26 @@ impl WlKeyboard {
     pub fn send_enter(
         &self,
         serial: u32,
-        surface: WlSurfaceId,
+        surface: Resolved<WlSurfaceId>,
         keys: Array,
         dispatcher: &mut ClientDispatcher,
     ) {
-        self.send_event(wl_keyboard::Event::Enter { serial, surface, keys }, dispatcher);
+        self.send_event(
+            wl_keyboard::Event::Enter { serial, surface: surface.wayland_id(), keys },
+            dispatcher,
+        );
     }
 
-    pub fn send_leave(&self, serial: u32, surface: WlSurfaceId, dispatcher: &mut ClientDispatcher) {
-        self.send_event(wl_keyboard::Event::Leave { serial, surface }, dispatcher);
+    pub fn send_leave(
+        &self,
+        serial: u32,
+        surface: Resolved<WlSurfaceId>,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.send_event(
+            wl_keyboard::Event::Leave { serial, surface: surface.wayland_id() },
+            dispatcher,
+        );
     }
 
     pub fn send_key(
@@ -110,7 +123,7 @@ impl WlKeyboard {
     pub fn send_empty_enter(
         &self,
         serial: u32,
-        surface: WlSurfaceId,
+        surface: Resolved<WlSurfaceId>,
         dispatcher: &mut ClientDispatcher,
     ) {
         self.send_enter(serial, surface, empty_keys(), dispatcher);

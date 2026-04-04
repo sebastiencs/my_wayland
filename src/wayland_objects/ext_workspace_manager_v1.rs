@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    clients::{Client, ClientDispatcher, ClientManagerAction, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, ClientManagerAction, EventWriter, RawRequest, Resolved},
     drm::schedule_outputs,
     globals::Global,
     object::{Object, Parser},
@@ -58,14 +58,8 @@ impl Global for ExtWorkspaceManagerV1Global {
         dispatcher: &mut ClientDispatcher,
     ) {
         let id = ExtWorkspaceManagerV1Id::from(id);
-        let ((_, object_id), _) =
-            client.insert_object(state, ExtWorkspaceManagerV1::new(id, version));
-        let Some(mut manager) = state
-            .objects
-            .try_grab_object::<ExtWorkspaceManagerV1>(object_id)
-        else {
-            return;
-        };
+        let (manager, _) = client.insert_object(state, ExtWorkspaceManagerV1::new(id, version));
+        let mut manager = manager.grab(state);
         manager.sync(client, state, dispatcher, true);
     }
 }
@@ -82,8 +76,8 @@ pub enum PendingWorkspaceRequest {
 pub struct ExtWorkspaceManagerV1 {
     id: ExtWorkspaceManagerV1Id,
     version: u32,
-    group_handles: BTreeMap<WorkspaceGroupId, ExtWorkspaceGroupHandleV1Id>,
-    workspace_handles: BTreeMap<WorkspaceId, ExtWorkspaceHandleV1Id>,
+    group_handles: BTreeMap<WorkspaceGroupId, Resolved<ExtWorkspaceGroupHandleV1Id>>,
+    workspace_handles: BTreeMap<WorkspaceId, Resolved<ExtWorkspaceHandleV1Id>>,
     pending_requests: Vec<PendingWorkspaceRequest>,
 }
 
@@ -105,11 +99,14 @@ impl ExtWorkspaceManagerV1 {
     pub fn group_handle_id(
         &self,
         group_id: WorkspaceGroupId,
-    ) -> Option<ExtWorkspaceGroupHandleV1Id> {
+    ) -> Option<Resolved<ExtWorkspaceGroupHandleV1Id>> {
         self.group_handles.get(&group_id).copied()
     }
 
-    pub fn workspace_handle_id(&self, workspace_id: WorkspaceId) -> Option<ExtWorkspaceHandleV1Id> {
+    pub fn workspace_handle_id(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Option<Resolved<ExtWorkspaceHandleV1Id>> {
         self.workspace_handles.get(&workspace_id).copied()
     }
 
@@ -138,9 +135,17 @@ impl ExtWorkspaceManagerV1 {
             let resource_id = client.allocate_server_object_id::<ExtWorkspaceGroupHandleV1Id>();
             client.insert_object(
                 state,
-                ExtWorkspaceGroupHandleV1::new(resource_id, self.id, group_id, self.version),
+                ExtWorkspaceGroupHandleV1::new(
+                    resource_id,
+                    Resolved::new(client.client_id(), self.id, client.object_id(self.id)),
+                    group_id,
+                    self.version,
+                ),
             );
-            self.group_handles.insert(group_id, resource_id);
+            self.group_handles.insert(
+                group_id,
+                Resolved::new(client.client_id(), resource_id, client.object_id(resource_id)),
+            );
             self.send_event(
                 ext_workspace_manager_v1::Event::WorkspaceGroup { workspace_group: resource_id },
                 dispatcher,
@@ -160,25 +165,22 @@ impl ExtWorkspaceManagerV1 {
                 continue;
             }
             let resource_id = client.allocate_server_object_id::<ExtWorkspaceHandleV1Id>();
-            let ((_, object_id), _) = client.insert_object(
+            let this = client.resolve(self.id, state).unwrap();
+            let (workspace_handle, _) = client.insert_object(
                 state,
-                ExtWorkspaceHandleV1::new(resource_id, self.id, workspace_id, self.version),
+                ExtWorkspaceHandleV1::new(resource_id, this, workspace_id, self.version),
             );
-            self.workspace_handles.insert(workspace_id, resource_id);
+            self.workspace_handles
+                .insert(workspace_id, workspace_handle);
             self.send_event(
                 ext_workspace_manager_v1::Event::Workspace { workspace: resource_id },
                 dispatcher,
             );
-            new_workspace_object_ids.push(object_id);
+            new_workspace_object_ids.push(workspace_handle);
         }
 
         for object_id in new_workspace_object_ids {
-            let Some(mut workspace) = state
-                .objects
-                .try_grab_object::<ExtWorkspaceHandleV1>(object_id)
-            else {
-                continue;
-            };
+            let mut workspace = object_id.grab(state);
             workspace.sync(state, dispatcher);
         }
     }
@@ -196,13 +198,7 @@ impl ExtWorkspaceManagerV1 {
         let workspace_handles = self.workspace_handles.clone();
         let group_object_ids = self.group_handles.values().copied().collect::<Vec<_>>();
         for resource_id in group_object_ids {
-            let Some(object_id) = client.object_id_for_wayland(resource_id) else {
-                continue;
-            };
-            let Some(mut group) = state
-                .objects
-                .try_grab_object::<ExtWorkspaceGroupHandleV1>(object_id)
-            else {
+            let Some(mut group) = resource_id.try_grab(state) else {
                 continue;
             };
             group.sync(client, state, dispatcher, &workspace_handles);
@@ -210,13 +206,7 @@ impl ExtWorkspaceManagerV1 {
 
         let workspace_object_ids = self.workspace_handles.values().copied().collect::<Vec<_>>();
         for resource_id in workspace_object_ids {
-            let Some(object_id) = client.object_id_for_wayland(resource_id) else {
-                continue;
-            };
-            let Some(mut workspace) = state
-                .objects
-                .try_grab_object::<ExtWorkspaceHandleV1>(object_id)
-            else {
+            let Some(mut workspace) = resource_id.try_grab(state) else {
                 continue;
             };
             workspace.sync(state, dispatcher);
@@ -277,13 +267,23 @@ impl ExtWorkspaceManagerV1 {
         let workspace_ids = self.workspace_handles.values().copied().collect::<Vec<_>>();
         self.send_event(ext_workspace_manager_v1::Event::Finished, dispatcher);
         for resource_id in group_ids {
-            if client.contains_object(resource_id, state) {
-                client.delete_id(&WlDisplay::default(), state, dispatcher, resource_id.into());
+            if resource_id.exists(state) {
+                client.delete_id(
+                    &WlDisplay::default(),
+                    state,
+                    dispatcher,
+                    resource_id.wayland_id().into(),
+                );
             }
         }
         for resource_id in workspace_ids {
-            if client.contains_object(resource_id, state) {
-                client.delete_id(&WlDisplay::default(), state, dispatcher, resource_id.into());
+            if resource_id.exists(state) {
+                client.delete_id(
+                    &WlDisplay::default(),
+                    state,
+                    dispatcher,
+                    resource_id.wayland_id().into(),
+                );
             }
         }
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());

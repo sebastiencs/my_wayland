@@ -34,11 +34,12 @@ impl Global for WlOutputGlobal {
         dispatcher: &mut ClientDispatcher,
     ) {
         let id = WlOutputId::from(id);
-        let ((_, object_id), _) =
+        let _ =
             client.insert_object(state, WlOutput { id, output_id: Some(self.output_id), version });
-        let Some(wl_output) = state.objects.try_ref_object::<WlOutput>(object_id) else {
+        let Some(wl_output) = client.resolve(id, state) else {
             return;
         };
+        let wl_output = wl_output.rref(state);
         wl_output.send_state(state, dispatcher);
         client.replay_surface_output_for_output(state, dispatcher, self.output_id);
         client.refresh_workspace_protocols(state, dispatcher);

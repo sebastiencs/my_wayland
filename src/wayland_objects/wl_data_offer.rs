@@ -63,21 +63,26 @@ impl WlDataOffer {
         self.send_event(wl_data_offer::Event::Action { dnd_action }, dispatcher);
     }
 
-    fn is_active_drag_offer(&self, state: &State, client_id: ClientId) -> bool {
-        self.role == DataOfferRole::Drag
-            && state.seat.active_drag_contains_offer(client_id, self.id)
+    fn is_active_drag_offer(
+        &self,
+        state: &State,
+        client_id: ClientId,
+        offer: Resolved<WlDataOfferId>,
+    ) -> bool {
+        self.role == DataOfferRole::Drag && state.seat.active_drag_contains_offer(client_id, offer)
     }
 
     pub fn before_destroy(
         &mut self,
         owner_client_id: ClientId,
+        offer: Resolved<WlDataOfferId>,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
         if self.role != DataOfferRole::Drag
             || !state
                 .seat
-                .unregister_active_drag_offer(owner_client_id, self.id)
+                .unregister_active_drag_offer(owner_client_id, offer)
             || self.finished
         {
             return;
@@ -174,12 +179,15 @@ impl Object for WlDataOffer {
                 // client decide whether it can actually serve the requested MIME type.
                 let accepted_mime = (!mime_type.is_empty()).then_some(mime_type);
                 if self.role == DataOfferRole::Drag {
-                    if !self.is_active_drag_offer(state, client.client_id()) {
+                    let Some(offer) = client.resolve(self.id, state) else {
+                        return Ok(());
+                    };
+                    if !self.is_active_drag_offer(state, client.client_id(), offer) {
                         return Ok(());
                     }
                     let _ = state.seat.set_active_drag_accepted_mime(
                         client.client_id(),
-                        self.id,
+                        offer,
                         accepted_mime.clone(),
                     );
                     if let Some(source) = self.source() {
@@ -205,7 +213,9 @@ impl Object for WlDataOffer {
                     return Ok(());
                 }
                 if self.role == DataOfferRole::Drag
-                    && !self.is_active_drag_offer(state, client.client_id())
+                    && client.resolve(self.id, state).is_none_or(|offer| {
+                        !self.is_active_drag_offer(state, client.client_id(), offer)
+                    })
                 {
                     let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
                     return Ok(());
@@ -226,7 +236,9 @@ impl Object for WlDataOffer {
                 }
             }
             Destroy => {
-                self.before_destroy(client.client_id(), state, dispatcher);
+                if let Some(offer) = client.resolve(self.id, state) {
+                    self.before_destroy(client.client_id(), offer, state, dispatcher);
+                }
                 client.delete_id(
                     &crate::wayland_objects::wl_display::WlDisplay::default(),
                     state,
@@ -244,7 +256,10 @@ impl Object for WlDataOffer {
                     );
                     return Ok(());
                 }
-                if !self.is_active_drag_offer(state, client.client_id()) {
+                let Some(offer) = client.resolve(self.id, state) else {
+                    return Ok(());
+                };
+                if !self.is_active_drag_offer(state, client.client_id(), offer) {
                     return Ok(());
                 }
                 let Some(drag) = state.seat.active_drag() else {
@@ -280,7 +295,7 @@ impl Object for WlDataOffer {
                 self.finished = true;
                 let _ = state
                     .seat
-                    .set_active_drag_finished(client.client_id(), self.id, true);
+                    .set_active_drag_finished(client.client_id(), offer, true);
                 if let Some(source) = self.source() {
                     dispatcher.dispatch_to(
                         source.client_id(),
@@ -320,7 +335,10 @@ impl Object for WlDataOffer {
                     );
                     return Ok(());
                 }
-                if !self.is_active_drag_offer(state, client.client_id()) {
+                let Some(offer) = client.resolve(self.id, state) else {
+                    return Ok(());
+                };
+                if !self.is_active_drag_offer(state, client.client_id(), offer) {
                     return Ok(());
                 }
                 const VALID_MASK: u32 = wl_data_device_manager::DndAction::Copy as u32
@@ -371,18 +389,19 @@ impl Object for WlDataOffer {
                 );
                 let _ = state.seat.set_active_drag_negotiation_actions(
                     client.client_id(),
-                    self.id,
+                    offer,
                     dnd_actions,
                     preferred_action,
                     chosen_action,
                 );
                 self.send_action(chosen_action, dispatcher);
-                for offer_id in state.seat.active_drag_offer_ids(client.client_id()) {
-                    if offer_id == self.id || !client.contains_object(offer_id, state) {
+                for other_offer in state.seat.active_drag_offer_ids(client.client_id()) {
+                    if other_offer == offer || !other_offer.exists(state) {
                         continue;
                     }
-                    let offer = client.ref_object(offer_id, state);
-                    offer.send_action(chosen_action, dispatcher);
+                    other_offer
+                        .rref(state)
+                        .send_action(chosen_action, dispatcher);
                 }
                 if let Some(source) = self.source() {
                     dispatcher.dispatch_to(
@@ -411,7 +430,9 @@ mod tests {
             egl::EGL,
             globals::Globals,
             object::Object,
-            protocol_generated::{wl_data_device_manager, WlDataOfferId, WlDataSourceId},
+            protocol_generated::{
+                wl_data_device_manager, WlDataOfferId, WlDataSourceId, WlSurfaceId,
+            },
             runner::Dispatcher,
             state::{
                 DataOfferRole, DragNegotiationState, DragPhase, DragSource, DragState,
@@ -431,7 +452,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -502,6 +522,22 @@ mod tests {
         (&*event.into_bytes()).try_into().unwrap()
     }
 
+    fn fake_surface(
+        client_id: ClientId,
+        surface_id: u32,
+        object_id: ObjectId,
+    ) -> Resolved<WlSurfaceId> {
+        Resolved::new(client_id, surface_id.into(), object_id)
+    }
+
+    fn fake_offer(
+        client_id: ClientId,
+        offer_id: WlDataOfferId,
+        object_id: ObjectId,
+    ) -> Resolved<WlDataOfferId> {
+        Resolved::new(client_id, offer_id, object_id)
+    }
+
     fn source_offer_request(
         source_id: WlDataSourceId,
         mime_type: &str,
@@ -518,7 +554,7 @@ mod tests {
         let mut target = Client::new_for_tests(ClientId::from_raw(2));
         let offer_id = WlDataOfferId::from(20);
         let source_id = WlDataSourceId::from(10);
-        let ((_, offer_object_id), _) = target.insert_object(
+        let (offer_resolved, _) = target.insert_object(
             &mut state,
             WlDataOffer::new(
                 offer_id,
@@ -527,18 +563,19 @@ mod tests {
                 Some(Resolved::new(source_client_id, source_id, ObjectId::from(0usize))),
             ),
         );
+        let offer_object_id = offer_resolved.object_id();
 
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
                 source: Resolved::new(source_client_id, source_id, ObjectId::from(0usize)),
             },
-            origin_surface_id: 30u32.into(),
-            icon_surface_object_id: None,
+            origin_surface: fake_surface(source_client_id, 30, ObjectId::from(30usize)),
+            icon_surface: None,
             target: Some(DragTargetState {
-                surface: Resolved::new(target.client_id(), 31u32.into(), ObjectId::from(0usize)),
+                surface: fake_surface(target.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
-                offer_ids: vec![offer_id],
+                offer_ids: vec![fake_offer(target.client_id(), offer_id, offer_object_id)],
                 accepted_mime: Some("text/plain".to_string()),
                 destination_actions: 0,
                 preferred_action: 0,
@@ -588,17 +625,18 @@ mod tests {
         let mut state = make_state();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let offer_id = WlDataOfferId::from(20);
-        let ((_, offer_object_id), _) = client
+        let (offer_resolved, _) = client
             .insert_object(&mut state, WlDataOffer::new(offer_id, 3, DataOfferRole::Drag, None));
+        let offer_object_id = offer_resolved.object_id();
         state.seat.set_active_drag(DragState {
             source: DragSource::None { initiator_client_id: ClientId::from_raw(9) },
-            origin_surface_id: 30u32.into(),
-            icon_surface_object_id: None,
+            origin_surface: fake_surface(ClientId::from_raw(9), 30, ObjectId::from(30usize)),
+            icon_surface: None,
             target: Some(DragTargetState {
-                surface: Resolved::new(client.client_id(), 31u32.into(), ObjectId::from(0usize)),
+                surface: fake_surface(client.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
-                offer_ids: vec![offer_id],
+                offer_ids: vec![fake_offer(client.client_id(), offer_id, offer_object_id)],
                 accepted_mime: None,
                 destination_actions: 0,
                 preferred_action: 0,
@@ -636,7 +674,7 @@ mod tests {
         let mut target = Client::new_for_tests(ClientId::from_raw(2));
         let offer_a_id = WlDataOfferId::from(20);
         let offer_b_id = WlDataOfferId::from(21);
-        let ((_, offer_a_object_id), _) = target.insert_object(
+        let (offer_a_resolved, _) = target.insert_object(
             &mut state,
             WlDataOffer::new(
                 offer_a_id,
@@ -649,7 +687,8 @@ mod tests {
                 )),
             ),
         );
-        let _ = target.insert_object(
+        let offer_a_object_id = offer_a_resolved.object_id();
+        let (offer_b_resolved, _) = target.insert_object(
             &mut state,
             WlDataOffer::new(
                 offer_b_id,
@@ -662,6 +701,7 @@ mod tests {
                 )),
             ),
         );
+        let offer_b_object_id = offer_b_resolved.object_id();
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
                 source: Resolved::new(
@@ -670,13 +710,16 @@ mod tests {
                     ObjectId::from(0usize),
                 ),
             },
-            origin_surface_id: 30u32.into(),
-            icon_surface_object_id: None,
+            origin_surface: fake_surface(source_client_id, 30, ObjectId::from(30usize)),
+            icon_surface: None,
             target: Some(DragTargetState {
-                surface: Resolved::new(target.client_id(), 31u32.into(), ObjectId::from(0usize)),
+                surface: fake_surface(target.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
-                offer_ids: vec![offer_a_id, offer_b_id],
+                offer_ids: vec![
+                    fake_offer(target.client_id(), offer_a_id, offer_a_object_id),
+                    fake_offer(target.client_id(), offer_b_id, offer_b_object_id),
+                ],
                 accepted_mime: Some("text/plain".to_string()),
                 destination_actions: wl_data_device_manager::DndAction::Copy as u32,
                 preferred_action: wl_data_device_manager::DndAction::Copy as u32,
@@ -694,7 +737,10 @@ mod tests {
         offer.on(&mut target, &mut state, destroy_request(offer_a_id), &mut client_dispatcher);
 
         let drag = state.seat.active_drag().expect("drag should stay active");
-        assert_eq!(drag.negotiation.offer_ids, vec![offer_b_id]);
+        assert_eq!(
+            drag.negotiation.offer_ids,
+            vec![fake_offer(target.client_id(), offer_b_id, offer_b_object_id)]
+        );
         assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
             source_client_id,
             |action| matches!(
@@ -710,19 +756,24 @@ mod tests {
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let stale_offer_id = WlDataOfferId::from(20);
         let live_offer_id = WlDataOfferId::from(21);
-        let ((_, stale_offer_object_id), _) = client.insert_object(
+        let (stale_offer_resolved, _) = client.insert_object(
             &mut state,
             WlDataOffer::new(stale_offer_id, 3, DataOfferRole::Drag, None),
         );
+        let stale_offer_object_id = stale_offer_resolved.object_id();
         state.seat.set_active_drag(DragState {
             source: DragSource::None { initiator_client_id: ClientId::from_raw(9) },
-            origin_surface_id: 30u32.into(),
-            icon_surface_object_id: None,
+            origin_surface: fake_surface(ClientId::from_raw(9), 30, ObjectId::from(30usize)),
+            icon_surface: None,
             target: Some(DragTargetState {
-                surface: Resolved::new(client.client_id(), 31u32.into(), ObjectId::from(0usize)),
+                surface: fake_surface(client.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
-                offer_ids: vec![live_offer_id],
+                offer_ids: vec![fake_offer(
+                    client.client_id(),
+                    live_offer_id,
+                    ObjectId::from(21usize),
+                )],
                 accepted_mime: Some("text/plain".to_string()),
                 destination_actions: wl_data_device_manager::DndAction::Copy as u32,
                 preferred_action: wl_data_device_manager::DndAction::Copy as u32,
@@ -745,7 +796,10 @@ mod tests {
             .seat
             .active_drag()
             .expect("stale finish should be ignored");
-        assert_eq!(drag.negotiation.offer_ids, vec![live_offer_id]);
+        assert_eq!(
+            drag.negotiation.offer_ids,
+            vec![fake_offer(client.client_id(), live_offer_id, ObjectId::from(21usize),)]
+        );
         assert!(!dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
             matches!(action, ClientManagerAction::Close { id } if *id == client.client_id())
         }));
@@ -757,9 +811,10 @@ mod tests {
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let source_id = WlDataSourceId::from(10);
         let selection_offer_id = WlDataOfferId::from(20);
-        let ((_, source_object_id), _) =
+        let (source_resolved, _) =
             client.insert_object(&mut state, WlDataSource::new(source_id, client.client_id(), 3));
-        let ((_, selection_offer_object_id), _) = client.insert_object(
+        let source_object_id = source_resolved.object_id();
+        let (selection_offer_resolved, _) = client.insert_object(
             &mut state,
             WlDataOffer::new(
                 selection_offer_id,
@@ -768,6 +823,7 @@ mod tests {
                 Some(Resolved::new(client.client_id(), source_id, source_object_id)),
             ),
         );
+        let selection_offer_object_id = selection_offer_resolved.object_id();
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
                 source: Resolved::new(
@@ -776,13 +832,17 @@ mod tests {
                     ObjectId::from(0usize),
                 ),
             },
-            origin_surface_id: 30u32.into(),
-            icon_surface_object_id: None,
+            origin_surface: fake_surface(ClientId::from_raw(9), 30, ObjectId::from(30usize)),
+            icon_surface: None,
             target: Some(DragTargetState {
-                surface: Resolved::new(client.client_id(), 31u32.into(), ObjectId::from(0usize)),
+                surface: fake_surface(client.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
-                offer_ids: vec![WlDataOfferId::from(99)],
+                offer_ids: vec![fake_offer(
+                    client.client_id(),
+                    WlDataOfferId::from(99),
+                    ObjectId::from(99usize),
+                )],
                 accepted_mime: None,
                 destination_actions: 0,
                 preferred_action: 0,
@@ -825,7 +885,7 @@ mod tests {
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let offer_id = WlDataOfferId::from(20);
         let source_id = WlDataSourceId::from(10);
-        let ((_, offer_object_id), _) = client.insert_object(
+        let (offer_resolved, _) = client.insert_object(
             &mut state,
             WlDataOffer::new(
                 offer_id,
@@ -834,18 +894,19 @@ mod tests {
                 Some(Resolved::new(ClientId::from_raw(9), source_id, ObjectId::from(0usize))),
             ),
         );
+        let offer_object_id = offer_resolved.object_id();
 
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
                 source: Resolved::new(ClientId::from_raw(9), source_id, ObjectId::from(0usize)),
             },
-            origin_surface_id: 30u32.into(),
-            icon_surface_object_id: None,
+            origin_surface: fake_surface(ClientId::from_raw(9), 30, ObjectId::from(30usize)),
+            icon_surface: None,
             target: Some(DragTargetState {
-                surface: Resolved::new(client.client_id(), 31u32.into(), ObjectId::from(0usize)),
+                surface: fake_surface(client.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
-                offer_ids: vec![offer_id],
+                offer_ids: vec![fake_offer(client.client_id(), offer_id, offer_object_id)],
                 accepted_mime: Some("text/plain".to_string()),
                 destination_actions: 0,
                 preferred_action: 0,
@@ -872,8 +933,9 @@ mod tests {
         let mut state = make_state();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let offer_id = WlDataOfferId::from(20);
-        let ((_, offer_object_id), _) = client
+        let (offer_resolved, _) = client
             .insert_object(&mut state, WlDataOffer::new(offer_id, 3, DataOfferRole::Drag, None));
+        let offer_object_id = offer_resolved.object_id();
 
         {
             let offer = state
@@ -906,7 +968,7 @@ mod tests {
         let mut target = Client::new_for_tests(ClientId::from_raw(7));
         let source_id = WlDataSourceId::from(10);
         let offer_id = WlDataOfferId::from(20);
-        let ((_, offer_object_id), _) = target.insert_object(
+        let (offer_resolved, _) = target.insert_object(
             &mut state,
             WlDataOffer::new(
                 offer_id,
@@ -915,17 +977,18 @@ mod tests {
                 Some(Resolved::new(source_client_id, source_id, ObjectId::from(0usize))),
             ),
         );
+        let offer_object_id = offer_resolved.object_id();
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
                 source: Resolved::new(source_client_id, source_id, ObjectId::from(0usize)),
             },
-            origin_surface_id: 30u32.into(),
-            icon_surface_object_id: None,
+            origin_surface: fake_surface(source_client_id, 30, ObjectId::from(30usize)),
+            icon_surface: None,
             target: Some(DragTargetState {
-                surface: Resolved::new(target.client_id(), 31u32.into(), ObjectId::from(0usize)),
+                surface: fake_surface(target.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
-                offer_ids: vec![offer_id],
+                offer_ids: vec![fake_offer(target.client_id(), offer_id, offer_object_id)],
                 accepted_mime: None,
                 destination_actions: 0,
                 preferred_action: 0,
@@ -971,7 +1034,7 @@ mod tests {
         let mut target = Client::new_for_tests(ClientId::from_raw(7));
         let source_id = WlDataSourceId::from(10);
         let offer_id = WlDataOfferId::from(20);
-        let ((_, offer_object_id), _) = target.insert_object(
+        let (offer_resolved, _) = target.insert_object(
             &mut state,
             WlDataOffer::new(
                 offer_id,
@@ -980,17 +1043,18 @@ mod tests {
                 Some(Resolved::new(source_client_id, source_id, ObjectId::from(0usize))),
             ),
         );
+        let offer_object_id = offer_resolved.object_id();
         state.seat.set_active_drag(DragState {
             source: DragSource::DataSource {
                 source: Resolved::new(source_client_id, source_id, ObjectId::from(0usize)),
             },
-            origin_surface_id: 30u32.into(),
-            icon_surface_object_id: None,
+            origin_surface: fake_surface(source_client_id, 30, ObjectId::from(30usize)),
+            icon_surface: None,
             target: Some(DragTargetState {
-                surface: Resolved::new(target.client_id(), 31u32.into(), ObjectId::from(0usize)),
+                surface: fake_surface(target.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
-                offer_ids: vec![offer_id],
+                offer_ids: vec![fake_offer(target.client_id(), offer_id, offer_object_id)],
                 accepted_mime: Some("application/x-unadvertised".to_string()),
                 destination_actions: wl_data_device_manager::DndAction::Copy as u32,
                 preferred_action: wl_data_device_manager::DndAction::Copy as u32,

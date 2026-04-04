@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest},
+    clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
     object::{Object, Parser},
     protocol_generated::{wp_viewporter, Constants, NewId, WaylandId, WpViewporterId},
@@ -58,19 +58,10 @@ impl Object for WpViewporter {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
             GetViewport { id, surface } => {
-                if !client.contains_object(surface, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                        "invalid wl_surface for wp_viewporter.get_viewport",
-                    );
-                    return Ok(());
-                }
-                let surface_oid = client.object_id(surface);
+                let surface = client.resolve_or_disconnect(surface, state, dispatcher)?;
                 {
-                    let mut surface = state.objects.grab_object::<WlSurface>(surface_oid);
-                    if surface.set_viewport_object(id).is_err() {
+                    let surface = surface.rref(state);
+                    if surface.has_viewport_object() {
                         client.send_protocol_error(
                             dispatcher,
                             self.id.into(),
@@ -80,7 +71,11 @@ impl Object for WpViewporter {
                         return Ok(());
                     }
                 }
-                client.insert_object(state, WpViewport::new(id, surface_oid));
+                let (viewport, _) = client.insert_object(state, WpViewport::new(id, surface));
+                surface
+                    .grab(state)
+                    .set_viewport_object(viewport)
+                    .expect("viewport existence was checked before insertion");
             }
         }
         Ok(())

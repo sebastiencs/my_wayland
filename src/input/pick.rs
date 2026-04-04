@@ -1,13 +1,11 @@
 use crate::{
     clients::Resolved,
-    object::Object,
-    protocol_generated::{xdg_toplevel::ResizeEdge, XdgSurfaceId},
+    protocol_generated::{xdg_toplevel::ResizeEdge, WlSurfaceId, XdgSurfaceId},
     region::RectI,
-    state::{IndexMap, ObjectId, State},
+    state::State,
     wayland_objects::{
-        wl_surface::{Role, StackEntry, WlSurface},
-        xdg_surface::xdg_toplevel::XdgToplevel,
-        zwlr_layer_surface_v1::ordered_scene_root_surface_ids,
+        wl_surface::{Role, StackEntry},
+        zwlr_layer_surface_v1::ordered_scene_root_surfaces,
     },
 };
 
@@ -20,23 +18,23 @@ pub(crate) fn scene_pick_at(state: &State, pointer_pos: (f64, f64)) -> ScenePick
     let mut surface_focus = None;
     let mut window_target = None;
 
-    for object_id in ordered_scene_root_surface_ids(state) {
-        let Some(surface) = state.objects.try_ref_object::<WlSurface>(object_id) else {
+    for root_surface in ordered_scene_root_surfaces(state) {
+        let Some(surface) = root_surface.try_ref(state) else {
             continue;
         };
         if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
             continue;
         }
         if let Some(root_hit) =
-            hit_test_subtree(&state.objects, object_id, 0, 0, pointer_pos.0, pointer_pos.1)
+            hit_test_subtree(state, root_surface, 0, 0, pointer_pos.0, pointer_pos.1)
         {
             surface_focus = Some(root_hit);
         }
-        let Some(interactive_rect) = state.root_surface_interactive_rect(object_id) else {
+        let Some(interactive_rect) = state.root_surface_interactive_rect(root_surface) else {
             continue;
         };
         if rect_contains_point(interactive_rect, pointer_pos) {
-            window_target = build_window_target(state, object_id, interactive_rect);
+            window_target = build_window_target(state, root_surface, interactive_rect);
         }
     }
 
@@ -62,32 +60,28 @@ pub(crate) fn surface_focus_pick_at(
 
 pub(crate) fn resolve_window_target(
     state: &State,
-    root_surface_object_id: ObjectId,
+    root_surface: Resolved<WlSurfaceId>,
 ) -> Option<WindowTarget> {
-    let interactive_rect = state.root_surface_interactive_rect(root_surface_object_id)?;
-    build_window_target(state, root_surface_object_id, interactive_rect)
+    let interactive_rect = state.root_surface_interactive_rect(root_surface)?;
+    build_window_target(state, root_surface, interactive_rect)
 }
 
 pub(crate) fn build_protocol_window_target(
     state: &State,
-    root_surface_object_id: ObjectId,
+    root_surface: Resolved<WlSurfaceId>,
     role: WindowRoleSnapshot,
 ) -> Option<WindowTarget> {
-    let root_surface = state
-        .objects
-        .try_ref_object::<WlSurface>(root_surface_object_id)?;
-    let content_rect = root_surface
+    let surface = root_surface.try_ref(state)?;
+    let content_rect = surface
         .global_logical_bounds()
-        .or_else(|| state.root_surface_content_rect(root_surface_object_id))?;
+        .or_else(|| state.root_surface_content_rect(root_surface))?;
     let interactive_rect = content_rect;
     let outer_rect = content_rect;
     Some(WindowSnapshot {
-        client_id: root_surface.client_id(),
-        surface_id: root_surface.surface_id(),
-        root_surface_object_id,
+        root_surface,
         role,
-        initial_root_pos: root_surface.root_position(),
-        initial_size: root_surface
+        initial_root_pos: surface.root_position(),
+        initial_size: surface
             .logical_size()
             .map(|size| (size.width, size.height))?,
         content_rect,
@@ -98,33 +92,29 @@ pub(crate) fn build_protocol_window_target(
 
 pub(crate) fn build_window_target(
     state: &State,
-    root_surface_object_id: ObjectId,
+    root_surface: Resolved<WlSurfaceId>,
     interactive_rect: RectI,
 ) -> Option<WindowTarget> {
-    let root_surface = state
-        .objects
-        .try_ref_object::<WlSurface>(root_surface_object_id)?;
-    let content_rect = state.root_surface_content_rect(root_surface_object_id)?;
+    let surface = root_surface.try_ref(state)?;
+    let content_rect = state.root_surface_content_rect(root_surface)?;
     let outer_rect = state
-        .root_surface_outer_rect(root_surface_object_id)
+        .root_surface_outer_rect(root_surface)
         .unwrap_or(interactive_rect);
-    let role = match root_surface.role() {
-        Role::XdgSurface => root_surface
-            .xdg_surface_id()
+    let role = match surface.role() {
+        Role::XdgSurface => surface
+            .xdg_surface()
             .map(|xdg_surface_id| {
-                resolve_xdg_window_role_snapshot(state, root_surface_object_id, xdg_surface_id)
+                resolve_xdg_window_role_snapshot(state, root_surface, xdg_surface_id.wayland_id())
             })
             .unwrap_or(WindowRoleSnapshot::Unsupported),
         _ => WindowRoleSnapshot::Unsupported,
     };
 
     Some(WindowSnapshot {
-        client_id: root_surface.client_id(),
-        surface_id: root_surface.surface_id(),
-        root_surface_object_id,
+        root_surface,
         role,
-        initial_root_pos: root_surface.root_position(),
-        initial_size: root_surface
+        initial_root_pos: surface.root_position(),
+        initial_size: surface
             .logical_size()
             .map(|size| (size.width, size.height))?,
         content_rect,
@@ -135,24 +125,27 @@ pub(crate) fn build_window_target(
 
 pub(crate) fn resolve_xdg_window_role_snapshot(
     state: &State,
-    root_surface_object_id: ObjectId,
+    root_surface: Resolved<WlSurfaceId>,
     xdg_surface_id: XdgSurfaceId,
 ) -> WindowRoleSnapshot {
+    let Some(xdg_surface) = root_surface
+        .try_ref(state)
+        .and_then(|s| s.xdg_surface())
+        .filter(|xs| xs.wayland_id() == xdg_surface_id)
+    else {
+        return WindowRoleSnapshot::Unsupported;
+    };
     state
-        .objects
-        .iter()
-        .find_map(|(_object_id, object)| {
-            object.downcast_ref::<XdgToplevel>().and_then(|toplevel| {
-                (toplevel.xdg_surface_id() == xdg_surface_id).then_some(
-                    WindowRoleSnapshot::XdgToplevel {
-                        xdg_toplevel_id: toplevel.toplevel_id(),
-                        size_constraints: toplevel.interactive_size_constraints(),
-                        is_maximized: toplevel.is_maximized(),
-                        is_fullscreen: state.root_surface_is_fullscreen(root_surface_object_id),
-                        decoration_mode: toplevel.decoration_mode(),
-                    },
-                )
-            })
+        .xdg_toplevel(xdg_surface)
+        .map(|xdg_toplevel| {
+            let toplevel = xdg_toplevel.rref(state);
+            WindowRoleSnapshot::XdgToplevel {
+                xdg_toplevel,
+                size_constraints: toplevel.interactive_size_constraints(),
+                is_maximized: toplevel.is_maximized(),
+                is_fullscreen: state.root_surface_is_fullscreen(root_surface),
+                decoration_mode: toplevel.decoration_mode(),
+            }
         })
         .unwrap_or(WindowRoleSnapshot::Unsupported)
 }
@@ -213,14 +206,14 @@ pub(crate) fn resize_edges_for_pointer(bounds: RectI, pointer_pos: (f64, f64)) -
 }
 
 fn hit_test_subtree(
-    objects: &IndexMap<ObjectId, Box<dyn Object>>,
-    surface_object_id: ObjectId,
+    state: &State,
+    surface_id: Resolved<WlSurfaceId>,
     base_x: i32,
     base_y: i32,
     x: f64,
     y: f64,
 ) -> Option<SurfaceFocusPick> {
-    let surface = objects.try_ref_object::<WlSurface>(surface_object_id)?;
+    let surface = surface_id.try_ref(state)?;
     let surface_state = surface.render_state_at(base_x, base_y)?;
     let stack = surface.current_stack().to_vec();
 
@@ -234,26 +227,17 @@ fn hit_test_subtree(
                     height: surface_state.height,
                 };
                 if surface.accepts_input_at_with_origin(x, y, base_x, base_y) {
-                    return Some(SurfaceFocusPick {
-                        target: SurfaceFocus::new(Resolved::new(
-                            surface.client_id(),
-                            surface.surface_id(),
-                            surface_object_id,
-                        )),
-                        rect,
-                    });
+                    return Some(SurfaceFocusPick { target: SurfaceFocus::new(surface_id), rect });
                 }
             }
-            StackEntry::Child(child_surface_object_id) => {
-                let Some(child_surface) =
-                    objects.try_ref_object::<WlSurface>(child_surface_object_id)
-                else {
+            StackEntry::Child(child_surface_id) => {
+                let Some(child_surface) = child_surface_id.try_ref(state) else {
                     continue;
                 };
                 let (child_x, child_y) = child_surface.current_subsurface_position();
                 if let Some(hit) = hit_test_subtree(
-                    objects,
-                    child_surface_object_id,
+                    state,
+                    child_surface_id,
                     surface_state.x + child_x,
                     surface_state.y + child_y,
                     x,

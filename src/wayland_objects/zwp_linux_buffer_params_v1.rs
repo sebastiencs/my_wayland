@@ -167,14 +167,15 @@ impl Object for ZwpLinuxBufferParamsV1 {
                         y_inverted,
                     }) {
                         Ok(buffer) => {
-                            let ((buffer_id, _), _) = client.insert_object(state, buffer);
+                            let (buffer, _) = client.insert_object(state, buffer);
+                            let buffer_wayland_id: WaylandId = buffer.wayland_id().into();
                             self.send_event(
                                 zwp_linux_buffer_params_v1::Event::Created {
-                                    buffer: buffer_id.into(),
+                                    buffer: buffer_wayland_id.into(),
                                 },
                                 dispatcher,
                             );
-                            log::debug!("created client dma-buf wl_buffer {:?}", buffer_id);
+                            log::debug!("created client dma-buf wl_buffer {:?}", buffer_wayland_id);
                         }
                         Err(_) => {
                             self.send_event(zwp_linux_buffer_params_v1::Event::Failed, dispatcher)

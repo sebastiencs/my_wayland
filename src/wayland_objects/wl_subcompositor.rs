@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest},
+    clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
     object::{Object, Parser},
     protocol_generated::{wl_subcompositor, Constants, NewId, WaylandId, WlSubcompositorId},
@@ -106,16 +106,17 @@ impl Object for WlSubcompositor {
                     }
                 }
 
-                client.insert_object(state, WlSubsurface::new(id, surface, parent));
-                state.unregister_root_surface(surface.object_id());
+                let (subsurface, _) =
+                    client.insert_object(state, WlSubsurface::new(id, surface, parent));
+                state.unregister_root_surface(surface);
 
                 {
                     let surface_ref = surface.ref_mut(state);
-                    surface_ref.assign_subsurface(id, parent);
+                    surface_ref.assign_subsurface(subsurface, parent);
                 }
                 {
                     let parent_ref = parent.ref_mut(state);
-                    parent_ref.add_pending_child(surface.object_id());
+                    parent_ref.add_pending_child(surface);
                 }
             }
         }
@@ -148,7 +149,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -196,13 +196,17 @@ mod tests {
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
         let mut subcompositor = WlSubcompositor::new(WlSubcompositorId::from(1));
 
-        let (_, parent_object_id) = client
-            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(10), client.client_id(), 6))
-            .0;
+        let (parent_resolved, _) = client.insert_object(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(10), client.client_id(), 6),
+        );
+        let parent_object_id = parent_resolved.object_id();
         state.register_root_surface(parent_object_id);
-        let (_, child_object_id) = client
-            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(11), client.client_id(), 6))
-            .0;
+        let (child_resolved, _) = client.insert_object(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(11), client.client_id(), 6),
+        );
+        let child_object_id = child_resolved.object_id();
         state.register_root_surface(child_object_id);
 
         subcompositor.on(

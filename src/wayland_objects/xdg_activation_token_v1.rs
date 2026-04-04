@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser},
     protocol_generated::{
         wl_display, xdg_activation_token_v1, Constants, WaylandId, WlSeatId, WlSurfaceId,
@@ -14,9 +14,9 @@ use crate::{
 pub struct XdgActivationTokenV1 {
     id: XdgActivationTokenV1Id,
     committed: bool,
-    seat_id: Option<WlSeatId>,
+    seat: Option<Resolved<WlSeatId>>,
     serial: Option<u32>,
-    surface_id: Option<WlSurfaceId>,
+    surface: Option<Resolved<WlSurfaceId>>,
     app_id: Option<String>,
 }
 
@@ -25,9 +25,9 @@ impl XdgActivationTokenV1 {
         Self {
             id,
             committed: false,
-            seat_id: None,
+            seat: None,
             serial: None,
-            surface_id: None,
+            surface: None,
             app_id: None,
         }
     }
@@ -65,9 +65,9 @@ impl Object for XdgActivationTokenV1 {
                     self.already_used(dispatcher);
                     return Ok(());
                 }
-                client.resolve_or_disconnect(seat, state, dispatcher)?;
+                let seat = client.resolve_or_disconnect(seat, state, dispatcher)?;
                 self.serial = Some(serial);
-                self.seat_id = Some(seat);
+                self.seat = Some(seat);
             }
             SetAppId { app_id } => {
                 if self.committed {
@@ -81,8 +81,8 @@ impl Object for XdgActivationTokenV1 {
                     self.already_used(dispatcher);
                     return Ok(());
                 }
-                client.resolve_or_disconnect(surface, state, dispatcher)?;
-                self.surface_id = Some(surface);
+                let surface = client.resolve_or_disconnect(surface, state, dispatcher)?;
+                self.surface = Some(surface);
             }
             Commit => {
                 if self.committed {
@@ -91,9 +91,9 @@ impl Object for XdgActivationTokenV1 {
                 }
                 self.committed = true;
 
-                let tracked = match (self.seat_id, self.serial, self.surface_id) {
-                    (Some(seat_id), Some(serial), Some(surface_id)) => {
-                        validate_activation_serial(state, client, seat_id, surface_id, serial)
+                let tracked = match (&self.seat, &self.serial, &self.surface) {
+                    (Some(seat), Some(serial), Some(surface)) => {
+                        validate_activation_serial(state, client, *seat, *surface, *serial)
                     }
                     _ => false,
                 };
@@ -101,18 +101,18 @@ impl Object for XdgActivationTokenV1 {
                 let token = if tracked {
                     state.activation_tokens.issue_tracked(
                         client.client_id(),
-                        self.seat_id,
+                        self.seat,
                         self.serial,
-                        self.surface_id,
+                        self.surface,
                         self.app_id.clone(),
                     )
                 } else {
                     log::debug!(
                         "rejecting activation token commit client={:?} seat={:?} serial={:?} surface={:?}",
                         client.client_id(),
-                        self.seat_id,
+                        self.seat,
                         self.serial,
-                        self.surface_id
+                        self.surface
                     );
                     state.activation_tokens.issue_untracked()
                 };

@@ -1,8 +1,10 @@
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
+    input::SurfaceFocus,
     object::{Object, Parser, PostAction},
     protocol_generated::{
-        xdg_popup, xdg_wm_base, WaylandId, WlSeatId, XdgPopupId, XdgSurfaceId, ZwlrLayerSurfaceV1Id,
+        xdg_popup, xdg_wm_base, WaylandId, WlSeatId, WlSurfaceId, XdgPopupId, XdgSurfaceId,
+        ZwlrLayerSurfaceV1Id,
     },
     region::RectI,
     state::State,
@@ -15,8 +17,8 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PopupParent {
     None,
-    XdgSurface(XdgSurfaceId),
-    LayerSurface(ZwlrLayerSurfaceV1Id),
+    XdgSurface(Resolved<XdgSurfaceId>),
+    LayerSurface(Resolved<ZwlrLayerSurfaceV1Id>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,7 +30,7 @@ pub enum AssignLayerParentError {
 #[derive(Debug)]
 pub struct XdgPopup {
     id: XdgPopupId,
-    xdg_surface_id: XdgSurfaceId,
+    xdg_surface: Resolved<XdgSurfaceId>,
     /// `xdg_wm_base` version for this shell (from the factory that created the popup).
     wm_base_version: u32,
     parent: PopupParent,
@@ -42,8 +44,8 @@ pub struct XdgPopup {
 impl XdgPopup {
     pub fn new(
         id: XdgPopupId,
-        xdg_surface_id: XdgSurfaceId,
-        parent_surface_id: Option<XdgSurfaceId>,
+        xdg_surface: Resolved<XdgSurfaceId>,
+        parent_surface: Option<Resolved<XdgSurfaceId>>,
         positioner: PositionerState,
         wm_base_version: u32,
     ) -> Self {
@@ -53,9 +55,9 @@ impl XdgPopup {
                 .unwrap_or(RectI { x: 0, y: 0, width: 0, height: 0 });
         Self {
             id,
-            xdg_surface_id,
+            xdg_surface,
             wm_base_version,
-            parent: parent_surface_id
+            parent: parent_surface
                 .map(PopupParent::XdgSurface)
                 .unwrap_or(PopupParent::None),
             positioner,
@@ -70,20 +72,20 @@ impl XdgPopup {
         self.explicit_grab
     }
 
-    pub fn xdg_surface_id(&self) -> XdgSurfaceId {
-        self.xdg_surface_id
+    pub fn xdg_surface(&self) -> Resolved<XdgSurfaceId> {
+        self.xdg_surface
     }
 
-    pub fn parent_surface_id(&self) -> Option<XdgSurfaceId> {
+    pub fn parent_surface(&self) -> Option<Resolved<XdgSurfaceId>> {
         match self.parent {
             PopupParent::XdgSurface(id) => Some(id),
             _ => None,
         }
     }
 
-    pub fn parent_layer_surface_id(&self) -> Option<ZwlrLayerSurfaceV1Id> {
+    pub fn parent_layer_surface(&self) -> Option<Resolved<ZwlrLayerSurfaceV1Id>> {
         match self.parent {
-            PopupParent::LayerSurface(id) => Some(id),
+            PopupParent::LayerSurface(layer) => Some(layer),
             _ => None,
         }
     }
@@ -106,7 +108,7 @@ impl XdgPopup {
 
     pub fn assign_layer_parent(
         &mut self,
-        layer_surface_id: ZwlrLayerSurfaceV1Id,
+        layer_surface: Resolved<ZwlrLayerSurfaceV1Id>,
     ) -> Result<(), AssignLayerParentError> {
         if !matches!(self.parent, PopupParent::None) {
             return Err(AssignLayerParentError::AlreadyHasParent);
@@ -114,7 +116,7 @@ impl XdgPopup {
         if self.mapped {
             return Err(AssignLayerParentError::AlreadyMapped);
         }
-        self.parent = PopupParent::LayerSurface(layer_surface_id);
+        self.parent = PopupParent::LayerSurface(layer_surface);
         Ok(())
     }
 
@@ -138,7 +140,7 @@ impl XdgPopup {
     ) {
         client.send_protocol_error(
             dispatcher,
-            xdg_surface.xdg_wm_base_id().into(),
+            xdg_surface.xdg_wm_base().wayland_id().into(),
             code as u32,
             message,
         );
@@ -147,14 +149,10 @@ impl XdgPopup {
     fn computed_geometry(&self, client: &Client, state: &State) -> RectI {
         match self.parent {
             PopupParent::XdgSurface(parent_surface_id) => {
-                let Some(parent_object_id) = client.object_id_for_wayland(parent_surface_id) else {
+                if !parent_surface_id.exists(state) {
                     return self.positioner.geometry().unwrap_or(self.current_geometry);
-                };
-                let Some(parent_surface) =
-                    state.objects.try_ref_object::<XdgSurface>(parent_object_id)
-                else {
-                    return self.positioner.geometry().unwrap_or(self.current_geometry);
-                };
+                }
+                let parent_surface = parent_surface_id.rref(state);
                 let parent_geometry = parent_surface.parent_geometry(client, state);
                 let Some(mut geometry) = self.positioner.geometry_in_bounds(RectI {
                     x: 0,
@@ -169,10 +167,7 @@ impl XdgPopup {
                 geometry
             }
             PopupParent::LayerSurface(parent_layer_surface_id) => {
-                let Some(parent_layer_surface) = state.objects.iter().find_map(|(_, object)| {
-                    let layer_surface = object.downcast_ref::<ZwlrLayerSurfaceV1>()?;
-                    (layer_surface.id() == parent_layer_surface_id.into()).then_some(layer_surface)
-                }) else {
+                let Some(parent_layer_surface) = parent_layer_surface_id.try_ref(state) else {
                     return self.positioner.geometry().unwrap_or(self.current_geometry);
                 };
                 let parent_geometry = parent_layer_surface.popup_anchor_geometry(state);
@@ -250,13 +245,14 @@ impl Object for XdgPopup {
 
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
-                let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
+                let mut xdg_surface = self.xdg_surface.grab(state);
                 let mut fallback_focus = None;
+                let popup = client.resolve(self.id, state).unwrap();
                 match self.parent {
                     PopupParent::XdgSurface(parent_surface_id) => {
-                        let mut parent_surface = client.grab_object(parent_surface_id, state);
-                        if parent_surface.has_popup_child(self.id)
-                            && !parent_surface.is_topmost_popup(self.id)
+                        let mut parent_surface = parent_surface_id.grab(state);
+                        if parent_surface.has_popup_child(popup)
+                            && !parent_surface.is_topmost_popup(popup)
                         {
                             self.send_wm_base_error(
                                 &xdg_surface,
@@ -267,22 +263,13 @@ impl Object for XdgPopup {
                             );
                             return Ok(());
                         }
-                        let parent_surface_id = parent_surface.wl_surface_id();
-                        let parent_surface_object_id = state
-                            .surface_object_id_for_client(client.client_id(), parent_surface_id);
-                        fallback_focus = parent_surface_object_id.map(|object_id| {
-                            crate::input::SurfaceFocus::new(crate::clients::Resolved::new(
-                                client.client_id(),
-                                parent_surface_id,
-                                object_id,
-                            ))
-                        });
-                        parent_surface.remove_popup_child(self.id);
+                        fallback_focus = Some(SurfaceFocus::new(parent_surface.wl_surface()));
+                        parent_surface.remove_popup_child(popup);
                     }
                     PopupParent::LayerSurface(parent_surface_id) => {
-                        let mut parent_surface = client.grab_object(parent_surface_id, state);
-                        if parent_surface.has_popup_child(self.id)
-                            && !parent_surface.is_topmost_popup(self.id)
+                        let mut parent_surface = parent_surface_id.grab(state);
+                        if parent_surface.has_popup_child(popup)
+                            && !parent_surface.is_topmost_popup(popup)
                         {
                             self.send_error(
                                 client,
@@ -292,24 +279,15 @@ impl Object for XdgPopup {
                             );
                             return Ok(());
                         }
-                        let parent_surface_id = parent_surface.surface_id();
-                        let parent_surface_object_id = state
-                            .surface_object_id_for_client(client.client_id(), parent_surface_id);
-                        fallback_focus = parent_surface_object_id.map(|object_id| {
-                            crate::input::SurfaceFocus::new(crate::clients::Resolved::new(
-                                client.client_id(),
-                                parent_surface_id,
-                                object_id,
-                            ))
-                        });
-                        parent_surface.remove_popup_child(self.id);
+                        fallback_focus = Some(SurfaceFocus::new(parent_surface.surface()));
+                        parent_surface.remove_popup_child(popup);
                     }
                     PopupParent::None => {}
                 }
                 drop(xdg_surface);
                 dispatcher.dispatch_post_action(PostXdgPopup::DestroyPopup {
-                    popup_id: self.id,
-                    xdg_surface_id: self.xdg_surface_id,
+                    popup,
+                    xdg_surface: self.xdg_surface,
                     fallback_focus,
                 });
             }
@@ -325,16 +303,12 @@ impl Object for XdgPopup {
                 }
                 if let PopupParent::XdgSurface(parent_surface_id) = self.parent {
                     let invalid_parent = {
-                        let parent_surface_object_id = client.object_id(parent_surface_id);
-                        let parent_surface = state
-                            .objects
-                            .try_ref_object::<XdgSurface>(parent_surface_object_id)
-                            .unwrap();
+                        let parent_surface = parent_surface_id.try_ref(state).unwrap();
                         parent_surface.is_popup_parent()
                             && !parent_surface.popup_has_explicit_grab(client, state)
                     };
                     if invalid_parent {
-                        let parent_surface = client.ref_object(parent_surface_id, state);
+                        let parent_surface = parent_surface_id.rref(state);
                         self.send_wm_base_error(
                             parent_surface,
                             client,
@@ -345,70 +319,40 @@ impl Object for XdgPopup {
                         return Ok(());
                     }
                 }
-                if !client.object_is(seat, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                        "xdg_popup.grab requires a live wl_seat",
-                    );
-                    return Ok(());
-                }
-                let parent_wl_surface_id = {
-                    match self.parent {
-                        PopupParent::XdgSurface(parent_surface_id) => {
-                            let parent_surface: &XdgSurface =
-                                client.ref_object(parent_surface_id, state);
-                            parent_surface.wl_surface_id()
-                        }
-                        PopupParent::LayerSurface(parent_surface_id) => {
-                            let parent_surface: &ZwlrLayerSurfaceV1 =
-                                client.ref_object(parent_surface_id, state);
-                            parent_surface.surface_id()
-                        }
-                        PopupParent::None => {
-                            self.send_error(
-                                client,
-                                dispatcher,
-                                xdg_popup::Error::InvalidGrab,
-                                "xdg_popup.grab requires a parent surface",
-                            );
-                            return Ok(());
-                        }
+                let _seat = client.resolve_or_disconnect(seat, state, dispatcher)?;
+                let parent_wl_surface = match self.parent {
+                    PopupParent::XdgSurface(parent_surface_id) => {
+                        parent_surface_id.rref(state).wl_surface()
+                    }
+                    PopupParent::LayerSurface(parent_surface_id) => {
+                        parent_surface_id.rref(state).surface()
+                    }
+                    PopupParent::None => {
+                        self.send_error(
+                            client,
+                            dispatcher,
+                            xdg_popup::Error::InvalidGrab,
+                            "xdg_popup.grab requires a parent surface",
+                        );
+                        return Ok(());
                     }
                 };
                 self.explicit_grab = true;
-                let popup_surface_id = {
-                    let xdg_surface = client.ref_object(self.xdg_surface_id, state);
-                    xdg_surface.wl_surface_id()
-                };
+                let popup = client.resolve(self.id, state).unwrap();
+                let popup_surface = self.xdg_surface.rref(state).wl_surface();
                 dispatcher.dispatch_post_action(PostXdgPopup::RequestPopupGrab {
-                    popup_id: self.id,
+                    popup,
                     client_id: client.client_id(),
-                    parent_wl_surface_id,
+                    parent_wl_surface,
                     serial,
-                    popup_surface_id,
+                    popup_surface,
                 });
             }
             Reposition { positioner, token } => {
-                if !client.object_is(positioner, state) {
-                    client.protocol_violation_disconnect(
-                        dispatcher,
-                        self.id.into(),
-                        crate::protocol_generated::wl_display::Error::InvalidObject as u32,
-                        "xdg_popup.reposition requires a live xdg_positioner",
-                    );
-                    return Ok(());
-                }
-                let positioner = state
-                    .objects
-                    .try_ref_object::<crate::wayland_objects::xdg_positioner::XdgPositioner>(
-                        client.object_id(positioner),
-                    )
-                    .unwrap()
-                    .snapshot();
+                let positioner = client.resolve_or_disconnect(positioner, state, dispatcher)?;
+                let positioner = positioner.rref(state).snapshot();
                 if !positioner.is_complete() {
-                    let xdg_surface = client.ref_object(self.xdg_surface_id, state);
+                    let xdg_surface = self.xdg_surface.rref(state);
                     self.send_wm_base_error(
                         xdg_surface,
                         client,
@@ -420,7 +364,7 @@ impl Object for XdgPopup {
                 }
                 self.positioner = positioner;
                 self.pending_reposition_token = Some(token);
-                let mut xdg_surface = client.grab_object(self.xdg_surface_id, state);
+                let mut xdg_surface = self.xdg_surface.grab(state);
                 self.send_configure_sequence(&mut xdg_surface, client, state, dispatcher);
             }
         }
@@ -430,16 +374,16 @@ impl Object for XdgPopup {
 
 enum PostXdgPopup {
     DestroyPopup {
-        popup_id: XdgPopupId,
-        xdg_surface_id: XdgSurfaceId,
+        popup: Resolved<XdgPopupId>,
+        xdg_surface: Resolved<XdgSurfaceId>,
         fallback_focus: Option<crate::input::SurfaceFocus>,
     },
     RequestPopupGrab {
-        popup_id: XdgPopupId,
+        popup: Resolved<XdgPopupId>,
         client_id: crate::clients::ClientId,
-        parent_wl_surface_id: crate::protocol_generated::WlSurfaceId,
+        parent_wl_surface: Resolved<WlSurfaceId>,
         serial: u32,
-        popup_surface_id: crate::protocol_generated::WlSurfaceId,
+        popup_surface: Resolved<WlSurfaceId>,
     },
 }
 
@@ -451,29 +395,32 @@ impl PostAction for PostXdgPopup {
         dispatcher: &mut ClientDispatcher,
     ) {
         match *self {
-            PostXdgPopup::DestroyPopup { popup_id, xdg_surface_id, fallback_focus } => {
-                crate::seat::remove_popup_grab(state, dispatcher, popup_id, fallback_focus);
-                if client.contains_object(xdg_surface_id, state) {
-                    let mut xdg_surface = client.grab_object(xdg_surface_id, state);
-                    xdg_surface.destroy_popup_role(popup_id);
+            PostXdgPopup::DestroyPopup { popup, xdg_surface, fallback_focus } => {
+                if popup.exists(state) {
+                    crate::seat::remove_popup_grab(state, dispatcher, popup, fallback_focus);
                 }
-                client.delete_id(&WlDisplay::default(), state, dispatcher, popup_id.into());
+                if xdg_surface.exists(state) {
+                    let mut xdg_surface = xdg_surface.grab(state);
+                    xdg_surface.destroy_popup_role(popup);
+                }
+                client.delete_id(
+                    &WlDisplay::default(),
+                    state,
+                    dispatcher,
+                    popup.wayland_id().into(),
+                );
             }
             PostXdgPopup::RequestPopupGrab {
-                popup_id,
+                popup,
                 client_id,
-                parent_wl_surface_id,
+                parent_wl_surface,
                 serial,
-                popup_surface_id,
+                popup_surface,
             } => {
-                let Some(popup_object_id) = client.try_object_id(popup_id, state) else {
+                if !popup.exists(state) {
                     return;
-                };
-                let Some(popup_parent) = state
-                    .objects
-                    .try_ref_object::<XdgPopup>(popup_object_id)
-                    .map(|popup| popup.parent)
-                else {
+                }
+                let Some(popup_parent) = popup.try_ref(state).map(|p| p.parent) else {
                     return;
                 };
 
@@ -481,36 +428,32 @@ impl PostAction for PostXdgPopup {
                     state,
                     dispatcher,
                     client_id,
-                    parent_wl_surface_id,
+                    parent_wl_surface,
                     serial,
-                    popup_id,
-                    popup_surface_id,
+                    popup,
+                    popup_surface,
                 ) {
                     return;
                 }
 
                 match popup_parent {
                     PopupParent::XdgSurface(parent_surface_id) => {
-                        if client.contains_object(parent_surface_id, state) {
-                            let mut parent_surface: crate::state::GrabbedObject<XdgSurface> =
-                                client.grab_object(parent_surface_id, state);
-                            parent_surface.remove_popup_child(popup_id);
+                        if parent_surface_id.exists(state) {
+                            let mut parent_surface = parent_surface_id.ref_mut(state);
+                            parent_surface.remove_popup_child(popup);
                         }
                     }
                     PopupParent::LayerSurface(parent_surface_id) => {
-                        if client.contains_object(parent_surface_id, state) {
-                            let mut parent_surface: crate::state::GrabbedObject<
-                                ZwlrLayerSurfaceV1,
-                            > = client.grab_object(parent_surface_id, state);
-                            parent_surface.remove_popup_child(popup_id);
+                        if parent_surface_id.exists(state) {
+                            let mut parent_surface = parent_surface_id.ref_mut(state);
+                            parent_surface.remove_popup_child(popup);
                         }
                     }
                     PopupParent::None => {}
                 }
 
-                if client.contains_object(popup_id, state) {
-                    let mut popup: crate::state::GrabbedObject<XdgPopup> =
-                        client.grab_object(popup_id, state);
+                if popup.exists(state) {
+                    let mut popup = popup.ref_mut(state);
                     popup.explicit_grab = false;
                     popup.dismiss(dispatcher);
                 }

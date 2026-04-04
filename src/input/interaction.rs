@@ -1,8 +1,9 @@
 use crate::{
+    clients::Resolved,
     config,
     protocol_generated::{xdg_toplevel::ResizeEdge, WlSurfaceId, XdgToplevelId},
     runner::Dispatcher,
-    state::{ObjectId, State},
+    state::State,
     wayland_objects::xdg_surface::xdg_toplevel::{
         InteractiveSizeConstraints, ToplevelDecorationMode,
     },
@@ -69,23 +70,30 @@ pub(crate) fn request_toplevel_move(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     client_id: crate::clients::ClientId,
-    surface_id: WlSurfaceId,
+    surface: Resolved<WlSurfaceId>,
     serial: u32,
-    root_surface_object_id: ObjectId,
+    root_surface: Resolved<WlSurfaceId>,
     is_maximized: bool,
     is_fullscreen: bool,
 ) -> bool {
     if !state
         .seat
-        .validate_implicit_grab_serial(client_id, surface_id, serial)
+        .validate_implicit_grab_serial(client_id, surface, serial)
     {
         return false;
     }
+    let Some(xdg_toplevel) = root_surface
+        .try_ref(state)
+        .and_then(|root| root.xdg_surface())
+        .and_then(|xdg_surface| state.xdg_toplevel(xdg_surface))
+    else {
+        return false;
+    };
     let Some(target) = build_protocol_window_target(
         state,
-        root_surface_object_id,
+        root_surface,
         WindowRoleSnapshot::XdgToplevel {
-            xdg_toplevel_id: XdgToplevelId::from(0),
+            xdg_toplevel,
             size_constraints: InteractiveSizeConstraints::default(),
             is_maximized,
             is_fullscreen,
@@ -94,7 +102,7 @@ pub(crate) fn request_toplevel_move(
     ) else {
         return false;
     };
-    if target.client_id != client_id || target.surface_id != surface_id {
+    if target.client_id() != client_id || target.surface_id() != surface.wayland_id() {
         return false;
     }
     apply_interaction_intent(
@@ -109,10 +117,10 @@ pub(crate) fn request_toplevel_resize(
     state: &mut State,
     dispatcher: &mut Dispatcher,
     client_id: crate::clients::ClientId,
-    surface_id: WlSurfaceId,
+    surface: Resolved<WlSurfaceId>,
     serial: u32,
-    root_surface_object_id: ObjectId,
-    xdg_toplevel_id: XdgToplevelId,
+    root_surface: Resolved<WlSurfaceId>,
+    xdg_toplevel: Resolved<XdgToplevelId>,
     size_constraints: InteractiveSizeConstraints,
     is_maximized: bool,
     is_fullscreen: bool,
@@ -120,15 +128,15 @@ pub(crate) fn request_toplevel_resize(
 ) -> bool {
     if !state
         .seat
-        .validate_implicit_grab_serial(client_id, surface_id, serial)
+        .validate_implicit_grab_serial(client_id, surface, serial)
     {
         return false;
     }
     let Some(target) = build_protocol_window_target(
         state,
-        root_surface_object_id,
+        root_surface,
         WindowRoleSnapshot::XdgToplevel {
-            xdg_toplevel_id,
+            xdg_toplevel,
             size_constraints,
             is_maximized,
             is_fullscreen,
@@ -137,7 +145,7 @@ pub(crate) fn request_toplevel_resize(
     ) else {
         return false;
     };
-    if target.client_id != client_id || target.surface_id != surface_id {
+    if target.client_id() != client_id || target.surface_id() != surface.wayland_id() {
         return false;
     }
     apply_interaction_intent(
@@ -171,7 +179,7 @@ fn classify_window_semantics(
     if !window_allows_compositor_interaction(target) {
         return HitSemantics::NoCompositorAction;
     }
-    let Some(layout) = state.root_surface_ssd_layout(target.root_surface_object_id) else {
+    let Some(layout) = state.root_surface_ssd_layout(target.root_surface) else {
         return HitSemantics::SurfaceContent;
     };
     if !rect_contains_point(layout.frame_rect, pointer_pos)
@@ -183,7 +191,7 @@ fn classify_window_semantics(
     let x = pointer_pos.0.round() as i32;
     let y = pointer_pos.1.round() as i32;
     let border_resize_height = state
-        .root_surface_ssd_insets(target.root_surface_object_id)
+        .root_surface_ssd_insets(target.root_surface)
         .map(|insets| insets.left.max(insets.right).max(insets.bottom).max(6))
         .unwrap_or(6);
     let top_resize_height =

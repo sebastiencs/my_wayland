@@ -85,7 +85,7 @@ impl Object for XdgActivationV1 {
                     );
                     return Ok(());
                 };
-                if !state.raise_root_surface2(&focus) {
+                if !state.raise_root_surface(focus.surface) {
                     return Ok(());
                 }
                 set_keyboard_focus_from_surface(state, dispatcher, Some(focus));
@@ -131,7 +131,6 @@ mod tests {
         State {
             objects: Default::default(),
             root_surfaces: Default::default(),
-            root_surface_resolved_by_object: Default::default(),
             layer_surface_objects: Default::default(),
             inputs: Default::default(),
             drm: Default::default(),
@@ -165,8 +164,9 @@ mod tests {
         surface_id: WlSurfaceId,
         buffer_object_id: usize,
     ) -> ObjectId {
-        let ((_, object_id), _) =
+        let (surface_resolved, _) =
             client.insert_object(state, WlSurface::new(surface_id, client.client_id(), 6));
+        let object_id = surface_resolved.object_id();
         state.register_root_surface(object_id);
         state
             .objects
@@ -182,8 +182,8 @@ mod tests {
         client: &mut Client,
         manager_id: XdgActivationV1Id,
     ) -> ObjectId {
-        let ((_, object_id), _) = client.insert_object(state, XdgActivationV1::new(manager_id));
-        object_id
+        let (manager_resolved, _) = client.insert_object(state, XdgActivationV1::new(manager_id));
+        manager_resolved.object_id()
     }
 
     fn insert_seat(state: &mut State, client: &mut Client, seat_id: WlSeatId) {
@@ -323,7 +323,14 @@ mod tests {
         }
 
         assert_eq!(state.activation_tokens.tracked_count(), 0);
-        assert_eq!(state.root_surface_ids(), vec![requester_object_id, target_object_id]);
+        assert_eq!(
+            state
+                .root_surfaces()
+                .into_iter()
+                .map(|surface| surface.object_id())
+                .collect::<Vec<_>>(),
+            vec![requester_object_id, target_object_id]
+        );
         assert_eq!(
             state.seat.keyboard_focus(),
             Some(focus_for_surface(client.client_id(), target_surface_id, target_object_id,))
@@ -524,7 +531,14 @@ mod tests {
             );
         }
 
-        assert_eq!(state.root_surface_ids(), vec![requester_object_id, target_object_id]);
+        assert_eq!(
+            state
+                .root_surfaces()
+                .into_iter()
+                .map(|surface| surface.object_id())
+                .collect::<Vec<_>>(),
+            vec![requester_object_id, target_object_id]
+        );
         assert_eq!(
             state.seat.keyboard_focus(),
             Some(focus_for_surface(client.client_id(), requester_surface_id, requester_object_id,))
@@ -569,7 +583,14 @@ mod tests {
             );
         }
 
-        assert_eq!(state.root_surface_ids(), vec![requester_object_id, target_object_id]);
+        assert_eq!(
+            state
+                .root_surfaces()
+                .into_iter()
+                .map(|surface| surface.object_id())
+                .collect::<Vec<_>>(),
+            vec![requester_object_id, target_object_id]
+        );
         assert_eq!(
             state.seat.keyboard_focus(),
             Some(focus_for_surface(client.client_id(), requester_surface_id, requester_object_id,))

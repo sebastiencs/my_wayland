@@ -6,6 +6,8 @@ use crate::{
     state::State,
 };
 
+/// Wayland object implementation. Kept object-safe so we can store `Box<dyn Object>`; protocol
+/// id pairing lives on [`ObjectWithId`] + [`IdToObject`].
 pub trait Object
 where
     Self: AsAny + 'static,
@@ -107,14 +109,12 @@ pub enum ParserError {
     InvalidString,
 }
 
-pub trait IdToObject {
-    type Object: 'static;
+/// Compositor object type paired with a protocol id (see [`IdToObject`]).
+pub trait ObjectWithId: Object {
+    type Id: IdToObject<Object = Self>;
 }
 
-impl<A, B> IdToObject for (A, B)
-where
-    A: IdToObject,
-    B: IdToObject,
-{
-    type Object = (A::Object, B::Object);
+/// Maps a protocol id newtype to its compositor object type. The id type is always `Self`.
+pub trait IdToObject: Copy + Into<WaylandId> + From<WaylandId> + 'static {
+    type Object: ObjectWithId<Id = Self>;
 }
