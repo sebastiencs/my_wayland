@@ -5,6 +5,7 @@ use crate::{
         Client, ClientDispatcher, ClientId, ClientManagerAction, EventWriter, RawRequest, Resolved,
     },
     drm::{schedule_active_output, schedule_outputs, schedule_outputs_for_rect},
+    input::{set_keyboard_focus_from_surface, SurfaceFocus},
     object::{Object, Parser},
     protocol_generated::{
         wl_pointer, wl_surface, wp_fractional_scale_v1, wp_linux_drm_syncobj_surface_v1,
@@ -40,6 +41,24 @@ fn monotonic_time_msec() -> u32 {
         .saturating_mul(1000)
         .saturating_add((ts.tv_nsec as u64) / 1_000_000);
     millis.min(u64::from(u32::MAX)) as u32
+}
+
+fn should_focus_new_toplevel_on_map(state: &State, root_surface: Resolved<WlSurfaceId>) -> bool {
+    if !state.root_surface_is_visible(root_surface) {
+        return false;
+    }
+    if state.seat.popup_grab_client().is_some() {
+        return false;
+    }
+    let Some(new_workspace_id) = state.root_surface_workspace(root_surface) else {
+        return false;
+    };
+    let focused_workspace_id = state
+        .focused_root_surface()
+        .and_then(|focused_root| state.root_surface_workspace(focused_root));
+    focused_workspace_id
+        .map(|workspace_id| workspace_id == new_workspace_id)
+        .unwrap_or(true)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1901,6 +1920,13 @@ impl WlSurface {
                 {
                     if is_mapped {
                         state.confirm_root_surface_mapped(resolved_surface);
+                        if should_focus_new_toplevel_on_map(state, resolved_surface) {
+                            set_keyboard_focus_from_surface(
+                                state,
+                                dispatcher,
+                                Some(SurfaceFocus::new(resolved_surface)),
+                            );
+                        }
                     }
                     dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
                 }
