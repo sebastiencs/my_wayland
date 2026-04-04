@@ -2256,6 +2256,9 @@ impl Model for Client {
                 {
                     schedule_active_output(state, &mut dispatcher);
                 }
+                if had_client_objects {
+                    dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
+                }
             }
         };
 
