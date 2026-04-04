@@ -6,7 +6,7 @@ use crate::{
     },
     drm::{schedule_active_output, schedule_outputs, schedule_outputs_for_rect},
     input::{set_keyboard_focus_from_surface, SurfaceFocus},
-    object::{Object, Parser},
+    object::{Object, Parser, PostAction},
     protocol_generated::{
         wl_pointer, wl_surface, wp_fractional_scale_v1, wp_linux_drm_syncobj_surface_v1,
         wp_viewport, xdg_wm_base, WaylandId, WlBufferId, WlCallbackId, WlOutputId, WlRegionId,
@@ -44,6 +44,9 @@ fn monotonic_time_msec() -> u32 {
 }
 
 fn should_focus_new_toplevel_on_map(state: &State, root_surface: Resolved<WlSurfaceId>) -> bool {
+    if !root_surface.exists(state) {
+        return false;
+    }
     if !state.root_surface_is_visible(root_surface) {
         return false;
     }
@@ -59,6 +62,31 @@ fn should_focus_new_toplevel_on_map(state: &State, root_surface: Resolved<WlSurf
     focused_workspace_id
         .map(|workspace_id| workspace_id == new_workspace_id)
         .unwrap_or(true)
+}
+
+enum PostWlSurface {
+    FocusNewToplevel { root_surface: Resolved<WlSurfaceId> },
+}
+
+impl PostAction for PostWlSurface {
+    fn execute(
+        self: Box<Self>,
+        _client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        match *self {
+            PostWlSurface::FocusNewToplevel { root_surface } => {
+                if should_focus_new_toplevel_on_map(state, root_surface) {
+                    set_keyboard_focus_from_surface(
+                        state,
+                        dispatcher,
+                        Some(SurfaceFocus::new(root_surface)),
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1920,13 +1948,9 @@ impl WlSurface {
                 {
                     if is_mapped {
                         state.confirm_root_surface_mapped(resolved_surface);
-                        if should_focus_new_toplevel_on_map(state, resolved_surface) {
-                            set_keyboard_focus_from_surface(
-                                state,
-                                dispatcher,
-                                Some(SurfaceFocus::new(resolved_surface)),
-                            );
-                        }
+                        dispatcher.dispatch_post_action(PostWlSurface::FocusNewToplevel {
+                            root_surface: resolved_surface,
+                        });
                     }
                     dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
                 }
