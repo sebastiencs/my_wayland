@@ -4452,9 +4452,25 @@ fn push_root_surface_effect_elements(
     let clip = visual_state.clip.unwrap_or_else(|| {
         RootSurfaceClip::new(visual_state.outer_rect, 0, crate::config::RoundingPower::DEFAULT)
     });
+    if visual_state.border.is_some() && visual_state.clip.is_none() {
+        log::debug!(
+            "[AAA] push_root_surface_effect_elements using square fallback clip outer={:?} content={:?}",
+            visual_state.outer_rect,
+            visual_state.content_rect,
+        );
+    }
     let ring = rounded_ring(clip, visual_state.content_rect);
     if phase == FramePhase::UnderWindow {
         if let Some(blur) = visual_state.effects.blur {
+            log::debug!(
+                "[AAA] emit effect=blur phase={:?} outer={:?} inner={:?} radius={} passes={} alpha={}",
+                FramePhase::UnderWindow,
+                ring.outer.outer_rect,
+                ring.inner.outer_rect,
+                blur.radius,
+                blur.passes,
+                visual_state.effects.opacity_alpha,
+            );
             frame_elements.push(RecordedFrameElement::Effect {
                 phase: FramePhase::UnderWindow,
                 element: EffectElement::WindowBlurBackdrop {
@@ -4467,6 +4483,15 @@ fn push_root_surface_effect_elements(
     }
     if phase == FramePhase::UnderWindow {
         if let Some(shadow) = visual_state.shadow {
+            log::debug!(
+                "[AAA] emit effect=shadow phase={:?} clip={:?} radius={} offset=({}, {}) alpha={}",
+                FramePhase::UnderWindow,
+                clip.outer_rect,
+                shadow.radius,
+                shadow.offset_x,
+                shadow.offset_y,
+                visual_state.shadow_alpha,
+            );
             frame_elements.push(RecordedFrameElement::Effect {
                 phase: FramePhase::UnderWindow,
                 element: EffectElement::WindowShadow {
@@ -4479,6 +4504,17 @@ fn push_root_surface_effect_elements(
     }
     if phase == FramePhase::OverWindow {
         if let Some(border) = visual_state.border {
+            log::debug!(
+                "[AAA] emit effect=border phase={:?} outer={:?} inner={:?} outer_radius={} inner_radius={} alpha={} gradient=({}->{})",
+                FramePhase::OverWindow,
+                ring.outer.outer_rect,
+                ring.inner.outer_rect,
+                ring.outer.corner_radius,
+                ring.inner.corner_radius,
+                visual_state.border_alpha,
+                border.gradient.start_color,
+                border.gradient.end_color,
+            );
             frame_elements.push(RecordedFrameElement::Effect {
                 phase: FramePhase::OverWindow,
                 element: EffectElement::WindowBorder {
@@ -4490,6 +4526,12 @@ fn push_root_surface_effect_elements(
         }
     }
     if phase == FramePhase::Overlay && visual_state.effects.dim_alpha > 0 {
+        log::debug!(
+            "[AAA] emit effect=dim phase={:?} clip={:?} alpha={}",
+            FramePhase::Overlay,
+            clip.outer_rect,
+            visual_state.effects.dim_alpha,
+        );
         frame_elements.push(RecordedFrameElement::Effect {
             phase: FramePhase::Overlay,
             element: EffectElement::DimOverlay { clip, alpha: visual_state.effects.dim_alpha },

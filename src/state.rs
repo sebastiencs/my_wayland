@@ -2033,7 +2033,7 @@ impl State {
                 power: shadow_config.power,
             },
         );
-        Some(RootSurfaceVisualState {
+        let visual_state = RootSurfaceVisualState {
             outer_rect,
             content_rect,
             clip,
@@ -2051,7 +2051,31 @@ impl State {
                 opacity_alpha: animated_values.content_alpha,
                 dim_alpha: animated_values.dim_alpha,
             },
-        })
+        };
+        if compositor_decorations_enabled
+            && (visual_state.border.is_some()
+                || visual_state.shadow.is_some()
+                || visual_state.effects.blur.is_some()
+                || visual_state.effects.dim_alpha > 0
+                || visual_state.effects.opacity_alpha != u8::MAX)
+        {
+            log::debug!(
+                "[AAA] root_surface_visual_state surface={:?} focused={} outer={:?} content={:?} clip={:?} border={} shadow={} blur={} opacity_alpha={} dim_alpha={} border_alpha={} shadow_alpha={}",
+                surface.wayland_id(),
+                focused,
+                visual_state.outer_rect,
+                visual_state.content_rect,
+                visual_state.clip,
+                visual_state.border.is_some(),
+                visual_state.shadow.is_some(),
+                visual_state.effects.blur.is_some(),
+                visual_state.effects.opacity_alpha,
+                visual_state.effects.dim_alpha,
+                visual_state.border_alpha,
+                visual_state.shadow_alpha,
+            );
+        }
+        Some(visual_state)
     }
 
     pub fn root_surface_outer_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
