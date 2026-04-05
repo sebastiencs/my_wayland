@@ -1,14 +1,16 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    env, fmt, fs,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    env,
+    ffi::OsStr,
+    fmt, fs,
     io::ErrorKind,
-    os::{fd::AsRawFd, unix::ffi::OsStrExt},
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
 };
 
 use {
     anyhow::{anyhow, bail, Context},
-    inotify::{Inotify, WatchDescriptor, WatchMask},
+    inotify::{EventMask, Inotify, WatchDescriptor, WatchMask},
     serde::Deserialize,
     xkbcommon::xkb,
 };
@@ -282,10 +284,17 @@ pub struct ConfigWatcher {
     inotify: Inotify,
     event_buffer: Box<[u8]>,
     poll_op_id: Option<RingId>,
-    config_path: PathBuf,
-    config_dir: PathBuf,
-    watched_path: PathBuf,
-    watched_descriptor: Option<WatchDescriptor>,
+    watches: HashMap<WatchDescriptor, ConfigWatchSlot>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfigWatchSlot {
+    /// `config_path` without following symlinks (Hyprland-style `IN_DONT_FOLLOW`).
+    LogicalFile,
+    /// Symlink target from `canonicalize`, when distinct from the logical path.
+    ResolvedTarget,
+    /// Ancestor directory used to observe create/delete/rename of the config entry.
+    ParentDirectory,
 }
 
 #[derive(Debug)]
@@ -830,24 +839,15 @@ impl Default for WindowAnimationConfigFile {
 
 impl ConfigWatcher {
     pub fn new(initial_state: &RuntimeConfig) -> Self {
-        let config_path = initial_state.path().to_path_buf();
-        let config_dir = config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        let watched_path = nearest_existing_directory(&config_dir);
         let inotify = Inotify::init().expect("failed to initialize config inotify watcher");
         let mut watcher = Self {
             inotify,
             event_buffer: vec![0; INOTIFY_BUFFER_SIZE].into_boxed_slice(),
             poll_op_id: None,
-            config_path,
-            config_dir,
-            watched_path,
-            watched_descriptor: None,
+            watches: HashMap::new(),
         };
         watcher
-            .refresh_watch()
+            .sync_watches(initial_state.path())
             .expect("failed to install config watcher");
         watcher
     }
@@ -870,65 +870,119 @@ impl ConfigWatcher {
         });
     }
 
-    fn refresh_watch(&mut self) -> std::io::Result<bool> {
-        let next_path = nearest_existing_directory(&self.config_dir);
-        if self.watched_descriptor.is_some() && self.watched_path == next_path {
-            return Ok(false);
-        }
-
-        if let Some(descriptor) = self.watched_descriptor.take() {
+    /// Drop every watch and subscribe again from `config_path` (logical path).
+    fn sync_watches(&mut self, config_path: &Path) -> std::io::Result<()> {
+        for descriptor in self.watches.keys().cloned().collect::<Vec<_>>() {
             let _ = self.inotify.watches().remove(descriptor);
         }
+        self.watches.clear();
 
-        let descriptor = self.inotify.watches().add(
-            &next_path,
-            WatchMask::CREATE
-                | WatchMask::DELETE
-                | WatchMask::CLOSE_WRITE
-                | WatchMask::MOVED_FROM
-                | WatchMask::MOVED_TO
-                | WatchMask::DELETE_SELF
-                | WatchMask::MOVE_SELF
-                | WatchMask::ATTRIB,
-        )?;
-        self.watched_path = next_path;
-        self.watched_descriptor = Some(descriptor);
-        Ok(true)
+        let Some(config_dir) = config_path.parent() else {
+            return Ok(());
+        };
+        let parent_watch_path = nearest_existing_directory(config_dir);
+        let parent_mask = WatchMask::CREATE
+            | WatchMask::DELETE
+            | WatchMask::CLOSE_WRITE
+            | WatchMask::MOVED_FROM
+            | WatchMask::MOVED_TO
+            | WatchMask::DELETE_SELF
+            | WatchMask::MOVE_SELF
+            | WatchMask::ATTRIB;
+        let descriptor = self
+            .inotify
+            .watches()
+            .add(&parent_watch_path, parent_mask)?;
+        self.watches
+            .insert(descriptor, ConfigWatchSlot::ParentDirectory);
+
+        let Ok(meta) = fs::symlink_metadata(config_path) else {
+            return Ok(());
+        };
+
+        let logical_mask = WatchMask::MODIFY
+            | WatchMask::CLOSE_WRITE
+            | WatchMask::ATTRIB
+            | WatchMask::DELETE_SELF
+            | WatchMask::MOVE_SELF
+            | WatchMask::DONT_FOLLOW;
+        let descriptor = self.inotify.watches().add(config_path, logical_mask)?;
+        self.watches
+            .insert(descriptor, ConfigWatchSlot::LogicalFile);
+
+        if meta.file_type().is_symlink() {
+            if let Ok(canonical) = fs::canonicalize(config_path) {
+                if canonical != config_path {
+                    let target_mask = WatchMask::MODIFY
+                        | WatchMask::CLOSE_WRITE
+                        | WatchMask::ATTRIB
+                        | WatchMask::DELETE_SELF
+                        | WatchMask::MOVE_SELF;
+                    let descriptor = self.inotify.watches().add(&canonical, target_mask)?;
+                    self.watches
+                        .insert(descriptor, ConfigWatchSlot::ResolvedTarget);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn on_event(&mut self, state: &mut State, dispatcher: &mut Dispatcher) {
+        let config_path = state.config.path().to_path_buf();
+        let config_file_name = config_path.file_name().map(|name| name.to_owned());
+
         let mut should_reload = false;
-        let watching_config_dir = self.watched_path == self.config_dir;
-        let config_dir_name = self.config_dir.file_name().map(|name| name.to_owned());
+        let mut should_resync = false;
 
         loop {
             match self.inotify.read_events(self.event_buffer.as_mut()) {
                 Ok(events) => {
-                    let mut should_refresh_watch = false;
                     for event in events {
-                        if event_targets_config(
-                            &event,
-                            watching_config_dir,
-                            config_dir_name.as_deref(),
-                        ) {
+                        if event.mask.contains(EventMask::Q_OVERFLOW) {
                             should_reload = true;
+                            should_resync = true;
+                            continue;
                         }
-                        if event_requires_watch_refresh(
-                            &event,
-                            watching_config_dir,
-                            config_dir_name.as_deref(),
-                        ) {
-                            should_refresh_watch = true;
-                        }
-                    }
 
-                    if should_refresh_watch {
-                        match self.refresh_watch() {
-                            Ok(changed) => {
-                                should_reload |= changed;
+                        if event.mask.contains(EventMask::IGNORED) {
+                            if !self.watches.contains_key(&event.wd) {
+                                continue;
                             }
-                            Err(error) => {
-                                log::warn!("failed to refresh config watcher: {:?}", error);
+                            should_resync = true;
+                            continue;
+                        }
+
+                        let Some(slot) = self.watches.get(&event.wd).copied() else {
+                            continue;
+                        };
+
+                        match slot {
+                            ConfigWatchSlot::LogicalFile | ConfigWatchSlot::ResolvedTarget => {
+                                if event.mask.intersects(
+                                    EventMask::MODIFY
+                                        | EventMask::CLOSE_WRITE
+                                        | EventMask::ATTRIB
+                                        | EventMask::DELETE_SELF
+                                        | EventMask::MOVE_SELF,
+                                ) {
+                                    should_reload = true;
+                                }
+                                if event
+                                    .mask
+                                    .intersects(EventMask::DELETE_SELF | EventMask::MOVE_SELF)
+                                {
+                                    should_resync = true;
+                                }
+                            }
+                            ConfigWatchSlot::ParentDirectory => {
+                                if parent_directory_event_affects_config(
+                                    &event,
+                                    config_file_name.as_deref(),
+                                ) {
+                                    should_reload = true;
+                                    should_resync = true;
+                                }
                             }
                         }
                     }
@@ -941,11 +995,24 @@ impl ConfigWatcher {
             }
         }
 
+        if should_resync {
+            if let Err(error) = self.sync_watches(&config_path) {
+                log::warn!("failed to resync config watcher: {:?}", error);
+            }
+        }
+
         if should_reload {
             if let Err(error) = reload_from_disk(state, dispatcher, ReloadTrigger::AutomaticWatch) {
                 log::warn!("failed to reload config after inotify event: {:#}", error);
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl ConfigWatcher {
+    fn watch_slot_count(&self) -> usize {
+        self.watches.len()
     }
 }
 
@@ -1249,63 +1316,32 @@ impl fmt::Display for RgbaColor {
     }
 }
 
-fn event_targets_config(
-    event: &inotify::Event<&std::ffi::OsStr>,
-    watching_config_dir: bool,
-    config_dir_name: Option<&std::ffi::OsStr>,
+fn parent_directory_event_affects_config(
+    event: &inotify::Event<&OsStr>,
+    config_file_name: Option<&OsStr>,
 ) -> bool {
-    if event.mask.contains(inotify::EventMask::Q_OVERFLOW) {
-        return true;
+    match event.name {
+        None => event
+            .mask
+            .intersects(EventMask::DELETE_SELF | EventMask::MOVE_SELF | EventMask::ATTRIB),
+        Some(name) => {
+            let Some(base) = config_file_name else {
+                return false;
+            };
+            if name != base {
+                return false;
+            }
+            event.mask.intersects(
+                EventMask::CLOSE_WRITE
+                    | EventMask::CREATE
+                    | EventMask::DELETE
+                    | EventMask::MOVED_FROM
+                    | EventMask::MOVED_TO
+                    | EventMask::MODIFY
+                    | EventMask::ATTRIB,
+            )
+        }
     }
-
-    if watching_config_dir {
-        let Some(name) = event.name else {
-            return event.mask.intersects(
-                inotify::EventMask::DELETE_SELF
-                    | inotify::EventMask::MOVE_SELF
-                    | inotify::EventMask::ATTRIB,
-            );
-        };
-        return name.as_bytes() == CONFIG_FILE_NAME.as_bytes()
-            && event.mask.intersects(
-                inotify::EventMask::CLOSE_WRITE
-                    | inotify::EventMask::CREATE
-                    | inotify::EventMask::DELETE
-                    | inotify::EventMask::MOVED_FROM
-                    | inotify::EventMask::MOVED_TO
-                    | inotify::EventMask::ATTRIB,
-            );
-    }
-
-    let Some(name) = event.name else {
-        return false;
-    };
-    let Some(config_dir_name) = config_dir_name else {
-        return false;
-    };
-    name == config_dir_name
-        && event.mask.intersects(
-            inotify::EventMask::CREATE
-                | inotify::EventMask::DELETE
-                | inotify::EventMask::MOVED_FROM
-                | inotify::EventMask::MOVED_TO
-                | inotify::EventMask::ATTRIB,
-        )
-}
-
-fn event_requires_watch_refresh(
-    event: &inotify::Event<&std::ffi::OsStr>,
-    watching_config_dir: bool,
-    config_dir_name: Option<&std::ffi::OsStr>,
-) -> bool {
-    if watching_config_dir {
-        return event.mask.intersects(
-            inotify::EventMask::DELETE_SELF
-                | inotify::EventMask::MOVE_SELF
-                | inotify::EventMask::IGNORED,
-        );
-    }
-    event_targets_config(event, watching_config_dir, config_dir_name)
 }
 
 fn nearest_existing_directory(path: &Path) -> PathBuf {
@@ -1754,5 +1790,61 @@ mod tests {
                 .layout
                 .dirty
         );
+    }
+
+    #[test]
+    fn config_watcher_missing_file_installs_parent_watch_only() {
+        let temp_dir = mktemp::Temp::new_dir().unwrap();
+        let path = temp_dir.to_path_buf().join("missing.toml");
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::load_from_path(&path, &xkb).unwrap();
+        let watcher = ConfigWatcher::new(&config);
+        assert_eq!(watcher.watch_slot_count(), 1);
+    }
+
+    #[test]
+    fn config_watcher_regular_file_installs_parent_and_logical_watches() {
+        let temp_dir = mktemp::Temp::new_dir().unwrap();
+        let path = temp_dir.to_path_buf().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+            [general]
+            cursor_theme = "Adwaita"
+
+            [bindings]
+            "Super+Return" = { action = "reload-config" }
+            "#,
+        )
+        .unwrap();
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::load_from_path(&path, &xkb).unwrap();
+        let watcher = ConfigWatcher::new(&config);
+        assert_eq!(watcher.watch_slot_count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_watcher_symlink_installs_parent_logical_and_resolved_watches() {
+        use std::os::unix::fs::symlink;
+        let temp_dir = mktemp::Temp::new_dir().unwrap();
+        let real = temp_dir.to_path_buf().join("real.toml");
+        let logical = temp_dir.to_path_buf().join("config.toml");
+        fs::write(
+            &real,
+            r#"
+            [general]
+            cursor_theme = "Adwaita"
+
+            [bindings]
+            "Super+Return" = { action = "reload-config" }
+            "#,
+        )
+        .unwrap();
+        symlink(&real, &logical).unwrap();
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::load_from_path(&logical, &xkb).unwrap();
+        let watcher = ConfigWatcher::new(&config);
+        assert_eq!(watcher.watch_slot_count(), 3);
     }
 }
