@@ -4,7 +4,7 @@ use crate::{
     protocol_generated::{wl_data_device_manager, wl_data_source, WaylandId, WlDataSourceId},
     seat,
     state::State,
-    wayland_objects::{wl_data_offer::WlDataOffer, wl_display::WlDisplay},
+    wayland_objects::wl_display::WlDisplay,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,20 +179,10 @@ fn destroy_source(
 ) -> RequestResult {
     let source = client.resolve_or_disconnect(source_id, state, dispatcher)?;
 
-    let offer_ids = state
-        .objects
-        .iter()
-        .filter_map(|(object_id, object)| {
-            let offer = object.downcast_ref::<WlDataOffer>()?;
-            (offer.source_object_id() == Some(source.object_id())).then_some(object_id)
-        })
-        .collect::<Vec<_>>();
-    for offer_object_id in offer_ids {
-        if let Some(offer) = state
-            .objects
-            .try_ref_object_mut::<WlDataOffer>(offer_object_id)
-        {
-            offer.clear_source();
+    let offer_ids = state.take_data_offers_for_source(source);
+    for offer in offer_ids {
+        if let Some(offer_obj) = offer.try_ref_mut(state) {
+            offer_obj.clear_source();
         }
     }
 
@@ -259,6 +249,8 @@ mod tests {
             root_surface_workspaces: Default::default(),
             managed_root_surfaces: Default::default(),
             xdg_toplevel_roles: Default::default(),
+            ctm_control_owner: None,
+            data_offers_by_source: Default::default(),
             next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,

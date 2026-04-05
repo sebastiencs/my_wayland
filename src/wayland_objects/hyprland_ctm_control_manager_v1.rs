@@ -48,15 +48,14 @@ impl Global for HyprlandCtmControlManagerV1Global {
             return;
         }
         let id = HyprlandCtmControlManagerV1Id::from(id);
-        let blocked = state.objects.iter().any(|(_, object)| {
-            object
-                .downcast_ref::<HyprlandCtmControlManagerV1>()
-                .is_some_and(|manager| !manager.is_blocked())
-        });
-        let (_, manager) =
+        state.sanitize_ctm_control_owner();
+        let blocked = state.ctm_control_owner.is_some();
+        let (resolved, manager) =
             client.insert_object(state, HyprlandCtmControlManagerV1::new(id, version, blocked));
         if blocked {
             manager.send_blocked(dispatcher);
+        } else {
+            state.ctm_control_owner = Some(resolved);
         }
     }
 }
@@ -231,10 +230,13 @@ impl Object for HyprlandCtmControlManagerV1 {
 
     fn on_client_disconnect(
         &mut self,
-        _client: &mut Client,
+        client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
         self.reset_applied_outputs(state, dispatcher);
+        if let Some(resolved) = client.resolve(self.id, state) {
+            state.clear_ctm_control_owner_if_matches(resolved);
+        }
     }
 }

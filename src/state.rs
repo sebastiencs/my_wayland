@@ -7,8 +7,8 @@ use crate::{
     libinput::Input,
     object::Object,
     protocol_generated::{
-        WaylandId, WlDataOfferId, WlDataSourceId, WlSeatId, WlSurfaceId, XdgSurfaceId,
-        XdgToplevelId, ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id,
+        HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId, WlDataSourceId, WlSeatId,
+        WlSurfaceId, XdgSurfaceId, XdgToplevelId, ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id,
     },
     region::RectI,
     seat::SeatState,
@@ -1131,6 +1131,11 @@ pub struct State {
     pub root_surface_workspaces: BTreeMap<Resolved<WlSurfaceId>, WorkspaceId>,
     pub managed_root_surfaces: BTreeMap<Resolved<WlSurfaceId>, ManagedRootSurfaceState>,
     pub xdg_toplevel_roles: BTreeMap<Resolved<XdgSurfaceId>, Resolved<XdgToplevelId>>,
+    /// Unblocked `hyprland_ctm_control_manager_v1` singleton; new binds are blocked while set.
+    pub ctm_control_owner: Option<Resolved<HyprlandCtmControlManagerV1Id>>,
+    /// Offers keyed by their bound `wl_data_source` for teardown without scanning all objects.
+    pub data_offers_by_source:
+        BTreeMap<Resolved<WlDataSourceId>, BTreeSet<Resolved<WlDataOfferId>>>,
     pub next_workspace_serial: u32,
     pub backend_syncobj_globals: BTreeMap<DrmId, GlobalName>,
     pub globals: Globals,
@@ -1730,7 +1735,8 @@ impl State {
         let wl_surface = self
             .objects
             .try_ref_object::<WlSurface>(surface.object_id())?;
-        let xdg_surface_id = wl_surface.xdg_surface()?.wayland_id();
+        let xdg_surface_id = wl_surface.xdg_surface()?;
+        let xdg_surface = xdg_surface_id.rref(self);
         let xdg_surface = self.objects.iter().find_map(|(_object_id, object)| {
             object
                 .downcast_ref::<crate::wayland_objects::xdg_surface::XdgSurface>()
@@ -1738,7 +1744,8 @@ impl State {
                     xdg_surface.wl_surface().wayland_id() == wl_surface.surface_id()
                 })
         })?;
-        debug_assert_eq!(xdg_surface.wl_surface().wayland_id(), wl_surface.surface_id());
+
+        assert_eq!(xdg_surface.wl_surface().wayland_id(), wl_surface.surface_id());
         let _ = xdg_surface_id;
         let window_geometry = xdg_surface.window_geometry_rect_for_surface(surface, self);
         let (root_x, root_y) = wl_surface.root_position();
@@ -2206,6 +2213,57 @@ impl State {
         }
     }
 
+    pub fn sanitize_ctm_control_owner(&mut self) {
+        if let Some(owner) = self.ctm_control_owner {
+            if !owner.exists(self) {
+                self.ctm_control_owner = None;
+            }
+        }
+    }
+
+    pub fn clear_ctm_control_owner_if_matches(
+        &mut self,
+        candidate: Resolved<HyprlandCtmControlManagerV1Id>,
+    ) {
+        if self.ctm_control_owner == Some(candidate) {
+            self.ctm_control_owner = None;
+        }
+    }
+
+    pub fn register_data_offer_for_source(
+        &mut self,
+        source: Resolved<WlDataSourceId>,
+        offer: Resolved<WlDataOfferId>,
+    ) {
+        self.data_offers_by_source
+            .entry(source)
+            .or_default()
+            .insert(offer);
+    }
+
+    pub fn unregister_data_offer_for_source(
+        &mut self,
+        source: Resolved<WlDataSourceId>,
+        offer: Resolved<WlDataOfferId>,
+    ) {
+        if let Some(set) = self.data_offers_by_source.get_mut(&source) {
+            set.remove(&offer);
+            if set.is_empty() {
+                self.data_offers_by_source.remove(&source);
+            }
+        }
+    }
+
+    pub fn take_data_offers_for_source(
+        &mut self,
+        source: Resolved<WlDataSourceId>,
+    ) -> Vec<Resolved<WlDataOfferId>> {
+        self.data_offers_by_source
+            .remove(&source)
+            .map(|offers| offers.into_iter().collect())
+            .unwrap_or_default()
+    }
+
     pub fn register_layer_surface_object(&mut self, layer_surface: Resolved<ZwlrLayerSurfaceV1Id>) {
         self.layer_surface_objects.insert(layer_surface);
     }
@@ -2555,15 +2613,6 @@ impl State {
             .or(preferred_output_id)
     }
 
-    fn surface_object_id(&self, surface_id: WlSurfaceId) -> Option<ObjectId> {
-        self.objects.iter().find_map(|(object_id, object)| {
-            object
-                .downcast_ref::<WlSurface>()
-                .is_some_and(|surface| surface.surface_id() == surface_id)
-                .then_some(object_id)
-        })
-    }
-
     // TODO: Remove this
     pub(crate) fn surface_object_id_for_client(
         &self,
@@ -2670,6 +2719,8 @@ mod tests {
             root_surface_workspaces: Default::default(),
             managed_root_surfaces: Default::default(),
             xdg_toplevel_roles: Default::default(),
+            ctm_control_owner: None,
+            data_offers_by_source: Default::default(),
             next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,

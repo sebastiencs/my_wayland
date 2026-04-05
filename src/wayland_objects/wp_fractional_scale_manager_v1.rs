@@ -132,6 +132,8 @@ mod tests {
             root_surface_workspaces: Default::default(),
             managed_root_surfaces: Default::default(),
             xdg_toplevel_roles: Default::default(),
+            ctm_control_owner: None,
+            data_offers_by_source: Default::default(),
             next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,

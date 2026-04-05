@@ -1157,36 +1157,25 @@ pub fn relayout_client_layer_surfaces(
     state: &mut State,
     dispatcher: &mut ClientDispatcher,
 ) {
-    let object_ids = state
-        .objects
+    let layer_surfaces = state
+        .layer_surface_objects
         .iter()
-        .filter_map(|(object_id, object)| {
-            object
-                .downcast_ref::<ZwlrLayerSurfaceV1>()
-                .is_some_and(|layer_surface| layer_surface.client_id() == client.client_id())
-                .then_some(object_id)
+        .copied()
+        .filter_map(|layer_id| {
+            let layer = layer_id.try_ref(state)?;
+            (layer.client_id() == client.client_id()).then_some(layer_id)
         })
         .collect::<Vec<_>>();
 
-    for object_id in object_ids.iter().copied() {
-        let Some(mut layer_surface) = state
-            .objects
-            .try_grab_object::<ZwlrLayerSurfaceV1>(object_id)
-        else {
-            continue;
-        };
+    for layer_surface in layer_surfaces.iter().copied() {
+        let mut layer_surface = layer_surface.grab(state);
         layer_surface.ensure_output_assignment(state);
     }
 
     let layout = compute_layer_layout(state, None);
 
-    for object_id in object_ids {
-        let Some(mut layer_surface) = state
-            .objects
-            .try_grab_object::<ZwlrLayerSurfaceV1>(object_id)
-        else {
-            continue;
-        };
+    for layer_surface in layer_surfaces {
+        let mut layer_surface = layer_surface.grab(state);
         let root_surface = layer_surface.surface();
         let placement = layout.placements.get(&root_surface).copied();
         layer_surface.apply_layout(client, state, dispatcher, placement);
@@ -1406,6 +1395,8 @@ mod tests {
             root_surface_workspaces: Default::default(),
             managed_root_surfaces: Default::default(),
             xdg_toplevel_roles: Default::default(),
+            ctm_control_owner: None,
+            data_offers_by_source: Default::default(),
             next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,

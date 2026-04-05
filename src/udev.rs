@@ -221,23 +221,9 @@ impl Udev {
         }
         sync_color_control_globals(state, dispatcher);
 
-        let client_ids = state
-            .objects
-            .iter()
-            .filter_map(|(_, object)| {
-                object
-                    .downcast_ref::<crate::wayland_objects::wl_surface::WlSurface>()
-                    .map(|surface| surface.client_id())
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        for client_id in client_ids {
-            dispatcher.dispatch_to(
-                client_id,
-                crate::clients::ClientAction::DiscardSurfacePresentationFeedbacksForBackend {
-                    drm_id,
-                },
-            );
-        }
+        dispatcher.dispatch(ClientManagerAction::DiscardSurfacePresentationFeedbacksForBackend {
+            drm_id,
+        });
         discard_backend_presentation_feedbacks(state, drm_id, dispatcher);
         dispatcher.stop_model(drm_id);
         dispatcher.dispatch(UdevAction::FinalizeBackendRemoval { drm_id });

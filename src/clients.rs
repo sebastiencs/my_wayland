@@ -140,6 +140,7 @@ pub enum ClientManagerAction {
     OutputStateChanged { output_id: OutputId },
     OutputRemoved { output_id: OutputId },
     GammaControlFailed { output_id: OutputId },
+    DiscardSurfacePresentationFeedbacksForBackend { drm_id: DrmId },
     PublishWorkspaceStateChanged { affected_outputs: Vec<OutputId> },
     WorkspaceStateChanged,
     LayerShellLayoutChanged,
@@ -270,6 +271,14 @@ impl Model for ClientManager {
                 for client_id in self.set.iter().copied() {
                     dispatcher
                         .dispatch_to(client_id, ClientAction::GammaControlFailed { output_id });
+                }
+            }
+            DiscardSurfacePresentationFeedbacksForBackend { drm_id } => {
+                for client_id in self.set.iter().copied() {
+                    dispatcher.dispatch_to(
+                        client_id,
+                        ClientAction::DiscardSurfacePresentationFeedbacksForBackend { drm_id },
+                    );
                 }
             }
             PublishWorkspaceStateChanged { affected_outputs } => {
@@ -888,6 +897,9 @@ impl Client {
             return;
         }
         if let Some(mut offer_obj) = offer.try_grab(state) {
+            if let Some(src) = offer_obj.source() {
+                state.unregister_data_offer_for_source(src, offer);
+            }
             offer_obj.before_destroy(self.id, offer, state, dispatcher);
         }
         self.delete_id(&WlDisplay::default(), state, dispatcher, offer.wayland_id().into());
@@ -936,6 +948,7 @@ impl Client {
         let offer_id = self.allocate_server_object_id::<WlDataOfferId>();
         let offer = WlDataOffer::new(offer_id, device_version, role, Some(source));
         let (resolved_offer, _) = self.insert_object(state, offer);
+        state.register_data_offer_for_source(source, resolved_offer);
         {
             let device = self.ref_object(device_id, state);
             device.send_data_offer(resolved_offer, dispatcher);
@@ -1283,13 +1296,12 @@ impl Client {
         let backend = crate::state::BackendOutputRef::new(drm_id);
         let surface_ids = self
             .iter_resolved_of::<WlSurfaceId>(state)
-            .map(|surface| surface.wayland_id())
             .collect::<Vec<_>>();
         for surface_id in surface_ids {
-            if !self.contains_object(surface_id, state) {
+            if !surface_id.exists(state) {
                 continue;
             }
-            let mut surface = self.resolve(surface_id, state).unwrap().grab(state);
+            let mut surface = surface_id.grab(state);
             surface.discard_presentation_feedbacks_for_backend(self, state, dispatcher, backend);
         }
     }
@@ -2799,6 +2811,8 @@ mod surface_output_refresh_tests {
             root_surface_workspaces: Default::default(),
             managed_root_surfaces: Default::default(),
             xdg_toplevel_roles: Default::default(),
+            ctm_control_owner: None,
+            data_offers_by_source: Default::default(),
             next_workspace_serial: 1,
             backend_syncobj_globals: Default::default(),
             globals,
