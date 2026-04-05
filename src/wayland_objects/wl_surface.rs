@@ -1923,19 +1923,6 @@ impl WlSurface {
                         )
                     })
             });
-            log::debug!(
-                "[DEBUG_TILING] wl_surface_commit surface={:?} root={:?} logical_size={:?} global_bounds={:?} surface_bounds={:?} window_geometry={:?} effective_insets={:?} mapped={} changed={} needs_frame={}",
-                resolved_surface,
-                self.root_position(),
-                self.logical_size(),
-                self.global_logical_bounds(),
-                surface_bounds,
-                window_geometry,
-                crate::tiling::effective_decoration_insets_for_surface(state, resolved_surface, self),
-                self.global_logical_bounds().is_some(),
-                changed,
-                needs_frame,
-            );
         }
         let is_mapped = self.global_logical_bounds().is_some();
         if was_mapped != is_mapped {

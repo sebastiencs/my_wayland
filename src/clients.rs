@@ -1586,27 +1586,23 @@ impl Client {
             let requested_decoration_mode = toplevel_ref.requested_decoration_mode(state);
             let xdg_surface_ref = xdg_surface.rref(state);
             let wl_surface = xdg_surface_ref.wl_surface();
-            let surface_ref = wl_surface.rref(state);
             let Some(root_surface) = state.root_surface_for_surface(wl_surface) else {
                 continue;
             };
             if !state.root_surface_is_visible(root_surface) {
                 continue;
             }
-            let tiled_rect = state.tiled_root_surface_frame_rect(root_surface);
-            let tiled_edges = state
-                .tiled_root_surface_edges(root_surface)
-                .unwrap_or_default();
-            let fullscreen = state.root_surface_is_fullscreen(root_surface);
+            let tiled_geometry = state.tiled_root_surface_geometry(root_surface);
             let resizing = tiled_resize_surfaces.contains(&root_surface);
-            let configure_bounds = tiled_rect
-                .map(|rect| (rect.width, rect.height))
-                .or_else(|| surface_ref.configure_bounds_for_object(state, wl_surface));
-            let pending_floating_restore = if tiled_rect.is_none() && !fullscreen {
-                state.take_pending_floating_rect_restore(root_surface)
-            } else {
-                None
-            };
+            let surface_configure_bounds = wl_surface
+                .rref(state)
+                .configure_bounds_for_object(state, wl_surface);
+            let pending_floating_restore =
+                if tiled_geometry.is_none() && !state.root_surface_is_fullscreen(root_surface) {
+                    state.take_pending_floating_rect_restore(root_surface)
+                } else {
+                    None
+                };
             let desired_decoration_mode = Some(state.xdg_decoration_mode_for_surface(
                 Some(root_surface),
                 has_decoration_object,
@@ -1618,16 +1614,19 @@ impl Client {
             if let Some(mode) = desired_decoration_mode {
                 toplevel.schedule_decoration_mode(mode);
             }
-            if let Some(rect) = tiled_rect {
-                toplevel.send_layout_configure(
+            let configure_bounds = tiled_geometry
+                .map(|geometry| {
+                    geometry.configure_size_for_decoration_mode(
+                        toplevel.decoration_mode_for_configure(),
+                    )
+                })
+                .or(surface_configure_bounds);
+            if let Some(geometry) = tiled_geometry {
+                toplevel.send_tiled_layout_configure(
                     self,
                     state,
-                    Some((rect.width, rect.height)),
                     &mut xdg_surface,
-                    rect.width,
-                    rect.height,
-                    tiled_edges,
-                    fullscreen,
+                    geometry,
                     resizing,
                     dispatcher,
                 );

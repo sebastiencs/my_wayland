@@ -1753,15 +1753,25 @@ impl State {
     }
 
     pub fn tiled_root_surface_content_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
-        tiling::tiled_content_rect_for_surface(self, surface)
+        self.tiled_root_surface_geometry(surface)
+            .map(|geometry| geometry.content_rect)
     }
 
     pub fn tiled_root_surface_frame_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
-        tiling::tiled_frame_rect_for_surface(self, surface)
+        self.tiled_root_surface_geometry(surface)
+            .map(|geometry| geometry.frame_rect)
     }
 
     pub fn tiled_root_surface_edges(&self, surface: Resolved<WlSurfaceId>) -> Option<u32> {
-        tiling::tiled_edges_for_surface(self, surface)
+        self.tiled_root_surface_geometry(surface)
+            .map(|geometry| geometry.tiled_edges)
+    }
+
+    pub fn tiled_root_surface_geometry(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<tiling::TiledSurfaceGeometry> {
+        tiling::tiled_geometry_for_surface(self, surface)
     }
 
     fn root_surface_xdg_toplevel(&self, object_id: ObjectId) -> Option<&XdgToplevel> {
@@ -2052,29 +2062,6 @@ impl State {
                 dim_alpha: animated_values.dim_alpha,
             },
         };
-        if compositor_decorations_enabled
-            && (visual_state.border.is_some()
-                || visual_state.shadow.is_some()
-                || visual_state.effects.blur.is_some()
-                || visual_state.effects.dim_alpha > 0
-                || visual_state.effects.opacity_alpha != u8::MAX)
-        {
-            log::debug!(
-                "[AAA] root_surface_visual_state surface={:?} focused={} outer={:?} content={:?} clip={:?} border={} shadow={} blur={} opacity_alpha={} dim_alpha={} border_alpha={} shadow_alpha={}",
-                surface.wayland_id(),
-                focused,
-                visual_state.outer_rect,
-                visual_state.content_rect,
-                visual_state.clip,
-                visual_state.border.is_some(),
-                visual_state.shadow.is_some(),
-                visual_state.effects.blur.is_some(),
-                visual_state.effects.opacity_alpha,
-                visual_state.effects.dim_alpha,
-                visual_state.border_alpha,
-                visual_state.shadow_alpha,
-            );
-        }
         Some(visual_state)
     }
 

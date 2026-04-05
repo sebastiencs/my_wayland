@@ -1592,17 +1592,6 @@ impl EglFrameBuffer {
         .to_gl_array();
         let start = gradient.start_color.to_premultiplied_rgba_bytes();
         let end = gradient.end_color.to_premultiplied_rgba_bytes();
-        log::debug!(
-            "[AAA] render_border bounds={:?} inner={:?} outer_radius={} inner_radius={} alpha={} start={:?} end={:?} damage={:?}",
-            bounds,
-            ring.inner.outer_rect,
-            ring.outer.corner_radius,
-            ring.inner.corner_radius,
-            alpha,
-            gradient.start_color,
-            gradient.end_color,
-            clipped_damage.extents(),
-        );
 
         unsafe {
             gl::BindFramebuffer(gl::FRAMEBUFFER as _, framebuffer_object);

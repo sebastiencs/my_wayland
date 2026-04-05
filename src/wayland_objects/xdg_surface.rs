@@ -358,12 +358,6 @@ impl XdgSurface {
                     toplevel.set_window_geometry(self.current_window_geometry);
                 }
             }
-            log::debug!(
-                "[DEBUG_TILING] xdg_surface_apply_window_geometry surface={:?} pending={:?} current={:?}",
-                self.wl_surface.object_id(),
-                self.pending_window_geometry,
-                self.current_window_geometry,
-            );
         }
         if role_changes.initial_commit_complete {
             self.initial_commit_complete = true;
@@ -464,8 +458,8 @@ impl XdgSurface {
                             (toplevel.minimum_size(), insets)
                         })
                         .unwrap_or((None, fallback_decoration_insets));
-                    let initial_layout_configure =
-                        crate::tiling::initial_layout_configure_for_surface(
+                    let initial_tiled_geometry =
+                        crate::tiling::initial_tiled_surface_geometry_for_surface(
                             state,
                             surface_id,
                             surface_decoration_insets,
@@ -477,7 +471,7 @@ impl XdgSurface {
                         client,
                         state,
                         configure_bounds,
-                        initial_layout_configure,
+                        initial_tiled_geometry,
                         self,
                         dispatcher,
                     );
@@ -666,12 +660,6 @@ impl Object for XdgSurface {
                     return Ok(());
                 }
                 self.pending_window_geometry = Some(window_geometry);
-                log::debug!(
-                    "[DEBUG_TILING] xdg_surface_set_window_geometry surface={:?} pending={:?} current={:?}",
-                    self.wl_surface.object_id(),
-                    self.pending_window_geometry,
-                    self.current_window_geometry,
-                );
             }
             AckConfigure { serial } => {
                 let Some(position) = self
@@ -977,26 +965,47 @@ pub mod xdg_toplevel {
             client: &Client,
             state: &State,
             configure_bounds: Option<(i32, i32)>,
-            initial_layout_configure: Option<crate::tiling::InitialLayoutConfigure>,
+            initial_tiled_geometry: Option<crate::tiling::TiledSurfaceGeometry>,
             xdg_surface: &mut XdgSurface,
             dispatcher: &mut ClientDispatcher,
         ) {
-            if let Some(layout) = initial_layout_configure {
-                self.send_layout_configure(
+            if let Some(geometry) = initial_tiled_geometry {
+                self.send_tiled_layout_configure(
                     client,
                     state,
-                    configure_bounds,
                     xdg_surface,
-                    layout.frame_rect.width,
-                    layout.frame_rect.height,
-                    layout.tiled_edges,
-                    layout.fullscreen,
+                    geometry,
                     false,
                     dispatcher,
                 );
             } else {
                 self.schedule_configure(client, state, configure_bounds, xdg_surface, dispatcher);
             }
+        }
+
+        pub fn send_tiled_layout_configure(
+            &mut self,
+            client: &Client,
+            state: &State,
+            xdg_surface: &mut XdgSurface,
+            geometry: crate::tiling::TiledSurfaceGeometry,
+            resizing: bool,
+            dispatcher: &mut ClientDispatcher,
+        ) {
+            let (width, height) =
+                geometry.configure_size_for_decoration_mode(self.decoration_mode_for_configure());
+            self.send_layout_configure(
+                client,
+                state,
+                Some((width, height)),
+                xdg_surface,
+                width,
+                height,
+                geometry.tiled_edges,
+                geometry.fullscreen,
+                resizing,
+                dispatcher,
+            );
         }
 
         pub fn send_layout_configure(
@@ -1782,6 +1791,64 @@ pub mod xdg_toplevel {
 
             assert!(states.contains(&(proto_xdg_toplevel::State::Activated as u32)));
             assert!(!states.contains(&(proto_xdg_toplevel::State::Fullscreen as u32)));
+        }
+
+        #[test]
+        fn tiled_layout_configure_uses_content_size_for_server_side_mode() {
+            let state = crate::test_support::state_for_tests();
+            let mut client =
+                crate::clients::Client::new_for_tests(crate::clients::ClientId::from_raw(1));
+            let mut dispatcher = crate::runner::Dispatcher::default();
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut xdg_surface = XdgSurface::new(
+                crate::protocol_generated::XdgSurfaceId::from(9),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    crate::protocol_generated::XdgWmBaseId::from(10),
+                    ObjectId::from(10usize),
+                ),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    crate::protocol_generated::WlSurfaceId::from(11),
+                    ObjectId::from(11usize),
+                ),
+                7,
+            );
+            let mut toplevel = XdgToplevel::new(
+                XdgToplevelId::from(12),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    crate::protocol_generated::XdgSurfaceId::from(9),
+                    ObjectId::from(9usize),
+                ),
+                7,
+            );
+            let geometry = crate::tiling::TiledSurfaceGeometry {
+                frame_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                content_rect: RectI { x: 25, y: 25, width: 1230, height: 750 },
+                tiled_edges: crate::tiling::EDGE_TOP | crate::tiling::EDGE_LEFT,
+                fullscreen: false,
+            };
+
+            toplevel.schedule_decoration_mode(ToplevelDecorationMode::ServerSide);
+            toplevel.send_tiled_layout_configure(
+                &client,
+                &state,
+                &mut xdg_surface,
+                geometry,
+                false,
+                &mut client_dispatcher,
+            );
+
+            let pending = xdg_surface
+                .pending_configures
+                .back()
+                .expect("pending configure");
+            let super::super::ConfigureState::Toplevel(configure) = &pending.state else {
+                panic!("expected toplevel configure");
+            };
+            assert_eq!((configure.width, configure.height), (1230, 750));
+            assert_eq!(configure.decoration_mode, ToplevelDecorationMode::ServerSide);
         }
 
         #[test]
