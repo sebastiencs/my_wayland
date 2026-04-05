@@ -4417,6 +4417,27 @@ fn push_scene_items_from_snapshots(
             let opaque = !opaque_region.is_empty();
             (SceneItemMask::None, opaque_region, opaque)
         };
+        let mask_label = match &mask {
+            SceneItemMask::None => "none",
+            SceneItemMask::RoundedClip { .. } => "rounded_clip",
+            SceneItemMask::FrameRing { .. } => "frame_ring",
+        };
+        log::debug!(
+            "[AAA] scene_item_from_snapshot surface={:?} buffer={:?} bounds={:?} output_bounds={:?} buffer_dims=({}, {}) alpha={} root_clip={:?} mask={} damage={:?} opaque={:?} has_alpha={} direct_scanout_candidate={}",
+            surface.wayland_id(),
+            surface_state.buffer.wayland_id(),
+            bounds,
+            output_bounds,
+            buffer_width,
+            buffer_height,
+            alpha,
+            root_clip,
+            mask_label,
+            damage.extents(),
+            opaque_region.extents(),
+            buffer.format().has_alpha,
+            direct_scanout.is_some(),
+        );
         items.push(SceneItem {
             state: SceneItemState {
                 key: SceneItemKey::Surface(surface_key),
