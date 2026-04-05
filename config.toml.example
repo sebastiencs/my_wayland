@@ -19,6 +19,25 @@ right = 0
 bottom = 0
 left = 0
 
+# Root-window border styling used by the pass-based effects pipeline.
+[decorations.border]
+thickness = 0
+active_start_color = "#5078c8ff"
+active_end_color = "#6b9df6ff"
+inactive_start_color = "#333844ff"
+inactive_end_color = "#434854ff"
+gradient_angle_degrees = 0
+rounding = 0
+rounding_power = 2.0
+
+# Simple compositor-owned shadow around the root window.
+[decorations.shadow]
+radius = 0
+offset_x = 0
+offset_y = 8
+color = "#00000090"
+power = 2.0
+
 # XDG decoration mode when the client uses zxdg_toplevel_decoration_v1 (or not).
 # Each key sets policy for: no CSD protocol, tiled, floating, fullscreen, or unset mode.
 # Values: "server" (SSD), "client" (CSD), "honor-client" (prefer client preference).
@@ -30,6 +49,19 @@ tiled = "server"
 floating = "honor-client"
 fullscreen = "server"
 unset_mode = "server"
+
+[effects.blur]
+enabled = false
+radius = 12
+passes = 2
+
+[effects.opacity]
+active_alpha = 255
+inactive_alpha = 230
+inactive_dim = 24
+
+[animations.window]
+duration_msec = 160
 
 [bindings]
 # Key names follow xkb (e.g. Super, Ctrl, Alt, Shift). Last segment is the key.

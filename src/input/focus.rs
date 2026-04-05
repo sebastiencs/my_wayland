@@ -1,6 +1,7 @@
 use {
     crate::{
         clients::{Client, ClientAction, ClientId, Resolved},
+        drm::{kick_window_animation_manager, schedule_outputs_for_rects},
         protocol_generated::{WlSeatId, WlSurfaceId},
         runner::Dispatcher,
         seat::{dispatch_client_event, SeatClientEvent},
@@ -61,6 +62,15 @@ pub(crate) fn set_keyboard_focus(
             .unwrap_or(new_focus);
         state.seat.remember_keyboard_focus(root_focus);
     }
+    let affected_rects = [old_focus, new_focus].into_iter().filter_map(|focus| {
+        let focus = focus?;
+        let root_surface = state
+            .root_surface_for_surface(focus.surface)
+            .unwrap_or(focus.surface);
+        state.root_surface_animation_damage_rect(root_surface)
+    });
+    schedule_outputs_for_rects(state, affected_rects, dispatcher);
+    kick_window_animation_manager(dispatcher);
     refresh_selection_focus_clients(dispatcher, old_focus, new_focus);
 }
 

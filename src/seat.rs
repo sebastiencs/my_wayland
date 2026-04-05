@@ -987,7 +987,7 @@ pub fn handle_pointer_button(
         return;
     }
 
-    if button_state == 1 && button == 0x110 && begin_ssd_pointer_action(state, dispatcher) {
+    if button_state == 1 && button == 0x110 && begin_decoration_pointer_action(state, dispatcher) {
         state.seat.intercept_pointer_button(button);
         return;
     }
@@ -1281,8 +1281,8 @@ fn begin_pointer_binding(
     crate::input::begin_pointer_binding(state, dispatcher, action)
 }
 
-fn begin_ssd_pointer_action(state: &mut State, dispatcher: &mut Dispatcher) -> bool {
-    crate::input::begin_ssd_pointer_action(state, dispatcher)
+fn begin_decoration_pointer_action(state: &mut State, dispatcher: &mut Dispatcher) -> bool {
+    crate::input::begin_decoration_pointer_action(state, dispatcher)
 }
 
 fn scene_pick_at(state: &State, pointer_pos: (f64, f64)) -> ScenePick {
@@ -1293,8 +1293,8 @@ fn window_hit_at(state: &State, pointer_pos: (f64, f64)) -> Option<WindowHit> {
     crate::input::window_hit_at(state, pointer_pos)
 }
 
-fn ssd_hover_cursor_icon_names(state: &State) -> Option<&'static [&'static str]> {
-    crate::input::ssd_hover_cursor_icon_names(state)
+fn decoration_hover_cursor_icon_names(state: &State) -> Option<&'static [&'static str]> {
+    crate::input::decoration_hover_cursor_icon_names(state)
 }
 
 fn update_idle_pointer_cursor(state: &mut State, dispatcher: &mut Dispatcher) {
@@ -1303,7 +1303,7 @@ fn update_idle_pointer_cursor(state: &mut State, dispatcher: &mut Dispatcher) {
     }
 
     let previous_cursor_owner = visible_cursor_owner_client(state);
-    let changed = if let Some(icon_names) = ssd_hover_cursor_icon_names(state) {
+    let changed = if let Some(icon_names) = decoration_hover_cursor_icon_names(state) {
         state.seat.set_compositor_named_cursor(icon_names)
     } else {
         state.seat.set_default_cursor()
@@ -2404,7 +2404,7 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn ssd_titlebar_press_starts_move_without_client_pointer_focus() {
+    fn decoration_titlebar_press_starts_move_without_client_pointer_focus() {
         let mut state = state_for_tests();
         state.config.general.decoration_insets.top = 12;
         state.config.general.decoration_insets.left = 4;
@@ -2520,7 +2520,7 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn ssd_left_border_press_starts_resize_with_left_edge() {
+    fn decoration_left_border_press_starts_resize_with_left_edge() {
         let mut state = state_for_tests();
         state.config.general.decoration_insets.top = 12;
         state.config.general.decoration_insets.left = 6;
@@ -2668,6 +2668,83 @@ mod xdg_seat_tests {
     }
 
     #[test]
+    fn scene_pick_keeps_focus_and_window_target_on_the_same_topmost_root_surface() {
+        let mut state = state_for_tests();
+        state.config.general.decoration_insets.top = 12;
+        state.config.general.decoration_insets.left = 6;
+        state.config.general.decoration_insets.right = 4;
+        state.config.general.decoration_insets.bottom = 4;
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (lower_surface_object_id, lower_xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(268),
+            XdgSurfaceId::from(278),
+        );
+        let lower_toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            lower_xdg_surface_object_id,
+            XdgSurfaceId::from(278),
+            XdgToplevelId::from(288),
+        );
+        let (upper_surface_object_id, upper_xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(269),
+            XdgSurfaceId::from(279),
+        );
+        let upper_toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            upper_xdg_surface_object_id,
+            XdgSurfaceId::from(279),
+            XdgToplevelId::from(289),
+        );
+        for toplevel_object_id in [lower_toplevel_object_id, upper_toplevel_object_id] {
+            let toplevel = state
+                .objects
+                .get_mut(toplevel_object_id)
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.test_set_decoration_mode(ToplevelDecorationMode::ServerSide);
+        }
+        {
+            let lower_surface = state
+                .objects
+                .get_mut(lower_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            lower_surface.test_map(ObjectId::from(959usize), 40, 50, 120, 80);
+        }
+        {
+            let upper_surface = state
+                .objects
+                .get_mut(upper_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            upper_surface.test_map(ObjectId::from(960usize), 60, 60, 120, 80);
+        }
+
+        let pick = scene_pick_at(&state, (90.0, 55.0));
+
+        assert!(pick.surface_focus.is_none());
+        assert_eq!(
+            pick.window_target
+                .expect("top decoration hit should still target the top window")
+                .root_surface
+                .object_id(),
+            upper_surface_object_id
+        );
+    }
+
+    #[test]
     fn window_pointer_hit_classifies_content_hits() {
         let mut state = state_for_tests();
         let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
@@ -2738,7 +2815,7 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn window_pointer_hit_classifies_ssd_titlebar_and_resize_hits() {
+    fn window_pointer_hit_classifies_decoration_titlebar_and_resize_hits() {
         let mut state = state_for_tests();
         state.config.general.decoration_insets.top = 12;
         state.config.general.decoration_insets.left = 6;
@@ -2798,7 +2875,62 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn ssd_hover_uses_resize_and_move_cursors_before_click() {
+    fn window_pointer_hit_treats_rounded_decoration_corner_as_non_border() {
+        let mut state = state_for_tests();
+        state.config.general.decoration_insets.top = 12;
+        state.config.general.decoration_insets.left = 6;
+        state.config.general.decoration_insets.right = 4;
+        state.config.general.decoration_insets.bottom = 4;
+        state.config.decorations.border.rounding = 18;
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(267),
+            XdgSurfaceId::from(277),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(277),
+            XdgToplevelId::from(287),
+        );
+        {
+            let toplevel = state
+                .objects
+                .get_mut(
+                    state
+                        .xdg_toplevel_object_id(Resolved::new(
+                            client.client_id(),
+                            XdgSurfaceId::from(277),
+                            xdg_surface_object_id,
+                        ))
+                        .unwrap(),
+                )
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.test_set_decoration_mode(ToplevelDecorationMode::ServerSide);
+        }
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(958usize), 40, 50, 120, 80);
+        }
+
+        let corner_hit = window_hit_at(&state, (34.0, 38.0)).expect("corner hit");
+        assert_eq!(corner_hit.semantics, HitSemantics::SurfaceContent);
+    }
+
+    #[test]
+    fn decoration_hover_uses_resize_and_move_cursors_before_click() {
         let mut state = state_for_tests();
         state.config.general.decoration_insets.top = 12;
         state.config.general.decoration_insets.left = 6;

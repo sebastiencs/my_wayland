@@ -18,8 +18,8 @@ pub(crate) use {
         resize_cursor_icon_names, tiled_resize_active_root_surfaces,
     },
     interaction::{
-        begin_pointer_binding, begin_ssd_pointer_action, request_toplevel_move,
-        request_toplevel_resize, ssd_hover_cursor_icon_names, window_hit_at,
+        begin_decoration_pointer_action, begin_pointer_binding, decoration_hover_cursor_icon_names,
+        request_toplevel_move, request_toplevel_resize, window_hit_at,
     },
     pick::{
         build_protocol_window_target, rect_contains_point, resize_edges_for_pointer, scene_pick_at,

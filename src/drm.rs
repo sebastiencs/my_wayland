@@ -25,17 +25,21 @@ use {
 use crate::{
     cursor::{CursorImage, CursorImageContentKey, CursorSourceRef},
     dmabuf::DmaBuf,
-    egl::{EglContext, EglFrameBuffer, GlTexture, RenderItem, EGL},
+    egl::{EglContext, EglFrameBuffer, GlTexture, EGL},
     gbm::{BufferObject, UseFlags},
     io_uring::{
         model::IoUringAction,
         ring::{PollCompleted, ReadWriteCompleted, RingId},
     },
     region::{DamageRegion, RectI},
+    render::{
+        rounded_ring, EffectElement, FrameElement, FramePhase, OutputFrameRecipe,
+        RootSurfaceVisualState, RoundedRing, TextureElement, TextureMask, TextureSource,
+    },
     runner::{Dispatcher, Model, ModelInstanceId},
     state::{
         BackendOutputRef, ColorTransformMatrix, DrmId, ObjectId, OutputId, OutputMode,
-        SsdFrameLayout, State,
+        RootSurfaceClip, State,
     },
     sync::{DeferredRelease, RetiredBufferCandidate},
     transform::{self, OutputPresentationTransform},
@@ -168,6 +172,7 @@ pub struct DrmOutput {
     present_count: u64,
     damage_history: VecDeque<DamageRegion>,
     last_scene: Vec<SceneItemState>,
+    last_submission_had_effects: bool,
     force_full_redraw: bool,
     rendered_buffer_present_id: [Option<u64>; 2],
     in_flight_frame: Option<SubmittedFrame>,
@@ -211,23 +216,13 @@ type SurfaceKey = Resolved<WlSurfaceId>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum SceneItemKey {
     Surface(SurfaceKey),
-    SsdFrame { root_surface: Resolved<WlSurfaceId>, segment: SsdFrameSegment },
     Cursor,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-enum SsdFrameSegment {
-    Top,
-    Left,
-    Right,
-    Bottom,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SceneItemContentKey {
     Buffer(Resolved<WlBufferId>),
     NamedCursor(CursorImageContentKey),
-    SsdFrame { focused: bool },
 }
 
 #[derive(Clone, Debug)]
@@ -239,14 +234,23 @@ struct SceneItemState {
     tex_transform: transform::Mat3,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum SceneItemMask {
+    None,
+    RoundedClip { clip: RootSurfaceClip },
+    FrameRing { ring: RoundedRing },
+}
+
 #[derive(Debug)]
 struct SceneItem {
     state: SceneItemState,
+    mask: SceneItemMask,
     texture: gl::Uint,
     owned_texture: Option<GlTexture>,
     damage: DamageRegion,
     sample_damage_padding: i32,
     state_has_alpha: bool,
+    alpha: u8,
     opaque_region: DamageRegion,
     opaque: bool,
     sync: crate::sync::SurfaceSyncState,
@@ -364,6 +368,7 @@ enum CursorOutputVisibility {
 struct FramePlan {
     items: Vec<SceneItem>,
     software_cursor_items: Vec<SceneItem>,
+    frame_elements: Vec<RecordedFrameElement>,
     scene: Vec<SceneItemState>,
     frame_callback_surfaces: Vec<SurfaceKey>,
     presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
@@ -371,6 +376,12 @@ struct FramePlan {
     direct_scanout: Option<DirectScanoutCandidate>,
     cursor_plane: Option<CursorPlaneCandidate>,
     preserve_contents: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RecordedFrameElement {
+    Texture { phase: FramePhase, item_index: usize },
+    Effect { phase: FramePhase, element: EffectElement },
 }
 
 #[derive(Debug)]
@@ -391,6 +402,7 @@ struct OutputSubmission {
     frame_callback_surfaces: Vec<SurfaceKey>,
     presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
     zero_copy: bool,
+    had_effects: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -475,6 +487,7 @@ impl DrmOutput {
         frame_callback_surfaces: Vec<SurfaceKey>,
         presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
         zero_copy: bool,
+        had_effects: bool,
     ) -> OutputSubmission {
         let id = self.next_submission_id;
         self.next_submission_id = self.next_submission_id.saturating_add(1);
@@ -485,6 +498,7 @@ impl DrmOutput {
             frame_callback_surfaces,
             presentation_feedbacks,
             zero_copy,
+            had_effects,
         }
     }
 
@@ -531,6 +545,7 @@ impl DrmOutput {
                     self.damage_history.pop_back();
                 }
                 self.last_scene = submission.scene.clone();
+                self.last_submission_had_effects = submission.had_effects;
                 self.displayed_external_fb = None;
                 self.displayed_cursor_slot = cursor_slot;
                 self.force_full_redraw = false;
@@ -539,6 +554,7 @@ impl DrmOutput {
             Some(SubmittedFrame::DirectScanout { submission, framebuffer, cursor_slot }) => {
                 self.force_full_redraw = true;
                 self.last_scene = submission.scene.clone();
+                self.last_submission_had_effects = false;
                 self.displayed_external_fb = Some(framebuffer);
                 self.displayed_cursor_slot = cursor_slot;
                 self.rendered_buffer_present_id = [None, None];
@@ -1259,7 +1275,7 @@ impl Drm {
     fn render_output(
         &self,
         drm_crtc_id: u32,
-        items: &[RenderItem],
+        recipe: &OutputFrameRecipe,
         damage: &DamageRegion,
         preserve_contents: bool,
     ) -> crate::egl::RenderCompletion {
@@ -1268,7 +1284,7 @@ impl Drm {
             .expect("missing DRM output pipeline for render");
         let projection = output.render_projection();
         output.render_buffer().gl_framebuffer.render(
-            items,
+            recipe,
             projection,
             output.render_sync_mode,
             damage,
@@ -1449,6 +1465,7 @@ impl Drm {
         frame_callback_surfaces: Vec<SurfaceKey>,
         presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
         cursor_plane: Option<CursorPlaneCandidate>,
+        had_effects: bool,
     ) -> std::io::Result<Vec<SurfaceKey>> {
         let (primary_plane, fb, crtc) = {
             let output = self
@@ -1573,6 +1590,7 @@ impl Drm {
                         frame_callback_surfaces,
                         presentation_feedbacks,
                         false,
+                        had_effects,
                     );
                     let callback_surfaces = submission.frame_callback_surfaces.clone();
                     self.output_mut(drm_crtc_id).unwrap().mark_frame_submitted(
@@ -1735,6 +1753,7 @@ impl Drm {
             frame_callback_surfaces,
             presentation_feedbacks,
             true,
+            false,
         );
         let callback_surfaces = submission.frame_callback_surfaces.clone();
         self.output_mut(drm_crtc_id)
@@ -2104,6 +2123,7 @@ impl Drm {
             present_count: 0,
             damage_history: VecDeque::new(),
             last_scene: Vec::new(),
+            last_submission_had_effects: false,
             force_full_redraw: true,
             rendered_buffer_present_id: [None, None],
             in_flight_frame: None,
@@ -2935,9 +2955,23 @@ enum DrmCursorAnimationTimerAction {
     Stop,
 }
 
+pub enum WindowAnimationManagerAction {
+    Start,
+    Kick,
+    Arm { delay_msec: Option<u32> },
+    Fired,
+    Failed { error: std::io::Error },
+    Stop,
+}
+
 struct DrmCursorAnimationTimer {
     drm_id: DrmId,
     output_id: OutputId,
+    timer_fd: TimerFd,
+    read_op_id: Option<RingId>,
+}
+
+pub struct WindowAnimationManager {
     timer_fd: TimerFd,
     read_op_id: Option<RingId>,
 }
@@ -3033,6 +3067,14 @@ pub fn schedule_outputs_for_points(
         state.output_at_point(x, y)
     });
     schedule_outputs(state, output_ids, dispatcher);
+}
+
+pub fn kick_window_animation_manager(dispatcher: &mut Dispatcher) {
+    dispatcher.dispatch(WindowAnimationManagerAction::Kick);
+}
+
+fn arm_window_animation_manager(dispatcher: &mut Dispatcher, delay_msec: Option<u32>) {
+    dispatcher.dispatch(WindowAnimationManagerAction::Arm { delay_msec });
 }
 
 fn arm_cursor_animation_timer(
@@ -3137,12 +3179,14 @@ fn collect_output_render_plan(
     let (
         mut items,
         mut software_cursor_items,
+        mut frame_elements,
         deferred_releases,
         cursor_plane,
         cursor_animation_delay_msec,
     ) = collect_render_items(state, drm_id, drm_crtc_id, global_bounds, frame_time_msec);
     translate_scene_items(&mut items, -global_bounds.x, -global_bounds.y);
     translate_scene_items(&mut software_cursor_items, -global_bounds.x, -global_bounds.y);
+    translate_recorded_frame_elements(&mut frame_elements, -global_bounds.x, -global_bounds.y);
     let frame = {
         let drm = state.drm.get(drm_id);
         build_frame_plan(
@@ -3150,6 +3194,7 @@ fn collect_output_render_plan(
                 .expect("missing DRM output pipeline for frame plan"),
             items,
             software_cursor_items,
+            frame_elements,
             cursor_plane,
         )
     };
@@ -3219,6 +3264,50 @@ impl Model for DrmCursorAnimationTimer {
     }
 }
 
+impl Model for WindowAnimationManager {
+    type Action = WindowAnimationManagerAction;
+    const START: Option<Self::Action> = Some(WindowAnimationManagerAction::Start);
+    const STOP: Option<Self::Action> = Some(WindowAnimationManagerAction::Stop);
+
+    fn process(
+        &mut self,
+        state: &mut crate::state::State,
+        action: Self::Action,
+        dispatcher: &mut crate::runner::Dispatcher,
+    ) -> Result<(), ()> {
+        match action {
+            WindowAnimationManagerAction::Start => {
+                self.dispatch_read(dispatcher);
+            }
+            WindowAnimationManagerAction::Kick => {
+                self.advance_and_schedule(state, dispatcher, monotonic_time_msec());
+            }
+            WindowAnimationManagerAction::Arm { delay_msec } => {
+                if let Err(error) = self.set_expiration(delay_msec) {
+                    log::warn!("failed to arm window animation timer: {:?}", error);
+                }
+            }
+            WindowAnimationManagerAction::Fired => {
+                self.read_op_id = None;
+                self.advance_and_schedule(state, dispatcher, monotonic_time_msec());
+                self.dispatch_read(dispatcher);
+            }
+            WindowAnimationManagerAction::Failed { error } => {
+                self.read_op_id = None;
+                log::warn!("window animation timer read failed: {:?}", error);
+                self.dispatch_read(dispatcher);
+            }
+            WindowAnimationManagerAction::Stop => {
+                let _ = self.set_expiration(None);
+                if let Some(read_op_id) = self.read_op_id.take() {
+                    dispatcher.dispatch(IoUringAction::Cancel { target: read_op_id });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl DrmCursorAnimationTimer {
     fn new(drm_id: DrmId, output_id: OutputId) -> Self {
         let timer_fd = TimerFd::new(
@@ -3260,6 +3349,59 @@ impl DrmCursorAnimationTimer {
                 TimerSetTimeFlags::empty(),
             )
             .map_err(std::io::Error::other)
+    }
+}
+
+impl WindowAnimationManager {
+    pub fn new() -> Self {
+        let timer_fd = TimerFd::new(
+            timerfd::ClockId::CLOCK_MONOTONIC,
+            TimerFlags::TFD_CLOEXEC | TimerFlags::TFD_NONBLOCK,
+        )
+        .expect("failed to create window animation timerfd");
+        Self { timer_fd, read_op_id: None }
+    }
+
+    fn dispatch_read(&mut self, dispatcher: &mut Dispatcher) {
+        if self.read_op_id.is_some() {
+            return;
+        }
+        let read_op_id = RingId::fresh();
+        self.read_op_id = Some(read_op_id);
+        dispatcher.dispatch(IoUringAction::Read {
+            id: Some(read_op_id),
+            fd: self.timer_fd.as_fd().as_raw_fd(),
+            offset: 0,
+            length: std::mem::size_of::<u64>(),
+            dispatch_to: crate::runner::Redispatcher::to::<Self>(|result| match result {
+                Ok(_) => WindowAnimationManagerAction::Fired,
+                Err(error) => WindowAnimationManagerAction::Failed { error },
+            }),
+        });
+    }
+
+    fn set_expiration(&mut self, delay_msec: Option<u32>) -> std::io::Result<()> {
+        let expiration = delay_msec
+            .map(|delay| Expiration::OneShot(Duration::from_millis(u64::from(delay)).into()));
+        self.timer_fd
+            .set(
+                expiration.unwrap_or_else(|| Expiration::OneShot(Duration::ZERO.into())),
+                TimerSetTimeFlags::empty(),
+            )
+            .map_err(std::io::Error::other)
+    }
+
+    fn advance_and_schedule(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut Dispatcher,
+        frame_time_msec: u32,
+    ) {
+        let result = state.advance_window_visual_animations(frame_time_msec);
+        if !result.damaged_rects.is_empty() {
+            schedule_outputs_for_rects(state, result.damaged_rects, dispatcher);
+        }
+        arm_window_animation_manager(dispatcher, result.has_active_animations.then_some(16));
     }
 }
 
@@ -3353,6 +3495,7 @@ impl DrmOutputModel {
             let FramePlan {
                 mut items,
                 mut software_cursor_items,
+                mut frame_elements,
                 mut scene,
                 mut frame_callback_surfaces,
                 mut presentation_feedbacks,
@@ -3393,10 +3536,18 @@ impl DrmOutputModel {
                 }
                 if !software_cursor_items.is_empty() {
                     items.append(&mut software_cursor_items);
-                    let fallback_plan =
-                        build_frame_plan(drm.output(drm_crtc_id).unwrap(), items, Vec::new(), None);
+                    // Clone the effect recipe on cursor fallback to keep the retry path simple;
+                    // if fallback becomes hot we should switch this to recipe reuse.
+                    let fallback_plan = build_frame_plan(
+                        drm.output(drm_crtc_id).unwrap(),
+                        items,
+                        Vec::new(),
+                        frame_elements.clone(),
+                        None,
+                    );
                     items = fallback_plan.items;
                     software_cursor_items = fallback_plan.software_cursor_items;
+                    frame_elements = fallback_plan.frame_elements;
                     scene = fallback_plan.scene;
                     frame_callback_surfaces = fallback_plan.frame_callback_surfaces;
                     presentation_feedbacks = fallback_plan.presentation_feedbacks;
@@ -3420,9 +3571,9 @@ impl DrmOutputModel {
                 );
                 Some(releases)
             } else {
-                let render_items = scene_items_to_render_items(&items);
+                let recipe = build_output_frame_recipe(&items, &frame_elements);
                 let render_completion =
-                    drm.render_output(drm_crtc_id, &render_items, &damage, preserve_contents);
+                    drm.render_output(drm_crtc_id, &recipe, &damage, preserve_contents);
                 let callback_surfaces = frame_callback_surfaces.clone();
                 let submit_had_cursor_plane = cursor_plane.is_some();
                 if submit_had_cursor_plane && crate::logger::ENABLE_NOISY_LOG {
@@ -3437,6 +3588,7 @@ impl DrmOutputModel {
                     frame_callback_surfaces,
                     presentation_feedbacks.clone(),
                     cursor_plane,
+                    recipe.has_effects(),
                 );
                 if let Err(error) = submit_result {
                     if submit_had_cursor_plane {
@@ -3450,13 +3602,16 @@ impl DrmOutputModel {
                                 drm.output(drm_crtc_id).unwrap(),
                                 items,
                                 Vec::new(),
+                                frame_elements.clone(),
                                 None,
                             );
-                            let fallback_render_items =
-                                scene_items_to_render_items(&fallback_plan.items);
+                            let fallback_recipe = build_output_frame_recipe(
+                                &fallback_plan.items,
+                                &fallback_plan.frame_elements,
+                            );
                             let fallback_render_completion = drm.render_output(
                                 drm_crtc_id,
-                                &fallback_render_items,
+                                &fallback_recipe,
                                 &fallback_plan.damage,
                                 fallback_plan.preserve_contents,
                             );
@@ -3470,6 +3625,7 @@ impl DrmOutputModel {
                                 fallback_plan.frame_callback_surfaces,
                                 fallback_plan.presentation_feedbacks.clone(),
                                 None,
+                                fallback_recipe.has_effects(),
                             ) {
                                 Ok(_) => {
                                     drm.output_mut(drm_crtc_id)
@@ -3929,6 +4085,7 @@ fn build_frame_plan(
     output: &DrmOutput,
     mut items: Vec<SceneItem>,
     mut software_cursor_items: Vec<SceneItem>,
+    frame_elements: Vec<RecordedFrameElement>,
     cursor_plane: Option<CursorPlaneCandidate>,
 ) -> FramePlan {
     let output_bounds = output.output_bounds();
@@ -3940,8 +4097,13 @@ fn build_frame_plan(
         collect_submission_metadata(&items, &software_cursor_items);
     let last_scene = &output.last_scene;
     let order_changed = scene_order(last_scene) != scene_order(&scene);
+    let has_effects = frame_elements
+        .iter()
+        .any(|element| matches!(element, RecordedFrameElement::Effect { .. }));
 
-    if !ENABLE_DAMAGE
+    let had_effects_last_frame = output.last_submission_had_effects;
+    if effect_transition_requires_full_redraw(has_effects, had_effects_last_frame)
+        || !ENABLE_DAMAGE
         || output.force_full_redraw
         || order_changed
         || scene.len() != last_scene.len()
@@ -3988,19 +4150,31 @@ fn build_frame_plan(
         base_damage.add_region(&padded_item_damage);
     }
 
-    let mut occluded = DamageRegion::new();
-    for item in items.iter_mut().rev() {
-        let mut visible_damage = base_damage.clone();
-        visible_damage.intersect_rect(item.state.bounds);
-        visible_damage.subtract_region(&occluded);
-        item.damage = visible_damage;
-        if item.opaque {
-            occluded.add_region(&item.opaque_region);
+    if has_effects {
+        // Keep effect damage conservative until each effect element reports full influence bounds;
+        // blur and multi-pass composition are easier to keep correct this way.
+        for item in &mut items {
+            let mut visible_damage = base_damage.clone();
+            visible_damage.intersect_rect(item.state.bounds);
+            item.damage = visible_damage;
+        }
+    } else {
+        let mut occluded = DamageRegion::new();
+        for item in items.iter_mut().rev() {
+            let mut visible_damage = base_damage.clone();
+            visible_damage.intersect_rect(item.state.bounds);
+            visible_damage.subtract_region(&occluded);
+            item.damage = visible_damage;
+            if item.opaque {
+                occluded.add_region(&item.opaque_region);
+            }
         }
     }
 
-    let direct_scanout = if items.len() == 1
+    let direct_scanout = if !has_effects
+        && items.len() == 1
         && items[0].state.bounds == output_bounds
+        && !scene_item_requires_compositor_compositing(&items[0])
         && output.page_flip_pending == false
     {
         let bounds = items[0].state.bounds;
@@ -4016,6 +4190,7 @@ fn build_frame_plan(
     FramePlan {
         items,
         software_cursor_items,
+        frame_elements,
         scene,
         frame_callback_surfaces,
         presentation_feedbacks,
@@ -4024,8 +4199,21 @@ fn build_frame_plan(
         cursor_plane,
         preserve_contents: ENABLE_DAMAGE
             && output.preserve_render_buffer_contents()
-            && !output.force_full_redraw,
+            && !output.force_full_redraw
+            && !has_effects,
     }
+}
+
+fn scene_item_requires_compositor_compositing(item: &SceneItem) -> bool {
+    item.alpha < u8::MAX || !matches!(item.mask, SceneItemMask::None)
+}
+
+fn surface_allows_direct_scanout(root_clip: Option<RootSurfaceClip>, alpha: u8) -> bool {
+    root_clip.is_none() && alpha == u8::MAX
+}
+
+fn effect_transition_requires_full_redraw(has_effects: bool, had_effects_last_frame: bool) -> bool {
+    has_effects || had_effects_last_frame
 }
 
 fn collect_named_cursor_render_item(
@@ -4057,11 +4245,13 @@ fn collect_named_cursor_render_item(
                         bounds,
                         tex_transform: transform::Mat3::identity(),
                     },
+                    mask: SceneItemMask::None,
                     texture: texture_id,
                     owned_texture: Some(texture),
                     damage: DamageRegion::from_rect(bounds),
                     sample_damage_padding: 0,
                     state_has_alpha: true,
+                    alpha: u8::MAX,
                     opaque_region: DamageRegion::new(),
                     opaque: false,
                     sync: crate::sync::SurfaceSyncState::default(),
@@ -4132,6 +4322,8 @@ fn push_scene_items_from_snapshots(
     output_bounds: RectI,
     snapshots: Vec<crate::wayland_objects::wl_surface::SurfaceRenderState>,
     allow_direct_scanout: bool,
+    root_clip: Option<RootSurfaceClip>,
+    alpha: u8,
 ) {
     for surface_state in snapshots {
         let buffer_oid = surface_state.buffer.object_id();
@@ -4191,7 +4383,8 @@ fn push_scene_items_from_snapshots(
                 || drm
                     .output(drm_crtc_id)
                     .is_some_and(|output| output.in_use.primary_plane().0.in_fence_fd.is_some()));
-        let direct_scanout = if allow_direct_scanout
+        let direct_scanout = if surface_allows_direct_scanout(root_clip, alpha)
+            && allow_direct_scanout
             && buffer.dmabuf().is_some()
             && !buffer.y_inverted()
             && !buffer.format().has_alpha
@@ -4218,6 +4411,12 @@ fn push_scene_items_from_snapshots(
             .surface
             .expect("rendered surface snapshots carry their object id");
         let surface_key = surface;
+        let (mask, opaque_region, opaque) = if let Some(clip) = root_clip {
+            (SceneItemMask::RoundedClip { clip }, DamageRegion::new(), false)
+        } else {
+            let opaque = !opaque_region.is_empty();
+            (SceneItemMask::None, opaque_region, opaque)
+        };
         items.push(SceneItem {
             state: SceneItemState {
                 key: SceneItemKey::Surface(surface_key),
@@ -4226,13 +4425,15 @@ fn push_scene_items_from_snapshots(
                 bounds,
                 tex_transform,
             },
+            mask,
             texture,
             owned_texture: None,
             damage,
             sample_damage_padding,
             state_has_alpha: buffer.format().has_alpha,
-            opaque_region: opaque_region.clone(),
-            opaque: !opaque_region.is_empty(),
+            alpha,
+            opaque_region,
+            opaque,
             sync: surface_state.sync,
             direct_scanout,
             presentation_feedbacks: surface_state.presentation_feedbacks,
@@ -4240,68 +4441,70 @@ fn push_scene_items_from_snapshots(
     }
 }
 
-fn ssd_frame_segments(layout: SsdFrameLayout) -> impl Iterator<Item = (SsdFrameSegment, RectI)> {
-    let top = RectI::from_extents(
-        layout.frame_rect.x,
-        layout.frame_rect.y,
-        layout.frame_rect.x2(),
-        layout.content_rect.y,
-    )
-    .map(|rect| (SsdFrameSegment::Top, rect));
-    let left = RectI::from_extents(
-        layout.frame_rect.x,
-        layout.content_rect.y,
-        layout.content_rect.x,
-        layout.content_rect.y2(),
-    )
-    .map(|rect| (SsdFrameSegment::Left, rect));
-    let right = RectI::from_extents(
-        layout.content_rect.x2(),
-        layout.content_rect.y,
-        layout.frame_rect.x2(),
-        layout.content_rect.y2(),
-    )
-    .map(|rect| (SsdFrameSegment::Right, rect));
-    let bottom = RectI::from_extents(
-        layout.frame_rect.x,
-        layout.content_rect.y2(),
-        layout.frame_rect.x2(),
-        layout.frame_rect.y2(),
-    )
-    .map(|rect| (SsdFrameSegment::Bottom, rect));
-
-    [top, left, right, bottom].into_iter().flatten()
-}
-
-fn push_ssd_frame_scene_items(
-    items: &mut Vec<SceneItem>,
-    root_surface: Resolved<WlSurfaceId>,
-    focused: bool,
-    layout: SsdFrameLayout,
-    texture_id: gl::Uint,
-    owned_texture: &mut Option<GlTexture>,
+fn push_root_surface_effect_elements(
+    frame_elements: &mut Vec<RecordedFrameElement>,
+    visual_state: Option<RootSurfaceVisualState>,
+    phase: FramePhase,
 ) {
-    for (index, (segment, bounds)) in ssd_frame_segments(layout).enumerate() {
-        items.push(SceneItem {
-            state: SceneItemState {
-                key: SceneItemKey::SsdFrame { root_surface, segment },
-                surface_key: None,
-                content_key: SceneItemContentKey::SsdFrame { focused },
-                bounds,
-                tex_transform: transform::Mat3::identity(),
-            },
-            texture: texture_id,
-            owned_texture: (index == 0).then(|| owned_texture.take()).flatten(),
-            damage: DamageRegion::from_rect(bounds),
-            sample_damage_padding: 0,
-            state_has_alpha: false,
-            opaque_region: DamageRegion::from_rect(bounds),
-            opaque: true,
-            sync: crate::sync::SurfaceSyncState::default(),
-            direct_scanout: None,
-            presentation_feedbacks: Vec::new(),
+    let Some(visual_state) = visual_state else {
+        return;
+    };
+    let clip = visual_state.clip.unwrap_or_else(|| {
+        RootSurfaceClip::new(visual_state.outer_rect, 0, crate::config::RoundingPower::DEFAULT)
+    });
+    let ring = rounded_ring(clip, visual_state.content_rect);
+    if phase == FramePhase::UnderWindow {
+        if let Some(blur) = visual_state.effects.blur {
+            frame_elements.push(RecordedFrameElement::Effect {
+                phase: FramePhase::UnderWindow,
+                element: EffectElement::WindowBlurBackdrop {
+                    ring,
+                    style: blur,
+                    alpha: visual_state.effects.opacity_alpha,
+                },
+            });
+        }
+    }
+    if phase == FramePhase::UnderWindow {
+        if let Some(shadow) = visual_state.shadow {
+            frame_elements.push(RecordedFrameElement::Effect {
+                phase: FramePhase::UnderWindow,
+                element: EffectElement::WindowShadow {
+                    clip,
+                    style: shadow,
+                    alpha: visual_state.shadow_alpha,
+                },
+            });
+        }
+    }
+    if phase == FramePhase::OverWindow {
+        if let Some(border) = visual_state.border {
+            frame_elements.push(RecordedFrameElement::Effect {
+                phase: FramePhase::OverWindow,
+                element: EffectElement::WindowBorder {
+                    ring,
+                    gradient: border.gradient,
+                    alpha: visual_state.border_alpha,
+                },
+            });
+        }
+    }
+    if phase == FramePhase::Overlay && visual_state.effects.dim_alpha > 0 {
+        frame_elements.push(RecordedFrameElement::Effect {
+            phase: FramePhase::Overlay,
+            element: EffectElement::DimOverlay { clip, alpha: visual_state.effects.dim_alpha },
         });
     }
+}
+
+fn push_scene_item_frame_elements(
+    frame_elements: &mut Vec<RecordedFrameElement>,
+    item_indices: std::ops::Range<usize>,
+) {
+    frame_elements.extend(item_indices.map(|item_index| RecordedFrameElement::Texture {
+        phase: FramePhase::Content,
+        item_index,
+    }));
 }
 
 fn collect_cursor_surface_snapshots(
@@ -4363,6 +4566,8 @@ fn collect_software_cursor_items(
         output_bounds,
         cursor_snapshots,
         false,
+        None,
+        u8::MAX,
     );
     (items, None)
 }
@@ -4451,13 +4656,19 @@ fn collect_render_items(
     drm_crtc_id: u32,
     output_bounds: RectI,
     frame_time_msec: u32,
-) -> (Vec<SceneItem>, Vec<SceneItem>, Vec<DeferredRelease>, Option<CursorPlaneCandidate>, Option<u32>)
-{
+) -> (
+    Vec<SceneItem>,
+    Vec<SceneItem>,
+    Vec<RecordedFrameElement>,
+    Vec<DeferredRelease>,
+    Option<CursorPlaneCandidate>,
+    Option<u32>,
+) {
     let mut items = Vec::new();
+    let mut frame_elements = Vec::new();
     let mut deferred_releases = Vec::new();
     let mut retired_candidates = Vec::new();
     let mut cursor_animation_delay_msec = None;
-    let focused_root_surface = state.focused_root_surface();
     let root_surfaces: Vec<_> = ordered_scene_root_surfaces(state)
         .into_iter()
         .filter(|root_surface| {
@@ -4470,30 +4681,15 @@ fn collect_render_items(
             surface.is_root() && !surface.has_cursor_role()
         })
         .collect();
-    let mut focused_frame_texture = GlTexture::from_rgba(&[0x50, 0x78, 0xc8, 0xff], 1, 1).ok();
-    let mut unfocused_frame_texture = GlTexture::from_rgba(&[0x33, 0x38, 0x44, 0xff], 1, 1).ok();
-    let focused_frame_texture_id = focused_frame_texture.as_ref().map(GlTexture::texture_id);
-    let unfocused_frame_texture_id = unfocused_frame_texture.as_ref().map(GlTexture::texture_id);
-    let mut snapshots = Vec::new();
     for root_surface in root_surfaces {
-        if let Some(layout) = state.root_surface_ssd_layout(root_surface) {
-            let focused = focused_root_surface == Some(root_surface);
-            let (texture_id, owned_texture) = if focused {
-                (focused_frame_texture_id, &mut focused_frame_texture)
-            } else {
-                (unfocused_frame_texture_id, &mut unfocused_frame_texture)
-            };
-            if let Some(texture_id) = texture_id {
-                push_ssd_frame_scene_items(
-                    &mut items,
-                    root_surface,
-                    focused,
-                    layout,
-                    texture_id,
-                    owned_texture,
-                );
-            }
-        }
+        let visual_state = state.root_surface_visual_state(root_surface);
+        let root_clip = visual_state.and_then(|visual| visual.clip);
+        push_root_surface_effect_elements(
+            &mut frame_elements,
+            visual_state,
+            FramePhase::UnderWindow,
+        );
+        let mut snapshots = Vec::new();
         collect_surface_snapshots(
             state,
             root_surface,
@@ -4502,6 +4698,31 @@ fn collect_render_items(
             &mut retired_candidates,
             &mut snapshots,
         );
+        let (objects, drm_map) = (&mut state.objects, &state.drm);
+        let drm = drm_map.get(drm_id);
+        let drm_fd = drm.fd();
+        let item_start_index = items.len();
+        push_scene_items_from_snapshots(
+            &mut items,
+            objects,
+            drm,
+            &drm_fd,
+            drm_crtc_id,
+            output_bounds,
+            snapshots,
+            true,
+            root_clip,
+            visual_state
+                .map(|visual| visual.effects.opacity_alpha)
+                .unwrap_or(u8::MAX),
+        );
+        push_scene_item_frame_elements(&mut frame_elements, item_start_index..items.len());
+        push_root_surface_effect_elements(
+            &mut frame_elements,
+            visual_state,
+            FramePhase::OverWindow,
+        );
+        push_root_surface_effect_elements(&mut frame_elements, visual_state, FramePhase::Overlay);
     }
 
     let cursor_plane = {
@@ -4528,19 +4749,6 @@ fn collect_render_items(
             None
         }
     };
-    let (objects, drm_map) = (&mut state.objects, &state.drm);
-    let drm = drm_map.get(drm_id);
-    let drm_fd = drm.fd();
-    push_scene_items_from_snapshots(
-        &mut items,
-        objects,
-        drm,
-        &drm_fd,
-        drm_crtc_id,
-        output_bounds,
-        snapshots,
-        true,
-    );
     let (software_cursor_items, software_cursor_animation_delay_msec) =
         collect_software_cursor_items(
             state,
@@ -4558,23 +4766,60 @@ fn collect_render_items(
         deferred_releases.push(DeferredRelease::from_candidate(state, retired));
     }
 
-    (items, software_cursor_items, deferred_releases, cursor_plane, cursor_animation_delay_msec)
+    (
+        items,
+        software_cursor_items,
+        frame_elements,
+        deferred_releases,
+        cursor_plane,
+        cursor_animation_delay_msec,
+    )
 }
 
-fn scene_items_to_render_items(items: &[SceneItem]) -> Vec<RenderItem> {
-    items
-        .iter()
-        .map(|item| RenderItem {
-            texture: item.texture,
-            x: item.state.bounds.x,
-            y: item.state.bounds.y,
-            width: item.state.bounds.width,
-            height: item.state.bounds.height,
-            tex_transform: item.state.tex_transform,
-            damage: item.damage.clone(),
-            blend: item.state_has_alpha,
-        })
-        .collect()
+fn scene_item_to_texture_element(item: &SceneItem) -> TextureElement {
+    TextureElement {
+        source: TextureSource::Texture,
+        texture: item.texture,
+        x: item.state.bounds.x,
+        y: item.state.bounds.y,
+        width: item.state.bounds.width,
+        height: item.state.bounds.height,
+        tex_transform: item.state.tex_transform,
+        damage: item.damage.clone(),
+        blend: item.state_has_alpha,
+        alpha: item.alpha,
+        mask: match item.mask {
+            SceneItemMask::None => TextureMask::None,
+            SceneItemMask::RoundedClip { clip } => {
+                TextureMask::RoundedClip { clip: localize_clip(clip, item.state.bounds) }
+            }
+            SceneItemMask::FrameRing { ring } => {
+                TextureMask::FrameRing { ring: localize_ring(ring, item.state.bounds) }
+            }
+        },
+    }
+}
+
+fn build_output_frame_recipe(
+    items: &[SceneItem],
+    frame_elements: &[RecordedFrameElement],
+) -> OutputFrameRecipe {
+    OutputFrameRecipe {
+        elements: frame_elements
+            .iter()
+            .filter_map(|element| match element {
+                RecordedFrameElement::Texture { phase, item_index } => {
+                    items.get(*item_index).map(|item| FrameElement::Texture {
+                        phase: *phase,
+                        element: scene_item_to_texture_element(item),
+                    })
+                }
+                RecordedFrameElement::Effect { phase, element } => {
+                    Some(FrameElement::Effect { phase: *phase, element: *element })
+                }
+            })
+            .collect(),
+    }
 }
 
 fn translate_scene_items(items: &mut [SceneItem], dx: i32, dy: i32) {
@@ -4582,6 +4827,48 @@ fn translate_scene_items(items: &mut [SceneItem], dx: i32, dy: i32) {
         item.state.bounds = item.state.bounds.translate(dx, dy);
         item.damage.translate(dx, dy);
         item.opaque_region.translate(dx, dy);
+    }
+}
+
+fn translate_recorded_frame_elements(
+    frame_elements: &mut [RecordedFrameElement],
+    dx: i32,
+    dy: i32,
+) {
+    for frame_element in frame_elements {
+        let RecordedFrameElement::Effect { element, .. } = frame_element else {
+            continue;
+        };
+        translate_effect_element(element, dx, dy);
+    }
+}
+
+fn translate_effect_element(element: &mut EffectElement, dx: i32, dy: i32) {
+    match element {
+        EffectElement::WindowBorder { ring, .. }
+        | EffectElement::WindowBlurBackdrop { ring, .. } => {
+            ring.outer.outer_rect = ring.outer.outer_rect.translate(dx, dy);
+            ring.inner.outer_rect = ring.inner.outer_rect.translate(dx, dy);
+        }
+        EffectElement::WindowShadow { clip, .. } | EffectElement::DimOverlay { clip, .. } => {
+            clip.outer_rect = clip.outer_rect.translate(dx, dy);
+        }
+    }
+}
+
+fn localize_clip(clip: RootSurfaceClip, item_bounds: RectI) -> RootSurfaceClip {
+    RootSurfaceClip::new(
+        clip.outer_rect
+            .translate(item_bounds.x.saturating_neg(), item_bounds.y.saturating_neg()),
+        clip.corner_radius,
+        clip.rounding_power,
+    )
+}
+
+fn localize_ring(ring: RoundedRing, item_bounds: RectI) -> RoundedRing {
+    RoundedRing {
+        outer: localize_clip(ring.outer, item_bounds),
+        inner: localize_clip(ring.inner, item_bounds),
     }
 }
 
@@ -4601,6 +4888,59 @@ mod drm_event_tests {
             crtc_id: 0,
         };
         assert_eq!(f.len(), 32);
+    }
+}
+
+#[cfg(test)]
+mod window_animation_tests {
+    use {
+        super::{DrmAction, WindowAnimationManager, WindowAnimationManagerAction},
+        crate::{
+            clients::ClientId,
+            protocol_generated::WlSurfaceId,
+            runner::{Dispatcher, Model},
+            state::{BackendOutputRef, DrmId, ObjectId},
+            test_support::{
+                resolved_wl_surface as root, state_for_tests, test_output_with_crtc_name,
+            },
+            wayland_objects::wl_surface::WlSurface,
+        },
+    };
+
+    #[test]
+    fn window_animation_manager_kick_schedules_outputs_and_rearms_timer() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(55u32), ClientId::from_raw(2), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(0usize), 50, 60, 320, 200);
+        }
+        state.config.effects.opacity.active_alpha = 255;
+        state.config.effects.opacity.inactive_alpha = 120;
+        state.config.effects.opacity.inactive_dim = 44;
+        state.config.animations.window.duration_msec = 120;
+        state.register_root_surface(object_id);
+        state.assign_root_surface_to_workspace(root(&state, object_id), workspace_id);
+        let surface = root(&state, object_id);
+        state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
+
+        let mut manager = WindowAnimationManager::new();
+        let mut dispatcher = Dispatcher::default();
+        manager
+            .process(&mut state, WindowAnimationManagerAction::Kick, &mut dispatcher)
+            .unwrap();
+
+        assert!(dispatcher.test_has_queued_action(|action: &WindowAnimationManagerAction| {
+            matches!(action, WindowAnimationManagerAction::Arm { delay_msec: Some(16) })
+        }));
+        assert!(dispatcher.test_has_queued_action_for(output_id, |action: &DrmAction| {
+            matches!(action, DrmAction::ScheduleFrame)
+        }));
     }
 }
 
@@ -4664,31 +5004,433 @@ mod cursor_policy_tests {
 }
 
 #[cfg(test)]
-mod ssd_render_tests {
+mod render_recipe_tests {
     use {
-        super::{ssd_frame_segments, SsdFrameSegment},
-        crate::{region::RectI, state::SsdFrameLayout},
+        super::{
+            build_output_frame_recipe, push_root_surface_effect_elements,
+            scene_item_to_texture_element, translate_recorded_frame_elements, RecordedFrameElement,
+            SceneItem, SceneItemContentKey, SceneItemKey, SceneItemMask, SceneItemState,
+        },
+        crate::{
+            region::{DamageRegion, RectI},
+            render::{
+                rounded_ring, BlurVisualStyle, BorderGradient, BorderVisualStyle, EffectElement,
+                FramePhase, RootSurfaceVisualState, ShadowVisualStyle, SurfaceEffectStyle,
+            },
+            state::RootSurfaceClip,
+            transform,
+        },
     };
 
     #[test]
-    fn ssd_frame_segments_cover_each_non_content_edge() {
-        let layout = SsdFrameLayout {
-            frame_rect: RectI::new(10, 20, 120, 90).unwrap(),
-            content_rect: RectI::new(14, 32, 112, 74).unwrap(),
-            titlebar_rect: RectI::new(14, 20, 112, 12),
-        };
-
-        let segments = ssd_frame_segments(layout).collect::<Vec<_>>();
-
-        assert_eq!(
-            segments,
-            vec![
-                (SsdFrameSegment::Top, RectI::new(10, 20, 120, 12).unwrap()),
-                (SsdFrameSegment::Left, RectI::new(10, 32, 4, 74).unwrap()),
-                (SsdFrameSegment::Right, RectI::new(126, 32, 4, 74).unwrap()),
-                (SsdFrameSegment::Bottom, RectI::new(10, 106, 120, 4).unwrap()),
-            ]
+    fn scene_items_to_texture_elements_map_root_clip_to_local_coordinates() {
+        let item_bounds = RectI::new(40, 50, 120, 80).unwrap();
+        let clip = RootSurfaceClip::new(
+            RectI::new(34, 38, 130, 96).unwrap(),
+            18,
+            crate::config::RoundingPower::DEFAULT,
         );
+        let items = vec![SceneItem {
+            state: SceneItemState {
+                key: SceneItemKey::Cursor,
+                surface_key: None,
+                content_key: SceneItemContentKey::NamedCursor(
+                    crate::cursor::CursorImageContentKey { width: 1, height: 2, fingerprint: 3 },
+                ),
+                bounds: item_bounds,
+                tex_transform: transform::Mat3::identity(),
+            },
+            mask: SceneItemMask::RoundedClip { clip },
+            texture: 0,
+            owned_texture: None,
+            damage: DamageRegion::from_rect(item_bounds),
+            sample_damage_padding: 0,
+            state_has_alpha: false,
+            alpha: u8::MAX,
+            opaque_region: DamageRegion::new(),
+            opaque: false,
+            sync: crate::sync::SurfaceSyncState::default(),
+            direct_scanout: None,
+            presentation_feedbacks: Vec::new(),
+        }];
+
+        let render_item = scene_item_to_texture_element(&items[0]);
+        assert_eq!(
+            render_item.mask,
+            crate::egl::RenderItemMask::RoundedClip {
+                clip: RootSurfaceClip::new(
+                    RectI::new(-6, -12, 130, 96).unwrap(),
+                    18,
+                    crate::config::RoundingPower::DEFAULT,
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn root_surface_effect_elements_use_runtime_alpha_blur_and_clip() {
+        let clip = RootSurfaceClip::new(
+            RectI::new(20, 30, 100, 80).unwrap(),
+            12,
+            crate::config::RoundingPower::DEFAULT,
+        );
+        let visual_state = RootSurfaceVisualState {
+            outer_rect: clip.outer_rect,
+            content_rect: RectI::new(26, 36, 88, 68).unwrap(),
+            clip: Some(clip),
+            border: Some(BorderVisualStyle {
+                gradient: BorderGradient {
+                    start_color: crate::config::RgbaColor::new(1, 2, 3, 4),
+                    end_color: crate::config::RgbaColor::new(5, 6, 7, 8),
+                    angle_degrees: 90,
+                },
+            }),
+            border_alpha: 120,
+            shadow: Some(ShadowVisualStyle {
+                radius: 18,
+                offset_x: 3,
+                offset_y: 5,
+                color: crate::config::RgbaColor::new(0, 0, 0, 100),
+                power: crate::config::ShadowPower::sanitize(2.5),
+            }),
+            shadow_alpha: 90,
+            effects: SurfaceEffectStyle {
+                blur: Some(BlurVisualStyle { radius: 22, passes: 4 }),
+                opacity_alpha: 200,
+                dim_alpha: 44,
+            },
+        };
+        let mut frame_elements = Vec::new();
+
+        push_root_surface_effect_elements(
+            &mut frame_elements,
+            Some(visual_state),
+            FramePhase::UnderWindow,
+        );
+        push_root_surface_effect_elements(
+            &mut frame_elements,
+            Some(visual_state),
+            FramePhase::OverWindow,
+        );
+        push_root_surface_effect_elements(
+            &mut frame_elements,
+            Some(visual_state),
+            FramePhase::Overlay,
+        );
+
+        assert!(frame_elements.iter().any(|effect| matches!(
+            effect,
+            RecordedFrameElement::Effect {
+                phase: FramePhase::UnderWindow,
+                element: EffectElement::WindowBlurBackdrop { style, alpha, .. }
+            } if style.radius == 22 && style.passes == 4 && *alpha == 200
+        )));
+        assert!(frame_elements.iter().any(|effect| matches!(
+            effect,
+            RecordedFrameElement::Effect {
+                phase: FramePhase::OverWindow,
+                element: EffectElement::WindowBorder { alpha, .. }
+            } if *alpha == 120
+        )));
+        assert!(frame_elements.iter().any(|effect| matches!(
+            effect,
+            RecordedFrameElement::Effect {
+                phase: FramePhase::UnderWindow,
+                element: EffectElement::WindowShadow { alpha, .. }
+            } if *alpha == 90
+        )));
+        assert!(frame_elements.iter().any(|effect| matches!(
+            effect,
+            RecordedFrameElement::Effect {
+                phase: FramePhase::Overlay,
+                element: EffectElement::DimOverlay { clip: overlay_clip, alpha }
+            } if *overlay_clip == clip && *alpha == 44
+        )));
+    }
+
+    #[test]
+    fn ordered_frame_recipe_preserves_window_local_phase_order() {
+        let bounds_a = RectI::new(10, 20, 80, 60).unwrap();
+        let bounds_b = RectI::new(40, 50, 90, 70).unwrap();
+        let clip = RootSurfaceClip::new(
+            RectI::new(8, 16, 96, 78).unwrap(),
+            10,
+            crate::config::RoundingPower::DEFAULT,
+        );
+        let items = vec![
+            SceneItem {
+                state: SceneItemState {
+                    key: SceneItemKey::Cursor,
+                    surface_key: None,
+                    content_key: SceneItemContentKey::NamedCursor(
+                        crate::cursor::CursorImageContentKey {
+                            width: 1,
+                            height: 1,
+                            fingerprint: 1,
+                        },
+                    ),
+                    bounds: bounds_a,
+                    tex_transform: transform::Mat3::identity(),
+                },
+                mask: SceneItemMask::None,
+                texture: 11,
+                owned_texture: None,
+                damage: DamageRegion::from_rect(bounds_a),
+                sample_damage_padding: 0,
+                state_has_alpha: true,
+                alpha: u8::MAX,
+                opaque_region: DamageRegion::new(),
+                opaque: false,
+                sync: crate::sync::SurfaceSyncState::default(),
+                direct_scanout: None,
+                presentation_feedbacks: Vec::new(),
+            },
+            SceneItem {
+                state: SceneItemState {
+                    key: SceneItemKey::Cursor,
+                    surface_key: None,
+                    content_key: SceneItemContentKey::NamedCursor(
+                        crate::cursor::CursorImageContentKey {
+                            width: 2,
+                            height: 2,
+                            fingerprint: 2,
+                        },
+                    ),
+                    bounds: bounds_b,
+                    tex_transform: transform::Mat3::identity(),
+                },
+                mask: SceneItemMask::None,
+                texture: 22,
+                owned_texture: None,
+                damage: DamageRegion::from_rect(bounds_b),
+                sample_damage_padding: 0,
+                state_has_alpha: true,
+                alpha: u8::MAX,
+                opaque_region: DamageRegion::new(),
+                opaque: false,
+                sync: crate::sync::SurfaceSyncState::default(),
+                direct_scanout: None,
+                presentation_feedbacks: Vec::new(),
+            },
+        ];
+        let frame_elements = vec![
+            RecordedFrameElement::Effect {
+                phase: FramePhase::UnderWindow,
+                element: EffectElement::WindowShadow {
+                    clip,
+                    style: ShadowVisualStyle {
+                        radius: 12,
+                        offset_x: 0,
+                        offset_y: 4,
+                        color: crate::config::RgbaColor::new(0, 0, 0, 100),
+                        power: crate::config::ShadowPower::DEFAULT,
+                    },
+                    alpha: 120,
+                },
+            },
+            RecordedFrameElement::Texture { phase: FramePhase::Content, item_index: 0 },
+            RecordedFrameElement::Effect {
+                phase: FramePhase::OverWindow,
+                element: EffectElement::WindowBorder {
+                    ring: rounded_ring(clip, RectI::new(14, 22, 72, 54).unwrap()),
+                    gradient: BorderGradient {
+                        start_color: crate::config::RgbaColor::new(1, 2, 3, 4),
+                        end_color: crate::config::RgbaColor::new(5, 6, 7, 8),
+                        angle_degrees: 0,
+                    },
+                    alpha: 200,
+                },
+            },
+            RecordedFrameElement::Texture { phase: FramePhase::Content, item_index: 1 },
+        ];
+
+        let recipe = build_output_frame_recipe(&items, &frame_elements);
+
+        assert!(matches!(
+            recipe.elements[0],
+            crate::render::FrameElement::Effect { phase: FramePhase::UnderWindow, .. }
+        ));
+        assert!(matches!(
+            recipe.elements[1],
+            crate::render::FrameElement::Texture { phase: FramePhase::Content, .. }
+        ));
+        assert!(matches!(
+            recipe.elements[2],
+            crate::render::FrameElement::Effect { phase: FramePhase::OverWindow, .. }
+        ));
+        assert!(matches!(
+            recipe.elements[3],
+            crate::render::FrameElement::Texture { phase: FramePhase::Content, .. }
+        ));
+    }
+
+    #[test]
+    fn translate_recorded_frame_elements_moves_effect_geometry_to_output_local_space() {
+        let clip = RootSurfaceClip::new(
+            RectI::new(308, 216, 96, 78).unwrap(),
+            10,
+            crate::config::RoundingPower::DEFAULT,
+        );
+        let mut frame_elements = vec![
+            RecordedFrameElement::Effect {
+                phase: FramePhase::UnderWindow,
+                element: EffectElement::WindowBlurBackdrop {
+                    ring: rounded_ring(clip, RectI::new(314, 222, 84, 66).unwrap()),
+                    style: BlurVisualStyle { radius: 12, passes: 2 },
+                    alpha: 180,
+                },
+            },
+            RecordedFrameElement::Effect {
+                phase: FramePhase::OverWindow,
+                element: EffectElement::WindowBorder {
+                    ring: rounded_ring(clip, RectI::new(314, 222, 84, 66).unwrap()),
+                    gradient: BorderGradient {
+                        start_color: crate::config::RgbaColor::new(1, 2, 3, 4),
+                        end_color: crate::config::RgbaColor::new(5, 6, 7, 8),
+                        angle_degrees: 45,
+                    },
+                    alpha: 220,
+                },
+            },
+            RecordedFrameElement::Effect {
+                phase: FramePhase::UnderWindow,
+                element: EffectElement::WindowShadow {
+                    clip,
+                    style: ShadowVisualStyle {
+                        radius: 16,
+                        offset_x: 2,
+                        offset_y: 6,
+                        color: crate::config::RgbaColor::new(0, 0, 0, 120),
+                        power: crate::config::ShadowPower::DEFAULT,
+                    },
+                    alpha: 120,
+                },
+            },
+            RecordedFrameElement::Effect {
+                phase: FramePhase::Overlay,
+                element: EffectElement::DimOverlay { clip, alpha: 40 },
+            },
+        ];
+
+        translate_recorded_frame_elements(&mut frame_elements, -300, -200);
+
+        assert!(matches!(
+            frame_elements[0],
+            RecordedFrameElement::Effect {
+                element: EffectElement::WindowBlurBackdrop { ring, .. },
+                ..
+            } if ring.outer.outer_rect == RectI::new(8, 16, 96, 78).unwrap()
+                && ring.inner.outer_rect == RectI::new(14, 22, 84, 66).unwrap()
+        ));
+        assert!(matches!(
+            frame_elements[1],
+            RecordedFrameElement::Effect {
+                element: EffectElement::WindowBorder { ring, .. },
+                ..
+            } if ring.outer.outer_rect == RectI::new(8, 16, 96, 78).unwrap()
+                && ring.inner.outer_rect == RectI::new(14, 22, 84, 66).unwrap()
+        ));
+        assert!(matches!(
+            frame_elements[2],
+            RecordedFrameElement::Effect {
+                element: EffectElement::WindowShadow { clip, .. },
+                ..
+            } if clip.outer_rect == RectI::new(8, 16, 96, 78).unwrap()
+        ));
+        assert!(matches!(
+            frame_elements[3],
+            RecordedFrameElement::Effect {
+                element: EffectElement::DimOverlay { clip, .. },
+                ..
+            } if clip.outer_rect == RectI::new(8, 16, 96, 78).unwrap()
+        ));
+    }
+
+    #[test]
+    fn output_frame_recipe_preserves_translated_effect_geometry() {
+        let item_bounds = RectI::new(14, 22, 84, 66).unwrap();
+        let items = vec![SceneItem {
+            state: SceneItemState {
+                key: SceneItemKey::Cursor,
+                surface_key: None,
+                content_key: SceneItemContentKey::NamedCursor(
+                    crate::cursor::CursorImageContentKey { width: 1, height: 1, fingerprint: 9 },
+                ),
+                bounds: item_bounds,
+                tex_transform: transform::Mat3::identity(),
+            },
+            mask: SceneItemMask::None,
+            texture: 7,
+            owned_texture: None,
+            damage: DamageRegion::from_rect(item_bounds),
+            sample_damage_padding: 0,
+            state_has_alpha: true,
+            alpha: u8::MAX,
+            opaque_region: DamageRegion::new(),
+            opaque: false,
+            sync: crate::sync::SurfaceSyncState::default(),
+            direct_scanout: None,
+            presentation_feedbacks: Vec::new(),
+        }];
+        let mut frame_elements = vec![
+            RecordedFrameElement::Effect {
+                phase: FramePhase::UnderWindow,
+                element: EffectElement::WindowShadow {
+                    clip: RootSurfaceClip::new(
+                        RectI::new(308, 216, 96, 78).unwrap(),
+                        10,
+                        crate::config::RoundingPower::DEFAULT,
+                    ),
+                    style: ShadowVisualStyle {
+                        radius: 14,
+                        offset_x: 0,
+                        offset_y: 4,
+                        color: crate::config::RgbaColor::new(0, 0, 0, 100),
+                        power: crate::config::ShadowPower::DEFAULT,
+                    },
+                    alpha: 120,
+                },
+            },
+            RecordedFrameElement::Texture { phase: FramePhase::Content, item_index: 0 },
+            RecordedFrameElement::Effect {
+                phase: FramePhase::OverWindow,
+                element: EffectElement::WindowBorder {
+                    ring: rounded_ring(
+                        RootSurfaceClip::new(
+                            RectI::new(308, 216, 96, 78).unwrap(),
+                            10,
+                            crate::config::RoundingPower::DEFAULT,
+                        ),
+                        RectI::new(314, 222, 84, 66).unwrap(),
+                    ),
+                    gradient: BorderGradient {
+                        start_color: crate::config::RgbaColor::new(1, 2, 3, 4),
+                        end_color: crate::config::RgbaColor::new(5, 6, 7, 8),
+                        angle_degrees: 0,
+                    },
+                    alpha: 200,
+                },
+            },
+        ];
+
+        translate_recorded_frame_elements(&mut frame_elements, -300, -200);
+        let recipe = build_output_frame_recipe(&items, &frame_elements);
+
+        assert!(matches!(
+            recipe.elements[0],
+            crate::render::FrameElement::Effect {
+                phase: FramePhase::UnderWindow,
+                element: EffectElement::WindowShadow { clip, .. }
+            } if clip.outer_rect == RectI::new(8, 16, 96, 78).unwrap()
+        ));
+        assert!(matches!(
+            recipe.elements[2],
+            crate::render::FrameElement::Effect {
+                phase: FramePhase::OverWindow,
+                element: EffectElement::WindowBorder { ring, .. }
+            } if ring.outer.outer_rect == RectI::new(8, 16, 96, 78).unwrap()
+                && ring.inner.outer_rect == RectI::new(14, 22, 84, 66).unwrap()
+        ));
     }
 }
 
@@ -4697,13 +5439,15 @@ mod presentation_timing_tests {
     use {
         super::{
             build_surface_cursor_plane_request, collect_submission_metadata,
-            cursor_plane_commit_dimensions, find_cursor_slot_index_for_key,
-            presentation_feedback_flags, presentation_refresh_interval_ns, rgba_to_drm_argb8888,
-            sanitize_present_timestamp, schedule_output, schedule_outputs_for_rects,
-            select_cursor_upload_slot, select_presentation_output_for_scene,
-            submitted_frame_feedbacks_for_discard, CursorPlaneContentKey, CursorSurfaceContentKey,
-            OutputSubmission, SceneItem, SceneItemContentKey, SceneItemKey, SceneItemState,
-            SubmissionPresentationFeedback, SubmittedFrame,
+            cursor_plane_commit_dimensions, effect_transition_requires_full_redraw,
+            find_cursor_slot_index_for_key, presentation_feedback_flags,
+            presentation_refresh_interval_ns, rgba_to_drm_argb8888, sanitize_present_timestamp,
+            scene_item_requires_compositor_compositing, schedule_output,
+            schedule_outputs_for_rects, select_cursor_upload_slot,
+            select_presentation_output_for_scene, submitted_frame_feedbacks_for_discard,
+            surface_allows_direct_scanout, CursorPlaneContentKey, CursorSurfaceContentKey,
+            OutputSubmission, SceneItem, SceneItemContentKey, SceneItemKey, SceneItemMask,
+            SceneItemState, SubmissionPresentationFeedback, SubmittedFrame,
         },
         crate::{
             clients::{ClientId, Resolved},
@@ -4767,11 +5511,13 @@ mod presentation_timing_tests {
                 bounds,
                 tex_transform: transform::Mat3::identity(),
             },
+            mask: SceneItemMask::None,
             texture: 0,
             owned_texture: None,
             damage: DamageRegion::from_rect(bounds),
             sample_damage_padding: 0,
             state_has_alpha: true,
+            alpha: u8::MAX,
             opaque_region: DamageRegion::new(),
             opaque: false,
             sync: crate::sync::SurfaceSyncState::default(),
@@ -4814,6 +5560,7 @@ mod presentation_timing_tests {
                 frame_callback_surfaces: Vec::new(),
                 presentation_feedbacks: vec![submission_feedback(4, 2)],
                 zero_copy: false,
+                had_effects: false,
             },
             damage_blob: None,
             cursor_slot: None,
@@ -5101,6 +5848,45 @@ mod presentation_timing_tests {
         let (tv_sec, tv_nsec) = sanitize_present_timestamp(1, 2_000_000);
         assert!(tv_sec > 0);
         assert!(tv_nsec < 1_000_000_000);
+    }
+
+    #[test]
+    fn direct_scanout_requires_surface_without_compositor_processing() {
+        let mut item = make_surface_scene_item(30, RectI::new(0, 0, 100, 100).unwrap(), Vec::new());
+        item.alpha = 200;
+        assert!(scene_item_requires_compositor_compositing(&item));
+
+        item.alpha = u8::MAX;
+        item.mask = SceneItemMask::RoundedClip {
+            clip: crate::state::RootSurfaceClip::new(
+                RectI::new(0, 0, 100, 100).unwrap(),
+                12,
+                crate::config::RoundingPower::DEFAULT,
+            ),
+        };
+        assert!(scene_item_requires_compositor_compositing(&item));
+    }
+
+    #[test]
+    fn candidate_scanout_requires_full_opacity_no_dim_and_no_clip() {
+        assert!(surface_allows_direct_scanout(None, u8::MAX));
+        assert!(!surface_allows_direct_scanout(None, 200));
+        assert!(!surface_allows_direct_scanout(
+            Some(crate::state::RootSurfaceClip::new(
+                RectI::new(0, 0, 100, 100).unwrap(),
+                8,
+                crate::config::RoundingPower::DEFAULT,
+            )),
+            u8::MAX,
+        ));
+    }
+
+    #[test]
+    fn effect_transitions_force_full_redraw_on_enter_and_exit() {
+        assert!(effect_transition_requires_full_redraw(true, false));
+        assert!(effect_transition_requires_full_redraw(false, true));
+        assert!(effect_transition_requires_full_redraw(true, true));
+        assert!(!effect_transition_requires_full_redraw(false, false));
     }
 }
 

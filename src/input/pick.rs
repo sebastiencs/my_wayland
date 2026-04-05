@@ -25,16 +25,16 @@ pub(crate) fn scene_pick_at(state: &State, pointer_pos: (f64, f64)) -> ScenePick
         if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
             continue;
         }
-        if let Some(root_hit) =
-            hit_test_subtree(state, root_surface, 0, 0, pointer_pos.0, pointer_pos.1)
-        {
-            surface_focus = Some(root_hit);
-        }
-        let Some(interactive_rect) = state.root_surface_interactive_rect(root_surface) else {
-            continue;
-        };
-        if rect_contains_point(interactive_rect, pointer_pos) {
-            window_target = build_window_target(state, root_surface, interactive_rect);
+        let root_hit = hit_test_subtree(state, root_surface, 0, 0, pointer_pos.0, pointer_pos.1);
+        let window_target_for_root = state
+            .root_surface_interactive_rect(root_surface)
+            .filter(|interactive_rect| rect_contains_point(*interactive_rect, pointer_pos))
+            .and_then(|interactive_rect| {
+                build_window_target(state, root_surface, interactive_rect)
+            });
+        if root_hit.is_some() || window_target_for_root.is_some() {
+            surface_focus = root_hit;
+            window_target = window_target_for_root;
         }
     }
 

@@ -41,7 +41,10 @@ pub(crate) fn begin_pointer_binding(
     apply_interaction_intent(state, dispatcher, intent, POINTER_INTERACTION_START_OPTIONS)
 }
 
-pub(crate) fn begin_ssd_pointer_action(state: &mut State, dispatcher: &mut Dispatcher) -> bool {
+pub(crate) fn begin_decoration_pointer_action(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+) -> bool {
     let pointer_pos = state.seat.pointer_position();
     let Some(intent) = window_interaction_intent_at(state, pointer_pos) else {
         return false;
@@ -56,7 +59,7 @@ pub(crate) fn window_hit_at(state: &State, pointer_pos: (f64, f64)) -> Option<Wi
     Some(WindowHit { target, semantics, binding_resize_edges })
 }
 
-pub(crate) fn ssd_hover_cursor_icon_names(state: &State) -> Option<&'static [&'static str]> {
+pub(crate) fn decoration_hover_cursor_icon_names(state: &State) -> Option<&'static [&'static str]> {
     let pointer_pos = state.seat.pointer_position();
     let hit = window_hit_at(state, pointer_pos)?;
     match hit.semantics {
@@ -179,7 +182,8 @@ fn classify_window_semantics(
     if !window_allows_compositor_interaction(target) {
         return HitSemantics::NoCompositorAction;
     }
-    let Some(layout) = state.root_surface_ssd_layout(target.root_surface) else {
+    let root_clip = state.root_surface_clip(target.root_surface);
+    let Some(layout) = state.root_surface_decoration_layout(target.root_surface) else {
         return HitSemantics::SurfaceContent;
     };
     if !rect_contains_point(layout.frame_rect, pointer_pos)
@@ -187,11 +191,14 @@ fn classify_window_semantics(
     {
         return HitSemantics::SurfaceContent;
     }
+    if root_clip.is_some_and(|clip| !clip.contains_point(pointer_pos.0, pointer_pos.1)) {
+        return HitSemantics::SurfaceContent;
+    }
 
     let x = pointer_pos.0.round() as i32;
     let y = pointer_pos.1.round() as i32;
     let border_resize_height = state
-        .root_surface_ssd_insets(target.root_surface)
+        .root_surface_decoration_insets(target.root_surface)
         .map(|insets| insets.left.max(insets.right).max(insets.bottom).max(6))
         .unwrap_or(6);
     let top_resize_height =

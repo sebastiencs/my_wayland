@@ -181,6 +181,7 @@ mod protocol;
 mod protocol_generated;
 mod queue;
 mod region;
+mod render;
 pub mod runner;
 mod seat;
 mod state;
@@ -318,11 +319,13 @@ fn main() {
     runner.add_model(libinput);
     runner.add_model(client_manager);
     runner.add_model(config_watcher);
+    runner.add_model(Box::new(drm::WindowAnimationManager::new()));
 
     let mut dispatcher = Dispatcher::default();
     dispatcher.start::<ClientManager>();
     dispatcher.start::<libinput::Libinput>();
     dispatcher.start::<config::ConfigWatcher>();
+    dispatcher.start::<drm::WindowAnimationManager>();
 
     // let timer = make_timer(Duration::from_secs(10));
 

@@ -1,6 +1,8 @@
 use crate::{
     clients::{ClientId, Resolved},
-    config::{DecorationInsets, OutputScaleSetting, RuntimeConfig, XdgDecorationModePolicy},
+    config::{
+        DecorationInsets, OutputScaleSetting, RoundingPower, RuntimeConfig, XdgDecorationModePolicy,
+    },
     drm::Drm,
     egl::EGL,
     globals::{Global, GlobalName, Globals},
@@ -11,6 +13,10 @@ use crate::{
         WlSurfaceId, XdgSurfaceId, XdgToplevelId, ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id,
     },
     region::RectI,
+    render::{
+        BlurVisualStyle, BorderGradient, BorderVisualStyle, RootSurfaceVisualState,
+        ShadowVisualStyle, SurfaceEffectStyle, WindowAnimationState, WindowAnimationValues,
+    },
     seat::SeatState,
     tiling::{self, TiledResizeState, WorkspaceLayout},
     wayland_objects::{
@@ -31,10 +37,72 @@ use {
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SsdFrameLayout {
+pub struct DecorationFrameLayout {
     pub frame_rect: RectI,
     pub content_rect: RectI,
     pub titlebar_rect: Option<RectI>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RootSurfaceClip {
+    pub outer_rect: RectI,
+    pub corner_radius: i32,
+    pub rounding_power: RoundingPower,
+}
+
+impl RootSurfaceClip {
+    pub fn new(outer_rect: RectI, corner_radius: i32, rounding_power: RoundingPower) -> Self {
+        Self {
+            outer_rect,
+            corner_radius: clamp_corner_radius_for_rect(outer_rect, corner_radius),
+            rounding_power,
+        }
+    }
+
+    pub fn contains_point(self, x: f64, y: f64) -> bool {
+        let rect = self.outer_rect;
+        let x1 = f64::from(rect.x);
+        let y1 = f64::from(rect.y);
+        let x2 = f64::from(rect.x2());
+        let y2 = f64::from(rect.y2());
+        if x < x1 || x >= x2 || y < y1 || y >= y2 {
+            return false;
+        }
+
+        let radius = f64::from(self.corner_radius.max(0));
+        if radius <= 0.0 {
+            return true;
+        }
+        let rounding_power = f64::from(self.rounding_power.get());
+
+        let left = x1 + radius;
+        let top = y1 + radius;
+        let right = x2 - radius;
+        let bottom = y2 - radius;
+
+        if x < left && y < top {
+            let dx = left - x;
+            let dy = top - y;
+            return rounded_corner_distance(dx, dy, rounding_power) <= radius;
+        }
+        if x >= right && y < top {
+            let dx = x - right;
+            let dy = top - y;
+            return rounded_corner_distance(dx, dy, rounding_power) <= radius;
+        }
+        if x < left && y >= bottom {
+            let dx = left - x;
+            let dy = y - bottom;
+            return rounded_corner_distance(dx, dy, rounding_power) <= radius;
+        }
+        if x >= right && y >= bottom {
+            let dx = x - right;
+            let dy = y - bottom;
+            return rounded_corner_distance(dx, dy, rounding_power) <= radius;
+        }
+
+        true
+    }
 }
 
 fn inflate_rect_with_insets(rect: RectI, insets: DecorationInsets) -> Option<RectI> {
@@ -44,6 +112,15 @@ fn inflate_rect_with_insets(rect: RectI, insets: DecorationInsets) -> Option<Rec
         rect.x2().saturating_add(insets.right.max(0)),
         rect.y2().saturating_add(insets.bottom.max(0)),
     )
+}
+
+fn clamp_corner_radius_for_rect(rect: RectI, corner_radius: i32) -> i32 {
+    let max_radius = rect.width.min(rect.height).max(0) / 2;
+    corner_radius.max(0).min(max_radius)
+}
+
+fn rounded_corner_distance(dx: f64, dy: f64, rounding_power: f64) -> f64 {
+    (dx.abs().powf(rounding_power) + dy.abs().powf(rounding_power)).powf(1.0 / rounding_power)
 }
 
 #[derive(Debug)]
@@ -767,6 +844,13 @@ pub struct ManagedRootSurfaceState {
     pub pending_initial_layout: bool,
     pub last_floating_rect: Option<RectI>,
     pub pending_floating_rect_restore: Option<RectI>,
+    pub visual_animation: WindowAnimationState,
+}
+
+#[derive(Debug, Default)]
+pub struct WindowAnimationAdvanceResult {
+    pub damaged_rects: Vec<RectI>,
+    pub has_active_animations: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1537,6 +1621,8 @@ impl State {
         };
         workspace.root_surfaces.insert(surface);
         workspace.layout.mark_dirty();
+        let initial_animation =
+            WindowAnimationState::from_values(self.window_animation_target_values(surface));
         self.managed_root_surfaces
             .entry(surface)
             .and_modify(|managed| managed.workspace_id = workspace_id)
@@ -1548,6 +1634,7 @@ impl State {
                 pending_initial_layout: true,
                 last_floating_rect: None,
                 pending_floating_rect_restore: None,
+                visual_animation: initial_animation,
             });
         true
     }
@@ -1650,6 +1737,17 @@ impl State {
         tiling::relayout_dirty_workspaces(self);
     }
 
+    pub fn mark_all_workspaces_dirty(&mut self) {
+        let workspace_ids = self
+            .workspaces
+            .iter()
+            .map(|(workspace_id, _)| workspace_id)
+            .collect::<Vec<_>>();
+        for workspace_id in workspace_ids {
+            tiling::mark_workspace_dirty(self, workspace_id);
+        }
+    }
+
     pub fn tiling_scene_root_surfaces(&self) -> Vec<Resolved<WlSurfaceId>> {
         tiling::managed_scene_order(self)
     }
@@ -1725,7 +1823,7 @@ impl State {
     }
 
     pub fn root_surface_interactive_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
-        if let Some(layout) = self.root_surface_ssd_layout(surface) {
+        if let Some(layout) = self.root_surface_decoration_layout(surface) {
             return Some(layout.frame_rect);
         }
         if let Some(frame_rect) = self.tiled_root_surface_frame_rect(surface) {
@@ -1758,28 +1856,43 @@ impl State {
         .or_else(|| wl_surface.global_logical_bounds())
     }
 
-    pub fn root_surface_ssd_insets(
+    pub fn root_surface_decoration_insets(
         &self,
         surface: Resolved<WlSurfaceId>,
     ) -> Option<DecorationInsets> {
-        let toplevel = self.root_surface_xdg_toplevel(surface.object_id())?;
-        if toplevel.decoration_mode()
-            != crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode::ServerSide
-            || self.root_surface_is_fullscreen(surface)
-        {
+        if !self.compositor_decorations_enabled(surface) {
             return None;
         }
 
-        let insets = self.config.general.decoration_insets;
+        let insets = self.configured_decoration_insets();
         (insets.top > 0 || insets.right > 0 || insets.bottom > 0 || insets.left > 0)
             .then_some(insets)
     }
 
-    pub fn root_surface_ssd_layout(
+    pub fn compositor_decorations_enabled(&self, surface: Resolved<WlSurfaceId>) -> bool {
+        self.root_surface_xdg_toplevel(surface.object_id()).is_some_and(|toplevel| {
+            toplevel.decoration_mode()
+                == crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode::ServerSide
+                && !self.root_surface_is_fullscreen(surface)
+        })
+    }
+
+    pub fn configured_decoration_insets(&self) -> DecorationInsets {
+        let explicit = self.config.general.decoration_insets;
+        let border_size = self.config.decorations.border.thickness.max(0);
+        DecorationInsets {
+            top: if explicit.top > 0 { explicit.top } else { border_size },
+            right: if explicit.right > 0 { explicit.right } else { border_size },
+            bottom: if explicit.bottom > 0 { explicit.bottom } else { border_size },
+            left: if explicit.left > 0 { explicit.left } else { border_size },
+        }
+    }
+
+    pub fn root_surface_decoration_layout(
         &self,
         surface: Resolved<WlSurfaceId>,
-    ) -> Option<SsdFrameLayout> {
-        let insets = self.root_surface_ssd_insets(surface)?;
+    ) -> Option<DecorationFrameLayout> {
+        let insets = self.root_surface_decoration_insets(surface)?;
         let content_rect = self.root_surface_content_rect(surface)?;
         let frame_rect = self
             .tiled_root_surface_frame_rect(surface)
@@ -1789,11 +1902,160 @@ impl State {
             .then(|| RectI::new(content_rect.x, frame_rect.y, content_rect.width, titlebar_height))
             .flatten();
 
-        Some(SsdFrameLayout { frame_rect, content_rect, titlebar_rect })
+        Some(DecorationFrameLayout { frame_rect, content_rect, titlebar_rect })
+    }
+
+    pub fn root_surface_clip(&self, surface: Resolved<WlSurfaceId>) -> Option<RootSurfaceClip> {
+        let outer_rect = self.root_surface_outer_rect(surface)?;
+        let rounding = self.config.decorations.border.rounding.max(0);
+        (rounding > 0).then(|| {
+            RootSurfaceClip::new(
+                outer_rect,
+                rounding,
+                self.config.decorations.border.rounding_power,
+            )
+        })
+    }
+
+    pub fn window_animation_target_values(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> WindowAnimationValues {
+        let focused = self.focused_root_surface() == Some(surface);
+        let opacity_config = self.config.effects.opacity;
+        WindowAnimationValues {
+            content_alpha: if focused {
+                opacity_config.active_alpha
+            } else {
+                opacity_config.inactive_alpha
+            },
+            dim_alpha: if focused { 0 } else { opacity_config.inactive_dim },
+            shadow_alpha: if focused {
+                opacity_config.active_alpha
+            } else {
+                opacity_config.inactive_alpha
+            },
+            border_alpha: if focused {
+                opacity_config.active_alpha
+            } else {
+                opacity_config.inactive_alpha
+            },
+        }
+    }
+
+    pub fn root_surface_animation_damage_rect(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<RectI> {
+        self.root_surface_visual_state(surface)
+            .map(|visual| visual.influence_bounds())
+            .or_else(|| self.root_surface_outer_rect(surface))
+            .or_else(|| self.root_surface_content_rect(surface))
+    }
+
+    pub fn advance_window_visual_animations(
+        &mut self,
+        frame_time_msec: u32,
+    ) -> WindowAnimationAdvanceResult {
+        let animation_duration = self.config.animations.window.duration_msec;
+        let surfaces = self
+            .managed_root_surfaces
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut damaged_rects = Vec::new();
+        let mut has_active_animations = false;
+        for surface in surfaces {
+            let target_values = self.window_animation_target_values(surface);
+            let damage_rect = self.root_surface_animation_damage_rect(surface);
+            let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
+                continue;
+            };
+            let previous_values = managed.visual_animation.current_values();
+            let next_values = managed.visual_animation.advance_to(
+                target_values,
+                animation_duration,
+                frame_time_msec,
+            );
+            if previous_values != next_values {
+                if let Some(rect) = damage_rect {
+                    damaged_rects.push(rect);
+                }
+            }
+            has_active_animations |= managed.visual_animation.is_animating();
+        }
+        WindowAnimationAdvanceResult { damaged_rects, has_active_animations }
+    }
+
+    pub fn root_surface_visual_state(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<RootSurfaceVisualState> {
+        let outer_rect = self.root_surface_outer_rect(surface)?;
+        let content_rect = self.root_surface_content_rect(surface)?;
+        let compositor_decorations_enabled = self.compositor_decorations_enabled(surface);
+        let has_visible_decoration_ring =
+            compositor_decorations_enabled && outer_rect != content_rect;
+        let clip = compositor_decorations_enabled
+            .then(|| self.root_surface_clip(surface))
+            .flatten();
+        let focused = self.focused_root_surface() == Some(surface);
+        let border_config = self.config.decorations.border;
+        let shadow_config = self.config.decorations.shadow;
+        let animated_values = self
+            .managed_root_surfaces
+            .get(&surface)
+            .map(|managed| managed.visual_animation.current_values())
+            .unwrap_or_else(|| self.window_animation_target_values(surface));
+        let gradient = if focused {
+            BorderGradient {
+                start_color: border_config.active_start_color,
+                end_color: border_config.active_end_color,
+                angle_degrees: border_config.gradient_angle_degrees,
+            }
+        } else {
+            BorderGradient {
+                start_color: border_config.inactive_start_color,
+                end_color: border_config.inactive_end_color,
+                angle_degrees: border_config.gradient_angle_degrees,
+            }
+        };
+        let border = (compositor_decorations_enabled
+            && border_config.thickness > 0
+            && has_visible_decoration_ring)
+            .then_some(BorderVisualStyle { gradient });
+        let shadow = (compositor_decorations_enabled && shadow_config.radius > 0).then_some(
+            ShadowVisualStyle {
+                radius: shadow_config.radius,
+                offset_x: shadow_config.offset_x,
+                offset_y: shadow_config.offset_y,
+                color: shadow_config.color,
+                power: shadow_config.power,
+            },
+        );
+        Some(RootSurfaceVisualState {
+            outer_rect,
+            content_rect,
+            clip,
+            border,
+            border_alpha: animated_values.border_alpha,
+            shadow,
+            shadow_alpha: animated_values.shadow_alpha,
+            effects: SurfaceEffectStyle {
+                blur: (self.config.effects.blur.enabled && has_visible_decoration_ring).then_some(
+                    BlurVisualStyle {
+                        radius: self.config.effects.blur.radius,
+                        passes: self.config.effects.blur.passes,
+                    },
+                ),
+                opacity_alpha: animated_values.content_alpha,
+                dim_alpha: animated_values.dim_alpha,
+            },
+        })
     }
 
     pub fn root_surface_outer_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
-        self.root_surface_ssd_layout(surface)
+        self.root_surface_decoration_layout(surface)
             .map(|layout| layout.frame_rect)
             .or_else(|| self.tiled_root_surface_frame_rect(surface))
             .or_else(|| self.root_surface_content_rect(surface))
@@ -1944,6 +2206,8 @@ impl State {
                     self.sync_root_surface_requested_fullscreen(candidate_surface, false);
                 }
             }
+            let initial_animation =
+                WindowAnimationState::from_values(self.window_animation_target_values(surface));
             self.managed_root_surfaces
                 .entry(surface)
                 .and_modify(|managed| {
@@ -1963,6 +2227,7 @@ impl State {
                     pending_initial_layout: true,
                     last_floating_rect: None,
                     pending_floating_rect_restore: None,
+                    visual_animation: initial_animation,
                 });
         } else {
             {
@@ -2702,6 +2967,95 @@ mod tests {
             },
         },
     };
+
+    #[test]
+    fn root_surface_clip_clamps_radius_and_excludes_outer_corner_points() {
+        let clip =
+            RootSurfaceClip::new(RectI::new(10, 20, 40, 30).unwrap(), 99, RoundingPower::DEFAULT);
+
+        assert_eq!(clip.corner_radius, 15);
+        assert_eq!(clip.rounding_power, RoundingPower::DEFAULT);
+        assert!(clip.contains_point(30.0, 35.0));
+        assert!(!clip.contains_point(10.0, 20.0));
+        assert!(!clip.contains_point(49.0, 20.0));
+    }
+
+    #[test]
+    fn root_surface_clip_rounding_power_changes_corner_shape() {
+        let circular = RootSurfaceClip::new(
+            RectI::new(10, 20, 40, 40).unwrap(),
+            12,
+            RoundingPower::sanitize(2.0),
+        );
+        let squircle = RootSurfaceClip::new(
+            RectI::new(10, 20, 40, 40).unwrap(),
+            12,
+            RoundingPower::sanitize(4.0),
+        );
+
+        assert!(!circular.contains_point(13.0, 23.0));
+        assert!(squircle.contains_point(13.0, 23.0));
+    }
+
+    #[test]
+    fn root_surface_visual_state_is_read_only_after_animation_tick() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(90u32), ClientId::from_raw(5), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(0usize), 30, 40, 160, 120);
+        }
+        state.config.effects.opacity.active_alpha = 255;
+        state.config.effects.opacity.inactive_alpha = 120;
+        state.config.effects.opacity.inactive_dim = 44;
+        state.config.animations.window.duration_msec = 120;
+        state.register_root_surface(object_id);
+        state.assign_root_surface_to_workspace(root(&state, object_id), workspace_id);
+        let surface = root(&state, object_id);
+        state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
+
+        let advance = state.advance_window_visual_animations(10);
+        assert!(advance.has_active_animations);
+
+        let first = state.root_surface_visual_state(surface).unwrap();
+        let second = state.root_surface_visual_state(surface).unwrap();
+
+        assert_eq!(first.effects.opacity_alpha, second.effects.opacity_alpha);
+        assert_eq!(first.effects.dim_alpha, second.effects.dim_alpha);
+        assert_eq!(first.border_alpha, second.border_alpha);
+        assert_eq!(first.shadow_alpha, second.shadow_alpha);
+    }
+
+    #[test]
+    fn root_surface_visual_state_skips_blur_without_visible_decoration_ring() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(91u32), ClientId::from_raw(6), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(0usize), 30, 40, 160, 120);
+        }
+        state.config.decorations.border.thickness = 0;
+        state.config.effects.blur.enabled = true;
+        state.register_root_surface(object_id);
+        state.assign_root_surface_to_workspace(root(&state, object_id), workspace_id);
+
+        let visual = state
+            .root_surface_visual_state(root(&state, object_id))
+            .unwrap();
+
+        assert_eq!(visual.outer_rect, visual.content_rect);
+        assert!(visual.effects.blur.is_none());
+    }
 
     #[derive(Debug)]
     struct TestObject {

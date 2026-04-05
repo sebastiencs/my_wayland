@@ -1317,7 +1317,7 @@ pub(crate) fn effective_decoration_insets(
         .objects
         .try_ref_object::<WlSurface>(surface_object_id.object_id())
     else {
-        return state.config.general.decoration_insets;
+        return state.configured_decoration_insets();
     };
     effective_decoration_insets_for_surface(state, surface_object_id, surface)
 }
@@ -1327,7 +1327,7 @@ pub(crate) fn effective_decoration_insets_for_surface(
     surface_object_id: Resolved<WlSurfaceId>,
     surface: &WlSurface,
 ) -> DecorationInsets {
-    let fallback = state.config.general.decoration_insets;
+    let fallback = state.configured_decoration_insets();
     let Some((_, toplevel)) = xdg_toplevel_for_surface_ids(state, surface.xdg_surface()) else {
         return fallback;
     };

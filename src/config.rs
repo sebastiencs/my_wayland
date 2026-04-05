@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    env, fmt, fs,
     io::ErrorKind,
     os::{fd::AsRawFd, unix::ffi::OsStrExt},
     path::{Path, PathBuf},
@@ -15,7 +15,7 @@ use {
 
 use crate::{
     clients::ClientManagerAction,
-    drm::{schedule_outputs, schedule_outputs_for_points},
+    drm::{kick_window_animation_manager, schedule_outputs, schedule_outputs_for_points},
     io_uring::{
         model::IoUringAction,
         ring::{PollCompleted, RingId},
@@ -46,6 +46,8 @@ pub struct RuntimeConfig {
     path: PathBuf,
     pub general: GeneralConfig,
     pub decorations: DecorationsConfig,
+    pub effects: EffectsConfig,
+    pub animations: AnimationsConfig,
     pub bindings: Vec<Binding>,
     pub mouse_bindings: Vec<MouseBinding>,
     output_scales: BTreeMap<String, OutputScaleSetting>,
@@ -71,6 +73,8 @@ pub enum XdgDecorationModePolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecorationsConfig {
     pub xdg: XdgDecorationConfig,
+    pub border: BorderDecorationConfig,
+    pub shadow: ShadowDecorationConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +86,57 @@ pub struct XdgDecorationConfig {
     pub unset_mode: XdgDecorationModePolicy,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BorderDecorationConfig {
+    pub thickness: i32,
+    pub active_start_color: RgbaColor,
+    pub active_end_color: RgbaColor,
+    pub inactive_start_color: RgbaColor,
+    pub inactive_end_color: RgbaColor,
+    pub gradient_angle_degrees: i32,
+    pub rounding: i32,
+    pub rounding_power: RoundingPower,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShadowDecorationConfig {
+    pub radius: i32,
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub color: RgbaColor,
+    pub power: ShadowPower,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectsConfig {
+    pub blur: BlurConfig,
+    pub opacity: OpacityConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlurConfig {
+    pub enabled: bool,
+    pub radius: i32,
+    pub passes: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpacityConfig {
+    pub active_alpha: u8,
+    pub inactive_alpha: u8,
+    pub inactive_dim: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnimationsConfig {
+    pub window: WindowAnimationConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowAnimationConfig {
+    pub duration_msec: u32,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DecorationInsets {
@@ -89,6 +144,96 @@ pub struct DecorationInsets {
     pub right: i32,
     pub bottom: i32,
     pub left: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RgbaColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialOrd)]
+pub struct RoundingPower(f32);
+
+#[derive(Clone, Copy, Debug, PartialOrd)]
+pub struct ShadowPower(f32);
+
+impl RoundingPower {
+    pub const DEFAULT: Self = Self(2.0);
+
+    pub fn sanitize(raw: f32) -> Self {
+        if raw.is_finite() && raw > 0.0 {
+            Self(raw)
+        } else {
+            Self::DEFAULT
+        }
+    }
+
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for RoundingPower {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PartialEq for RoundingPower {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for RoundingPower {}
+
+impl ShadowPower {
+    pub const DEFAULT: Self = Self(2.0);
+
+    pub fn sanitize(raw: f32) -> Self {
+        if raw.is_finite() && raw > 0.0 {
+            Self(raw)
+        } else {
+            Self::DEFAULT
+        }
+    }
+
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for ShadowPower {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PartialEq for ShadowPower {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for ShadowPower {}
+
+impl RgbaColor {
+    pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+
+    pub const fn to_rgba_bytes(self) -> [u8; 4] {
+        [self.r, self.g, self.b, self.a]
+    }
+
+    pub fn to_premultiplied_rgba_bytes(self) -> [u8; 4] {
+        let alpha = self.a as u16;
+        let premultiply = |channel: u8| -> u8 { (((channel as u16) * alpha + 127) / 255) as u8 };
+        [premultiply(self.r), premultiply(self.g), premultiply(self.b), self.a]
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -155,6 +300,8 @@ pub enum ConfigWatcherAction {
 struct ConfigFile {
     general: GeneralConfigFile,
     decorations: DecorationsConfigFile,
+    effects: EffectsConfigFile,
+    animations: AnimationsConfigFile,
     bindings: BTreeMap<String, CompositorAction>,
     mouse_bindings: BTreeMap<String, MouseBindingAction>,
     output: OutputConfigFile,
@@ -164,6 +311,8 @@ struct ConfigFile {
 #[serde(default, deny_unknown_fields)]
 struct DecorationsConfigFile {
     xdg: XdgDecorationConfigFile,
+    border: BorderDecorationConfigFile,
+    shadow: ShadowDecorationConfigFile,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,6 +323,64 @@ struct XdgDecorationConfigFile {
     floating: XdgDecorationModePolicy,
     fullscreen: XdgDecorationModePolicy,
     unset_mode: XdgDecorationModePolicy,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BorderDecorationConfigFile {
+    thickness: i32,
+    active_start_color: String,
+    active_end_color: String,
+    inactive_start_color: String,
+    inactive_end_color: String,
+    gradient_angle_degrees: i32,
+    rounding: i32,
+    rounding_power: f32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ShadowDecorationConfigFile {
+    radius: i32,
+    offset_x: i32,
+    offset_y: i32,
+    color: String,
+    power: f32,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct EffectsConfigFile {
+    blur: BlurConfigFile,
+    opacity: OpacityConfigFile,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BlurConfigFile {
+    enabled: bool,
+    radius: i32,
+    passes: u8,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct OpacityConfigFile {
+    active_alpha: u8,
+    inactive_alpha: u8,
+    inactive_dim: u8,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AnimationsConfigFile {
+    window: WindowAnimationConfigFile,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct WindowAnimationConfigFile {
+    duration_msec: u32,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -289,6 +496,44 @@ impl RuntimeConfig {
             output_scales.insert(name, setting);
         }
 
+        let border = BorderDecorationConfig {
+            thickness: sanitize_non_negative_i32(parsed.decorations.border.thickness),
+            active_start_color: parse_rgba_color(&parsed.decorations.border.active_start_color)
+                .with_context(|| "invalid decorations.border.active_start_color")?,
+            active_end_color: parse_rgba_color(&parsed.decorations.border.active_end_color)
+                .with_context(|| "invalid decorations.border.active_end_color")?,
+            inactive_start_color: parse_rgba_color(&parsed.decorations.border.inactive_start_color)
+                .with_context(|| "invalid decorations.border.inactive_start_color")?,
+            inactive_end_color: parse_rgba_color(&parsed.decorations.border.inactive_end_color)
+                .with_context(|| "invalid decorations.border.inactive_end_color")?,
+            gradient_angle_degrees: parsed.decorations.border.gradient_angle_degrees,
+            rounding: sanitize_non_negative_i32(parsed.decorations.border.rounding),
+            rounding_power: RoundingPower::sanitize(parsed.decorations.border.rounding_power),
+        };
+        let shadow = ShadowDecorationConfig {
+            radius: sanitize_non_negative_i32(parsed.decorations.shadow.radius),
+            offset_x: parsed.decorations.shadow.offset_x,
+            offset_y: parsed.decorations.shadow.offset_y,
+            color: parse_rgba_color(&parsed.decorations.shadow.color)
+                .with_context(|| "invalid decorations.shadow.color")?,
+            power: ShadowPower::sanitize(parsed.decorations.shadow.power),
+        };
+        let effects = EffectsConfig {
+            blur: BlurConfig {
+                enabled: parsed.effects.blur.enabled,
+                radius: sanitize_non_negative_i32(parsed.effects.blur.radius),
+                passes: parsed.effects.blur.passes.max(1),
+            },
+            opacity: OpacityConfig {
+                active_alpha: parsed.effects.opacity.active_alpha,
+                inactive_alpha: parsed.effects.opacity.inactive_alpha,
+                inactive_dim: parsed.effects.opacity.inactive_dim,
+            },
+        };
+        let animations = AnimationsConfig {
+            window: WindowAnimationConfig { duration_msec: parsed.animations.window.duration_msec },
+        };
+
         Ok(Self {
             path,
             general: GeneralConfig {
@@ -306,7 +551,11 @@ impl RuntimeConfig {
                     fullscreen: parsed.decorations.xdg.fullscreen,
                     unset_mode: parsed.decorations.xdg.unset_mode,
                 },
+                border,
+                shadow,
             },
+            effects,
+            animations,
             bindings,
             mouse_bindings,
             output_scales,
@@ -324,6 +573,8 @@ impl RuntimeConfig {
                 decoration_insets: DecorationInsets::default(),
             },
             decorations: DecorationsConfig::default(),
+            effects: EffectsConfig::default(),
+            animations: AnimationsConfig::default(),
             bindings: Vec::new(),
             mouse_bindings: Vec::new(),
             output_scales: BTreeMap::new(),
@@ -395,7 +646,11 @@ impl GeneralConfig {
 
 impl Default for DecorationsConfig {
     fn default() -> Self {
-        Self { xdg: XdgDecorationConfig::default() }
+        Self {
+            xdg: XdgDecorationConfig::default(),
+            border: BorderDecorationConfig::default(),
+            shadow: ShadowDecorationConfig::default(),
+        }
     }
 }
 
@@ -408,6 +663,66 @@ impl Default for XdgDecorationConfig {
             fullscreen: XdgDecorationModePolicy::Server,
             unset_mode: XdgDecorationModePolicy::Server,
         }
+    }
+}
+
+impl Default for BorderDecorationConfig {
+    fn default() -> Self {
+        Self {
+            thickness: 0,
+            active_start_color: RgbaColor::new(0x50, 0x78, 0xc8, 0xff),
+            active_end_color: RgbaColor::new(0x6b, 0x9d, 0xf6, 0xff),
+            inactive_start_color: RgbaColor::new(0x33, 0x38, 0x44, 0xff),
+            inactive_end_color: RgbaColor::new(0x43, 0x48, 0x54, 0xff),
+            gradient_angle_degrees: 0,
+            rounding: 0,
+            rounding_power: RoundingPower::DEFAULT,
+        }
+    }
+}
+
+impl Default for ShadowDecorationConfig {
+    fn default() -> Self {
+        Self {
+            radius: 0,
+            offset_x: 0,
+            offset_y: 8,
+            color: RgbaColor::new(0, 0, 0, 0x90),
+            power: ShadowPower::DEFAULT,
+        }
+    }
+}
+
+impl Default for EffectsConfig {
+    fn default() -> Self {
+        Self {
+            blur: BlurConfig::default(),
+            opacity: OpacityConfig::default(),
+        }
+    }
+}
+
+impl Default for BlurConfig {
+    fn default() -> Self {
+        Self { enabled: false, radius: 12, passes: 2 }
+    }
+}
+
+impl Default for OpacityConfig {
+    fn default() -> Self {
+        Self { active_alpha: u8::MAX, inactive_alpha: 230, inactive_dim: 24 }
+    }
+}
+
+impl Default for AnimationsConfig {
+    fn default() -> Self {
+        Self { window: WindowAnimationConfig::default() }
+    }
+}
+
+impl Default for WindowAnimationConfig {
+    fn default() -> Self {
+        Self { duration_msec: 160 }
     }
 }
 
@@ -450,6 +765,65 @@ impl Default for XdgDecorationConfigFile {
             floating: defaults.floating,
             fullscreen: defaults.fullscreen,
             unset_mode: defaults.unset_mode,
+        }
+    }
+}
+
+impl Default for BorderDecorationConfigFile {
+    fn default() -> Self {
+        let defaults = BorderDecorationConfig::default();
+        Self {
+            thickness: defaults.thickness,
+            active_start_color: "#5078c8ff".to_string(),
+            active_end_color: "#6b9df6ff".to_string(),
+            inactive_start_color: "#333844ff".to_string(),
+            inactive_end_color: "#434854ff".to_string(),
+            gradient_angle_degrees: defaults.gradient_angle_degrees,
+            rounding: defaults.rounding,
+            rounding_power: defaults.rounding_power.get(),
+        }
+    }
+}
+
+impl Default for ShadowDecorationConfigFile {
+    fn default() -> Self {
+        let defaults = ShadowDecorationConfig::default();
+        Self {
+            radius: defaults.radius,
+            offset_x: defaults.offset_x,
+            offset_y: defaults.offset_y,
+            color: "#00000090".to_string(),
+            power: defaults.power.get(),
+        }
+    }
+}
+
+impl Default for BlurConfigFile {
+    fn default() -> Self {
+        let defaults = BlurConfig::default();
+        Self {
+            enabled: defaults.enabled,
+            radius: defaults.radius,
+            passes: defaults.passes,
+        }
+    }
+}
+
+impl Default for OpacityConfigFile {
+    fn default() -> Self {
+        let defaults = OpacityConfig::default();
+        Self {
+            active_alpha: defaults.active_alpha,
+            inactive_alpha: defaults.inactive_alpha,
+            inactive_dim: defaults.inactive_dim,
+        }
+    }
+}
+
+impl Default for WindowAnimationConfigFile {
+    fn default() -> Self {
+        Self {
+            duration_msec: WindowAnimationConfig::default().duration_msec,
         }
     }
 }
@@ -619,6 +993,12 @@ pub fn reload_from_disk(
     state.config = next;
     apply_general_settings(state, dispatcher);
     apply_output_settings(state, dispatcher);
+    if changed {
+        state.mark_all_workspaces_dirty();
+        dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
+        schedule_outputs(state, state.outputs.iter().map(|(output_id, _)| output_id), dispatcher);
+        kick_window_animation_manager(dispatcher);
+    }
     let trigger = match trigger {
         ReloadTrigger::ManualBinding => "manual binding",
         ReloadTrigger::AutomaticWatch => "file watch",
@@ -813,6 +1193,62 @@ fn sanitize_decoration_insets(insets: DecorationInsets) -> DecorationInsets {
     }
 }
 
+fn parse_rgba_color(raw: &str) -> anyhow::Result<RgbaColor> {
+    fn parse_hex_byte(component: &str, raw: &str) -> anyhow::Result<u8> {
+        u8::from_str_radix(component, 16)
+            .with_context(|| format!("`{raw}` contains an invalid hex component"))
+    }
+
+    fn parse_hex_color(hex: &str, raw: &str) -> anyhow::Result<RgbaColor> {
+        match hex.len() {
+            6 => Ok(RgbaColor::new(
+                parse_hex_byte(&hex[0..2], raw)?,
+                parse_hex_byte(&hex[2..4], raw)?,
+                parse_hex_byte(&hex[4..6], raw)?,
+                0xff,
+            )),
+            8 => Ok(RgbaColor::new(
+                parse_hex_byte(&hex[0..2], raw)?,
+                parse_hex_byte(&hex[2..4], raw)?,
+                parse_hex_byte(&hex[4..6], raw)?,
+                parse_hex_byte(&hex[6..8], raw)?,
+            )),
+            _ => bail!(
+                "expected 6 or 8 hex digits in `{raw}` (supported forms: #RRGGBB, #RRGGBBAA, rgb(...), rgba(...), 0xRRGGBB, 0xRRGGBBAA)"
+            ),
+        }
+    }
+
+    let raw = raw.trim();
+    let hex = raw
+        .strip_prefix('#')
+        .or_else(|| raw.strip_prefix("0x"))
+        .or_else(|| raw.strip_prefix("0X"))
+        .or_else(|| {
+            raw.strip_prefix("rgba(")
+                .and_then(|value| value.strip_suffix(')'))
+        })
+        .or_else(|| {
+            raw.strip_prefix("rgb(")
+                .and_then(|value| value.strip_suffix(')'))
+        })
+        .unwrap_or(raw)
+        .trim();
+    if hex.is_empty() {
+        bail!("color must not be empty");
+    }
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("`{raw}` is not a valid hex color");
+    }
+    parse_hex_color(hex, raw)
+}
+
+impl fmt::Display for RgbaColor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "#{:02x}{:02x}{:02x}{:02x}", self.r, self.g, self.b, self.a)
+    }
+}
+
 fn event_targets_config(
     event: &inotify::Event<&std::ffi::OsStr>,
     watching_config_dir: bool,
@@ -894,7 +1330,7 @@ mod tests {
     fn parses_toml_binding_with_aliases() {
         let xkb = Xkb::new();
         let parsed: ConfigFile = toml::from_str(
-            r#"
+            r##"
             [general]
             cursor_theme = "Adwaita"
             cursor_size = 32
@@ -914,10 +1350,27 @@ mod tests {
             fullscreen = "client"
             unset_mode = "client"
 
+            [decorations.border]
+            thickness = 4
+            active_start_color = "#11223344"
+            active_end_color = "#22334455"
+            inactive_start_color = "rgba(55667788)"
+            inactive_end_color = "#66778899"
+            gradient_angle_degrees = 15
+            rounding = 7
+            rounding_power = 3.5
+
+            [decorations.shadow]
+            radius = 18
+            offset_x = 2
+            offset_y = 9
+            color = "#01020380"
+            power = 2.5
+
             [bindings]
             "Super+Enter" = { action = "spawn", command = "alacritty" }
             "Ctrl+Shift+Esc" = { action = "reload-config" }
-            "#,
+            "##,
         )
         .unwrap();
 
@@ -935,6 +1388,29 @@ mod tests {
         assert_eq!(config.decorations.xdg.floating, XdgDecorationModePolicy::HonorClient);
         assert_eq!(config.decorations.xdg.fullscreen, XdgDecorationModePolicy::Client);
         assert_eq!(config.decorations.xdg.unset_mode, XdgDecorationModePolicy::Client);
+        assert_eq!(
+            config.decorations.border,
+            BorderDecorationConfig {
+                thickness: 4,
+                active_start_color: RgbaColor::new(0x11, 0x22, 0x33, 0x44),
+                active_end_color: RgbaColor::new(0x22, 0x33, 0x44, 0x55),
+                inactive_start_color: RgbaColor::new(0x55, 0x66, 0x77, 0x88),
+                inactive_end_color: RgbaColor::new(0x66, 0x77, 0x88, 0x99),
+                gradient_angle_degrees: 15,
+                rounding: 7,
+                rounding_power: RoundingPower::sanitize(3.5),
+            }
+        );
+        assert_eq!(
+            config.decorations.shadow,
+            ShadowDecorationConfig {
+                radius: 18,
+                offset_x: 2,
+                offset_y: 9,
+                color: RgbaColor::new(0x01, 0x02, 0x03, 0x80),
+                power: ShadowPower::sanitize(2.5),
+            }
+        );
         assert_eq!(config.bindings.len(), 2);
         let enter = config
             .bindings
@@ -964,6 +1440,11 @@ mod tests {
             right = 2
             bottom = -3
             left = 4
+
+            [decorations.border]
+            thickness = -9
+            rounding = -5
+            rounding_power = 0.0
             "#,
             &xkb,
         )
@@ -975,6 +1456,10 @@ mod tests {
             config.general.decoration_insets,
             DecorationInsets { top: 0, right: 2, bottom: 0, left: 4 }
         );
+        assert_eq!(config.decorations.border.thickness, 0);
+        assert_eq!(config.decorations.border.rounding, 0);
+        assert_eq!(config.decorations.border.rounding_power, RoundingPower::DEFAULT);
+        assert_eq!(config.decorations.shadow.power, ShadowPower::DEFAULT);
     }
 
     #[test]
@@ -986,6 +1471,58 @@ mod tests {
         assert_eq!(config.decorations.xdg.floating, XdgDecorationModePolicy::HonorClient);
         assert_eq!(config.decorations.xdg.fullscreen, XdgDecorationModePolicy::Server);
         assert_eq!(config.decorations.xdg.unset_mode, XdgDecorationModePolicy::Server);
+        assert_eq!(config.decorations.border.thickness, 0);
+        assert_eq!(
+            config.decorations.border.active_start_color,
+            RgbaColor::new(0x50, 0x78, 0xc8, 0xff)
+        );
+        assert_eq!(
+            config.decorations.border.inactive_start_color,
+            RgbaColor::new(0x33, 0x38, 0x44, 0xff)
+        );
+        assert_eq!(config.decorations.border.rounding, 0);
+        assert_eq!(config.decorations.border.rounding_power, RoundingPower::DEFAULT);
+    }
+
+    #[test]
+    fn parses_supported_color_formats() {
+        assert_eq!(parse_rgba_color("#5078c8").unwrap(), RgbaColor::new(0x50, 0x78, 0xc8, 0xff));
+        assert_eq!(parse_rgba_color("0x333844ff").unwrap(), RgbaColor::new(0x33, 0x38, 0x44, 0xff));
+        assert_eq!(
+            parse_rgba_color("rgba(11223344)").unwrap(),
+            RgbaColor::new(0x11, 0x22, 0x33, 0x44)
+        );
+    }
+
+    #[test]
+    fn invalid_border_rounding_power_falls_back_to_default() {
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::parse_for_test(
+            r#"
+            [decorations.border]
+            rounding = 8
+            rounding_power = -1.0
+            "#,
+            &xkb,
+        )
+        .unwrap();
+
+        assert_eq!(config.decorations.border.rounding_power, RoundingPower::DEFAULT);
+    }
+
+    #[test]
+    fn invalid_shadow_power_falls_back_to_default() {
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::parse_for_test(
+            r#"
+            [decorations.shadow]
+            power = 0.0
+            "#,
+            &xkb,
+        )
+        .unwrap();
+
+        assert_eq!(config.decorations.shadow.power, ShadowPower::DEFAULT);
     }
 
     #[test]
@@ -1099,5 +1636,123 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("failed to parse"));
         assert_eq!(state.config, config);
+    }
+
+    #[test]
+    fn reload_dispatches_workspace_state_changed_when_config_changes() {
+        let temp_dir = mktemp::Temp::new_dir().unwrap();
+        let path = temp_dir.to_path_buf().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+            [general]
+            cursor_theme = "Adwaita"
+            outer_gap = 4
+
+            [bindings]
+            "Super+Return" = { action = "reload-config" }
+            "#,
+        )
+        .unwrap();
+
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::load_from_path(&path, &xkb).unwrap();
+        let mut state = state_for_tests_with_config(config);
+        state.config.path = path.clone();
+        let mut dispatcher = Dispatcher::default();
+
+        fs::write(
+            &path,
+            r#"
+            [general]
+            cursor_theme = "Adwaita"
+            outer_gap = 16
+
+            [bindings]
+            "Super+Return" = { action = "reload-config" }
+            "#,
+        )
+        .unwrap();
+
+        let changed =
+            reload_from_disk(&mut state, &mut dispatcher, ReloadTrigger::ManualBinding).unwrap();
+
+        assert!(changed);
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| matches!(
+            action,
+            ClientManagerAction::WorkspaceStateChanged
+        )));
+    }
+
+    #[test]
+    fn reload_marks_all_workspaces_dirty_when_config_changes() {
+        let temp_dir = mktemp::Temp::new_dir().unwrap();
+        let path = temp_dir.to_path_buf().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+            [general]
+            cursor_theme = "Adwaita"
+            outer_gap = 4
+
+            [bindings]
+            "Super+Return" = { action = "reload-config" }
+            "#,
+        )
+        .unwrap();
+
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::load_from_path(&path, &xkb).unwrap();
+        let mut state = state_for_tests_with_config(config);
+        state.config.path = path.clone();
+        let first_workspace = state.create_workspace(None, Some("first".to_string()));
+        let second_workspace = state.create_workspace(None, Some("second".to_string()));
+        state
+            .workspaces
+            .try_get_mut(first_workspace)
+            .unwrap()
+            .layout
+            .dirty = false;
+        state
+            .workspaces
+            .try_get_mut(second_workspace)
+            .unwrap()
+            .layout
+            .dirty = false;
+        let mut dispatcher = Dispatcher::default();
+
+        fs::write(
+            &path,
+            r#"
+            [general]
+            cursor_theme = "Adwaita"
+            outer_gap = 16
+
+            [bindings]
+            "Super+Return" = { action = "reload-config" }
+            "#,
+        )
+        .unwrap();
+
+        let changed =
+            reload_from_disk(&mut state, &mut dispatcher, ReloadTrigger::ManualBinding).unwrap();
+
+        assert!(changed);
+        assert!(
+            state
+                .workspaces
+                .try_get(first_workspace)
+                .unwrap()
+                .layout
+                .dirty
+        );
+        assert!(
+            state
+                .workspaces
+                .try_get(second_workspace)
+                .unwrap()
+                .layout
+                .dirty
+        );
     }
 }

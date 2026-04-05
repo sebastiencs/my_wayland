@@ -440,7 +440,7 @@ impl XdgSurface {
                             toplevel.schedule_decoration_mode(mode);
                         }
                     }
-                    let fallback_decoration_insets = state.config.general.decoration_insets;
+                    let fallback_decoration_insets = state.configured_decoration_insets();
                     let committed_window_geometry = self.geometry_after_this_commit();
                     let (target_min_size, surface_decoration_insets) = id
                         .try_ref(state)
