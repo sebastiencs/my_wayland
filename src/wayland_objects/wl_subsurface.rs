@@ -163,53 +163,14 @@ mod tests {
         super::WlSubsurface,
         crate::{
             clients::{Client, ClientId, RawEvent, Resolved},
-            egl::EGL,
-            globals::Globals,
             object::Object,
             protocol_generated::{WlSubsurfaceId, WlSurfaceId},
             runner::Dispatcher,
             state::State,
+            test_support::{state_for_tests, test_client_and_dispatcher},
             wayland_objects::wl_surface::{StackEntry, WlSurface},
-            xkb::Xkb,
         },
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn make_client() -> (Client, Dispatcher) {
-        (Client::new_for_tests(ClientId::from_raw(5)), Dispatcher::default())
-    }
 
     fn place_above_request(
         object_id: WlSubsurfaceId,
@@ -222,8 +183,8 @@ mod tests {
 
     #[test]
     fn place_above_rejects_non_sibling_surface() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(5);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (parent_resolved, _) = client.insert_object(

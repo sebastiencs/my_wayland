@@ -1551,87 +1551,20 @@ mod surface_tree_hit_test_tests {
     use {
         super::surface_focus_pick_at,
         crate::{
-            clients::{ClientId, Resolved},
-            egl::EGL,
-            globals::Globals,
             protocol_generated::{WlSubsurfaceId, WlSurfaceId},
-            state::{ObjectId, State},
-            wayland_objects::{wl_subsurface::WlSubsurface, wl_surface::WlSurface},
-            xkb::Xkb,
+            state::ObjectId,
+            test_support::{
+                insert_root_surface as insert_surface,
+                insert_wl_subsurface_client1 as insert_subsurface, resolved_wl_surface as root,
+                state_for_tests,
+            },
+            wayland_objects::wl_surface::WlSurface,
         },
     };
 
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn root(
-        state: &State,
-        object_id: ObjectId,
-    ) -> crate::clients::Resolved<crate::protocol_generated::WlSurfaceId> {
-        let surface = state
-            .objects
-            .try_ref_object::<crate::wayland_objects::wl_surface::WlSurface>(object_id)
-            .unwrap();
-        crate::clients::Resolved::new(surface.client_id(), surface.surface_id(), object_id)
-    }
-
-    fn insert_surface(state: &mut State, id: u32) -> ObjectId {
-        let object_id = state
-            .insert_object(WlSurface::new(WlSurfaceId::from(id), ClientId::from_raw(1), 6))
-            .1;
-        state.register_root_surface(object_id);
-        object_id
-    }
-
-    fn insert_subsurface(
-        state: &mut State,
-        id: WlSubsurfaceId,
-        surface_object_id: ObjectId,
-        parent_object_id: ObjectId,
-    ) -> Resolved<WlSubsurfaceId> {
-        let object_id = state
-            .insert_object(WlSubsurface::new(
-                id,
-                root(state, surface_object_id),
-                root(state, parent_object_id),
-            ))
-            .1;
-        Resolved::new(ClientId::from_raw(1), id, object_id)
-    }
-
     #[test]
     fn hit_test_prefers_above_then_parent_then_below() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let root_object_id = insert_surface(&mut state, 1);
         let below = insert_surface(&mut state, 2);
         let above = insert_surface(&mut state, 3);
@@ -1686,7 +1619,7 @@ mod surface_tree_hit_test_tests {
 
     #[test]
     fn hit_test_uses_nested_offsets_and_falls_back_when_child_rejects_input() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let root_object_id = insert_surface(&mut state, 1);
         let child = insert_surface(&mut state, 2);
         let grandchild = insert_surface(&mut state, 3);
@@ -1748,7 +1681,7 @@ mod surface_tree_hit_test_tests {
 
     #[test]
     fn hit_test_uses_explicit_root_surface_order() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let root_a = insert_surface(&mut state, 1);
         let root_b = insert_surface(&mut state, 2);
 
@@ -1783,27 +1716,28 @@ mod xdg_seat_tests {
             begin_popup_grab, cancel_active_drag, complete_drag_drop, handle_keyboard_key,
             handle_pointer_button, handle_pointer_motion, handle_pointer_motion_absolute,
             recover_pointer_after_interactive_grab_loss, remove_popup_grab, scene_pick_at,
-            window_hit_at, HitSemantics, SeatClientEvent, SeatState, SurfaceFocus,
+            window_hit_at, HitSemantics, SeatClientEvent, SeatState,
         },
         crate::{
             clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent, Resolved},
             config::RuntimeConfig,
             cursor::CursorSourceRef,
-            egl::EGL,
-            globals::Globals,
             object::Object,
             protocol_generated::{
                 xdg_toplevel, Constants, WlSeatId, WlSubsurfaceId, WlSurfaceId, XdgPopupId,
                 XdgPositionerId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
             },
             region::RectI,
-            runner::Dispatcher,
             state::{
                 DragPhase, DragSource, DragState, DragTargetState, ObjectId, State, WorkspaceGroup,
             },
+            test_support::{
+                fake_focus, focus_for_surface, get_toplevel_request, insert_wl_subsurface,
+                raw_request_from_event, resolved_wl_surface as root, state_for_tests,
+                test_client_and_dispatcher,
+            },
             wayland_objects::{
                 wl_seat::WlSeat,
-                wl_subsurface::WlSubsurface,
                 wl_surface::{Role, WlSurface},
                 xdg_popup::XdgPopup,
                 xdg_positioner::{PositionerState, XdgPositioner},
@@ -1813,57 +1747,8 @@ mod xdg_seat_tests {
                 },
                 xdg_wm_base::XdgWmBase,
             },
-            xkb::Xkb,
         },
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: SeatState::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn root(
-        state: &State,
-        object_id: ObjectId,
-    ) -> crate::clients::Resolved<crate::protocol_generated::WlSurfaceId> {
-        let surface = state
-            .objects
-            .try_ref_object::<crate::wayland_objects::wl_surface::WlSurface>(object_id)
-            .unwrap();
-        crate::clients::Resolved::new(surface.client_id(), surface.surface_id(), object_id)
-    }
-
-    fn make_client() -> (Client, Dispatcher) {
-        (Client::new_for_tests(ClientId::from_raw(7)), Dispatcher::default())
-    }
 
     fn assert_named_cursor_matches_any(seat: &SeatState, expected_names: &[&str]) {
         assert!(matches!(
@@ -1879,35 +1764,6 @@ mod xdg_seat_tests {
         let object_id = resolved.object_id();
         state.register_root_surface(object_id);
         object_id
-    }
-
-    fn insert_subsurface(
-        state: &mut State,
-        client_id: ClientId,
-        id: WlSubsurfaceId,
-        surface_object_id: ObjectId,
-        parent_object_id: ObjectId,
-    ) -> Resolved<WlSubsurfaceId> {
-        let object_id = state
-            .insert_object(WlSubsurface::new(
-                id,
-                root(state, surface_object_id),
-                root(state, parent_object_id),
-            ))
-            .1;
-        Resolved::new(client_id, id, object_id)
-    }
-
-    fn focus_for_surface(
-        client_id: ClientId,
-        surface_id: WlSurfaceId,
-        object_id: ObjectId,
-    ) -> SurfaceFocus {
-        SurfaceFocus::new(crate::clients::Resolved::new(client_id, surface_id, object_id))
-    }
-
-    fn fake_focus(client_id: ClientId, surface_id: WlSurfaceId) -> SurfaceFocus {
-        focus_for_surface(client_id, surface_id, ObjectId::from(0usize))
     }
 
     fn insert_xdg_surface(
@@ -1957,15 +1813,6 @@ mod xdg_seat_tests {
         (wl_surface_object_id, xdg_surface_object_id)
     }
 
-    fn get_toplevel_request(
-        xdg_surface_id: XdgSurfaceId,
-        toplevel_id: XdgToplevelId,
-    ) -> crate::clients::RawRequest<'static> {
-        let mut event = RawEvent::new(xdg_surface_id.into(), 1, 1);
-        event.id(toplevel_id);
-        (&*event.into_bytes()).try_into().unwrap()
-    }
-
     fn popup_grab_request(
         popup_id: XdgPopupId,
         seat_id: WlSeatId,
@@ -1974,12 +1821,11 @@ mod xdg_seat_tests {
         let mut event = RawEvent::new(popup_id.into(), 1, 2);
         event.id(seat_id);
         event.uint(serial);
-        (&*event.into_bytes()).try_into().unwrap()
+        raw_request_from_event(event)
     }
 
     fn popup_destroy_request(popup_id: XdgPopupId) -> crate::clients::RawRequest<'static> {
-        let event = RawEvent::new(popup_id.into(), 0, 0);
-        (&*event.into_bytes()).try_into().unwrap()
+        raw_request_from_event(RawEvent::new(popup_id.into(), 0, 0))
     }
 
     fn toplevel_move_request(
@@ -1990,7 +1836,7 @@ mod xdg_seat_tests {
         let mut event = RawEvent::new(toplevel_id.into(), 5, 2);
         event.id(seat_id);
         event.uint(serial);
-        (&*event.into_bytes()).try_into().unwrap()
+        raw_request_from_event(event)
     }
 
     fn toplevel_resize_request(
@@ -2003,7 +1849,7 @@ mod xdg_seat_tests {
         event.id(seat_id);
         event.uint(serial);
         event.uint(edges);
-        (&*event.into_bytes()).try_into().unwrap()
+        raw_request_from_event(event)
     }
 
     fn get_popup_request(
@@ -2016,7 +1862,7 @@ mod xdg_seat_tests {
         event.id(popup_id);
         event.id(parent_id);
         event.id(positioner_id);
-        (&*event.into_bytes()).try_into().unwrap()
+        raw_request_from_event(event)
     }
 
     fn positioner_set_size_request(
@@ -2027,7 +1873,7 @@ mod xdg_seat_tests {
         let mut event = RawEvent::new(positioner_id.into(), 1, 2);
         event.int(width);
         event.int(height);
-        (&*event.into_bytes()).try_into().unwrap()
+        raw_request_from_event(event)
     }
 
     fn positioner_set_anchor_rect_request(
@@ -2042,7 +1888,7 @@ mod xdg_seat_tests {
         event.int(y);
         event.int(width);
         event.int(height);
-        (&*event.into_bytes()).try_into().unwrap()
+        raw_request_from_event(event)
     }
 
     fn assign_toplevel_role(
@@ -2084,8 +1930,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn popup_grab_accepts_untracked_serial() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         client.insert_object(&mut state, WlSeat::new(WlSeatId::from(2)));
@@ -2177,8 +2023,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn popup_grab_accepts_matching_serial() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         client.insert_object(&mut state, WlSeat::new(WlSeatId::from(2)));
@@ -2291,8 +2137,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn dismissed_popup_stays_alive_until_client_destroy() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (_parent_wl_surface_object_id, parent_xdg_surface_object_id) = insert_xdg_surface(
@@ -2405,8 +2251,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn popup_parent_click_dismisses_grab() {
-        let mut state = make_state();
-        let (_client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (_client, mut dispatcher) = test_client_and_dispatcher(7);
 
         let parent_focus = fake_focus(ClientId::from_raw(7), WlSurfaceId::from(50));
         let popup_focus = fake_focus(ClientId::from_raw(7), WlSurfaceId::from(51));
@@ -2433,8 +2279,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn compositor_mouse_move_binding_starts_drag_and_swallows_button_events() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -2559,12 +2405,12 @@ mod xdg_seat_tests {
 
     #[test]
     fn ssd_titlebar_press_starts_move_without_client_pointer_focus() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         state.config.general.decoration_insets.top = 12;
         state.config.general.decoration_insets.left = 4;
         state.config.general.decoration_insets.right = 4;
         state.config.general.decoration_insets.bottom = 4;
-        let (mut client, mut dispatcher) = make_client();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -2624,8 +2470,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn compositor_mouse_resize_binding_uses_pointer_thirds_for_edges() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -2675,12 +2521,12 @@ mod xdg_seat_tests {
 
     #[test]
     fn ssd_left_border_press_starts_resize_with_left_edge() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         state.config.general.decoration_insets.top = 12;
         state.config.general.decoration_insets.left = 6;
         state.config.general.decoration_insets.right = 4;
         state.config.general.decoration_insets.bottom = 4;
-        let (mut client, mut dispatcher) = make_client();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -2736,8 +2582,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn csd_window_geometry_extends_window_pointer_target_bounds() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -2778,7 +2624,7 @@ mod xdg_seat_tests {
             root_surface.add_pending_child(child_resolved);
             assert!(root_surface.restack_child_relative(child_resolved, None, true));
         }
-        let child_subsurface = insert_subsurface(
+        let child_subsurface = insert_wl_subsurface(
             &mut state,
             ClientId::from_raw(1),
             WlSubsurfaceId::from(232),
@@ -2823,8 +2669,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn window_pointer_hit_classifies_content_hits() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -2858,8 +2704,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn window_hit_caches_binding_resize_edges_for_content_hits() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -2893,12 +2739,12 @@ mod xdg_seat_tests {
 
     #[test]
     fn window_pointer_hit_classifies_ssd_titlebar_and_resize_hits() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         state.config.general.decoration_insets.top = 12;
         state.config.general.decoration_insets.left = 6;
         state.config.general.decoration_insets.right = 4;
         state.config.general.decoration_insets.bottom = 4;
-        let (mut client, mut dispatcher) = make_client();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -2953,12 +2799,12 @@ mod xdg_seat_tests {
 
     #[test]
     fn ssd_hover_uses_resize_and_move_cursors_before_click() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         state.config.general.decoration_insets.top = 12;
         state.config.general.decoration_insets.left = 6;
         state.config.general.decoration_insets.right = 4;
         state.config.general.decoration_insets.bottom = 4;
-        let (mut client, mut dispatcher) = make_client();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -3020,8 +2866,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn compositor_mouse_move_binding_uses_window_bounds_without_pointer_focus() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -3072,8 +2918,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn compositor_mouse_move_binding_rejects_maximized_windows() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -3130,8 +2976,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn compositor_mouse_resize_binding_rejects_fullscreen_windows() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -3198,8 +3044,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn compositor_mouse_resize_binding_uses_compositor_fullscreen_state() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (first_surface_object_id, first_xdg_surface_object_id) = insert_xdg_surface(
@@ -3289,8 +3135,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn compositor_mouse_grab_surface_loss_runs_full_teardown() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -3345,8 +3191,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn removing_grab_client_clears_intercepted_buttons_and_recovers_cursor() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -3403,8 +3249,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn tiled_resize_grab_is_cleared_on_client_removal() {
-        let mut state = make_state();
-        let (client, _dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (client, _dispatcher) = test_client_and_dispatcher(7);
 
         state.seat.pointer_interactive_grab = Some(super::PointerInteractiveGrab::ResizeTiled {
             root_surface: crate::clients::Resolved::new(
@@ -3427,8 +3273,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn compositor_binding_swallows_key_press_and_release() {
-        let mut state = make_state();
-        let (_client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (_client, mut dispatcher) = test_client_and_dispatcher(7);
 
         state.config = RuntimeConfig::parse_for_test(
             r#"
@@ -3459,8 +3305,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn removing_last_popup_grab_restores_parent_focus() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
 
         let parent_surface_id = WlSurfaceId::from(50);
         let popup_surface_id = WlSurfaceId::from(51);
@@ -3502,8 +3348,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn toplevel_resize_rejects_none_edge_without_starting_grab() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         client.insert_object(&mut state, WlSeat::new(WlSeatId::from(3)));
@@ -3581,8 +3427,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn toplevel_resize_accepts_keyboard_trigger_serial() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         client.insert_object(&mut state, WlSeat::new(WlSeatId::from(4)));
@@ -3642,8 +3488,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn toplevel_move_accepts_pointer_trigger_serial() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         client.insert_object(&mut state, WlSeat::new(WlSeatId::from(6)));
@@ -3697,8 +3543,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn interactive_resize_clamps_left_edge_to_toplevel_constraints() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         client.insert_object(&mut state, WlSeat::new(WlSeatId::from(5)));
@@ -3784,8 +3630,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn get_popup_allows_null_parent_for_layer_shell_workflows() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (_wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
@@ -3968,8 +3814,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn local_drag_drop_without_source_finishes_immediately() {
-        let mut state = make_state();
-        let (_client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (_client, mut dispatcher) = test_client_and_dispatcher(7);
         let target_client_id = ClientId::from_raw(42);
 
         state.seat.set_active_drag(DragState {
@@ -4002,8 +3848,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn invalid_drag_drop_cancels_source() {
-        let mut state = make_state();
-        let (_client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (_client, mut dispatcher) = test_client_and_dispatcher(7);
         let source_client_id = ClientId::from_raw(50);
         let target_client_id = ClientId::from_raw(51);
         let source_id = crate::protocol_generated::WlDataSourceId::from(12);
@@ -4052,8 +3898,8 @@ mod xdg_seat_tests {
 
     #[test]
     fn cancelling_drag_with_icon_refreshes_source_outputs() {
-        let mut state = make_state();
-        let (_client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (_client, mut dispatcher) = test_client_and_dispatcher(7);
         let source_client_id = ClientId::from_raw(60);
 
         state.seat.set_active_drag(DragState {

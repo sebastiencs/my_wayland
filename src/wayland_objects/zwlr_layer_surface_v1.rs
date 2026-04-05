@@ -1366,72 +1366,15 @@ mod tests {
         super::*,
         crate::{
             clients::{Client, ClientId, ClientManagerAction, RawEvent},
-            egl::EGL,
-            globals::Globals,
             io_uring::model::IoUringAction,
             runner::Dispatcher,
-            state::{BackendOutputRef, DrmId, FractionalScale, Output, OutputMode},
+            state::State,
+            test_support::{
+                state_for_tests, test_output_drm1_crtc, test_resolved_wl_surface_client1,
+            },
             wayland_objects::wl_display::WlDisplay,
-            xkb::Xkb,
         },
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            seat: Default::default(),
-            config: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn make_output(drm_crtc_id: u32, x: i32, y: i32, width: i32, height: i32) -> Output {
-        Output {
-            backend: BackendOutputRef::new(DrmId::from(1usize)),
-            drm_crtc_id,
-            global_name: None,
-            gamma_lut_size: 0,
-            ctm_supported: false,
-            gamma_control_object_id: None,
-            x,
-            y,
-            physical_width: 0,
-            physical_height: 0,
-            scale: FractionalScale::ONE,
-            transform: 0,
-            make: String::new(),
-            model: String::new(),
-            name: format!("output-{drm_crtc_id}"),
-            description: String::new(),
-            enabled: true,
-            current_mode: OutputMode { width, height, refresh_millihz: 60_000 },
-            preferred_mode: None,
-        }
-    }
 
     fn set_layer_request(
         layer_surface_id: ZwlrLayerSurfaceV1Id,
@@ -1458,10 +1401,6 @@ mod tests {
         let mut event = RawEvent::new(layer_surface_id.into(), 4, 1);
         event.uint(keyboard_interactivity);
         (&*event.into_bytes()).try_into().unwrap()
-    }
-
-    fn fake_surface(raw: usize) -> Resolved<WlSurfaceId> {
-        Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(raw as u32), ObjectId::from(raw))
     }
 
     fn fake_layer_manager(raw: usize) -> Resolved<ZwlrLayerShellV1Id> {
@@ -1500,7 +1439,7 @@ mod tests {
 
     fn snapshot_with_zone(zone: i32, margin: LayerMargins) -> LayerSnapshot {
         LayerSnapshot {
-            root_surface: fake_surface(1),
+            root_surface: test_resolved_wl_surface_client1(1),
             root_index: 0,
             output_id: OutputId::from(0usize),
             mapped: true,
@@ -1522,7 +1461,7 @@ mod tests {
         exclusive_zone: i32,
     ) -> LayerSnapshot {
         LayerSnapshot {
-            root_surface: fake_surface(surface_object_id),
+            root_surface: test_resolved_wl_surface_client1(surface_object_id),
             root_index,
             output_id: OutputId::from(0usize),
             mapped: true,
@@ -1582,8 +1521,18 @@ mod tests {
             vec![top_panel_snapshot(1, 0, 10), top_panel_snapshot(2, 1, 10)],
         );
 
-        assert_eq!(output_layout.placements[&fake_surface(1)].rect.y, 0);
-        assert_eq!(output_layout.placements[&fake_surface(2)].rect.y, 10);
+        assert_eq!(
+            output_layout.placements[&test_resolved_wl_surface_client1(1)]
+                .rect
+                .y,
+            0
+        );
+        assert_eq!(
+            output_layout.placements[&test_resolved_wl_surface_client1(2)]
+                .rect
+                .y,
+            10
+        );
         assert_eq!(output_layout.usable, RectI { x: 0, y: 20, width: 100, height: 80 });
     }
 
@@ -1594,8 +1543,18 @@ mod tests {
             vec![top_panel_snapshot(1, 0, 0), top_panel_snapshot(2, 1, 10)],
         );
 
-        assert_eq!(output_layout.placements[&fake_surface(2)].rect.y, 0);
-        assert_eq!(output_layout.placements[&fake_surface(1)].rect.y, 10);
+        assert_eq!(
+            output_layout.placements[&test_resolved_wl_surface_client1(2)]
+                .rect
+                .y,
+            0
+        );
+        assert_eq!(
+            output_layout.placements[&test_resolved_wl_surface_client1(1)]
+                .rect
+                .y,
+            10
+        );
         assert_eq!(output_layout.usable, RectI { x: 0, y: 10, width: 100, height: 90 });
     }
 
@@ -1667,8 +1626,8 @@ mod tests {
 
     #[test]
     fn requested_output_does_not_fallback_to_active_output_when_missing() {
-        let mut state = make_state();
-        let _active_output = state.insert_output(make_output(1, 0, 0, 1920, 1080));
+        let mut state = state_for_tests();
+        let _active_output = state.insert_output(test_output_drm1_crtc(1, 0, 0, 1920, 1080));
         let missing_output = OutputId::from(99usize);
         let layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
@@ -1769,7 +1728,7 @@ mod tests {
 
     #[test]
     fn set_layer_reports_error_for_version_one_objects() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
             1,
@@ -1805,7 +1764,7 @@ mod tests {
 
     #[test]
     fn set_anchor_rejects_invalid_bits_immediately() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
             5,
@@ -1837,7 +1796,7 @@ mod tests {
 
     #[test]
     fn set_keyboard_interactivity_rejects_invalid_values_immediately() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
             5,
@@ -1885,7 +1844,7 @@ mod tests {
 
     #[test]
     fn set_exclusive_edge_reports_invalid_method_before_version_five() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut layer_surface = make_test_layer_surface(
             ZwlrLayerSurfaceV1Id::from(1u32),
             4,
@@ -1917,7 +1876,7 @@ mod tests {
 
     #[test]
     fn destroy_ignores_missing_manager_binding() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(3));
         let layer_surface_id = ZwlrLayerSurfaceV1Id::from(1u32);
         client.insert_object(
@@ -1941,7 +1900,7 @@ mod tests {
 
     #[test]
     fn malformed_requests_disconnect_the_client() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(3));
         let layer_surface_id = ZwlrLayerSurfaceV1Id::from(1u32);
         client.insert_object(

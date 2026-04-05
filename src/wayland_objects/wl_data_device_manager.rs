@@ -90,52 +90,17 @@ mod tests {
         super::WlDataDeviceManager,
         crate::{
             clients::{Client, ClientAction, ClientId, ClientManagerAction, RawEvent, Resolved},
-            egl::EGL,
-            globals::Globals,
             object::Object,
             protocol_generated::{WlDataDeviceId, WlDataDeviceManagerId, WlDataSourceId, WlSeatId},
             runner::Dispatcher,
             seat::{set_keyboard_focus_from_surface, SurfaceFocus},
             state::State,
+            test_support::state_for_tests,
             wayland_objects::{
                 wl_data_source::WlDataSource, wl_seat::WlSeat, wl_surface::WlSurface,
             },
-            xkb::Xkb,
         },
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
 
     fn get_data_device_request(
         manager_id: WlDataDeviceManagerId,
@@ -154,7 +119,7 @@ mod tests {
 
     #[test]
     fn focused_client_get_data_device_queues_selection_refresh() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let mut dispatcher = Dispatcher::default();
         let seat_id = WlSeatId::from(2);
@@ -193,7 +158,7 @@ mod tests {
 
     #[test]
     fn get_data_device_rejects_non_seat_object() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let mut dispatcher = Dispatcher::default();
         let manager_id = WlDataDeviceManagerId::from(3);

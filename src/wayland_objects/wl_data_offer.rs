@@ -427,8 +427,6 @@ mod tests {
                 Client, ClientAction, ClientId, ClientManagerAction, DataSourceClientEvent,
                 RawEvent, Resolved,
             },
-            egl::EGL,
-            globals::Globals,
             object::Object,
             protocol_generated::{
                 wl_data_device_manager, WlDataOfferId, WlDataSourceId, WlSurfaceId,
@@ -438,44 +436,11 @@ mod tests {
                 DataOfferRole, DragNegotiationState, DragPhase, DragSource, DragState,
                 DragTargetState, ObjectId, State,
             },
+            test_support::{state_for_tests, test_resolved_wl_surface},
             wayland_objects::wl_data_source::WlDataSource,
-            xkb::Xkb,
         },
         std::os::fd::{FromRawFd, IntoRawFd},
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
 
     fn destroy_request(offer_id: WlDataOfferId) -> crate::clients::RawRequest<'static> {
         let event = RawEvent::new(offer_id.into(), 2, 0);
@@ -524,14 +489,6 @@ mod tests {
         (&*event.into_bytes()).try_into().unwrap()
     }
 
-    fn fake_surface(
-        client_id: ClientId,
-        surface_id: u32,
-        object_id: ObjectId,
-    ) -> Resolved<WlSurfaceId> {
-        Resolved::new(client_id, surface_id.into(), object_id)
-    }
-
     fn fake_offer(
         client_id: ClientId,
         offer_id: WlDataOfferId,
@@ -551,7 +508,7 @@ mod tests {
 
     #[test]
     fn legacy_drag_offer_destroy_after_drop_finishes_source() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let source_client_id = ClientId::from_raw(1);
         let mut target = Client::new_for_tests(ClientId::from_raw(2));
         let offer_id = WlDataOfferId::from(20);
@@ -571,10 +528,10 @@ mod tests {
             source: DragSource::DataSource {
                 source: Resolved::new(source_client_id, source_id, ObjectId::from(0usize)),
             },
-            origin_surface: fake_surface(source_client_id, 30, ObjectId::from(30usize)),
+            origin_surface: test_resolved_wl_surface(source_client_id, 30, ObjectId::from(30usize)),
             icon_surface: None,
             target: Some(DragTargetState {
-                surface: fake_surface(target.client_id(), 31, ObjectId::from(0usize)),
+                surface: test_resolved_wl_surface(target.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![fake_offer(target.client_id(), offer_id, offer_object_id)],
@@ -624,7 +581,7 @@ mod tests {
 
     #[test]
     fn set_actions_rejects_preferred_action_outside_destination_mask() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let offer_id = WlDataOfferId::from(20);
         let (offer_resolved, _) = client
@@ -632,10 +589,14 @@ mod tests {
         let offer_object_id = offer_resolved.object_id();
         state.seat.set_active_drag(DragState {
             source: DragSource::None { initiator_client_id: ClientId::from_raw(9) },
-            origin_surface: fake_surface(ClientId::from_raw(9), 30, ObjectId::from(30usize)),
+            origin_surface: test_resolved_wl_surface(
+                ClientId::from_raw(9),
+                30,
+                ObjectId::from(30usize),
+            ),
             icon_surface: None,
             target: Some(DragTargetState {
-                surface: fake_surface(client.client_id(), 31, ObjectId::from(0usize)),
+                surface: test_resolved_wl_surface(client.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![fake_offer(client.client_id(), offer_id, offer_object_id)],
@@ -671,7 +632,7 @@ mod tests {
 
     #[test]
     fn destroying_one_sibling_drag_offer_keeps_shared_drag_alive() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let source_client_id = ClientId::from_raw(1);
         let mut target = Client::new_for_tests(ClientId::from_raw(2));
         let offer_a_id = WlDataOfferId::from(20);
@@ -712,10 +673,10 @@ mod tests {
                     ObjectId::from(0usize),
                 ),
             },
-            origin_surface: fake_surface(source_client_id, 30, ObjectId::from(30usize)),
+            origin_surface: test_resolved_wl_surface(source_client_id, 30, ObjectId::from(30usize)),
             icon_surface: None,
             target: Some(DragTargetState {
-                surface: fake_surface(target.client_id(), 31, ObjectId::from(0usize)),
+                surface: test_resolved_wl_surface(target.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![
@@ -754,7 +715,7 @@ mod tests {
 
     #[test]
     fn stale_drag_offer_finish_is_ignored() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let stale_offer_id = WlDataOfferId::from(20);
         let live_offer_id = WlDataOfferId::from(21);
@@ -765,10 +726,14 @@ mod tests {
         let stale_offer_object_id = stale_offer_resolved.object_id();
         state.seat.set_active_drag(DragState {
             source: DragSource::None { initiator_client_id: ClientId::from_raw(9) },
-            origin_surface: fake_surface(ClientId::from_raw(9), 30, ObjectId::from(30usize)),
+            origin_surface: test_resolved_wl_surface(
+                ClientId::from_raw(9),
+                30,
+                ObjectId::from(30usize),
+            ),
             icon_surface: None,
             target: Some(DragTargetState {
-                surface: fake_surface(client.client_id(), 31, ObjectId::from(0usize)),
+                surface: test_resolved_wl_surface(client.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![fake_offer(
@@ -809,7 +774,7 @@ mod tests {
 
     #[test]
     fn selection_accept_does_not_mutate_drag_acceptance() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let source_id = WlDataSourceId::from(10);
         let selection_offer_id = WlDataOfferId::from(20);
@@ -834,10 +799,14 @@ mod tests {
                     ObjectId::from(0usize),
                 ),
             },
-            origin_surface: fake_surface(ClientId::from_raw(9), 30, ObjectId::from(30usize)),
+            origin_surface: test_resolved_wl_surface(
+                ClientId::from_raw(9),
+                30,
+                ObjectId::from(30usize),
+            ),
             icon_surface: None,
             target: Some(DragTargetState {
-                surface: fake_surface(client.client_id(), 31, ObjectId::from(0usize)),
+                surface: test_resolved_wl_surface(client.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![fake_offer(
@@ -883,7 +852,7 @@ mod tests {
 
     #[test]
     fn finish_rejects_ask_action() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let offer_id = WlDataOfferId::from(20);
         let source_id = WlDataSourceId::from(10);
@@ -902,10 +871,14 @@ mod tests {
             source: DragSource::DataSource {
                 source: Resolved::new(ClientId::from_raw(9), source_id, ObjectId::from(0usize)),
             },
-            origin_surface: fake_surface(ClientId::from_raw(9), 30, ObjectId::from(30usize)),
+            origin_surface: test_resolved_wl_surface(
+                ClientId::from_raw(9),
+                30,
+                ObjectId::from(30usize),
+            ),
             icon_surface: None,
             target: Some(DragTargetState {
-                surface: fake_surface(client.client_id(), 31, ObjectId::from(0usize)),
+                surface: test_resolved_wl_surface(client.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![fake_offer(client.client_id(), offer_id, offer_object_id)],
@@ -932,7 +905,7 @@ mod tests {
 
     #[test]
     fn accept_rejects_after_finish() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let offer_id = WlDataOfferId::from(20);
         let (offer_resolved, _) = client
@@ -965,7 +938,7 @@ mod tests {
 
     #[test]
     fn accept_allows_unadvertised_mime_for_compatibility() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let source_client_id = ClientId::from_raw(8);
         let mut target = Client::new_for_tests(ClientId::from_raw(7));
         let source_id = WlDataSourceId::from(10);
@@ -984,10 +957,10 @@ mod tests {
             source: DragSource::DataSource {
                 source: Resolved::new(source_client_id, source_id, ObjectId::from(0usize)),
             },
-            origin_surface: fake_surface(source_client_id, 30, ObjectId::from(30usize)),
+            origin_surface: test_resolved_wl_surface(source_client_id, 30, ObjectId::from(30usize)),
             icon_surface: None,
             target: Some(DragTargetState {
-                surface: fake_surface(target.client_id(), 31, ObjectId::from(0usize)),
+                surface: test_resolved_wl_surface(target.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![fake_offer(target.client_id(), offer_id, offer_object_id)],
@@ -1031,7 +1004,7 @@ mod tests {
 
     #[test]
     fn receive_forwards_unadvertised_mime_to_source_for_compatibility() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let source_client_id = ClientId::from_raw(8);
         let mut target = Client::new_for_tests(ClientId::from_raw(7));
         let source_id = WlDataSourceId::from(10);
@@ -1050,10 +1023,10 @@ mod tests {
             source: DragSource::DataSource {
                 source: Resolved::new(source_client_id, source_id, ObjectId::from(0usize)),
             },
-            origin_surface: fake_surface(source_client_id, 30, ObjectId::from(30usize)),
+            origin_surface: test_resolved_wl_surface(source_client_id, 30, ObjectId::from(30usize)),
             icon_surface: None,
             target: Some(DragTargetState {
-                surface: fake_surface(target.client_id(), 31, ObjectId::from(0usize)),
+                surface: test_resolved_wl_surface(target.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![fake_offer(target.client_id(), offer_id, offer_object_id)],

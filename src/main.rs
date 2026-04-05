@@ -185,6 +185,8 @@ pub mod runner;
 mod seat;
 mod state;
 mod sync;
+#[cfg(test)]
+mod test_support;
 mod tiling;
 mod transform;
 mod udev;

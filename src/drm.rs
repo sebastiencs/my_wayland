@@ -4708,21 +4708,16 @@ mod presentation_timing_tests {
         crate::{
             clients::{ClientId, Resolved},
             cursor::{CursorImageContentKey, CursorSurface},
-            egl::EGL,
-            globals::Globals,
             protocol_generated::{WlBufferId, WlSurfaceId, WpPresentationFeedbackId},
             region::{DamageRegion, RectI},
             runner::Dispatcher,
-            state::{
-                BackendOutputRef, DrmId, FractionalScale, ObjectId, Output, OutputId, OutputMode,
-                State,
-            },
+            state::{BackendOutputRef, DrmId, ObjectId, OutputId},
+            test_support::{state_for_tests, test_output},
             transform,
             wayland_objects::{
                 wl_buffer::WlBuffer,
                 wl_surface::{SurfacePresentationFeedback, WlSurface},
             },
-            xkb::Xkb,
         },
     };
 
@@ -4746,70 +4741,6 @@ mod presentation_timing_tests {
             ),
             version,
             output_id: None,
-        }
-    }
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn make_output(
-        backend: BackendOutputRef,
-        drm_crtc_id: u32,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-    ) -> Output {
-        Output {
-            backend,
-            drm_crtc_id,
-            global_name: None,
-            gamma_lut_size: 0,
-            ctm_supported: false,
-            gamma_control_object_id: None,
-            x,
-            y,
-            physical_width: 0,
-            physical_height: 0,
-            scale: FractionalScale::ONE,
-            transform: 0,
-            make: String::new(),
-            model: String::new(),
-            name: String::new(),
-            description: String::new(),
-            enabled: true,
-            current_mode: OutputMode { width, height, refresh_millihz: 60_000 },
-            preferred_mode: None,
         }
     }
 
@@ -4919,7 +4850,7 @@ mod presentation_timing_tests {
 
     #[test]
     fn simple_surface_cursor_can_build_hardware_cursor_request() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let buffer_object_id = state
             .insert_object(WlBuffer::test_argb8888_shm(
                 WlBufferId::from(1),
@@ -4981,7 +4912,7 @@ mod presentation_timing_tests {
 
     #[test]
     fn surface_cursor_request_rejects_subsurface_trees() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let surface_object_id = state
             .insert_object(WlSurface::new(WlSurfaceId::from(10), ClientId::from_raw(1), 6))
             .1;
@@ -5043,11 +4974,11 @@ mod presentation_timing_tests {
 
     #[test]
     fn cursor_only_logical_scene_still_selects_an_output() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let drm_id = DrmId::from(0usize);
         let backend = BackendOutputRef::new(drm_id);
-        let left = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
-        let right = state.insert_output(make_output(backend, 2, 100, 0, 100, 100));
+        let left = state.insert_output(test_output(backend, 1, 0, 0, 100, 100, ""));
+        let right = state.insert_output(test_output(backend, 2, 100, 0, 100, 100, ""));
         let cursor_item = make_surface_scene_item(
             10,
             RectI::new(120, 5, 16, 16).unwrap(),
@@ -5096,11 +5027,11 @@ mod presentation_timing_tests {
 
     #[test]
     fn select_presentation_output_prefers_largest_overlap() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let drm_id = DrmId::from(0usize);
         let backend = BackendOutputRef::new(drm_id);
-        let left = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
-        let right = state.insert_output(make_output(backend, 2, 100, 0, 100, 100));
+        let left = state.insert_output(test_output(backend, 1, 0, 0, 100, 100, ""));
+        let right = state.insert_output(test_output(backend, 2, 100, 0, 100, 100, ""));
         let surface_key =
             Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(1), ObjectId::from(1usize));
         let buffer =
@@ -5121,11 +5052,11 @@ mod presentation_timing_tests {
 
     #[test]
     fn schedule_output_targets_logical_output_model_id() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let drm_id = DrmId::from(0usize);
         let backend = BackendOutputRef::new(drm_id);
-        let left = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
-        let right = state.insert_output(make_output(backend, 2, 100, 0, 100, 100));
+        let left = state.insert_output(test_output(backend, 1, 0, 0, 100, 100, ""));
+        let right = state.insert_output(test_output(backend, 2, 100, 0, 100, 100, ""));
         let mut dispatcher = Dispatcher::default();
 
         schedule_output(&state, right, &mut dispatcher);
@@ -5142,11 +5073,11 @@ mod presentation_timing_tests {
 
     #[test]
     fn schedule_outputs_for_rects_marks_old_and_new_outputs() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let drm_id = DrmId::from(0usize);
         let backend = BackendOutputRef::new(drm_id);
-        let left = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
-        let right = state.insert_output(make_output(backend, 2, 100, 0, 100, 100));
+        let left = state.insert_output(test_output(backend, 1, 0, 0, 100, 100, ""));
+        let right = state.insert_output(test_output(backend, 2, 100, 0, 100, 100, ""));
         let mut dispatcher = Dispatcher::default();
 
         schedule_outputs_for_rects(
@@ -5178,84 +5109,21 @@ mod surface_tree_render_tests {
     use {
         super::{collect_cursor_surface_snapshots, collect_surface_snapshots},
         crate::{
-            clients::{ClientId, Resolved},
-            egl::EGL,
-            globals::Globals,
+            clients::ClientId,
             protocol_generated::{WlSubsurfaceId, WlSurfaceId},
-            state::{ObjectId, State},
-            wayland_objects::{wl_subsurface::WlSubsurface, wl_surface::WlSurface},
-            xkb::Xkb,
+            state::ObjectId,
+            test_support::{
+                insert_root_surface as insert_surface,
+                insert_wl_subsurface_client1 as insert_subsurface, resolved_wl_surface as root,
+                state_for_tests,
+            },
+            wayland_objects::wl_surface::WlSurface,
         },
     };
 
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn insert_surface(state: &mut State, id: u32) -> ObjectId {
-        let object_id = state
-            .insert_object(WlSurface::new(WlSurfaceId::from(id), ClientId::from_raw(1), 6))
-            .1;
-        state.register_root_surface(object_id);
-        object_id
-    }
-
-    fn root(state: &State, object_id: ObjectId) -> Resolved<WlSurfaceId> {
-        let surface = state
-            .objects
-            .try_ref_object::<WlSurface>(object_id)
-            .unwrap();
-        Resolved::new(surface.client_id(), surface.surface_id(), object_id)
-    }
-
-    fn insert_subsurface(
-        state: &mut State,
-        id: WlSubsurfaceId,
-        surface_object_id: ObjectId,
-        parent_object_id: ObjectId,
-    ) -> Resolved<WlSubsurfaceId> {
-        let object_id = state
-            .insert_object(WlSubsurface::new(
-                id,
-                root(state, surface_object_id),
-                root(state, parent_object_id),
-            ))
-            .1;
-        Resolved::new(ClientId::from_raw(1), id, object_id)
-    }
-
     #[test]
     fn collect_surface_snapshots_walks_below_self_above() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let root_object_id = insert_surface(&mut state, 1);
         let below = insert_surface(&mut state, 2);
         let above = insert_surface(&mut state, 3);
@@ -5326,7 +5194,7 @@ mod surface_tree_render_tests {
 
     #[test]
     fn new_subsurface_defaults_below_parent() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let root_object_id = insert_surface(&mut state, 1);
         let child = insert_surface(&mut state, 2);
         let root_resolved = root(&state, root_object_id);
@@ -5371,7 +5239,7 @@ mod surface_tree_render_tests {
 
     #[test]
     fn collect_surface_snapshots_accumulates_nested_subsurface_offsets() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let root_object_id = insert_surface(&mut state, 1);
         let child = insert_surface(&mut state, 2);
         let grandchild = insert_surface(&mut state, 3);
@@ -5436,7 +5304,7 @@ mod surface_tree_render_tests {
 
     #[test]
     fn collect_cursor_surface_snapshots_walks_cursor_subsurface_tree() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let root_object_id = insert_surface(&mut state, 1);
         let child = insert_surface(&mut state, 2);
         let root_resolved = root(&state, root_object_id);

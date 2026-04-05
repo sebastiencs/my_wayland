@@ -1736,7 +1736,7 @@ impl State {
             .objects
             .try_ref_object::<WlSurface>(surface.object_id())?;
         let xdg_surface_id = wl_surface.xdg_surface()?;
-        let xdg_surface = xdg_surface_id.rref(self);
+        let _xdg_surface = xdg_surface_id.rref(self);
         let xdg_surface = self.objects.iter().find_map(|(_object_id, object)| {
             object
                 .downcast_ref::<crate::wayland_objects::xdg_surface::XdgSurface>()
@@ -2697,80 +2697,11 @@ mod tests {
         crate::{
             clients::{Client, ClientDispatcher, RawRequest},
             protocol_generated::{WaylandId, WlSurfaceId},
+            test_support::{
+                resolved_wl_surface as root, state_for_tests, test_output_with_crtc_name,
+            },
         },
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn root(state: &State, object_id: ObjectId) -> Resolved<WlSurfaceId> {
-        let surface = state
-            .objects
-            .try_ref_object::<WlSurface>(object_id)
-            .unwrap();
-        Resolved::new(surface.client_id(), surface.surface_id(), object_id)
-    }
-
-    fn make_output(
-        backend: BackendOutputRef,
-        drm_crtc_id: u32,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-    ) -> Output {
-        Output {
-            backend,
-            drm_crtc_id,
-            global_name: None,
-            gamma_lut_size: 0,
-            ctm_supported: false,
-            gamma_control_object_id: None,
-            x,
-            y,
-            physical_width: 0,
-            physical_height: 0,
-            scale: FractionalScale::ONE,
-            transform: 0,
-            make: String::new(),
-            model: String::new(),
-            name: format!("output-{drm_crtc_id}"),
-            description: String::new(),
-            enabled: true,
-            current_mode: OutputMode { width, height, refresh_millihz: 60_000 },
-            preferred_mode: None,
-        }
-    }
 
     #[derive(Debug)]
     struct TestObject {
@@ -3055,8 +2986,8 @@ mod tests {
 
     #[test]
     fn active_output_prefers_pointer_location_over_stored_fallback() {
-        let mut state = make_state();
-        let left = state.insert_output(make_output(
+        let mut state = state_for_tests();
+        let left = state.insert_output(test_output_with_crtc_name(
             BackendOutputRef::new(DrmId::from(1usize)),
             1,
             0,
@@ -3064,7 +2995,7 @@ mod tests {
             100,
             100,
         ));
-        let right = state.insert_output(make_output(
+        let right = state.insert_output(test_output_with_crtc_name(
             BackendOutputRef::new(DrmId::from(1usize)),
             2,
             100,
@@ -3084,8 +3015,8 @@ mod tests {
 
     #[test]
     fn output_for_surface_falls_back_to_current_output_without_bounds() {
-        let mut state = make_state();
-        let output_id = state.insert_output(make_output(
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_with_crtc_name(
             BackendOutputRef::new(DrmId::from(1usize)),
             1,
             0,
@@ -3108,9 +3039,10 @@ mod tests {
 
     #[test]
     fn insert_output_creates_workspace_group_and_default_workspace() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
 
         let group_id = state.workspace_group_for_output(output_id).unwrap();
         let workspace_id = state.active_workspace_for_output(output_id).unwrap();
@@ -3125,9 +3057,10 @@ mod tests {
 
     #[test]
     fn root_surface_visibility_tracks_active_workspace() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
         let group_id = state.workspace_group_for_output(output_id).unwrap();
         let first_workspace = state.active_workspace_for_output(output_id).unwrap();
         let second_workspace = state.create_workspace(Some(group_id), Some("2".to_string()));
@@ -3145,9 +3078,10 @@ mod tests {
 
     #[test]
     fn assigning_root_surface_creates_persistent_managed_state() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
         let workspace_id = state.active_workspace_for_output(output_id).unwrap();
 
         let (_, object_id) =
@@ -3175,7 +3109,7 @@ mod tests {
 
     #[test]
     fn xdg_decoration_policy_defaults_to_client_without_protocol() {
-        let state = make_state();
+        let state = state_for_tests();
 
         assert_eq!(
             state.xdg_decoration_mode_for_surface(None, false, None),
@@ -3185,9 +3119,10 @@ mod tests {
 
     #[test]
     fn xdg_decoration_policy_forces_server_side_for_tiled_windows() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
         let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
         let (_, object_id) = state.insert_object(WlSurface::new(
             WlSurfaceId::from(50u32),
@@ -3213,9 +3148,10 @@ mod tests {
 
     #[test]
     fn xdg_decoration_policy_honors_client_for_floating_windows() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
         let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
         let (_, object_id) = state.insert_object(WlSurface::new(
             WlSurfaceId::from(51u32),
@@ -3250,9 +3186,10 @@ mod tests {
 
     #[test]
     fn xdg_decoration_policy_uses_unset_mode_for_unset_requests() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
         let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
         let (_, object_id) = state.insert_object(WlSurface::new(
             WlSurfaceId::from(52u32),
@@ -3275,9 +3212,10 @@ mod tests {
 
     #[test]
     fn floating_mode_restores_last_floating_rect_when_reenabled() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
         let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
 
         let (_, object_id) =
@@ -3320,9 +3258,10 @@ mod tests {
 
     #[test]
     fn fullscreen_state_is_workspace_scoped_and_replaced_cleanly() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
         let workspace_id = state.active_workspace_for_output(output_id).unwrap();
 
         let (_, first_object_id) =
@@ -3368,9 +3307,10 @@ mod tests {
 
     #[test]
     fn fullscreen_round_trip_restores_floating_rect() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
         let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
 
         let (_, object_id) =
@@ -3405,10 +3345,12 @@ mod tests {
 
     #[test]
     fn moving_workspace_between_outputs_translates_assigned_root_surfaces() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let left_output = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
-        let right_output = state.insert_output(make_output(backend, 2, 200, 0, 100, 100));
+        let left_output =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let right_output =
+            state.insert_output(test_output_with_crtc_name(backend, 2, 200, 0, 100, 100));
         let left_workspace = state.active_workspace_for_output(left_output).unwrap();
         let right_group = state.workspace_group_for_output(right_output).unwrap();
 
@@ -3433,10 +3375,12 @@ mod tests {
 
     #[test]
     fn moving_workspace_between_outputs_translates_stored_floating_rects() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let left_output = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
-        let right_output = state.insert_output(make_output(backend, 2, 200, 0, 100, 100));
+        let left_output =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let right_output =
+            state.insert_output(test_output_with_crtc_name(backend, 2, 200, 0, 100, 100));
         let left_workspace = state.active_workspace_for_output(left_output).unwrap();
         let right_group = state.workspace_group_for_output(right_output).unwrap();
 
@@ -3464,10 +3408,12 @@ mod tests {
 
     #[test]
     fn moving_workspace_between_outputs_translates_pending_floating_restore_rects() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let left_output = state.insert_output(make_output(backend, 1, 0, 0, 100, 100));
-        let right_output = state.insert_output(make_output(backend, 2, 200, 0, 100, 100));
+        let left_output =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let right_output =
+            state.insert_output(test_output_with_crtc_name(backend, 2, 200, 0, 100, 100));
         let left_workspace = state.active_workspace_for_output(left_output).unwrap();
         let right_group = state.workspace_group_for_output(right_output).unwrap();
 
@@ -3495,7 +3441,7 @@ mod tests {
 
     #[test]
     fn create_workspace_with_missing_group_stays_unassigned() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
 
         let workspace_id = state.create_workspace(Some(WorkspaceGroupId::from(999usize)), None);
         let workspace = state.workspaces.try_get(workspace_id).unwrap();
@@ -3506,9 +3452,10 @@ mod tests {
 
     #[test]
     fn assign_workspace_to_missing_group_is_rejected() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
         let workspace_id = state.active_workspace_for_output(output_id).unwrap();
         let original_group = state.workspaces.try_get(workspace_id).unwrap().group;
 
@@ -3520,9 +3467,10 @@ mod tests {
 
     #[test]
     fn unassigning_workspace_clears_coordinates() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
         let workspace_id = state.active_workspace_for_output(output_id).unwrap();
 
         assert_eq!(state.workspaces.try_get(workspace_id).unwrap().coordinates, vec![1]);

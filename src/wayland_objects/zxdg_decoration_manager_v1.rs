@@ -121,74 +121,14 @@ mod tests {
         super::*,
         crate::{
             clients::{Client, ClientId, RawEvent},
-            drm::ARGB8888,
-            egl::EGL,
-            globals::Globals,
             io_uring::model::IoUringAction,
             protocol_generated::{WlBufferId, WlSurfaceId, XdgSurfaceId, XdgWmBaseId},
             runner::Dispatcher,
             state::{ObjectId, State},
-            wayland_objects::{
-                wl_buffer::{NewWlBufferParams, WlBuffer},
-                wl_shm_pool::shared_memory_from_bytes,
-                wl_surface::Role,
-                xdg_surface::XdgSurface,
-            },
-            xkb::Xkb,
+            test_support::{insert_test_shm_buffer, state_for_tests},
+            wayland_objects::{wl_surface::Role, xdg_surface::XdgSurface},
         },
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn insert_test_buffer(state: &mut State, client_id: ClientId) -> ObjectId {
-        let bytes = [0u8; 16];
-        state
-            .insert_object(
-                WlBuffer::new(NewWlBufferParams {
-                    id: WlBufferId::from(40),
-                    owner_client_id: client_id,
-                    offset: 0,
-                    width: 2,
-                    height: 2,
-                    stride: 8,
-                    format: &ARGB8888,
-                    mem: shared_memory_from_bytes(&bytes),
-                })
-                .unwrap(),
-            )
-            .1
-    }
 
     fn get_toplevel_decoration_request(
         manager_id: ZxdgDecorationManagerV1Id,
@@ -203,7 +143,7 @@ mod tests {
 
     #[test]
     fn get_toplevel_decoration_rejects_surfaces_with_existing_buffer() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(8));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -241,7 +181,8 @@ mod tests {
                 xdg_surface_id,
                 xdg_surface_object_id,
             ));
-            let buffer_object_id = insert_test_buffer(&mut state, client.client_id());
+            let buffer_object_id =
+                insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(40), 2, 2);
             surface.test_map(buffer_object_id, 0, 0, 2, 2);
         }
         let (toplevel_resolved, _) = client.insert_object(

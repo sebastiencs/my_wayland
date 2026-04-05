@@ -216,47 +216,12 @@ impl Object for ZwlrLayerShellV1 {
 mod tests {
     use crate::{
         clients::{Client, ClientId, ClientManagerAction, RawEvent},
-        egl::EGL,
-        globals::Globals,
         io_uring::model::IoUringAction,
         runner::Dispatcher,
-        xkb::Xkb,
+        test_support::state_for_tests,
     };
 
     use super::*;
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
 
     fn destroy_request(id: ZwlrLayerShellV1Id) -> crate::clients::RawRequest<'static> {
         let event = RawEvent::new(id.into(), 1, 0);
@@ -270,7 +235,7 @@ mod tests {
 
     #[test]
     fn destroy_requires_version_three() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let manager_id = ZwlrLayerShellV1Id::from(3u32);
         client.insert_object(
@@ -303,7 +268,7 @@ mod tests {
 
     #[test]
     fn malformed_requests_disconnect_the_client() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let manager_id = ZwlrLayerShellV1Id::from(3u32);
         client.insert_object(

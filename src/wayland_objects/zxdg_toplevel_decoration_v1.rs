@@ -205,48 +205,13 @@ mod tests {
         super::*,
         crate::{
             clients::{Client, ClientId, RawEvent},
-            egl::EGL,
-            globals::Globals,
             protocol_generated::{WlSurfaceId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId},
             runner::Dispatcher,
             state::{ObjectId, State},
+            test_support::state_for_tests,
             wayland_objects::wl_surface::{Role, WlSurface},
-            xkb::Xkb,
         },
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
 
     fn set_mode_request(
         decoration_id: ZxdgToplevelDecorationV1Id,
@@ -259,7 +224,7 @@ mod tests {
 
     #[test]
     fn set_mode_after_initial_configure_queues_xdg_configure_when_policy_is_unchanged() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(90));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -357,7 +322,7 @@ mod tests {
 
     #[test]
     fn unset_mode_after_initial_configure_queues_xdg_configure_when_policy_is_unchanged() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(91));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);

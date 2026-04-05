@@ -2237,54 +2237,21 @@ mod tests {
         super::*,
         crate::{
             clients::{Client, ClientId, Resolved},
-            egl::EGL,
-            globals::Globals,
             protocol_generated::{
                 WlSubsurfaceId, WlSurfaceId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
             },
             runner::Dispatcher,
             state::{ObjectId, State},
+            test_support::{
+                insert_wl_subsurface_client1 as insert_subsurface, resolved_wl_surface as root,
+                state_for_tests, test_resolved_wl_surface_client1,
+            },
             wayland_objects::{
-                wl_subsurface::WlSubsurface,
                 wl_surface::Role,
                 xdg_surface::{xdg_toplevel::ToplevelDecorationMode, XdgSurface},
             },
-            xkb::Xkb,
         },
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
 
     fn insert_root_xdg_toplevel(
         state: &mut State,
@@ -2336,39 +2303,11 @@ mod tests {
         (surface_object_id, xdg_surface_object_id, toplevel_object_id)
     }
 
-    fn fake_surface(raw: usize) -> Resolved<WlSurfaceId> {
-        Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(raw as u32), ObjectId::from(raw))
-    }
-
-    fn root(state: &State, object_id: ObjectId) -> Resolved<WlSurfaceId> {
-        let surface = state
-            .objects
-            .try_ref_object::<WlSurface>(object_id)
-            .unwrap();
-        Resolved::new(surface.client_id(), surface.surface_id(), object_id)
-    }
-
-    fn insert_subsurface(
-        state: &mut State,
-        id: WlSubsurfaceId,
-        surface_object_id: ObjectId,
-        parent_object_id: ObjectId,
-    ) -> Resolved<WlSubsurfaceId> {
-        let object_id = state
-            .insert_object(WlSubsurface::new(
-                id,
-                root(state, surface_object_id),
-                root(state, parent_object_id),
-            ))
-            .1;
-        Resolved::new(ClientId::from_raw(1), id, object_id)
-    }
-
     #[test]
     fn tiled_resize_uses_grab_start_weights() {
         let mut layout = WorkspaceLayout::default();
-        let left = fake_surface(1);
-        let right = fake_surface(2);
+        let left = test_resolved_wl_surface_client1(1);
+        let right = test_resolved_wl_surface_client1(2);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -2403,7 +2342,7 @@ mod tests {
     #[test]
     fn fullscreen_layout_applies_to_floating_surface() {
         let mut layout = WorkspaceLayout::default();
-        let floating = fake_surface(3);
+        let floating = test_resolved_wl_surface_client1(3);
         layout.floating.stack.push(floating);
         assert!(layout.set_fullscreen(Some(floating)));
 
@@ -2430,9 +2369,9 @@ mod tests {
     #[test]
     fn inserting_after_focus_can_create_vertical_subsplit() {
         let mut layout = WorkspaceLayout::default();
-        let first = fake_surface(4);
-        let second = fake_surface(5);
-        let third = fake_surface(6);
+        let first = test_resolved_wl_surface_client1(4);
+        let second = test_resolved_wl_surface_client1(5);
+        let third = test_resolved_wl_surface_client1(6);
 
         assert!(layout.insert_tiled(first));
         assert!(layout.insert_tiled(second));
@@ -2460,8 +2399,8 @@ mod tests {
     #[test]
     fn removing_focused_leaf_selects_remaining_tiled_focus() {
         let mut layout = WorkspaceLayout::default();
-        let first = fake_surface(7);
-        let second = fake_surface(8);
+        let first = test_resolved_wl_surface_client1(7);
+        let second = test_resolved_wl_surface_client1(8);
 
         assert!(layout.insert_tiled(first));
         assert!(layout.insert_tiled(second));
@@ -2481,7 +2420,7 @@ mod tests {
     #[test]
     fn removing_last_leaf_from_nested_container_cleans_up_empty_ancestors() {
         let mut layout = WorkspaceLayout::default();
-        let leaf_surface = fake_surface(9);
+        let leaf_surface = test_resolved_wl_surface_client1(9);
         let leaf_id = layout.alloc_leaf(leaf_surface, None);
         let inner_id = layout.alloc_container(
             SplitAxis::Vertical,
@@ -2509,8 +2448,8 @@ mod tests {
     #[test]
     fn layout_handles_minimums_larger_than_available_space() {
         let mut layout = WorkspaceLayout::default();
-        let left = fake_surface(10);
-        let right = fake_surface(11);
+        let left = test_resolved_wl_surface_client1(10);
+        let right = test_resolved_wl_surface_client1(11);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -2544,8 +2483,8 @@ mod tests {
     #[test]
     fn inner_gap_inserts_spacing_between_sibling_tiles() {
         let mut layout = WorkspaceLayout::default();
-        let left = fake_surface(12);
-        let right = fake_surface(13);
+        let left = test_resolved_wl_surface_client1(12);
+        let right = test_resolved_wl_surface_client1(13);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -2565,8 +2504,8 @@ mod tests {
     #[test]
     fn tiled_edges_are_relative_to_gapped_tiling_bounds() {
         let mut layout = WorkspaceLayout::default();
-        let left = fake_surface(14);
-        let right = fake_surface(15);
+        let left = test_resolved_wl_surface_client1(14);
+        let right = test_resolved_wl_surface_client1(15);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -2609,7 +2548,7 @@ mod tests {
     #[test]
     fn window_geometry_derives_per_edge_decoration_insets() {
         let surface = WlSurface::new(WlSurfaceId::from(30u32), ClientId::from_raw(31), 6);
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let (surface_resolved, _) =
             Client::new_for_tests(ClientId::from_raw(32)).insert_object(&mut state, surface);
         let surface_object_id = surface_resolved.object_id();
@@ -2637,7 +2576,7 @@ mod tests {
 
     #[test]
     fn tiled_root_position_aligns_negative_origin_geometry_to_frame_rect() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(44));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -2718,7 +2657,7 @@ mod tests {
 
     #[test]
     fn tiled_root_position_aligns_positive_origin_geometry_to_frame_rect() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(60));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -2763,7 +2702,7 @@ mod tests {
 
     #[test]
     fn effective_decoration_insets_fall_back_to_config_without_explicit_geometry() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         state.config.general.decoration_insets =
             DecorationInsets { top: 7, right: 1, bottom: 2, left: 3 };
         let mut client = Client::new_for_tests(ClientId::from_raw(40));
@@ -2788,7 +2727,7 @@ mod tests {
 
     #[test]
     fn effective_decoration_insets_use_explicit_window_geometry_for_csd() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         state.config.general.decoration_insets =
             DecorationInsets { top: 1, right: 1, bottom: 1, left: 1 };
         let mut client = Client::new_for_tests(ClientId::from_raw(50));
@@ -2857,7 +2796,7 @@ mod tests {
 
     #[test]
     fn effective_decoration_insets_clamp_window_geometry_to_surface_tree_bounds() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         state.config.general.decoration_insets =
             DecorationInsets { top: 1, right: 1, bottom: 1, left: 1 };
         let mut client = Client::new_for_tests(ClientId::from_raw(55));
@@ -2926,7 +2865,7 @@ mod tests {
 
     #[test]
     fn server_side_decoration_mode_uses_configured_fallback_insets() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         state.config.general.decoration_insets =
             DecorationInsets { top: 2, right: 3, bottom: 4, left: 5 };
         let mut client = Client::new_for_tests(ClientId::from_raw(60));
@@ -2966,7 +2905,7 @@ mod tests {
     #[test]
     fn fullscreen_layout_ignores_gaps_and_insets() {
         let mut layout = WorkspaceLayout::default();
-        let surface = fake_surface(16);
+        let surface = test_resolved_wl_surface_client1(16);
         layout.floating.stack.push(surface);
         assert!(layout.set_fullscreen(Some(surface)));
 
@@ -2987,8 +2926,8 @@ mod tests {
     #[test]
     fn mixed_decoration_insets_shrink_each_leaf_independently() {
         let mut layout = WorkspaceLayout::default();
-        let left = fake_surface(160);
-        let right = fake_surface(161);
+        let left = test_resolved_wl_surface_client1(160);
+        let right = test_resolved_wl_surface_client1(161);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -3012,8 +2951,8 @@ mod tests {
     #[test]
     fn minimum_size_fallback_accounts_for_inner_gaps() {
         let mut layout = WorkspaceLayout::default();
-        let left = fake_surface(17);
-        let right = fake_surface(18);
+        let left = test_resolved_wl_surface_client1(17);
+        let right = test_resolved_wl_surface_client1(18);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -3037,8 +2976,8 @@ mod tests {
     #[test]
     fn node_minimum_size_uses_per_surface_decoration_insets() {
         let mut layout = WorkspaceLayout::default();
-        let left = fake_surface(170);
-        let right = fake_surface(171);
+        let left = test_resolved_wl_surface_client1(170);
+        let right = test_resolved_wl_surface_client1(171);
         assert!(layout.insert_tiled(left));
         assert!(layout.insert_tiled(right));
 
@@ -3060,9 +2999,9 @@ mod tests {
     #[test]
     fn nested_container_minimum_uses_effective_gap_from_size_hint() {
         let mut layout = WorkspaceLayout::default();
-        let first = fake_surface(19);
-        let second = fake_surface(20);
-        let third = fake_surface(21);
+        let first = test_resolved_wl_surface_client1(19);
+        let second = test_resolved_wl_surface_client1(20);
+        let third = test_resolved_wl_surface_client1(21);
         let first_id = layout.alloc_leaf(first, None);
         let second_id = layout.alloc_leaf(second, None);
         let third_id = layout.alloc_leaf(third, None);
@@ -3096,9 +3035,9 @@ mod tests {
     #[test]
     fn nested_splits_propagate_internal_tiled_edge_constraints() {
         let mut layout = WorkspaceLayout::default();
-        let first = fake_surface(22);
-        let second = fake_surface(23);
-        let third = fake_surface(24);
+        let first = test_resolved_wl_surface_client1(22);
+        let second = test_resolved_wl_surface_client1(23);
+        let third = test_resolved_wl_surface_client1(24);
         assert!(layout.insert_tiled(first));
         assert!(layout.insert_tiled(second));
         assert!(layout.insert_tiled(third));

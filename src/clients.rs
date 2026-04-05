@@ -2783,77 +2783,18 @@ mod clients_wire_tests {
 mod surface_output_refresh_tests {
     use crate::{
         clients::{Client, ClientId, Resolved},
-        egl::EGL,
-        globals::Globals,
         io_uring::model::IoUringAction,
         runner::Dispatcher,
-        state::{BackendOutputRef, DrmId, FractionalScale, ObjectId, Output, OutputMode, State},
+        state::{FractionalScale, ObjectId},
+        test_support::{state_for_tests, test_output_drm1},
         wayland_objects::{wl_surface::WlSurface, wp_fractional_scale_v1::WpFractionalScaleV1},
-        xkb::Xkb,
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn make_output(x: i32, y: i32, width: i32, height: i32) -> Output {
-        Output {
-            backend: BackendOutputRef::new(DrmId::from(1usize)),
-            drm_crtc_id: 1,
-            global_name: None,
-            gamma_lut_size: 0,
-            ctm_supported: false,
-            gamma_control_object_id: None,
-            x,
-            y,
-            physical_width: 0,
-            physical_height: 0,
-            scale: FractionalScale::ONE,
-            transform: 0,
-            make: String::new(),
-            model: String::new(),
-            name: "output-1".to_string(),
-            description: String::new(),
-            enabled: true,
-            current_mode: OutputMode { width, height, refresh_millihz: 60_000 },
-            preferred_mode: None,
-        }
-    }
 
     #[test]
     fn refresh_surface_outputs_resends_fractional_scale_when_output_scale_changes() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(9));
-        let output_id = state.insert_output(make_output(0, 0, 200, 120));
+        let output_id = state.insert_output(test_output_drm1(0, 0, 200, 120));
         let surface_id = crate::protocol_generated::WlSurfaceId::from(10u32);
         let fractional_id = crate::protocol_generated::WpFractionalScaleV1Id::from(11u32);
         let (surface_resolved, _) =

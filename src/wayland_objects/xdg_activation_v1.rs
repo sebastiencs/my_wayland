@@ -109,56 +109,17 @@ mod tests {
         super::{XdgActivationV1, XdgActivationV1Global},
         crate::{
             clients::{Client, ClientId, RawEvent},
-            egl::EGL,
-            globals::Globals,
             object::Object,
             protocol_generated::{
                 Constants, WlSeatId, WlSurfaceId, XdgActivationTokenV1Id, XdgActivationV1Id,
             },
             runner::Dispatcher,
-            seat::{handle_keyboard_key, set_keyboard_focus_from_surface, SurfaceFocus},
+            seat::{handle_keyboard_key, set_keyboard_focus_from_surface},
             state::{ObjectId, State},
+            test_support::{focus_for_surface, state_for_tests, test_client_and_dispatcher},
             wayland_objects::{wl_seat::WlSeat, wl_surface::WlSurface},
-            xkb::Xkb,
         },
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn make_client(id: u64) -> (Client, Dispatcher) {
-        (Client::new_for_tests(ClientId::from_raw(id)), Dispatcher::default())
-    }
 
     fn insert_mapped_surface(
         state: &mut State,
@@ -190,14 +151,6 @@ mod tests {
 
     fn insert_seat(state: &mut State, client: &mut Client, seat_id: WlSeatId) {
         client.insert_object(state, WlSeat::new(seat_id));
-    }
-
-    fn focus_for_surface(
-        client_id: ClientId,
-        surface_id: WlSurfaceId,
-        object_id: ObjectId,
-    ) -> SurfaceFocus {
-        SurfaceFocus::new(crate::clients::Resolved::new(client_id, surface_id, object_id))
     }
 
     fn get_activation_token_request(
@@ -247,8 +200,8 @@ mod tests {
 
     #[test]
     fn valid_token_commit_and_activate_raises_and_focuses_target() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client(1);
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(1);
         let requester_surface_id = WlSurfaceId::from(10u32);
         let target_surface_id = WlSurfaceId::from(11u32);
         let target_object_id =
@@ -341,8 +294,8 @@ mod tests {
 
     #[test]
     fn invalid_serial_commit_returns_untracked_token() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client(2);
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(2);
         let surface_id = WlSurfaceId::from(30u32);
         let manager_id = XdgActivationV1Id::from(31u32);
         let token_id = XdgActivationTokenV1Id::from(32u32);
@@ -390,8 +343,8 @@ mod tests {
 
     #[test]
     fn double_commit_keeps_single_tracked_token() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client(3);
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(3);
         let surface_id = WlSurfaceId::from(40u32);
         let manager_id = XdgActivationV1Id::from(41u32);
         let token_id = XdgActivationTokenV1Id::from(42u32);
@@ -455,8 +408,8 @@ mod tests {
 
     #[test]
     fn expired_token_is_ignored_on_activate() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client(4);
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(4);
         let requester_surface_id = WlSurfaceId::from(50u32);
         let target_surface_id = WlSurfaceId::from(51u32);
         let requester_object_id =
@@ -549,8 +502,8 @@ mod tests {
 
     #[test]
     fn unknown_token_is_ignored_on_activate() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client(5);
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(5);
         let requester_surface_id = WlSurfaceId::from(60u32);
         let target_surface_id = WlSurfaceId::from(61u32);
         let requester_object_id =

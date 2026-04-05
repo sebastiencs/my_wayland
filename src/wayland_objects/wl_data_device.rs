@@ -296,8 +296,6 @@ mod tests {
         super::{set_selection, start_drag, WlDataDevice},
         crate::{
             clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent, Resolved},
-            egl::EGL,
-            globals::Globals,
             object::Object,
             protocol_generated::{WlDataDeviceId, WlDataSourceId, WlSeatId, WlSurfaceId},
             runner::Dispatcher,
@@ -306,67 +304,22 @@ mod tests {
                 DataOfferRole, DragNegotiationState, DragPhase, DragSource, DragState,
                 DragTargetState, ObjectId, State,
             },
+            test_support::{state_for_tests, test_client_and_dispatcher, test_resolved_wl_surface},
             wayland_objects::{
                 wl_data_offer::WlDataOffer, wl_data_source::WlDataSource, wl_surface::WlSurface,
             },
-            xkb::Xkb,
         },
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn make_client(id: u64) -> (Client, Dispatcher) {
-        (Client::new_for_tests(ClientId::from_raw(id)), Dispatcher::default())
-    }
 
     fn release_request(data_device_id: WlDataDeviceId) -> crate::clients::RawRequest<'static> {
         let event = RawEvent::new(data_device_id.into(), 2, 0);
         (&*event.into_bytes()).try_into().unwrap()
     }
 
-    fn fake_surface(
-        client_id: ClientId,
-        surface_id: u32,
-        object_id: ObjectId,
-    ) -> Resolved<WlSurfaceId> {
-        Resolved::new(client_id, surface_id.into(), object_id)
-    }
-
     #[test]
     fn set_selection_requires_keyboard_focus() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client(1);
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(1);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
         let mut data_device = WlDataDevice::new(WlDataDeviceId::from(2), WlSeatId::from(2), 3);
         let source_id = WlDataSourceId::from(3);
@@ -387,8 +340,8 @@ mod tests {
 
     #[test]
     fn start_drag_rejects_keyboard_serial_without_pointer_grab() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client(1);
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(1);
         let mut setup_dispatcher = client.test_dispatcher(&mut dispatcher);
         let mut data_device = WlDataDevice::new(WlDataDeviceId::from(2), WlSeatId::from(2), 3);
         let origin_id = WlSurfaceId::from(10);
@@ -425,8 +378,8 @@ mod tests {
 
     #[test]
     fn set_selection_accepts_older_issued_serial() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client(1);
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(1);
         let mut setup_dispatcher = client.test_dispatcher(&mut dispatcher);
         let mut data_device = WlDataDevice::new(WlDataDeviceId::from(2), WlSeatId::from(2), 3);
         let source_id = WlDataSourceId::from(3);
@@ -464,8 +417,8 @@ mod tests {
 
     #[test]
     fn release_runs_drag_offer_cleanup() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client(2);
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(2);
         let data_device_id = WlDataDeviceId::from(2);
         let offer_id = crate::protocol_generated::WlDataOfferId::from(20);
         let source_id = WlDataSourceId::from(10);
@@ -493,10 +446,10 @@ mod tests {
             source: DragSource::DataSource {
                 source: Resolved::new(source_client_id, source_id, ObjectId::from(0usize)),
             },
-            origin_surface: fake_surface(source_client_id, 30, ObjectId::from(30usize)),
+            origin_surface: test_resolved_wl_surface(source_client_id, 30, ObjectId::from(30usize)),
             icon_surface: None,
             target: Some(DragTargetState {
-                surface: fake_surface(client.client_id(), 31, ObjectId::from(0usize)),
+                surface: test_resolved_wl_surface(client.client_id(), 31, ObjectId::from(0usize)),
             }),
             negotiation: DragNegotiationState {
                 offer_ids: vec![Resolved::new(

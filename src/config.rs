@@ -887,41 +887,8 @@ fn nearest_existing_directory(path: &Path) -> PathBuf {
 mod tests {
     use {
         super::*,
-        crate::{egl::EGL, globals::Globals, runner::Dispatcher, seat::SeatState, state::State},
+        crate::{runner::Dispatcher, test_support::state_for_tests_with_config},
     };
-
-    fn make_state(config: RuntimeConfig) -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config,
-            seat: SeatState::default(),
-            keyboard,
-            xkb,
-        }
-    }
 
     #[test]
     fn parses_toml_binding_with_aliases() {
@@ -1122,7 +1089,7 @@ mod tests {
 
         let xkb = Xkb::new();
         let config = RuntimeConfig::load_from_path(&path, &xkb).unwrap();
-        let mut state = make_state(config.clone());
+        let mut state = state_for_tests_with_config(config.clone());
         state.config.path = path.clone();
         let mut dispatcher = Dispatcher::default();
 

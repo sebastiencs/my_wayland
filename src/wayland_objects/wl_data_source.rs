@@ -216,8 +216,6 @@ mod tests {
         super::{destroy_source, WlDataSource},
         crate::{
             clients::{Client, ClientAction, ClientId, DataSourceClientEvent, Resolved},
-            egl::EGL,
-            globals::Globals,
             protocol_generated::{WlDataSourceId, WlSurfaceId},
             runner::Dispatcher,
             seat::{set_keyboard_focus_from_surface, SurfaceFocus},
@@ -225,59 +223,18 @@ mod tests {
                 DragPhase, DragSource, DragState, DragTargetState, ObjectId, SelectionSourceState,
                 State,
             },
+            test_support::{state_for_tests, test_resolved_wl_surface},
             wayland_objects::wl_surface::WlSurface,
-            xkb::Xkb,
         },
     };
-
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
 
     fn insert_surface(state: &mut State, client_id: ClientId, surface_id: u32) {
         let _ = state.insert_object(WlSurface::new(surface_id.into(), client_id, 6));
     }
 
-    fn fake_surface(
-        client_id: ClientId,
-        surface_id: u32,
-        object_id: ObjectId,
-    ) -> Resolved<WlSurfaceId> {
-        Resolved::new(client_id, surface_id.into(), object_id)
-    }
-
     #[test]
     fn source_disconnect_clears_selection_and_refreshes_focused_client() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut owner = Client::new_for_tests(ClientId::from_raw(1));
         let focused_client_id = ClientId::from_raw(2);
         let owner_client_id = owner.client_id();
@@ -323,7 +280,7 @@ mod tests {
 
     #[test]
     fn source_disconnect_cancels_active_drag_and_notifies_target() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut owner = Client::new_for_tests(ClientId::from_raw(1));
         let target_client_id = ClientId::from_raw(2);
         let owner_client_id = owner.client_id();
@@ -336,10 +293,14 @@ mod tests {
             source: DragSource::DataSource {
                 source: Resolved::new(owner.client_id(), source_id, source_object_id),
             },
-            origin_surface: fake_surface(owner.client_id(), 20, ObjectId::from(20usize)),
+            origin_surface: test_resolved_wl_surface(
+                owner.client_id(),
+                20,
+                ObjectId::from(20usize),
+            ),
             icon_surface: None,
             target: Some(DragTargetState {
-                surface: fake_surface(target_client_id, 21, ObjectId::from(0usize)),
+                surface: test_resolved_wl_surface(target_client_id, 21, ObjectId::from(0usize)),
             }),
             negotiation: Default::default(),
             phase: DragPhase::Dragging,

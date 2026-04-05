@@ -2710,9 +2710,6 @@ mod tests {
         crate::{
             clients::{Client, ClientId, ClientManagerAction, RawEvent, RawRequest, Resolved},
             cursor::CursorSourceRef,
-            drm::ARGB8888,
-            egl::EGL,
-            globals::Globals,
             io_uring::model::IoUringAction,
             object::Object,
             protocol_generated::{
@@ -2726,10 +2723,14 @@ mod tests {
                 BackendOutputRef, DrmId, FractionalScale, ObjectId, Output, OutputMode, State,
             },
             sync::SurfaceSyncState,
+            test_support::{
+                get_toplevel_request, insert_test_shm_buffer, raw_request_from_event,
+                resolved_wl_surface as root, state_for_tests, test_client_and_dispatcher,
+                test_output_with_crtc_name,
+            },
             transform::{self, BufferTransform, SizeI, SurfaceViewport},
             wayland_objects::{
-                wl_buffer::{NewWlBufferParams, WlBuffer},
-                wl_shm_pool::shared_memory_from_bytes,
+                wl_buffer::WlBuffer,
                 wl_subsurface::WlSubsurface,
                 wp_fractional_scale_v1::WpFractionalScaleV1,
                 wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
@@ -2739,7 +2740,6 @@ mod tests {
                     XdgSurface,
                 },
             },
-            xkb::Xkb,
         },
     };
 
@@ -2765,47 +2765,6 @@ mod tests {
         surface
     }
 
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn root(state: &State, object_id: ObjectId) -> Resolved<WlSurfaceId> {
-        let surface = state
-            .objects
-            .try_ref_object::<WlSurface>(object_id)
-            .unwrap();
-        Resolved::new(surface.client_id(), surface.surface_id(), object_id)
-    }
-
     fn insert_subsurface_object(
         state: &mut State,
         id: WlSubsurfaceId,
@@ -2829,37 +2788,6 @@ mod tests {
         subsurface
     }
 
-    fn make_output(
-        backend: BackendOutputRef,
-        drm_crtc_id: u32,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-    ) -> Output {
-        Output {
-            backend,
-            drm_crtc_id,
-            global_name: None,
-            gamma_lut_size: 0,
-            ctm_supported: false,
-            gamma_control_object_id: None,
-            x,
-            y,
-            physical_width: 0,
-            physical_height: 0,
-            scale: FractionalScale::ONE,
-            transform: 0,
-            make: String::new(),
-            model: String::new(),
-            name: format!("output-{drm_crtc_id}"),
-            description: String::new(),
-            enabled: true,
-            current_mode: OutputMode { width, height, refresh_millihz: 60_000 },
-            preferred_mode: None,
-        }
-    }
-
     fn insert_surface(state: &mut State, surface: WlSurface) -> ObjectId {
         let object_id = state.insert_object(surface).1;
         state.register_root_surface(object_id);
@@ -2880,10 +2808,6 @@ mod tests {
             ))
             .unwrap();
         object_id
-    }
-
-    fn make_client() -> (Client, Dispatcher) {
-        (Client::new_for_tests(ClientId::from_raw(9)), Dispatcher::default())
     }
 
     fn region_value(x: i32, y: i32, width: i32, height: i32) -> RegionValue {
@@ -2916,49 +2840,10 @@ mod tests {
         )
     }
 
-    fn get_toplevel_request(
-        xdg_surface_id: XdgSurfaceId,
-        toplevel_id: XdgToplevelId,
-    ) -> RawRequest<'static> {
-        let mut event = RawEvent::new(xdg_surface_id.into(), 1, 1);
-        event.id(toplevel_id);
-        (&*event.into_bytes()).try_into().unwrap()
-    }
-
     fn ack_configure_request(xdg_surface_id: XdgSurfaceId, serial: u32) -> RawRequest<'static> {
         let mut event = RawEvent::new(xdg_surface_id.into(), 4, 1);
         event.uint(serial);
-        (&*event.into_bytes()).try_into().unwrap()
-    }
-
-    fn insert_test_buffer(state: &mut State, client_id: ClientId) -> ObjectId {
-        insert_test_buffer_sized(state, client_id, WlBufferId::from(90), 2, 2)
-    }
-
-    fn insert_test_buffer_sized(
-        state: &mut State,
-        client_id: ClientId,
-        id: WlBufferId,
-        width: i32,
-        height: i32,
-    ) -> ObjectId {
-        let byte_len = (width.max(1) * height.max(1) * 4) as usize;
-        let bytes = vec![0u8; byte_len];
-        state
-            .insert_object(
-                WlBuffer::new(NewWlBufferParams {
-                    id,
-                    owner_client_id: client_id,
-                    offset: 0,
-                    width,
-                    height,
-                    stride: width.saturating_mul(4),
-                    format: &ARGB8888,
-                    mem: shared_memory_from_bytes(&bytes),
-                })
-                .unwrap(),
-            )
-            .1
+        raw_request_from_event(event)
     }
 
     fn create_root_xdg_toplevel(
@@ -3049,7 +2934,7 @@ mod tests {
     #[test]
     fn cursor_role_conflicts_with_xdg_role() {
         let mut surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(3), 6);
-        let (mut client, mut dispatcher) = make_client();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         assert!(surface.set_cursor_role(&mut client_dispatcher).is_ok());
@@ -3062,8 +2947,8 @@ mod tests {
 
     #[test]
     fn deleting_active_cursor_surface_clears_seat_cursor_state() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
         let (surface_resolved, _) = client
             .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(5), client.client_id(), 6));
@@ -3091,8 +2976,8 @@ mod tests {
 
     #[test]
     fn deleting_surface_removes_surface_extension_objects() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
         let surface_id = WlSurfaceId::from(5);
         let (surface_resolved, _) =
@@ -3175,10 +3060,11 @@ mod tests {
 
     #[test]
     fn mapping_root_xdg_toplevel_schedules_workspace_relayout() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
-        let (mut client, mut dispatcher) = make_client();
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
 
         let surface_id = WlSurfaceId::from(50);
         let xdg_surface_id = XdgSurfaceId::from(60);
@@ -3198,7 +3084,8 @@ mod tests {
             surface_object_id,
             xdg_surface_id,
         );
-        let buffer_object_id = insert_test_buffer(&mut state, client.client_id());
+        let buffer_object_id =
+            insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(90), 2, 2);
         {
             let surface = state
                 .objects
@@ -3221,10 +3108,11 @@ mod tests {
 
     #[test]
     fn tiled_root_initial_configure_uses_tile_size() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(2usize));
-        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
-        let (mut client, mut dispatcher) = make_client();
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
 
         let surface_object_id = create_root_xdg_toplevel(
             &mut state,
@@ -3266,12 +3154,13 @@ mod tests {
 
     #[test]
     fn tiled_root_initial_configure_uses_frame_size_with_decoration_insets() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         state.config.general.decoration_insets =
             crate::config::DecorationInsets { top: 11, right: 7, bottom: 5, left: 3 };
         let backend = BackendOutputRef::new(DrmId::from(22usize));
-        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
-        let (mut client, mut dispatcher) = make_client();
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
 
         let surface_object_id = create_root_xdg_toplevel(
             &mut state,
@@ -3299,10 +3188,11 @@ mod tests {
 
     #[test]
     fn floating_root_initial_configure_stays_generic() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(3usize));
-        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
-        let (mut client, mut dispatcher) = make_client();
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
 
         let surface_object_id = create_root_xdg_toplevel(
             &mut state,
@@ -3338,10 +3228,11 @@ mod tests {
 
     #[test]
     fn fullscreen_root_initial_configure_uses_fullscreen_layout() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(4usize));
-        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
-        let (mut client, mut dispatcher) = make_client();
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
 
         let surface_object_id = create_root_xdg_toplevel(
             &mut state,
@@ -3374,10 +3265,11 @@ mod tests {
 
     #[test]
     fn first_map_clears_pending_initial_layout_state() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(5usize));
-        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
-        let (mut client, mut dispatcher) = make_client();
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
 
         let surface_object_id = create_root_xdg_toplevel(
             &mut state,
@@ -3398,7 +3290,8 @@ mod tests {
             .managed_root_surface_state(root(&state, surface_object_id))
             .is_some_and(|managed| managed.pending_initial_layout));
 
-        let buffer_object_id = insert_test_buffer(&mut state, client.client_id());
+        let buffer_object_id =
+            insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(90), 2, 2);
         {
             let surface = state
                 .objects
@@ -3420,10 +3313,11 @@ mod tests {
 
     #[test]
     fn buffer_resize_without_new_window_geometry_relayouts_tiled_insets() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(7usize));
-        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
-        let (mut client, mut dispatcher) = make_client();
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
 
         let surface_object_id = create_root_xdg_toplevel(
             &mut state,
@@ -3479,7 +3373,7 @@ mod tests {
         }
 
         let initial_buffer_object_id =
-            insert_test_buffer_sized(&mut state, client.client_id(), WlBufferId::from(143), 2, 2);
+            insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(143), 2, 2);
         {
             let surface = state
                 .objects
@@ -3535,7 +3429,7 @@ mod tests {
         );
 
         let resized_buffer_object_id =
-            insert_test_buffer_sized(&mut state, client.client_id(), WlBufferId::from(144), 4, 2);
+            insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(144), 4, 2);
         {
             let surface = state
                 .objects
@@ -3572,10 +3466,11 @@ mod tests {
 
     #[test]
     fn stale_pending_root_does_not_shrink_next_initial_configure() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(6usize));
-        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
-        let (mut client, mut dispatcher) = make_client();
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
 
         let first_surface_object_id = create_root_xdg_toplevel(
             &mut state,
@@ -3632,10 +3527,11 @@ mod tests {
 
     #[test]
     fn rejected_commit_does_not_apply_pending_window_geometry() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(23usize));
-        let _output_id = state.insert_output(make_output(backend, 1, 0, 0, 1280, 720));
-        let (mut client, mut dispatcher) = make_client();
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
 
         let surface_object_id = create_root_xdg_toplevel(
             &mut state,
@@ -3653,7 +3549,8 @@ mod tests {
             XdgSurfaceId::from(191),
         );
 
-        let buffer_object_id = insert_test_buffer(&mut state, client.client_id());
+        let buffer_object_id =
+            insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(90), 2, 2);
         {
             let surface = state
                 .objects
@@ -3722,8 +3619,8 @@ mod tests {
 
     #[test]
     fn configure_bounds_falls_back_to_current_output_without_surface_geometry() {
-        let mut state = make_state();
-        let output_id = state.insert_output(make_output(
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_with_crtc_name(
             BackendOutputRef::new(DrmId::from(1usize)),
             1,
             0,
@@ -3758,8 +3655,8 @@ mod tests {
 
     #[test]
     fn configure_bounds_for_object_works_while_surface_is_grabbed() {
-        let mut state = make_state();
-        let output_id = state.insert_output(make_output(
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_with_crtc_name(
             BackendOutputRef::new(DrmId::from(1usize)),
             1,
             0,
@@ -3779,8 +3676,8 @@ mod tests {
 
     #[test]
     fn preferred_buffer_state_sends_v6_hints_once_per_change() {
-        let mut state = make_state();
-        let output_id = state.insert_output(make_output(
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_with_crtc_name(
             BackendOutputRef::new(DrmId::from(1usize)),
             1,
             0,
@@ -3798,7 +3695,7 @@ mod tests {
             WlSurface::new(WlSurfaceId::from(9), ClientId::from_raw(6), 6),
         );
         let mut surface = WlSurface::new(WlSurfaceId::from(9), ClientId::from_raw(6), 6);
-        let (client, mut dispatcher) = make_client();
+        let (client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         surface.send_preferred_buffer_state_for_object(
@@ -3832,8 +3729,8 @@ mod tests {
 
     #[test]
     fn preferred_fractional_scale_sends_once_per_scale_value() {
-        let mut state = make_state();
-        let output_id = state.insert_output(make_output(
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_with_crtc_name(
             BackendOutputRef::new(DrmId::from(1usize)),
             1,
             0,
@@ -3857,7 +3754,7 @@ mod tests {
             fractional_object_id,
         ));
 
-        let (client, mut dispatcher) = make_client();
+        let (client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
         surface.send_preferred_fractional_scale_for_object(
@@ -3893,8 +3790,8 @@ mod tests {
 
     #[test]
     fn preferred_fractional_scale_updates_when_surface_moves_outputs() {
-        let mut state = make_state();
-        let left_output = state.insert_output(make_output(
+        let mut state = state_for_tests();
+        let left_output = state.insert_output(test_output_with_crtc_name(
             BackendOutputRef::new(DrmId::from(1usize)),
             1,
             0,
@@ -3902,7 +3799,7 @@ mod tests {
             200,
             120,
         ));
-        let right_output = state.insert_output(make_output(
+        let right_output = state.insert_output(test_output_with_crtc_name(
             BackendOutputRef::new(DrmId::from(1usize)),
             2,
             200,
@@ -3927,7 +3824,7 @@ mod tests {
         ));
         surface.update_output_membership(vec![left_output]);
 
-        let (client, mut dispatcher) = make_client();
+        let (client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
         surface.send_preferred_fractional_scale_for_object(
             &state,
@@ -3969,7 +3866,7 @@ mod tests {
 
     #[test]
     fn parent_commit_applies_pending_child_positions_and_stack_order() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let parent_object_id = insert_surface(
             &mut state,
             WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(1), 6),
@@ -4063,7 +3960,7 @@ mod tests {
 
     #[test]
     fn synchronized_behavior_inherits_from_sync_ancestors() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let root_object_id = insert_surface(
             &mut state,
             WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(1), 6),
@@ -4149,7 +4046,7 @@ mod tests {
 
     #[test]
     fn restack_relative_to_sibling_updates_pending_order() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let parent_object_id = insert_surface(
             &mut state,
             WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(1), 6),
@@ -4242,7 +4139,7 @@ mod tests {
 
     #[test]
     fn applying_unchanged_tree_state_is_idempotent() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let parent_object_id = insert_surface(
             &mut state,
             WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(1), 6),
@@ -4378,9 +4275,9 @@ mod tests {
     fn backend_discard_also_clears_unassigned_feedbacks() {
         let mut surface = make_surface();
         surface.pending_presentation_feedbacks = vec![feedback(41, 2)];
-        let (mut client, mut dispatcher) = make_client();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut dispatcher = client.test_dispatcher(&mut dispatcher);
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let backend = crate::state::BackendOutputRef::new(crate::state::DrmId::from(0usize));
 
         surface.discard_presentation_feedbacks_for_backend(
@@ -4395,8 +4292,8 @@ mod tests {
 
     #[test]
     fn deleting_parent_surface_detaches_and_unmaps_child_subtree() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut dispatcher = client.test_dispatcher(&mut dispatcher);
 
         let (parent_resolved_insert, _) = client
@@ -4495,8 +4392,8 @@ mod tests {
 
     #[test]
     fn client_disconnect_clears_blocked_surface_state() {
-        let mut state = make_state();
-        let (mut client, mut dispatcher) = make_client();
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut surface = make_surface();
         surface.blocked_waiter_id = Some(crate::sync::AcquireReadyWaiterId::from(42u64));
 

@@ -1812,88 +1812,21 @@ mod tests {
         super::*,
         crate::{
             clients::{Client, ClientId, ClientManagerAction, RawEvent},
-            egl::EGL,
-            globals::Globals,
             protocol_generated::{WaylandId, WlSurfaceId, XdgToplevelId},
             runner::Dispatcher,
-            state::{BackendOutputRef, DrmId, FractionalScale, ObjectId, Output, OutputMode},
+            state::{ObjectId, State},
+            test_support::{resolved_wl_surface as root, state_for_tests, test_output_drm0_wh},
             wayland_objects::{
                 wl_surface::Role, xdg_surface::xdg_toplevel::XdgToplevel,
                 zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
             },
-            xkb::Xkb,
         },
     };
 
-    fn make_state() -> State {
-        let xkb = Xkb::new();
-        let keyboard = xkb.create_keyboard_state();
-        let mut globals = Globals::new();
-        globals.initialize();
-        State {
-            objects: Default::default(),
-            root_surfaces: Default::default(),
-            layer_surface_objects: Default::default(),
-            inputs: Default::default(),
-            drm: Default::default(),
-            outputs: Default::default(),
-            active_output: None,
-            workspace_groups: Default::default(),
-            workspaces: Default::default(),
-            output_workspace_groups: Default::default(),
-            root_surface_workspaces: Default::default(),
-            managed_root_surfaces: Default::default(),
-            xdg_toplevel_roles: Default::default(),
-            ctm_control_owner: None,
-            data_offers_by_source: Default::default(),
-            next_workspace_serial: 1,
-            backend_syncobj_globals: Default::default(),
-            globals,
-            activation_tokens: Default::default(),
-            egl: EGL::new(),
-            config: Default::default(),
-            seat: Default::default(),
-            keyboard,
-            xkb,
-        }
-    }
-
-    fn root(state: &State, object_id: ObjectId) -> Resolved<WlSurfaceId> {
-        let surface = state
-            .objects
-            .try_ref_object::<WlSurface>(object_id)
-            .unwrap();
-        Resolved::new(surface.client_id(), surface.surface_id(), object_id)
-    }
-
-    fn make_output(width: i32, height: i32) -> Output {
-        Output {
-            backend: BackendOutputRef::new(DrmId::from(0usize)),
-            drm_crtc_id: 1,
-            global_name: None,
-            gamma_lut_size: 0,
-            ctm_supported: false,
-            gamma_control_object_id: None,
-            x: 0,
-            y: 0,
-            physical_width: 0,
-            physical_height: 0,
-            scale: FractionalScale::ONE,
-            transform: 0,
-            make: String::new(),
-            model: String::new(),
-            name: "test-output".to_string(),
-            description: String::new(),
-            enabled: true,
-            current_mode: OutputMode { width, height, refresh_millihz: 60_000 },
-            preferred_mode: None,
-        }
-    }
-
     #[test]
     fn geometry_commit_updates_toplevel_window_geometry() {
-        let mut state = make_state();
-        let output_id = state.insert_output(make_output(120, 80));
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_drm0_wh(120, 80));
         let workspace_id = state.active_workspace_for_output(output_id).unwrap();
         let mut client = Client::new_for_tests(ClientId::from_raw(77));
         let mut dispatcher = Dispatcher::default();
@@ -2024,7 +1957,7 @@ mod tests {
 
     #[test]
     fn destroying_toplevel_before_decoration_disconnects_client_with_orphaned_error() {
-        let mut state = make_state();
+        let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(88));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -2113,8 +2046,8 @@ mod tests {
 
     #[test]
     fn set_min_size_defers_workspace_relayout_to_client_manager() {
-        let mut state = make_state();
-        let output_id = state.insert_output(make_output(120, 80));
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_drm0_wh(120, 80));
         let workspace_id = state.active_workspace_for_output(output_id).unwrap();
         let mut client = Client::new_for_tests(ClientId::from_raw(89));
         let mut dispatcher = Dispatcher::default();
