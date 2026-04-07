@@ -43,6 +43,56 @@ pub struct TiledSurfaceGeometry {
     pub fullscreen: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GeometryOwnership {
+    Compositor,
+    Client,
+}
+
+impl GeometryOwnership {
+    fn for_decoration_mode(decoration_mode: ToplevelDecorationMode) -> Self {
+        match decoration_mode {
+            ToplevelDecorationMode::ServerSide => Self::Compositor,
+            ToplevelDecorationMode::ClientSide => Self::Client,
+        }
+    }
+
+    fn root_position(
+        self,
+        fallback_rect: RectI,
+        anchor_rect: RectI,
+        effective_window_geometry: Option<RectI>,
+    ) -> (i32, i32) {
+        match self {
+            Self::Compositor => (anchor_rect.x, anchor_rect.y),
+            Self::Client => effective_window_geometry
+                .map(|window_geometry| {
+                    (
+                        anchor_rect.x.saturating_sub(window_geometry.x),
+                        anchor_rect.y.saturating_sub(window_geometry.y),
+                    )
+                })
+                .unwrap_or((fallback_rect.x, fallback_rect.y)),
+        }
+    }
+
+    fn decoration_insets(
+        self,
+        fallback: DecorationInsets,
+        surface: &WlSurface,
+        effective_window_geometry: Option<RectI>,
+    ) -> DecorationInsets {
+        match self {
+            Self::Compositor => fallback,
+            Self::Client => effective_window_geometry
+                .and_then(|window_geometry| {
+                    decoration_insets_from_window_geometry(surface, window_geometry)
+                })
+                .unwrap_or(fallback),
+        }
+    }
+}
+
 impl TiledSurfaceGeometry {
     pub fn configure_rect_for_decoration_mode(
         self,
@@ -63,82 +113,27 @@ impl TiledSurfaceGeometry {
         (rect.width, rect.height)
     }
 
-    pub fn placement_anchor_rect(self, decoration_mode: ToplevelDecorationMode) -> RectI {
-        self.configure_rect_for_decoration_mode(decoration_mode)
-    }
-
     pub fn root_position_for_surface(
         self,
         state: &State,
         surface_object_id: Resolved<WlSurfaceId>,
         surface: &WlSurface,
     ) -> (i32, i32) {
-        let fallback_anchor = self.content_rect;
-        let configured_insets = state.configured_decoration_insets();
         let Some((_, toplevel)) = xdg_toplevel_for_surface_ids(state, surface.xdg_surface()) else {
-            log::debug!(
-                "AAA tiled root position fallback: surface={:?} reason=no_xdg_toplevel frame_rect={:?} content_rect={:?} configured_insets={:?} root_pos=({}, {})",
-                surface_object_id,
-                self.frame_rect,
-                self.content_rect,
-                configured_insets,
-                fallback_anchor.x,
-                fallback_anchor.y,
-            );
-            return (fallback_anchor.x, fallback_anchor.y);
+            return (self.content_rect.x, self.content_rect.y);
         };
         let decoration_mode = toplevel.decoration_mode();
-        let Some(explicit_geometry) = toplevel.window_geometry() else {
-            log::debug!(
-                "AAA tiled root position fallback: surface={:?} decoration_mode={:?} reason=no_window_geometry frame_rect={:?} content_rect={:?} configured_insets={:?} root_pos=({}, {})",
+        let geometry_ownership = GeometryOwnership::for_decoration_mode(decoration_mode);
+        let effective_window_geometry = toplevel.window_geometry().and_then(|window_geometry| {
+            effective_window_geometry_for_surface(
+                state,
                 surface_object_id,
-                decoration_mode,
-                self.frame_rect,
-                self.content_rect,
-                configured_insets,
-                fallback_anchor.x,
-                fallback_anchor.y,
-            );
-            return (fallback_anchor.x, fallback_anchor.y);
-        };
-        let Some(window_geometry) = effective_window_geometry_for_surface(
-            state,
-            surface_object_id,
-            surface,
-            Some(explicit_geometry),
-        ) else {
-            log::debug!(
-                "AAA tiled root position fallback: surface={:?} decoration_mode={:?} reason=no_effective_window_geometry frame_rect={:?} content_rect={:?} configured_insets={:?} explicit_window_geometry={:?} root_pos=({}, {})",
-                surface_object_id,
-                decoration_mode,
-                self.frame_rect,
-                self.content_rect,
-                configured_insets,
-                explicit_geometry,
-                fallback_anchor.x,
-                fallback_anchor.y,
-            );
-            return (fallback_anchor.x, fallback_anchor.y);
-        };
-        let anchor = self.placement_anchor_rect(decoration_mode);
-        let root_pos = (
-            anchor.x.saturating_sub(window_geometry.x),
-            anchor.y.saturating_sub(window_geometry.y),
-        );
-        log::debug!(
-            "AAA tiled root position: surface={:?} decoration_mode={:?} frame_rect={:?} content_rect={:?} anchor_rect={:?} configured_insets={:?} explicit_window_geometry={:?} effective_window_geometry={:?} root_pos=({}, {})",
-            surface_object_id,
-            decoration_mode,
-            self.frame_rect,
-            self.content_rect,
-            anchor,
-            configured_insets,
-            explicit_geometry,
-            window_geometry,
-            root_pos.0,
-            root_pos.1,
-        );
-        root_pos
+                surface,
+                Some(window_geometry),
+            )
+        });
+        let anchor_rect = self.configure_rect_for_decoration_mode(decoration_mode);
+        geometry_ownership.root_position(self.content_rect, anchor_rect, effective_window_geometry)
     }
 }
 
@@ -1410,21 +1405,16 @@ pub(crate) fn effective_decoration_insets_for_surface(
     let Some((_, toplevel)) = xdg_toplevel_for_surface_ids(state, surface.xdg_surface()) else {
         return fallback;
     };
-    if toplevel.decoration_mode() == ToplevelDecorationMode::ServerSide {
-        return fallback;
-    }
-    let Some(explicit_geometry) = toplevel.window_geometry() else {
-        return fallback;
-    };
-    let Some(window_geometry) = effective_window_geometry_for_surface(
-        state,
-        surface_object_id,
-        surface,
-        Some(explicit_geometry),
-    ) else {
-        return fallback;
-    };
-    decoration_insets_from_window_geometry(surface, window_geometry).unwrap_or(fallback)
+    let geometry_ownership = GeometryOwnership::for_decoration_mode(toplevel.decoration_mode());
+    let effective_window_geometry = toplevel.window_geometry().and_then(|window_geometry| {
+        effective_window_geometry_for_surface(
+            state,
+            surface_object_id,
+            surface,
+            Some(window_geometry),
+        )
+    });
+    geometry_ownership.decoration_insets(fallback, surface, effective_window_geometry)
 }
 
 pub(crate) fn effective_window_geometry_for_surface(
@@ -1439,9 +1429,8 @@ pub(crate) fn effective_window_geometry_for_surface(
         .or(Some(surface_bounds))
 }
 
-/// Places the wl_surface root so explicit xdg window geometry aligns with the compositor-owned
-/// content rect. For server-side decorations, the outer frame is compositor-owned and must remain
-/// outside the client's window geometry.
+/// Places the wl_surface root according to geometry ownership. Client-owned geometry is honored
+/// for CSD, while tiled SSD is anchored directly to the compositor-owned content rect.
 pub(crate) fn tiled_root_position_for_geometry(
     state: &State,
     surface_object_id: Resolved<WlSurfaceId>,
@@ -2754,6 +2743,54 @@ mod tests {
                 geometry,
             ),
             (10, -12)
+        );
+    }
+
+    #[test]
+    fn tiled_root_position_ignores_window_geometry_for_server_side_decorations() {
+        let mut state = state_for_tests();
+        let mut client = Client::new_for_tests(ClientId::from_raw(64));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (surface_object_id, _xdg_surface_object_id, toplevel_object_id) =
+            insert_root_xdg_toplevel(
+                &mut state,
+                &mut client,
+                &mut client_dispatcher,
+                WlSurfaceId::from(65u32),
+                XdgSurfaceId::from(66u32),
+                XdgToplevelId::from(67u32),
+                (360, 750),
+            );
+        {
+            let toplevel = state
+                .objects
+                .get_mut(toplevel_object_id)
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.set_decoration_mode(ToplevelDecorationMode::ServerSide);
+            toplevel.set_window_geometry(Some(RectI { x: 25, y: 25, width: 360, height: 750 }));
+        }
+
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(surface_object_id)
+            .unwrap();
+        let geometry = TiledSurfaceGeometry {
+            frame_rect: RectI { x: 645, y: 20, width: 615, height: 760 },
+            content_rect: RectI { x: 650, y: 25, width: 605, height: 750 },
+            tiled_edges: EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
+            fullscreen: false,
+        };
+
+        assert_eq!(
+            tiled_root_position_for_geometry(
+                &state,
+                root(&state, surface_object_id),
+                surface,
+                geometry,
+            ),
+            (650, 25)
         );
     }
 
