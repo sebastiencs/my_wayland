@@ -64,6 +64,17 @@ impl ZxdgToplevelDecorationV1 {
             state.xdg_decoration_mode_for_surface(root_surface, true, self.requested_mode);
         toplevel.schedule_decoration_mode(effective_mode);
         let xdg_surface = toplevel.xdg_surface();
+        log::debug!(
+            "AAA zxdg_toplevel_decoration update_effective_mode: decoration={:?} toplevel={:?} root_surface={:?} requested_mode={:?} effective_mode={:?} force_xdg_configure={} send_xdg_configure={} initial_commit_complete={}",
+            self.id,
+            self.toplevel,
+            root_surface,
+            self.requested_mode,
+            effective_mode,
+            force_xdg_configure,
+            send_xdg_configure,
+            xdg_surface.rref(state).initial_commit_complete(),
+        );
         if !send_xdg_configure {
             return;
         }
@@ -108,6 +119,14 @@ impl ZxdgToplevelDecorationV1 {
         };
         let changed = toplevel.schedule_decoration_mode(target_mode);
         let xdg_surface = toplevel.xdg_surface();
+        log::debug!(
+            "AAA zxdg_toplevel_decoration revert_to_unnegotiated_mode: decoration={:?} toplevel={:?} target_mode={:?} changed={} initial_commit_complete={}",
+            self.id,
+            self.toplevel,
+            target_mode,
+            changed,
+            xdg_surface.rref(state).initial_commit_complete(),
+        );
         if !changed {
             return;
         }

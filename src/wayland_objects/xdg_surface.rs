@@ -258,6 +258,17 @@ impl XdgSurface {
         dispatcher: &mut ClientDispatcher,
     ) -> u32 {
         let serial = self.next_serial();
+        log::debug!(
+            "AAA xdg_surface queue_toplevel_configure: xdg_surface={:?} serial={} width={} height={} states={:?} decoration_mode={:?} initial_commit_complete={} pending_configures_before={}",
+            self.id,
+            serial,
+            width,
+            height,
+            states,
+            decoration_mode,
+            self.initial_commit_complete,
+            self.pending_configures.len(),
+        );
         self.pending_configures.push_back(PendingConfigure {
             serial,
             state: ConfigureState::Toplevel(ToplevelConfigureState {
@@ -350,6 +361,12 @@ impl XdgSurface {
         role_changes: CommitRoleChanges,
     ) {
         if role_changes.apply_window_geometry {
+            log::debug!(
+                "AAA xdg_surface apply_commit_role_changes geometry: xdg_surface={:?} pending_window_geometry={:?} current_window_geometry_before={:?}",
+                self.id,
+                self.pending_window_geometry,
+                self.current_window_geometry,
+            );
             if self.pending_window_geometry.is_some() {
                 self.current_window_geometry = self.pending_window_geometry.take();
             }
@@ -360,6 +377,11 @@ impl XdgSurface {
             }
         }
         if role_changes.initial_commit_complete {
+            log::debug!(
+                "AAA xdg_surface apply_commit_role_changes initial_commit_complete: xdg_surface={:?} role_object={:?}",
+                self.id,
+                self.role_object,
+            );
             self.initial_commit_complete = true;
         }
         if role_changes.map_popup {
@@ -369,6 +391,10 @@ impl XdgSurface {
             }
         }
         if role_changes.reset_on_unmap {
+            log::debug!(
+                "AAA xdg_surface apply_commit_role_changes reset_on_unmap: xdg_surface={:?}",
+                self.id,
+            );
             if let RoleObject::Toplevel(id) = self.role_object {
                 let mut toplevel = id.grab(state);
                 toplevel.reset_on_unmap();
@@ -659,6 +685,11 @@ impl Object for XdgSurface {
                     );
                     return Ok(());
                 }
+                log::debug!(
+                    "AAA xdg_surface set_window_geometry: xdg_surface={:?} geometry={:?}",
+                    self.id,
+                    window_geometry,
+                );
                 self.pending_window_geometry = Some(window_geometry);
             }
             AckConfigure { serial } => {
@@ -679,6 +710,13 @@ impl Object for XdgSurface {
                 let acked = self.pending_configures[position].clone();
                 self.pending_configures.drain(..=position);
                 self.last_acked = Some(acked.clone());
+                log::debug!(
+                    "AAA xdg_surface ack_configure: xdg_surface={:?} serial={} acked_state={:?} remaining_pending={}",
+                    self.id,
+                    serial,
+                    acked.state,
+                    self.pending_configures.len(),
+                );
 
                 match acked.state {
                     ConfigureState::Toplevel(ToplevelConfigureState {
@@ -958,6 +996,16 @@ pub mod xdg_toplevel {
             xdg_surface: &mut XdgSurface,
             dispatcher: &mut ClientDispatcher,
         ) {
+            log::debug!(
+                "AAA xdg_toplevel schedule_configure_with_known_decoration: toplevel={:?} xdg_surface={:?} current_size=({}, {}) configure_bounds={:?} decoration_mode_for_configure={:?} states={:?}",
+                self.id,
+                self.xdg_surface,
+                self.current_width,
+                self.current_height,
+                configure_bounds,
+                self.decoration_mode_for_configure(),
+                self.effective_states(),
+            );
             self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_configure(dispatcher);
             decoration.send_configure_mode(self.decoration_mode_for_configure(), dispatcher);
