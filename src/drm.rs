@@ -31,7 +31,7 @@ use crate::{
         model::IoUringAction,
         ring::{PollCompleted, ReadWriteCompleted, RingId},
     },
-    object::ObjectWrapper,
+    object::Object,
     region::{DamageRegion, RectI},
     render::{
         rounded_ring, EffectElement, FrameElement, FramePhase, OutputFrameRecipe,
@@ -4316,7 +4316,7 @@ fn rgba_to_drm_argb8888(
 
 fn push_scene_items_from_snapshots(
     items: &mut Vec<SceneItem>,
-    objects: &mut Box<crate::state::IndexMap<ObjectId, ObjectWrapper>>,
+    objects: &mut Box<crate::state::IndexMap<ObjectId, Box<dyn Object>>>,
     drm: &Drm,
     drm_fd: &DrmFd,
     drm_crtc_id: u32,

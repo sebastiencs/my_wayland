@@ -1,5 +1,3 @@
-use std::any::Any;
-
 use crate::{
     clients::{ClientId, Resolved},
     config::{
@@ -9,7 +7,7 @@ use crate::{
     egl::EGL,
     globals::{Global, GlobalName, Globals},
     libinput::Input,
-    object::{Object, ObjectVTable, ObjectWrapper},
+    object::Object,
     protocol_generated::{
         HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId, WlDataSourceId, WlSeatId,
         WlSurfaceId, XdgSurfaceId, XdgToplevelId, ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id,
@@ -224,21 +222,16 @@ static_assertions::assert_not_impl_all!(Grab<ObjectId, usize>: Send, Sync);
 
 pub struct GrabbedObject<O: Object> {
     value: Option<Box<O>>,
-    vtable: ObjectVTable,
-    grab: Grab<ObjectId, ObjectWrapper>,
-    _phantom: PhantomData<O>,
+    grab: Grab<ObjectId, Box<dyn Object>>,
 }
 impl<O: Object> Drop for GrabbedObject<O> {
     fn drop(&mut self) {
-        self.grab.value = Some(ObjectWrapper::from_raw((self.value.take().unwrap(), self.vtable)));
+        self.grab.value = Some(self.value.take().unwrap());
     }
 }
 impl<O: Object> GrabbedObject<O> {
-    pub fn new(mut grab: Grab<ObjectId, ObjectWrapper>) -> Self {
-        let wrapper: ObjectWrapper = grab.value.take().unwrap();
-        let (value, vtable): (Box<dyn Any>, ObjectVTable) = wrapper.into_raw();
-        let value: Box<O> = value.downcast().unwrap();
-        Self { value: Some(value), vtable, grab, _phantom: PhantomData }
+    pub fn new(value: Box<O>, grab: Grab<ObjectId, Box<dyn Object>>) -> Self {
+        Self { value: Some(value), grab }
     }
 }
 impl<O: Object> std::ops::Deref for GrabbedObject<O> {
@@ -288,6 +281,19 @@ where
         indexmap.release(*key, value);
 
         // ngrabbed will be dropped and its counter decremented
+    }
+}
+
+impl Grab<ObjectId, Box<dyn Object>> {
+    pub fn on(
+        mut self,
+        client: &mut crate::clients::Client,
+        state: &mut State,
+        request: crate::clients::RawRequest,
+        dispatcher: &mut crate::clients::ClientDispatcher,
+    ) -> crate::object::RequestResult {
+        let object = self.value.take().unwrap();
+        object.call_on(self, client, state, request, dispatcher)
     }
 }
 
@@ -522,7 +528,7 @@ where
     }
 }
 
-impl IndexMap<ObjectId, ObjectWrapper> {
+impl IndexMap<ObjectId, Box<dyn Object>> {
     pub fn try_ref_object<T: Object>(&self, key: ObjectId) -> Option<&T> {
         self.try_get(key)
             .and_then(|object| object.downcast_ref::<T>())
@@ -537,13 +543,19 @@ impl IndexMap<ObjectId, ObjectWrapper> {
         self: &mut Box<Self>,
         key: ObjectId,
     ) -> Option<GrabbedObject<T>> {
-        let grabbed = self.try_grab(key)?;
-        Some(GrabbedObject::<T>::new(grabbed))
-        // GrabbedAny::try_new(grabbed).ok()
+        let mut grabbed = self.try_grab(key)?;
+        let erased = grabbed.value.take().unwrap();
+        match erased.downcast::<T>() {
+            Ok(value) => Some(GrabbedObject::<T>::new(value, grabbed)),
+            Err(erased) => {
+                grabbed.value = Some(erased);
+                None
+            }
+        }
     }
 
     pub fn grab_object<T: Object>(self: &mut Box<Self>, key: ObjectId) -> GrabbedObject<T> {
-        GrabbedObject::new(self.grab(key))
+        self.try_grab_object(key).expect("invalid object type")
     }
 }
 
@@ -1192,8 +1204,7 @@ pub struct DragState {
 }
 
 pub struct State {
-    pub objects: Box<IndexMap<ObjectId, ObjectWrapper>>,
-    // pub objects: Box<IndexMap<ObjectId, Box<dyn Object>>>,
+    pub objects: Box<IndexMap<ObjectId, Box<dyn Object>>>,
     pub root_surfaces: Vec<Resolved<WlSurfaceId>>,
     pub layer_surface_objects: BTreeSet<Resolved<ZwlrLayerSurfaceV1Id>>,
     pub inputs: IndexMap<InputId, Input>,
@@ -2448,7 +2459,7 @@ impl State {
 
     pub fn insert_object<O: Object + 'static>(&mut self, object: O) -> (WaylandId, ObjectId) {
         let wayland_id = object.id();
-        let object_id = self.objects.insert(ObjectWrapper::from(object));
+        let object_id = self.objects.insert(Box::new(object));
         (wayland_id, object_id)
     }
     /// Removes the object now, or defers if the slot is currently grabbed.
@@ -2462,9 +2473,7 @@ impl State {
         {
             self.unregister_root_surface(surface);
         }
-        self.objects
-            .remove_or_defer(object_id)
-            .map(|wrapper| wrapper.into_object())
+        self.objects.remove_or_defer(object_id)
     }
 
     pub fn register_root_surface(&mut self, object_id: ObjectId) {
