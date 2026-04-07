@@ -172,6 +172,7 @@ mod drm;
 mod egl;
 mod gbm;
 mod globals;
+mod indexmap;
 mod input;
 mod io_uring;
 mod libinput;
