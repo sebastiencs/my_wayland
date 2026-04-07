@@ -57,25 +57,6 @@ impl GeometryOwnership {
         }
     }
 
-    fn root_position(
-        self,
-        fallback_rect: RectI,
-        anchor_rect: RectI,
-        effective_window_geometry: Option<RectI>,
-    ) -> (i32, i32) {
-        match self {
-            Self::Compositor => (anchor_rect.x, anchor_rect.y),
-            Self::Client => effective_window_geometry
-                .map(|window_geometry| {
-                    (
-                        anchor_rect.x.saturating_sub(window_geometry.x),
-                        anchor_rect.y.saturating_sub(window_geometry.y),
-                    )
-                })
-                .unwrap_or((fallback_rect.x, fallback_rect.y)),
-        }
-    }
-
     fn decoration_insets(
         self,
         fallback: DecorationInsets,
@@ -91,6 +72,21 @@ impl GeometryOwnership {
                 .unwrap_or(fallback),
         }
     }
+}
+
+fn root_position_from_anchor(
+    fallback_rect: RectI,
+    anchor_rect: RectI,
+    effective_window_geometry: Option<RectI>,
+) -> (i32, i32) {
+    effective_window_geometry
+        .map(|window_geometry| {
+            (
+                anchor_rect.x.saturating_sub(window_geometry.x),
+                anchor_rect.y.saturating_sub(window_geometry.y),
+            )
+        })
+        .unwrap_or((fallback_rect.x, fallback_rect.y))
 }
 
 impl TiledSurfaceGeometry {
@@ -123,7 +119,6 @@ impl TiledSurfaceGeometry {
             return (self.content_rect.x, self.content_rect.y);
         };
         let decoration_mode = toplevel.decoration_mode();
-        let geometry_ownership = GeometryOwnership::for_decoration_mode(decoration_mode);
         let effective_window_geometry = toplevel.window_geometry().and_then(|window_geometry| {
             effective_window_geometry_for_surface(
                 state,
@@ -133,7 +128,7 @@ impl TiledSurfaceGeometry {
             )
         });
         let anchor_rect = self.configure_rect_for_decoration_mode(decoration_mode);
-        geometry_ownership.root_position(self.content_rect, anchor_rect, effective_window_geometry)
+        root_position_from_anchor(self.content_rect, anchor_rect, effective_window_geometry)
     }
 }
 
@@ -2747,7 +2742,7 @@ mod tests {
     }
 
     #[test]
-    fn tiled_root_position_ignores_window_geometry_for_server_side_decorations() {
+    fn tiled_root_position_aligns_window_geometry_to_content_rect_for_server_side_decorations() {
         let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(64));
         let mut dispatcher = Dispatcher::default();
@@ -2790,7 +2785,7 @@ mod tests {
                 surface,
                 geometry,
             ),
-            (650, 25)
+            (625, 0)
         );
     }
 
