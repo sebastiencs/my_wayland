@@ -116,9 +116,18 @@ impl TiledSurfaceGeometry {
         surface: &WlSurface,
     ) -> (i32, i32) {
         let Some((_, toplevel)) = xdg_toplevel_for_surface_ids(state, surface.xdg_surface()) else {
+            log::debug!(
+                "AAA tiled_root_position fallback_no_toplevel surface={:?} frame_rect={:?} content_rect={:?} root_pos=({}, {})",
+                surface_object_id,
+                self.frame_rect,
+                self.content_rect,
+                self.content_rect.x,
+                self.content_rect.y,
+            );
             return (self.content_rect.x, self.content_rect.y);
         };
         let decoration_mode = toplevel.decoration_mode();
+        let explicit_window_geometry = toplevel.window_geometry();
         let effective_window_geometry = toplevel.window_geometry().and_then(|window_geometry| {
             effective_window_geometry_for_surface(
                 state,
@@ -128,7 +137,21 @@ impl TiledSurfaceGeometry {
             )
         });
         let anchor_rect = self.configure_rect_for_decoration_mode(decoration_mode);
-        root_position_from_anchor(self.content_rect, anchor_rect, effective_window_geometry)
+        let root_pos =
+            root_position_from_anchor(self.content_rect, anchor_rect, effective_window_geometry);
+        log::debug!(
+            "AAA tiled_root_position surface={:?} decoration_mode={:?} frame_rect={:?} content_rect={:?} anchor_rect={:?} explicit_window_geometry={:?} effective_window_geometry={:?} root_pos=({}, {})",
+            surface_object_id,
+            decoration_mode,
+            self.frame_rect,
+            self.content_rect,
+            anchor_rect,
+            explicit_window_geometry,
+            effective_window_geometry,
+            root_pos.0,
+            root_pos.1,
+        );
+        root_pos
     }
 }
 
@@ -1326,10 +1349,19 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
             let Some(mut surface) = operation.surface_object_id.try_grab(state) else {
                 continue;
             };
+            let previous_root_pos = surface.root_position();
             let (rx, ry) = tiled_root_position_for_geometry(
                 state,
                 operation.surface_object_id,
                 &surface,
+                operation.geometry,
+            );
+            log::debug!(
+                "AAA tiled_apply_root_position surface={:?} previous_root_pos={:?} next_root_pos=({}, {}) geometry={:?}",
+                operation.surface_object_id,
+                previous_root_pos,
+                rx,
+                ry,
                 operation.geometry,
             );
             surface.set_root_position(rx, ry);
