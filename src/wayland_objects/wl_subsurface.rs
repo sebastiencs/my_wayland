@@ -1,9 +1,9 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
     drm::{schedule_active_output, schedule_outputs_for_rect},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wl_subsurface, WaylandId, WlSubsurfaceId, WlSurfaceId},
-    state::{ObjectId, State},
+    state::{GrabbedObject, ObjectId, State},
     wayland_objects::wl_surface::WlSurface,
 };
 
@@ -61,12 +61,12 @@ impl Object for WlSubsurface {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_subsurface::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -163,10 +163,10 @@ mod tests {
         super::WlSubsurface,
         crate::{
             clients::{Client, ClientId, RawEvent, Resolved},
-            object::Object,
+            object::{Object, RequestResult},
             protocol_generated::{WlSubsurfaceId, WlSurfaceId},
             runner::Dispatcher,
-            state::State,
+            state::{GrabbedObject, State},
             test_support::{state_for_tests, test_client_and_dispatcher},
             wayland_objects::wl_surface::{StackEntry, WlSurface},
         },

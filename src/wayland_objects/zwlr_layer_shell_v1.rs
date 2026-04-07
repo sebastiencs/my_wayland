@@ -1,12 +1,12 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
-    object::{Object, Parser, ParserError},
+    object::{Object, Parser, ParserError, RequestResult},
     protocol_generated::{
         wl_display, zwlr_layer_shell_v1, Constants, NewId, WaylandId, WlOutputId,
         ZwlrLayerShellV1Id,
     },
-    state::{OutputId, State},
+    state::{GrabbedObject, OutputId, State},
     wayland_objects::{
         wl_display::WlDisplay,
         wl_output::WlOutput,
@@ -115,12 +115,12 @@ impl Object for ZwlrLayerShellV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use zwlr_layer_shell_v1::Request::*;
 
         let Some(request) = self.parse_request(client, req, dispatcher) else {

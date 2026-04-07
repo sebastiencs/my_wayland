@@ -3,9 +3,9 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     drm::schedule_output,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{zwlr_gamma_control_v1, Constants, WaylandId, ZwlrGammaControlV1Id},
-    state::{OutputId, State},
+    state::{GrabbedObject, OutputId, State},
     wayland_objects::wl_display::WlDisplay,
 };
 
@@ -168,12 +168,12 @@ impl Object for ZwlrGammaControlV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use zwlr_gamma_control_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

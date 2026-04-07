@@ -2,9 +2,9 @@ use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     drm::{Format, ARGB8888, FORMATS, XRGB8888},
     globals::{Global, GlobalName},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wl_shm, Constants, NewId, WaylandId, WlShmId},
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{wl_display::WlDisplay, wl_shm_pool::WlShmPool},
 };
 
@@ -58,12 +58,12 @@ impl Object for WlShm {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use crate::protocol_generated::wl_shm::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

@@ -1,11 +1,11 @@
 use crate::{
     clients::{Client, ClientAction, ClientDispatcher, RawRequest},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_data_device_manager, Constants, NewId, WaylandId, WlDataDeviceId, WlDataDeviceManagerId,
     },
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{wl_data_device::WlDataDevice, wl_data_source::WlDataSource},
 };
 
@@ -48,12 +48,12 @@ impl Object for WlDataDeviceManager {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_data_device_manager::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -90,7 +90,7 @@ mod tests {
         super::WlDataDeviceManager,
         crate::{
             clients::{Client, ClientAction, ClientId, ClientManagerAction, RawEvent, Resolved},
-            object::Object,
+            object::{Object, RequestResult},
             protocol_generated::{WlDataDeviceId, WlDataDeviceManagerId, WlDataSourceId, WlSeatId},
             runner::Dispatcher,
             seat::{set_keyboard_focus_from_surface, SurfaceFocus},

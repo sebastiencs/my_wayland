@@ -1,8 +1,8 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wl_display, wl_registry, WaylandId, WlRegistryId},
-    state::State,
+    state::{GrabbedObject, State},
 };
 
 #[derive(Debug)]
@@ -48,12 +48,12 @@ impl Object for WlRegistry {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         match client.parse::<Self>(req).unwrap() {
             wl_registry::Request::Bind { name, id, requested_version } => {
                 let Some(mut global) = state.globals.try_grab_global(name) else {

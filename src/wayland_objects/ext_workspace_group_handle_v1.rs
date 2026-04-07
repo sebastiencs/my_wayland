@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         ext_workspace_group_handle_v1, wl_display, ExtWorkspaceGroupHandleV1Id,
         ExtWorkspaceHandleV1Id, ExtWorkspaceManagerV1Id, WaylandId, WlOutputId,
     },
-    state::{State, WorkspaceGroupId, WorkspaceId},
+    state::{GrabbedObject, State, WorkspaceGroupId, WorkspaceId},
     wayland_objects::{
         ext_workspace_manager_v1::{ExtWorkspaceManagerV1, PendingWorkspaceRequest},
         wl_display::WlDisplay,
@@ -153,12 +153,12 @@ impl Object for ExtWorkspaceGroupHandleV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use ext_workspace_group_handle_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

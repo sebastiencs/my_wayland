@@ -6,7 +6,7 @@ use crate::{
         wl_display, wp_presentation, Constants, NewId, WaylandId, WlSurfaceId,
         WpPresentationFeedbackId, WpPresentationId,
     },
-    state::State,
+    state::{GrabbedObject, State},
 };
 
 use super::{wl_display::WlDisplay, wp_presentation_feedback::WpPresentationFeedback};
@@ -59,12 +59,12 @@ impl Object for WpPresentation {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wp_presentation::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

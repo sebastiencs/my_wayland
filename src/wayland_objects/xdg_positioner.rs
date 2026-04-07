@@ -2,10 +2,10 @@ use std::cmp::min;
 
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wl_display, xdg_positioner, WaylandId, XdgPositionerId},
     region::RectI,
-    state::State,
+    state::{GrabbedObject, State},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -372,12 +372,12 @@ impl Object for XdgPositioner {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use xdg_positioner::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

@@ -5,12 +5,12 @@ use crate::{
         Client, ClientAction, ClientDispatcher, ClientId, DataSourceClientEvent, EventWriter,
         RawRequest, Resolved,
     },
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_data_device_manager, wl_data_offer, WaylandId, WlDataOfferId, WlDataSourceId,
     },
     seat,
-    state::{DataOfferRole, DragPhase, ObjectId, State},
+    state::{DataOfferRole, DragPhase, GrabbedObject, ObjectId, State},
     wayland_objects::wl_data_source::WlDataSource,
 };
 
@@ -155,12 +155,12 @@ impl Object for WlDataOffer {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_data_offer::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -427,7 +427,7 @@ mod tests {
                 Client, ClientAction, ClientId, ClientManagerAction, DataSourceClientEvent,
                 RawEvent, Resolved,
             },
-            object::Object,
+            object::{Object, RequestResult},
             protocol_generated::{
                 wl_data_device_manager, WlDataOfferId, WlDataSourceId, WlSurfaceId,
             },

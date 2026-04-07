@@ -6,7 +6,7 @@ use crate::{
         zwlr_gamma_control_manager_v1, Constants, NewId, WaylandId, WlOutputId,
         ZwlrGammaControlManagerV1Id, ZwlrGammaControlV1Id,
     },
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{wl_display::WlDisplay, zwlr_gamma_control_v1::ZwlrGammaControlV1},
 };
 
@@ -85,12 +85,12 @@ impl Object for ZwlrGammaControlManagerV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use zwlr_gamma_control_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

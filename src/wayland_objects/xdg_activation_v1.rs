@@ -2,12 +2,12 @@ use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
     drm::{schedule_active_output, schedule_outputs_for_rect},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_display, xdg_activation_v1, Constants, NewId, WaylandId, XdgActivationV1Id,
     },
     seat::{resolve_activation_target, set_keyboard_focus_from_surface},
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{wl_display::WlDisplay, xdg_activation_token_v1::XdgActivationTokenV1},
 };
 
@@ -54,12 +54,12 @@ impl Object for XdgActivationV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use xdg_activation_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -109,13 +109,13 @@ mod tests {
         super::{XdgActivationV1, XdgActivationV1Global},
         crate::{
             clients::{Client, ClientId, RawEvent},
-            object::Object,
+            object::{Object, RequestResult},
             protocol_generated::{
                 Constants, WlSeatId, WlSurfaceId, XdgActivationTokenV1Id, XdgActivationV1Id,
             },
             runner::Dispatcher,
             seat::{handle_keyboard_key, set_keyboard_focus_from_surface},
-            state::{ObjectId, State},
+            state::{GrabbedObject, ObjectId, State},
             test_support::{focus_for_surface, state_for_tests, test_client_and_dispatcher},
             wayland_objects::{wl_seat::WlSeat, wl_surface::WlSurface},
         },

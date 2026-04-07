@@ -1,12 +1,12 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wp_fractional_scale_manager_v1, Constants, NewId, WaylandId, WlSurfaceId,
         WpFractionalScaleManagerV1Id, WpFractionalScaleV1Id,
     },
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{
         wl_display::WlDisplay, wl_surface::WlSurface, wp_fractional_scale_v1::WpFractionalScaleV1,
     },
@@ -49,12 +49,12 @@ impl Object for WpFractionalScaleManagerV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wp_fractional_scale_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

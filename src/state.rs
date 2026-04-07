@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use crate::{
     clients::{ClientId, Resolved},
     config::{
@@ -7,7 +9,7 @@ use crate::{
     egl::EGL,
     globals::{Global, GlobalName, Globals},
     libinput::Input,
-    object::Object,
+    object::{Object, ObjectVTable, ObjectWrapper},
     protocol_generated::{
         HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId, WlDataSourceId, WlSeatId,
         WlSurfaceId, XdgSurfaceId, XdgToplevelId, ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id,
@@ -220,6 +222,37 @@ where
 static_assertions::assert_not_impl_all!(IndexMap<usize, usize>: Send, Sync);
 static_assertions::assert_not_impl_all!(Grab<ObjectId, usize>: Send, Sync);
 
+pub struct GrabbedObject<O: Object> {
+    value: Option<Box<O>>,
+    vtable: ObjectVTable,
+    grab: Grab<ObjectId, ObjectWrapper>,
+    _phantom: PhantomData<O>,
+}
+impl<O: Object> Drop for GrabbedObject<O> {
+    fn drop(&mut self) {
+        self.grab.value = Some(ObjectWrapper::from_raw((self.value.take().unwrap(), self.vtable)));
+    }
+}
+impl<O: Object> GrabbedObject<O> {
+    pub fn new(mut grab: Grab<ObjectId, ObjectWrapper>) -> Self {
+        let wrapper: ObjectWrapper = grab.value.take().unwrap();
+        let (value, vtable): (Box<dyn Any>, ObjectVTable) = wrapper.into_raw();
+        let value: Box<O> = value.downcast().unwrap();
+        Self { value: Some(value), vtable, grab, _phantom: PhantomData }
+    }
+}
+impl<O: Object> std::ops::Deref for GrabbedObject<O> {
+    type Target = O;
+    fn deref(&self) -> &Self::Target {
+        self.value.as_ref().unwrap()
+    }
+}
+impl<O: Object> std::ops::DerefMut for GrabbedObject<O> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.value.as_mut().unwrap()
+    }
+}
+
 impl<K, V> std::ops::Deref for Grab<K, V>
 where
     K: IndexMapKey,
@@ -255,50 +288,6 @@ where
         indexmap.release(*key, value);
 
         // ngrabbed will be dropped and its counter decremented
-    }
-}
-
-/// Small helper structure to downcast `dyn Object` into their concrete types
-pub struct GrabbedObject<O: Object> {
-    value: Option<Box<O>>,
-    grabbed: Grab<ObjectId, Box<dyn Object>>,
-    _phantom: PhantomData<O>,
-}
-impl<O: Object> Drop for GrabbedObject<O> {
-    fn drop(&mut self) {
-        self.grabbed.value = Some(self.value.take().unwrap());
-    }
-}
-impl<O: Object> GrabbedObject<O> {
-    pub fn new(mut grabbed: Grab<ObjectId, Box<dyn Object>>) -> Self {
-        let value: Box<dyn Object> = grabbed.value.take().unwrap();
-        let value: Box<O> = value.downcast().ok().unwrap();
-        Self { value: Some(value), grabbed, _phantom: PhantomData }
-    }
-
-    pub fn try_new(
-        mut grabbed: Grab<ObjectId, Box<dyn Object>>,
-    ) -> Result<Self, Grab<ObjectId, Box<dyn Object>>> {
-        let value: Box<dyn Object> = grabbed.value.take().unwrap();
-        let value = match value.downcast() {
-            Ok(value) => value,
-            Err(value) => {
-                grabbed.value = Some(value);
-                return Err(grabbed);
-            }
-        };
-        Ok(Self { value: Some(value), grabbed, _phantom: PhantomData })
-    }
-}
-impl<O: Object> std::ops::Deref for GrabbedObject<O> {
-    type Target = O;
-    fn deref(&self) -> &Self::Target {
-        self.value.as_ref().unwrap()
-    }
-}
-impl<O: Object> std::ops::DerefMut for GrabbedObject<O> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.value.as_mut().unwrap()
     }
 }
 
@@ -533,7 +522,7 @@ where
     }
 }
 
-impl IndexMap<ObjectId, Box<dyn Object>> {
+impl IndexMap<ObjectId, ObjectWrapper> {
     pub fn try_ref_object<T: Object>(&self, key: ObjectId) -> Option<&T> {
         self.try_get(key)
             .and_then(|object| object.downcast_ref::<T>())
@@ -549,7 +538,8 @@ impl IndexMap<ObjectId, Box<dyn Object>> {
         key: ObjectId,
     ) -> Option<GrabbedObject<T>> {
         let grabbed = self.try_grab(key)?;
-        GrabbedObject::try_new(grabbed).ok()
+        Some(GrabbedObject::<T>::new(grabbed))
+        // GrabbedAny::try_new(grabbed).ok()
     }
 
     pub fn grab_object<T: Object>(self: &mut Box<Self>, key: ObjectId) -> GrabbedObject<T> {
@@ -1202,7 +1192,8 @@ pub struct DragState {
 }
 
 pub struct State {
-    pub objects: Box<IndexMap<ObjectId, Box<dyn Object>>>,
+    pub objects: Box<IndexMap<ObjectId, ObjectWrapper>>,
+    // pub objects: Box<IndexMap<ObjectId, Box<dyn Object>>>,
     pub root_surfaces: Vec<Resolved<WlSurfaceId>>,
     pub layer_surface_objects: BTreeSet<Resolved<ZwlrLayerSurfaceV1Id>>,
     pub inputs: IndexMap<InputId, Input>,
@@ -2457,7 +2448,7 @@ impl State {
 
     pub fn insert_object<O: Object + 'static>(&mut self, object: O) -> (WaylandId, ObjectId) {
         let wayland_id = object.id();
-        let object_id = self.objects.insert(Box::new(object));
+        let object_id = self.objects.insert(ObjectWrapper::from(object));
         (wayland_id, object_id)
     }
     /// Removes the object now, or defers if the slot is currently grabbed.
@@ -2471,7 +2462,9 @@ impl State {
         {
             self.unregister_root_surface(surface);
         }
-        self.objects.remove_or_defer(object_id)
+        self.objects
+            .remove_or_defer(object_id)
+            .map(|wrapper| wrapper.into_object())
     }
 
     pub fn register_root_surface(&mut self, object_id: ObjectId) {
@@ -3079,7 +3072,7 @@ mod tests {
         }
 
         fn on(
-            &mut self,
+            mut self: crate::state::GrabbedObject<Self>,
             _client: &mut Client,
             _state: &mut State,
             _request: RawRequest,
@@ -3100,7 +3093,7 @@ mod tests {
         }
 
         fn on(
-            &mut self,
+            mut self: crate::state::GrabbedObject<Self>,
             _client: &mut Client,
             _state: &mut State,
             _request: RawRequest,

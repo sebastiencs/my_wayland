@@ -1,10 +1,10 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wp_linux_drm_syncobj_surface_v1, WaylandId, WlSurfaceId, WpLinuxDrmSyncobjSurfaceV1Id,
     },
-    state::State,
+    state::{GrabbedObject, State},
     sync::{AcquireSync, ReleasePoint},
     wayland_objects::{
         wl_surface::WlSurface, wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1,
@@ -29,12 +29,12 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wp_linux_drm_syncobj_surface_v1::Request::*;
 
         let Some(mut surface) = self.surface.try_grab(state) else {

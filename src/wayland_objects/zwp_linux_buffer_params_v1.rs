@@ -7,9 +7,9 @@ use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     dmabuf::{DmaBuf, DmaBufId, DmaBufPlane},
     drm::{Modifier, FORMATS_MAP},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{zwp_linux_buffer_params_v1, WaylandId, ZwpLinuxBufferParamsV1Id},
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::wl_buffer::{NewDmabufWlBufferParams, WlBuffer},
 };
 
@@ -109,12 +109,12 @@ impl Object for ZwpLinuxBufferParamsV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use zwp_linux_buffer_params_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

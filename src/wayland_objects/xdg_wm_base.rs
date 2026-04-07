@@ -1,12 +1,12 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_display, xdg_wm_base, Constants, NewId, WaylandId, XdgPositionerId, XdgSurfaceId,
         XdgWmBaseId,
     },
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{
         wl_surface::{Role, WlSurface},
         xdg_positioner::XdgPositioner,
@@ -69,12 +69,12 @@ impl Object for XdgWmBase {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use xdg_wm_base::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

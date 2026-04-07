@@ -1,11 +1,11 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_display, zxdg_output_manager_v1, Constants, NewId, WaylandId, ZxdgOutputManagerV1Id,
     },
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{wl_output::WlOutput, zxdg_output_v1::ZxdgOutputV1},
 };
 
@@ -53,12 +53,12 @@ impl Object for ZxdgOutputManagerV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use zxdg_output_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

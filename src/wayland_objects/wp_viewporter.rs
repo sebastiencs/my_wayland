@@ -1,9 +1,9 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wp_viewporter, Constants, NewId, WaylandId, WpViewporterId},
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{wl_surface::WlSurface, wp_viewport::WpViewport},
 };
 
@@ -44,12 +44,12 @@ impl Object for WpViewporter {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wp_viewporter::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

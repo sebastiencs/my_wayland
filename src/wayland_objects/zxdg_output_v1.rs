@@ -1,8 +1,8 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{zxdg_output_v1, WaylandId, ZxdgOutputV1Id},
-    state::{Output, OutputId, State},
+    state::{GrabbedObject, Output, OutputId, State},
 };
 
 /// `xdg_output.done` is not sent for client objects at version 3+ (use `wl_output.done` instead).
@@ -98,12 +98,12 @@ impl Object for ZxdgOutputV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use zxdg_output_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

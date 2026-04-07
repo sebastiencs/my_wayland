@@ -1,8 +1,8 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wl_display, WaylandId, WlDisplayId},
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{wl_callback::WlCallback, wl_registry::WlRegistry},
 };
 
@@ -34,19 +34,19 @@ impl Object for WlDisplay {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         request: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_display::Request::*;
 
         match client.parse::<Self>(request).unwrap() {
             Sync { callback } => {
                 let (resolved, callback) = client.insert_object(state, WlCallback::new(callback));
                 callback.done(monotonic_time_msec(), dispatcher);
-                client.delete_id(self, state, dispatcher, resolved.wayland_id().into());
+                client.delete_id(&self, state, dispatcher, resolved.wayland_id().into());
             }
             GetRegistry { registry } => {
                 let registry = WlRegistry::new(registry);

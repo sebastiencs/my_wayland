@@ -6,7 +6,7 @@ use crate::{
         WlSurfaceId,
     },
     seat,
-    state::{SelectionSourceState, State},
+    state::{GrabbedObject, SelectionSourceState, State},
     wayland_objects::{wl_data_source::SourceUse, wl_display::WlDisplay, wl_surface::WlSurface},
 };
 
@@ -117,20 +117,20 @@ impl Object for WlDataDevice {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_data_device::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
             StartDrag { source, origin, icon, serial } => {
-                start_drag(self, client, state, dispatcher, source, origin, icon, serial)?;
+                start_drag(&mut self, client, state, dispatcher, source, origin, icon, serial)?;
             }
             SetSelection { source, serial } => {
-                set_selection(self, client, state, dispatcher, source, serial)?;
+                set_selection(&mut self, client, state, dispatcher, source, serial)?;
             }
             Release => {
                 if let Some(data_device) = client.resolve(self.id, state) {
@@ -296,7 +296,7 @@ mod tests {
         super::{set_selection, start_drag, WlDataDevice},
         crate::{
             clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent, Resolved},
-            object::Object,
+            object::{Object, RequestResult},
             protocol_generated::{WlDataDeviceId, WlDataSourceId, WlSeatId, WlSurfaceId},
             runner::Dispatcher,
             seat::{handle_keyboard_key, set_keyboard_focus_from_surface, SurfaceFocus},

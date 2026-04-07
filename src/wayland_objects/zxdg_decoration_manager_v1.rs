@@ -1,12 +1,12 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_display, zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1, Constants, NewId,
         WaylandId, XdgToplevelId, ZxdgDecorationManagerV1Id, ZxdgToplevelDecorationV1Id,
     },
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{
         wl_display::WlDisplay, wl_surface::WlSurface, xdg_surface::xdg_toplevel::XdgToplevel,
         zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
@@ -53,12 +53,12 @@ impl Object for ZxdgDecorationManagerV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use zxdg_decoration_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -124,7 +124,7 @@ mod tests {
             io_uring::model::IoUringAction,
             protocol_generated::{WlBufferId, WlSurfaceId, XdgSurfaceId, XdgWmBaseId},
             runner::Dispatcher,
-            state::{ObjectId, State},
+            state::{GrabbedObject, ObjectId, State},
             test_support::{insert_test_shm_buffer, state_for_tests},
             wayland_objects::{wl_surface::Role, xdg_surface::XdgSurface},
         },

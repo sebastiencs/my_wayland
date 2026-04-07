@@ -1,9 +1,9 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wl_display, wl_region, WaylandId, WlRegionId},
     region::{RectI, RegionSpec, RegionValue},
-    state::State,
+    state::{GrabbedObject, State},
 };
 
 #[derive(Debug)]
@@ -46,12 +46,12 @@ impl Object for WlRegion {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_region::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

@@ -2214,7 +2214,7 @@ impl Model for Client {
                 dispatcher.requester_object_id = Some(requester_object_id);
 
                 let _ = {
-                    let mut obj = state.objects.grab(obj_id);
+                    let obj = state.objects.grab(obj_id);
                     obj.on(self, state, request, &mut dispatcher)
                 };
                 while let Some(action) = dispatcher.post_actions.pop_front() {

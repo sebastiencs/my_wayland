@@ -2,13 +2,13 @@ use std::collections::{BTreeSet, VecDeque};
 
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         xdg_surface, xdg_wm_base, WaylandId, WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgToplevelId,
         XdgWmBaseId,
     },
     region::RectI,
-    state::{ObjectId, State},
+    state::{GrabbedObject, ObjectId, State},
     transform::SizeI,
     wayland_objects::{
         wl_display::WlDisplay, wl_surface::WlSurface, xdg_popup::XdgPopup,
@@ -546,12 +546,12 @@ impl Object for XdgSurface {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use xdg_surface::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -714,13 +714,13 @@ pub mod xdg_toplevel {
             Resolved,
         },
         drm::schedule_outputs,
-        object::{Object, Parser, PostAction},
+        object::{Object, Parser, PostAction, RequestResult},
         protocol_generated::{
             xdg_toplevel as proto_xdg_toplevel, zxdg_toplevel_decoration_v1, Array, WaylandId,
             WlOutputId, WlSeatId, WlSurfaceId, XdgToplevelId, ZxdgToplevelDecorationV1Id,
         },
         region::RectI,
-        state::{ObjectId, State},
+        state::{GrabbedObject, ObjectId, State},
         wayland_objects::{
             wl_display::WlDisplay, wl_surface::WlSurface,
             zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
@@ -1433,12 +1433,12 @@ pub mod xdg_toplevel {
         }
 
         fn on(
-            &mut self,
+            mut self: GrabbedObject<Self>,
             client: &mut Client,
             state: &mut State,
             req: RawRequest,
             dispatcher: &mut ClientDispatcher,
-        ) -> crate::object::RequestResult {
+        ) -> RequestResult {
             use proto_xdg_toplevel::Request::*;
 
             match client.parse::<Self>(req).unwrap() {

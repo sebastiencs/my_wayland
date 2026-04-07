@@ -1,8 +1,8 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
-    object::Object,
+    object::{Object, RequestResult},
     protocol_generated::{wl_callback, WaylandId, WlCallbackId},
-    state::State,
+    state::{GrabbedObject, State},
 };
 
 #[derive(Debug)]
@@ -26,12 +26,12 @@ impl Object for WlCallback {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         _: &mut Client,
         _: &mut State,
         _: RawRequest,
         _: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         Ok(())
     }
 }

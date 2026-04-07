@@ -57,14 +57,14 @@ macro_rules! fake_obj {
             use crate::clients::{Client, ClientDispatcher, RawRequest};
             use crate::object::{Object, RequestResult};
             use crate::protocol_generated::WaylandId;
-            use crate::state::State;
+            use crate::state::{GrabbedObject, State};
             pub struct $name;
             impl Object for $name {
                 fn id(&self) -> WaylandId {
                     todo!()
                 }
                 fn on(
-                    &mut self,
+                    mut self: GrabbedObject<Self>,
                     _client: &mut Client,
                     _state: &mut State,
                     _request: RawRequest,

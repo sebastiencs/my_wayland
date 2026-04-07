@@ -3,7 +3,7 @@ use crate::{
     object::{Object, Parser, RequestResult},
     protocol_generated::{wl_data_device_manager, wl_data_source, WaylandId, WlDataSourceId},
     seat,
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::wl_display::WlDisplay,
 };
 
@@ -115,12 +115,12 @@ impl Object for WlDataSource {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_data_source::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

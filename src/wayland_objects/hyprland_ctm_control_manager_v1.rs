@@ -4,12 +4,12 @@ use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     drm::schedule_outputs,
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         hyprland_ctm_control_manager_v1, wl_display, Constants, HyprlandCtmControlManagerV1Id,
         NewId, WaylandId,
     },
-    state::{ColorTransformMatrix, OutputId, State},
+    state::{ColorTransformMatrix, GrabbedObject, OutputId, State},
     wayland_objects::{wl_display::WlDisplay, wl_output::WlOutput},
 };
 
@@ -196,12 +196,12 @@ impl Object for HyprlandCtmControlManagerV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use hyprland_ctm_control_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

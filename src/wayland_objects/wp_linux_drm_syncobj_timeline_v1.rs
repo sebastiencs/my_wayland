@@ -2,11 +2,11 @@ use drm::control::Device;
 
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wp_linux_drm_syncobj_timeline_v1, WaylandId, WpLinuxDrmSyncobjTimelineV1Id,
     },
-    state::State,
+    state::{GrabbedObject, State},
     sync::SyncTimeline,
 };
 
@@ -32,12 +32,12 @@ impl Object for WpLinuxDrmSyncobjTimelineV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wp_linux_drm_syncobj_timeline_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

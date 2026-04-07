@@ -5,9 +5,9 @@ use crate::{
     dmabuf::DmaBuf,
     drm::{Format, ARGB8888},
     egl::{EglContext, GlTexture},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wl_buffer, WaylandId, WlBufferId},
-    state::{ObjectId, State},
+    state::{GrabbedObject, ObjectId, State},
     sync::PlainRelease,
     transform,
 };
@@ -312,12 +312,12 @@ impl Object for WlBuffer {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         _state: &mut State,
         req: RawRequest,
         _: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_buffer::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

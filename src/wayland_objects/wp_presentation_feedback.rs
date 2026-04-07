@@ -1,10 +1,10 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
-    object::Object,
+    object::{Object, RequestResult},
     protocol_generated::{
         wp_presentation_feedback, WaylandId, WlOutputId, WpPresentationFeedbackId,
     },
-    state::State,
+    state::{GrabbedObject, State},
 };
 
 #[derive(Debug)]
@@ -62,12 +62,12 @@ impl Object for WpPresentationFeedback {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         _: &mut Client,
         _: &mut State,
         _: RawRequest,
         _: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         Ok(())
     }
 }

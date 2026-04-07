@@ -1,8 +1,8 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wl_pointer, WaylandId, WlPointerId, WlSurfaceId},
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::wl_display::WlDisplay,
 };
 
@@ -78,12 +78,12 @@ impl Object for WlPointer {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_pointer::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

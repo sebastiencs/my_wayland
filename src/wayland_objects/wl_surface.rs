@@ -6,7 +6,7 @@ use crate::{
     },
     drm::{schedule_active_output, schedule_outputs, schedule_outputs_for_rect},
     input::{set_keyboard_focus_from_surface, SurfaceFocus},
-    object::{Object, Parser, PostAction},
+    object::{Object, Parser, PostAction, RequestResult},
     protocol_generated::{
         wl_pointer, wl_surface, wp_fractional_scale_v1, wp_linux_drm_syncobj_surface_v1,
         wp_viewport, xdg_wm_base, WaylandId, WlBufferId, WlCallbackId, WlOutputId, WlRegionId,
@@ -14,7 +14,7 @@ use crate::{
         WpPresentationFeedbackId, WpViewportId, XdgSurfaceId, ZwlrLayerSurfaceV1Id,
     },
     region::{DamageRegion, RectI, RegionValue},
-    state::{FractionalScale, IndexMapKey, ObjectId, OutputId, State},
+    state::{FractionalScale, GrabbedObject, IndexMapKey, ObjectId, OutputId, State},
     sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
     transform::{self, BufferTransform, SizeI, SurfaceViewport},
     wayland_objects::{
@@ -2571,12 +2571,12 @@ impl Object for WlSurface {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_surface::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -2698,7 +2698,7 @@ mod tests {
             clients::{Client, ClientId, ClientManagerAction, RawEvent, RawRequest, Resolved},
             cursor::CursorSourceRef,
             io_uring::model::IoUringAction,
-            object::Object,
+            object::{Object, RequestResult},
             protocol_generated::{
                 xdg_wm_base, WlBufferId, WlSubsurfaceId, WlSurfaceId, WpFractionalScaleV1Id,
                 WpLinuxDrmSyncobjSurfaceV1Id, WpPresentationFeedbackId, WpViewportId, XdgSurfaceId,

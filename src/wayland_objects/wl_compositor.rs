@@ -1,9 +1,9 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{Constants, NewId, WaylandId, WlCompositorId},
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{wl_region::WlRegion, wl_surface::WlSurface},
 };
 
@@ -45,12 +45,12 @@ impl Object for WlCompositor {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         _: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use crate::protocol_generated::wl_compositor::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

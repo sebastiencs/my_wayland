@@ -1,10 +1,10 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wp_cursor_shape_device_v1, WaylandId, WlPointerId, WpCursorShapeDeviceV1Id,
     },
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::wl_display::WlDisplay,
 };
 
@@ -44,12 +44,12 @@ impl Object for WpCursorShapeDeviceV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wp_cursor_shape_device_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

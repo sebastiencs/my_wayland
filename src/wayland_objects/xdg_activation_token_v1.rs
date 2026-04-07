@@ -1,12 +1,12 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_display, xdg_activation_token_v1, Constants, WaylandId, WlSeatId, WlSurfaceId,
         XdgActivationTokenV1Id,
     },
     seat::validate_activation_serial,
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::wl_display::WlDisplay,
 };
 
@@ -51,12 +51,12 @@ impl Object for XdgActivationTokenV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use xdg_activation_token_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

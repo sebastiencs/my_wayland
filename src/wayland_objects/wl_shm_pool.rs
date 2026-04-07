@@ -6,9 +6,9 @@ use std::{
 
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wl_shm, wl_shm_pool, WaylandId, WlShmPoolId},
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{
         wl_buffer::{NewWlBufferParams, WlBuffer},
         wl_display::WlDisplay,
@@ -69,12 +69,12 @@ impl Object for WlShmPool {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_shm_pool::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

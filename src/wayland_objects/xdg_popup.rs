@@ -1,13 +1,13 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     input::SurfaceFocus,
-    object::{Object, Parser, PostAction},
+    object::{Object, Parser, PostAction, RequestResult},
     protocol_generated::{
         xdg_popup, xdg_wm_base, WaylandId, WlSeatId, WlSurfaceId, XdgPopupId, XdgSurfaceId,
         ZwlrLayerSurfaceV1Id,
     },
     region::RectI,
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{
         wl_display::WlDisplay, xdg_positioner::PositionerState, xdg_surface::XdgSurface,
         zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
@@ -235,12 +235,12 @@ impl Object for XdgPopup {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use xdg_popup::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

@@ -5,12 +5,12 @@ use drm::control::Device;
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_display, wp_linux_drm_syncobj_manager_v1, Constants, NewId, WaylandId,
         WpLinuxDrmSyncobjManagerV1Id,
     },
-    state::{DrmId, State},
+    state::{DrmId, GrabbedObject, State},
     sync::SyncTimeline,
     wayland_objects::{
         wl_surface::WlSurface, wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
@@ -60,12 +60,12 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wp_linux_drm_syncobj_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

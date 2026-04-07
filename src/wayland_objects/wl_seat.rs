@@ -1,12 +1,12 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_keyboard, wl_seat, Constants as ProtocolConstants, NewId, WaylandId, WlPointerId,
         WlSeatId,
     },
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{wl_display::WlDisplay, wl_keyboard::WlKeyboard, wl_pointer::WlPointer},
 };
 
@@ -64,12 +64,12 @@ impl Object for WlSeat {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_seat::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

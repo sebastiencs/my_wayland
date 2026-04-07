@@ -1,9 +1,9 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wl_subcompositor, Constants, NewId, WaylandId, WlSubcompositorId},
-    state::State,
+    state::{GrabbedObject, State},
     wayland_objects::{wl_subsurface::WlSubsurface, wl_surface::WlSurface},
 };
 
@@ -60,12 +60,12 @@ impl Object for WlSubcompositor {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_subcompositor::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
@@ -130,7 +130,7 @@ mod tests {
         super::WlSubcompositor,
         crate::{
             clients::{Client, ClientId, RawEvent},
-            object::Object,
+            object::{Object, RequestResult},
             protocol_generated::{WlSubcompositorId, WlSubsurfaceId, WlSurfaceId},
             runner::Dispatcher,
             state::State,

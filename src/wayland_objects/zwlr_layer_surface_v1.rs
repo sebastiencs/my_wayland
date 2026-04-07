@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::{
     clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest, Resolved},
-    object::{Object, Parser, ParserError},
+    object::{Object, Parser, ParserError, RequestResult},
     protocol_generated::{
         wl_display, zwlr_layer_shell_v1, zwlr_layer_surface_v1, Constants, WaylandId, WlSurfaceId,
         XdgPopupId, ZwlrLayerShellV1Id, ZwlrLayerSurfaceV1Id,
     },
     region::RectI,
     seat::{refresh_keyboard_focus, refresh_keyboard_focus_with_snapshot},
-    state::{ObjectId, OutputId, State},
+    state::{GrabbedObject, ObjectId, OutputId, State},
     wayland_objects::{
         wl_display::WlDisplay,
         wl_surface::WlSurface,
@@ -1188,12 +1188,12 @@ impl Object for ZwlrLayerSurfaceV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use zwlr_layer_surface_v1::Request::*;
 
         let Some(request) = self.parse_request(client, req, dispatcher) else {
@@ -1368,7 +1368,7 @@ mod tests {
             clients::{Client, ClientId, ClientManagerAction, RawEvent},
             io_uring::model::IoUringAction,
             runner::Dispatcher,
-            state::State,
+            state::{GrabbedObject, State},
             test_support::{
                 state_for_tests, test_output_drm1_crtc, test_resolved_wl_surface_client1,
             },

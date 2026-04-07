@@ -4,14 +4,14 @@ use crate::{
     clients::{Client, ClientDispatcher, ClientManagerAction, EventWriter, RawRequest, Resolved},
     drm::schedule_outputs,
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         ext_workspace_manager_v1, Constants, ExtWorkspaceGroupHandleV1Id, ExtWorkspaceHandleV1Id,
         ExtWorkspaceManagerV1Id, NewId, WaylandId,
     },
     runner::Dispatcher,
     seat,
-    state::{OutputId, State, WorkspaceGroupId, WorkspaceId},
+    state::{GrabbedObject, OutputId, State, WorkspaceGroupId, WorkspaceId},
     wayland_objects::{
         ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
         ext_workspace_handle_v1::ExtWorkspaceHandleV1, wl_display::WlDisplay,
@@ -296,12 +296,12 @@ impl Object for ExtWorkspaceManagerV1 {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use ext_workspace_manager_v1::Request::*;
 
         match client.parse::<Self>(req).unwrap() {

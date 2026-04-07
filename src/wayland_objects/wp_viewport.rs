@@ -1,8 +1,8 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wp_viewport, WaylandId, WlSurfaceId, WpViewportId},
-    state::State,
+    state::{GrabbedObject, State},
     transform::{RectF, SizeI},
     wayland_objects::wl_surface::WlSurface,
 };
@@ -25,12 +25,12 @@ impl Object for WpViewport {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wp_viewport::Request::*;
 
         let Some(mut surface) = self.surface.try_grab(state) else {

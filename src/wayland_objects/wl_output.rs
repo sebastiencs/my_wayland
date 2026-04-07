@@ -5,9 +5,9 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
     globals::Global,
-    object::{Object, Parser},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{wl_output, Constants, NewId, WaylandId, WlOutputId},
-    state::{Output, OutputId, State},
+    state::{GrabbedObject, Output, OutputId, State},
 };
 
 #[derive(Debug)]
@@ -59,12 +59,12 @@ impl Object for WlOutput {
     }
 
     fn on(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
-    ) -> crate::object::RequestResult {
+    ) -> RequestResult {
         use wl_output::Request::*;
 
         match client.parse::<Self>(req).unwrap() {
