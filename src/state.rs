@@ -2642,7 +2642,7 @@ mod tests {
         }
 
         fn on(
-            mut self: crate::state::GrabbedObject<Self>,
+            self: crate::state::GrabbedObject<Self>,
             _client: &mut Client,
             _state: &mut State,
             _request: RawRequest,
@@ -2663,7 +2663,7 @@ mod tests {
         }
 
         fn on(
-            mut self: crate::state::GrabbedObject<Self>,
+            self: crate::state::GrabbedObject<Self>,
             _client: &mut Client,
             _state: &mut State,
             _request: RawRequest,

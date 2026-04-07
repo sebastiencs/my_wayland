@@ -157,7 +157,6 @@ mod tests {
         let mut state = state_for_tests();
         let (mut client, mut dispatcher) = test_client_and_dispatcher(4);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-        let mut subcompositor = WlSubcompositor::new(WlSubcompositorId::from(1));
 
         let (parent_resolved, _) = client.insert_object(
             &mut state,
@@ -172,28 +171,33 @@ mod tests {
         let child_object_id = child_resolved.object_id();
         state.register_root_surface(child_object_id);
 
-        subcompositor.on(
-            &mut client,
-            &mut state,
-            get_subsurface_request(
-                WlSubcompositorId::from(1),
-                WlSubsurfaceId::from(21),
-                WlSurfaceId::from(11),
-                WlSurfaceId::from(10),
-            ),
-            &mut client_dispatcher,
-        );
-        subcompositor.on(
-            &mut client,
-            &mut state,
-            get_subsurface_request(
-                WlSubcompositorId::from(1),
-                WlSubsurfaceId::from(22),
-                WlSurfaceId::from(10),
-                WlSurfaceId::from(11),
-            ),
-            &mut client_dispatcher,
-        );
+        client.insert_object(&mut state, WlSubcompositor::new(WlSubcompositorId::from(1)));
+        client
+            .grab_object(WlSubcompositorId::from(1), &mut state)
+            .on(
+                &mut client,
+                &mut state,
+                get_subsurface_request(
+                    WlSubcompositorId::from(1),
+                    WlSubsurfaceId::from(21),
+                    WlSurfaceId::from(11),
+                    WlSurfaceId::from(10),
+                ),
+                &mut client_dispatcher,
+            );
+        client
+            .grab_object(WlSubcompositorId::from(1), &mut state)
+            .on(
+                &mut client,
+                &mut state,
+                get_subsurface_request(
+                    WlSubcompositorId::from(1),
+                    WlSubsurfaceId::from(22),
+                    WlSurfaceId::from(10),
+                    WlSurfaceId::from(11),
+                ),
+                &mut client_dispatcher,
+            );
 
         let parent = state
             .objects

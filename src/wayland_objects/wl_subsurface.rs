@@ -239,7 +239,7 @@ mod tests {
             );
         }
 
-        let mut subsurface = state
+        let subsurface = state
             .objects
             .grab_object::<WlSubsurface>(subsurface_object_id);
         subsurface.on(
@@ -248,7 +248,6 @@ mod tests {
             place_above_request(WlSubsurfaceId::from(30), WlSurfaceId::from(12)),
             &mut client_dispatcher,
         );
-        drop(subsurface);
 
         let mut parent = state.objects.grab_object::<WlSurface>(parent_object_id);
         assert!(parent.apply_pending_tree_state(&mut state));

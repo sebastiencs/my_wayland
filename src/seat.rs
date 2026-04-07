@@ -1899,7 +1899,7 @@ mod xdg_seat_tests {
         xdg_surface_id: XdgSurfaceId,
         toplevel_id: XdgToplevelId,
     ) -> ObjectId {
-        let mut xdg_surface = state
+        let xdg_surface = state
             .objects
             .grab_object::<XdgSurface>(xdg_surface_object_id);
         let _ = xdg_surface.on(
@@ -1908,7 +1908,6 @@ mod xdg_seat_tests {
             get_toplevel_request(xdg_surface_id, toplevel_id),
             dispatcher,
         );
-        drop(xdg_surface);
         dispatcher.drain_post_actions(client, state);
         client.object_id(toplevel_id)
     }
@@ -1980,7 +1979,7 @@ mod xdg_seat_tests {
         let popup_object_id = popup_resolved.object_id();
 
         {
-            let mut popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
+            let popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
             let _ = popup.on(
                 &mut client,
                 &mut state,
@@ -2081,7 +2080,7 @@ mod xdg_seat_tests {
         state.seat.record_keyboard_trigger(serial, parent_focus);
 
         {
-            let mut popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
+            let popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
             let _ = popup.on(
                 &mut client,
                 &mut state,
@@ -2168,7 +2167,7 @@ mod xdg_seat_tests {
             client.insert_object(&mut state, XdgPositioner::new(XdgPositionerId::from(50)));
         let positioner_object_id = positioner_resolved.object_id();
         {
-            let mut positioner = state
+            let positioner = state
                 .objects
                 .grab_object::<XdgPositioner>(positioner_object_id);
             let _ = positioner.on(
@@ -2177,6 +2176,11 @@ mod xdg_seat_tests {
                 positioner_set_size_request(XdgPositionerId::from(50), 40, 30),
                 &mut client_dispatcher,
             );
+        }
+        {
+            let positioner = state
+                .objects
+                .grab_object::<XdgPositioner>(positioner_object_id);
             let _ = positioner.on(
                 &mut client,
                 &mut state,
@@ -2187,7 +2191,7 @@ mod xdg_seat_tests {
         client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         {
-            let mut xdg_surface = state
+            let xdg_surface = state
                 .objects
                 .grab_object::<XdgSurface>(popup_xdg_surface_object_id);
             let _ = xdg_surface.on(
@@ -2230,7 +2234,7 @@ mod xdg_seat_tests {
 
         {
             let popup_object_id = client.object_id(XdgPopupId::from(40));
-            let mut popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
+            let popup = state.objects.grab_object::<XdgPopup>(popup_object_id);
             let _ = popup.on(
                 &mut client,
                 &mut state,
@@ -3517,7 +3521,7 @@ mod xdg_seat_tests {
         state.seat.record_pointer_button(1, serial, Some(focus));
 
         {
-            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
+            let toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
             let _ = toplevel.on(
                 &mut client,
                 &mut state,
@@ -3535,7 +3539,7 @@ mod xdg_seat_tests {
         assert!(state.seat.pointer_interactive_grab.is_none());
 
         {
-            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
+            let toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
             let _ = toplevel.on(
                 &mut client,
                 &mut state,
@@ -3596,7 +3600,7 @@ mod xdg_seat_tests {
         state.seat.record_keyboard_trigger(serial, focus);
 
         {
-            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
+            let toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
             let _ = toplevel.on(
                 &mut client,
                 &mut state,
@@ -3657,7 +3661,7 @@ mod xdg_seat_tests {
         state.seat.record_pointer_button(1, serial, Some(focus));
 
         {
-            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
+            let toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
             let _ = toplevel.on(
                 &mut client,
                 &mut state,
@@ -3718,7 +3722,7 @@ mod xdg_seat_tests {
         state.seat.pointer_pos = (40.0, 90.0);
 
         {
-            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
+            let toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
             let _ = toplevel.on(
                 &mut client,
                 &mut state,
@@ -3778,7 +3782,7 @@ mod xdg_seat_tests {
         let positioner_object_id = positioner_resolved.object_id();
 
         {
-            let mut positioner = state
+            let positioner = state
                 .objects
                 .grab_object::<XdgPositioner>(positioner_object_id);
             let _ = positioner.on(
@@ -3787,6 +3791,11 @@ mod xdg_seat_tests {
                 positioner_set_size_request(XdgPositionerId::from(150), 40, 30),
                 &mut client_dispatcher,
             );
+        }
+        {
+            let positioner = state
+                .objects
+                .grab_object::<XdgPositioner>(positioner_object_id);
             let _ = positioner.on(
                 &mut client,
                 &mut state,
@@ -3797,7 +3806,7 @@ mod xdg_seat_tests {
         client_dispatcher.drain_post_actions(&mut client, &mut state);
 
         {
-            let mut xdg_surface = state
+            let xdg_surface = state
                 .objects
                 .grab_object::<XdgSurface>(xdg_surface_object_id);
             let _ = xdg_surface.on(
@@ -3817,7 +3826,7 @@ mod xdg_seat_tests {
         assert!(client.contains_object(XdgPopupId::from(160), &state));
 
         {
-            let mut xdg_surface = state
+            let xdg_surface = state
                 .objects
                 .grab_object::<XdgSurface>(xdg_surface_object_id);
             let _ = xdg_surface.on(

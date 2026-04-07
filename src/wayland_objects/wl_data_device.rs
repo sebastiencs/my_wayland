@@ -481,7 +481,7 @@ mod tests {
         }
 
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-        let mut data_device = state
+        let data_device = state
             .objects
             .grab_object::<WlDataDevice>(data_device_object_id);
         data_device.on(
@@ -490,7 +490,6 @@ mod tests {
             release_request(data_device_id),
             &mut client_dispatcher,
         );
-        drop(data_device);
 
         assert!(state.seat.active_drag().is_none());
         assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(

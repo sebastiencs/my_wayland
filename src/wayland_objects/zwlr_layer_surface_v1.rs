@@ -1729,28 +1729,28 @@ mod tests {
     #[test]
     fn set_layer_reports_error_for_version_one_objects() {
         let mut state = state_for_tests();
-        let mut layer_surface = make_test_layer_surface(
-            ZwlrLayerSurfaceV1Id::from(1u32),
-            1,
-            None,
-            LayerShellLayer::Bottom,
-            "panel",
-        );
+        let layer_surface_id = ZwlrLayerSurfaceV1Id::from(1u32);
         let mut client = Client::new_for_tests(ClientId::from_raw(3));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
-        layer_surface.on(
+        client.insert_object(
+            &mut state,
+            make_test_layer_surface(layer_surface_id, 1, None, LayerShellLayer::Bottom, "panel"),
+        );
+        client.grab_object(layer_surface_id, &mut state).on(
             &mut client,
             &mut state,
-            set_layer_request(
-                ZwlrLayerSurfaceV1Id::from(1u32),
-                zwlr_layer_shell_v1::Layer::Overlay,
-            ),
+            set_layer_request(layer_surface_id, zwlr_layer_shell_v1::Layer::Overlay),
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
 
+        let layer_surface = state
+            .objects
+            .get(client.object_id(layer_surface_id))
+            .downcast_ref::<ZwlrLayerSurfaceV1>()
+            .unwrap();
         assert_eq!(layer_surface.pending.layer, None);
         assert_eq!(layer_surface.layer(), LayerShellLayer::Bottom);
         assert!(dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(|action| {
@@ -1765,25 +1765,28 @@ mod tests {
     #[test]
     fn set_anchor_rejects_invalid_bits_immediately() {
         let mut state = state_for_tests();
-        let mut layer_surface = make_test_layer_surface(
-            ZwlrLayerSurfaceV1Id::from(1u32),
-            5,
-            None,
-            LayerShellLayer::Bottom,
-            "panel",
-        );
+        let layer_surface_id = ZwlrLayerSurfaceV1Id::from(1u32);
         let mut client = Client::new_for_tests(ClientId::from_raw(3));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
-        layer_surface.on(
+        client.insert_object(
+            &mut state,
+            make_test_layer_surface(layer_surface_id, 5, None, LayerShellLayer::Bottom, "panel"),
+        );
+        client.grab_object(layer_surface_id, &mut state).on(
             &mut client,
             &mut state,
-            set_anchor_request(ZwlrLayerSurfaceV1Id::from(1u32), ANCHOR_MASK | 0x10),
+            set_anchor_request(layer_surface_id, ANCHOR_MASK | 0x10),
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
 
+        let layer_surface = state
+            .objects
+            .get(client.object_id(layer_surface_id))
+            .downcast_ref::<ZwlrLayerSurfaceV1>()
+            .unwrap();
         assert_eq!(layer_surface.pending.anchor, None);
         assert!(!dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(|action| {
             matches!(action, crate::clients::ClientManagerAction::Close { id } if *id == client.client_id())
@@ -1797,25 +1800,28 @@ mod tests {
     #[test]
     fn set_keyboard_interactivity_rejects_invalid_values_immediately() {
         let mut state = state_for_tests();
-        let mut layer_surface = make_test_layer_surface(
-            ZwlrLayerSurfaceV1Id::from(1u32),
-            5,
-            None,
-            LayerShellLayer::Bottom,
-            "panel",
-        );
+        let layer_surface_id = ZwlrLayerSurfaceV1Id::from(1u32);
         let mut client = Client::new_for_tests(ClientId::from_raw(3));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
-        layer_surface.on(
+        client.insert_object(
+            &mut state,
+            make_test_layer_surface(layer_surface_id, 5, None, LayerShellLayer::Bottom, "panel"),
+        );
+        client.grab_object(layer_surface_id, &mut state).on(
             &mut client,
             &mut state,
-            set_keyboard_interactivity_request(ZwlrLayerSurfaceV1Id::from(1u32), 99),
+            set_keyboard_interactivity_request(layer_surface_id, 99),
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
 
+        let layer_surface = state
+            .objects
+            .get(client.object_id(layer_surface_id))
+            .downcast_ref::<ZwlrLayerSurfaceV1>()
+            .unwrap();
         assert_eq!(layer_surface.pending.keyboard_interactivity, None);
         assert!(!dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(|action| {
             matches!(action, crate::clients::ClientManagerAction::Close { id } if *id == client.client_id())
@@ -1845,25 +1851,28 @@ mod tests {
     #[test]
     fn set_exclusive_edge_reports_invalid_method_before_version_five() {
         let mut state = state_for_tests();
-        let mut layer_surface = make_test_layer_surface(
-            ZwlrLayerSurfaceV1Id::from(1u32),
-            4,
-            None,
-            LayerShellLayer::Bottom,
-            "panel",
-        );
+        let layer_surface_id = ZwlrLayerSurfaceV1Id::from(1u32);
         let mut client = Client::new_for_tests(ClientId::from_raw(3));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
-        layer_surface.on(
+        client.insert_object(
+            &mut state,
+            make_test_layer_surface(layer_surface_id, 4, None, LayerShellLayer::Bottom, "panel"),
+        );
+        client.grab_object(layer_surface_id, &mut state).on(
             &mut client,
             &mut state,
-            set_exclusive_edge_request(ZwlrLayerSurfaceV1Id::from(1u32), ANCHOR_TOP),
+            set_exclusive_edge_request(layer_surface_id, ANCHOR_TOP),
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
 
+        let layer_surface = state
+            .objects
+            .get(client.object_id(layer_surface_id))
+            .downcast_ref::<ZwlrLayerSurfaceV1>()
+            .unwrap();
         assert_eq!(layer_surface.pending.exclusive_edge, None);
         assert!(dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(|action| {
             matches!(action, crate::clients::ClientManagerAction::Close { id } if *id == client.client_id())

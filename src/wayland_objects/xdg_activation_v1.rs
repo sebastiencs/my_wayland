@@ -242,7 +242,7 @@ mod tests {
             );
         }
         {
-            let mut token = state
+            let token = state
                 .objects
                 .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
                     client.object_id(token_id),
@@ -254,12 +254,28 @@ mod tests {
                 set_surface_request(token_id, requester_surface_id),
                 &mut client_dispatcher,
             );
+        }
+        {
+            let token = state
+                .objects
+                .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
+                    client.object_id(token_id),
+                );
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
             token.on(
                 &mut client,
                 &mut state,
                 set_serial_request(token_id, serial, seat_id),
                 &mut client_dispatcher,
             );
+        }
+        {
+            let token = state
+                .objects
+                .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
+                    client.object_id(token_id),
+                );
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
             token.on(&mut client, &mut state, commit_request(token_id), &mut client_dispatcher);
         }
 
@@ -317,7 +333,7 @@ mod tests {
             );
         }
         {
-            let mut token = state
+            let token = state
                 .objects
                 .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
                     client.object_id(token_id),
@@ -329,12 +345,28 @@ mod tests {
                 set_surface_request(token_id, surface_id),
                 &mut client_dispatcher,
             );
+        }
+        {
+            let token = state
+                .objects
+                .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
+                    client.object_id(token_id),
+                );
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
             token.on(
                 &mut client,
                 &mut state,
                 set_serial_request(token_id, 9999, seat_id),
                 &mut client_dispatcher,
             );
+        }
+        {
+            let token = state
+                .objects
+                .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
+                    client.object_id(token_id),
+                );
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
             token.on(&mut client, &mut state, commit_request(token_id), &mut client_dispatcher);
         }
 
@@ -381,7 +413,7 @@ mod tests {
             );
         }
         {
-            let mut token = state
+            let token = state
                 .objects
                 .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
                     client.object_id(token_id),
@@ -393,13 +425,37 @@ mod tests {
                 set_surface_request(token_id, surface_id),
                 &mut client_dispatcher,
             );
+        }
+        {
+            let token = state
+                .objects
+                .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
+                    client.object_id(token_id),
+                );
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
             token.on(
                 &mut client,
                 &mut state,
                 set_serial_request(token_id, serial, seat_id),
                 &mut client_dispatcher,
             );
+        }
+        {
+            let token = state
+                .objects
+                .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
+                    client.object_id(token_id),
+                );
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
             token.on(&mut client, &mut state, commit_request(token_id), &mut client_dispatcher);
+        }
+        {
+            let token = state
+                .objects
+                .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
+                    client.object_id(token_id),
+                );
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
             token.on(&mut client, &mut state, commit_request(token_id), &mut client_dispatcher);
         }
 
@@ -450,7 +506,7 @@ mod tests {
             );
         }
         {
-            let mut token = state
+            let token = state
                 .objects
                 .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
                     client.object_id(token_id),
@@ -462,12 +518,28 @@ mod tests {
                 set_surface_request(token_id, requester_surface_id),
                 &mut client_dispatcher,
             );
+        }
+        {
+            let token = state
+                .objects
+                .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
+                    client.object_id(token_id),
+                );
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
             token.on(
                 &mut client,
                 &mut state,
                 set_serial_request(token_id, serial, seat_id),
                 &mut client_dispatcher,
             );
+        }
+        {
+            let token = state
+                .objects
+                .grab_object::<crate::wayland_objects::xdg_activation_token_v1::XdgActivationTokenV1>(
+                    client.object_id(token_id),
+                );
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
             token.on(&mut client, &mut state, commit_request(token_id), &mut client_dispatcher);
         }
 

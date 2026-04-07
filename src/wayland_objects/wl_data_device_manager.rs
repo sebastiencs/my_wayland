@@ -90,7 +90,7 @@ mod tests {
         super::WlDataDeviceManager,
         crate::{
             clients::{Client, ClientAction, ClientId, ClientManagerAction, RawEvent, Resolved},
-            object::{Object, RequestResult},
+            object::Object,
             protocol_generated::{WlDataDeviceId, WlDataDeviceManagerId, WlDataSourceId, WlSeatId},
             runner::Dispatcher,
             seat::{set_keyboard_focus_from_surface, SurfaceFocus},
@@ -124,7 +124,6 @@ mod tests {
         let mut dispatcher = Dispatcher::default();
         let seat_id = WlSeatId::from(2);
         let manager_id = WlDataDeviceManagerId::from(3);
-        let mut manager = WlDataDeviceManager { id: manager_id, version: 3 };
 
         client.insert_object(&mut state, WlSeat::new(seat_id));
         insert_surface(&mut state, &mut client, 99);
@@ -143,7 +142,8 @@ mod tests {
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
-        manager.on(
+        client.insert_object(&mut state, WlDataDeviceManager { id: manager_id, version: 3 });
+        client.grab_object(manager_id, &mut state).on(
             &mut client,
             &mut state,
             get_data_device_request(manager_id, WlDataDeviceId::from(4), seat_id),
@@ -162,16 +162,16 @@ mod tests {
         let mut client = Client::new_for_tests(ClientId::from_raw(7));
         let mut dispatcher = Dispatcher::default();
         let manager_id = WlDataDeviceManagerId::from(3);
-        let mut manager = WlDataDeviceManager { id: manager_id, version: 3 };
 
         client.insert_object(
             &mut state,
             WlDataSource::new(WlDataSourceId::from(2), client.client_id(), 3),
         );
+        client.insert_object(&mut state, WlDataDeviceManager { id: manager_id, version: 3 });
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
         client_dispatcher.set_requester_object_id_for_tests(manager_id.into());
 
-        manager.on(
+        client.grab_object(manager_id, &mut state).on(
             &mut client,
             &mut state,
             get_data_device_request(manager_id, WlDataDeviceId::from(4), WlSeatId::from(2)),

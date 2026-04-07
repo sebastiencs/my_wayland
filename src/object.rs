@@ -63,7 +63,7 @@ where
         dispatcher: &mut ClientDispatcher,
     ) -> RequestResult {
         let grabbed = GrabbedObject::<Self>::new(self, grab);
-        grabbed.on(client, state, request, dispatcher)
+        <Self as Object>::on(grabbed, client, state, request, dispatcher)
     }
 
     fn as_any(&self) -> &dyn Any {

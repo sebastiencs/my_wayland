@@ -548,9 +548,8 @@ mod tests {
 
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = target.test_dispatcher(&mut dispatcher);
-        let mut offer = state.objects.grab_object::<WlDataOffer>(offer_object_id);
+        let offer = state.objects.grab_object::<WlDataOffer>(offer_object_id);
         offer.on(&mut target, &mut state, destroy_request(offer_id), &mut client_dispatcher);
-        drop(offer);
 
         assert!(state.seat.active_drag().is_none());
         assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
