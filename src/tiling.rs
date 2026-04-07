@@ -137,8 +137,12 @@ impl TiledSurfaceGeometry {
             )
         });
         let anchor_rect = self.configure_rect_for_decoration_mode(decoration_mode);
-        let root_pos =
-            root_position_from_anchor(self.content_rect, anchor_rect, effective_window_geometry);
+        let root_pos = match GeometryOwnership::for_decoration_mode(decoration_mode) {
+            GeometryOwnership::Compositor => (self.content_rect.x, self.content_rect.y),
+            GeometryOwnership::Client => {
+                root_position_from_anchor(self.content_rect, anchor_rect, effective_window_geometry)
+            }
+        };
         log::debug!(
             "AAA tiled_root_position surface={:?} decoration_mode={:?} frame_rect={:?} content_rect={:?} anchor_rect={:?} explicit_window_geometry={:?} effective_window_geometry={:?} root_pos=({}, {})",
             surface_object_id,
@@ -2774,7 +2778,7 @@ mod tests {
     }
 
     #[test]
-    fn tiled_root_position_aligns_window_geometry_to_content_rect_for_server_side_decorations() {
+    fn tiled_root_position_ignores_window_geometry_for_server_side_decorations() {
         let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(64));
         let mut dispatcher = Dispatcher::default();
@@ -2817,7 +2821,7 @@ mod tests {
                 surface,
                 geometry,
             ),
-            (625, 0)
+            (650, 25)
         );
     }
 
