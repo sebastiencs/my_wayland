@@ -1621,6 +1621,16 @@ impl Client {
                     )
                 })
                 .or(surface_configure_bounds);
+            log::debug!(
+                "AAA client configure_root_surface: root_surface={:?} tiled_geometry={:?} configure_bounds={:?} resizing={} pending_floating_restore={:?} desired_decoration_mode={:?} current_decoration_mode_for_configure={:?}",
+                root_surface,
+                tiled_geometry,
+                configure_bounds,
+                resizing,
+                pending_floating_restore,
+                desired_decoration_mode,
+                toplevel.decoration_mode_for_configure(),
+            );
             if let Some(geometry) = tiled_geometry {
                 toplevel.send_tiled_layout_configure(
                     self,

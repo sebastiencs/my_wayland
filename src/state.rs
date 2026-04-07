@@ -892,12 +892,36 @@ impl State {
             return false;
         };
         if managed.mode != ManagedWindowMode::Tiled || managed.mapped {
+            log::debug!(
+                "AAA prepare_root_surface_initial_layout skipped: surface={:?} workspace_id={:?} mode={:?} mapped={} pending_initial_layout={}",
+                surface,
+                workspace_id,
+                managed.mode,
+                managed.mapped,
+                managed.pending_initial_layout,
+            );
             return false;
         }
         if managed.pending_initial_layout {
+            log::debug!(
+                "AAA prepare_root_surface_initial_layout already_pending: surface={:?} workspace_id={:?} mode={:?} mapped={} pending_initial_layout={}",
+                surface,
+                workspace_id,
+                managed.mode,
+                managed.mapped,
+                managed.pending_initial_layout,
+            );
             return true;
         }
         managed.pending_initial_layout = true;
+        log::debug!(
+            "AAA prepare_root_surface_initial_layout armed: surface={:?} workspace_id={:?} mode={:?} mapped={} pending_initial_layout={}",
+            surface,
+            workspace_id,
+            managed.mode,
+            managed.mapped,
+            managed.pending_initial_layout,
+        );
         tiling::mark_workspace_dirty(self, workspace_id);
         true
     }
@@ -914,9 +938,25 @@ impl State {
             return;
         };
         if !managed.pending_initial_layout {
+            log::debug!(
+                "AAA confirm_root_surface_mapped skipped: surface={:?} workspace_id={:?} mode={:?} mapped={} pending_initial_layout={}",
+                surface,
+                workspace_id,
+                managed.mode,
+                managed.mapped,
+                managed.pending_initial_layout,
+            );
             return;
         }
         managed.pending_initial_layout = false;
+        log::debug!(
+            "AAA confirm_root_surface_mapped cleared: surface={:?} workspace_id={:?} mode={:?} mapped={} pending_initial_layout={}",
+            surface,
+            workspace_id,
+            managed.mode,
+            managed.mapped,
+            managed.pending_initial_layout,
+        );
         tiling::mark_workspace_dirty(self, workspace_id);
     }
 

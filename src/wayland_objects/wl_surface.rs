@@ -1934,6 +1934,14 @@ impl WlSurface {
                     .is_some_and(XdgSurface::is_toplevel_parent)
                 {
                     if is_mapped {
+                        log::debug!(
+                            "AAA wl_surface first_map: surface={:?} xdg_surface={:?} root_position={:?} logical_size={:?} global_bounds={:?}",
+                            resolved_surface,
+                            xdg_surface_id,
+                            self.root_position(),
+                            self.logical_size(),
+                            self.global_logical_bounds(),
+                        );
                         state.confirm_root_surface_mapped(resolved_surface);
                         dispatcher.dispatch_post_action(PostWlSurface::FocusNewToplevel {
                             root_surface: resolved_surface,

@@ -74,10 +74,31 @@ impl TiledSurfaceGeometry {
         surface: &WlSurface,
     ) -> (i32, i32) {
         let fallback_anchor = self.content_rect;
+        let configured_insets = state.configured_decoration_insets();
         let Some((_, toplevel)) = xdg_toplevel_for_surface_ids(state, surface.xdg_surface()) else {
+            log::debug!(
+                "AAA tiled root position fallback: surface={:?} reason=no_xdg_toplevel frame_rect={:?} content_rect={:?} configured_insets={:?} root_pos=({}, {})",
+                surface_object_id,
+                self.frame_rect,
+                self.content_rect,
+                configured_insets,
+                fallback_anchor.x,
+                fallback_anchor.y,
+            );
             return (fallback_anchor.x, fallback_anchor.y);
         };
+        let decoration_mode = toplevel.decoration_mode();
         let Some(explicit_geometry) = toplevel.window_geometry() else {
+            log::debug!(
+                "AAA tiled root position fallback: surface={:?} decoration_mode={:?} reason=no_window_geometry frame_rect={:?} content_rect={:?} configured_insets={:?} root_pos=({}, {})",
+                surface_object_id,
+                decoration_mode,
+                self.frame_rect,
+                self.content_rect,
+                configured_insets,
+                fallback_anchor.x,
+                fallback_anchor.y,
+            );
             return (fallback_anchor.x, fallback_anchor.y);
         };
         let Some(window_geometry) = effective_window_geometry_for_surface(
@@ -86,10 +107,38 @@ impl TiledSurfaceGeometry {
             surface,
             Some(explicit_geometry),
         ) else {
+            log::debug!(
+                "AAA tiled root position fallback: surface={:?} decoration_mode={:?} reason=no_effective_window_geometry frame_rect={:?} content_rect={:?} configured_insets={:?} explicit_window_geometry={:?} root_pos=({}, {})",
+                surface_object_id,
+                decoration_mode,
+                self.frame_rect,
+                self.content_rect,
+                configured_insets,
+                explicit_geometry,
+                fallback_anchor.x,
+                fallback_anchor.y,
+            );
             return (fallback_anchor.x, fallback_anchor.y);
         };
-        let anchor = self.placement_anchor_rect(toplevel.decoration_mode());
-        (anchor.x.saturating_sub(window_geometry.x), anchor.y.saturating_sub(window_geometry.y))
+        let anchor = self.placement_anchor_rect(decoration_mode);
+        let root_pos = (
+            anchor.x.saturating_sub(window_geometry.x),
+            anchor.y.saturating_sub(window_geometry.y),
+        );
+        log::debug!(
+            "AAA tiled root position: surface={:?} decoration_mode={:?} frame_rect={:?} content_rect={:?} anchor_rect={:?} configured_insets={:?} explicit_window_geometry={:?} effective_window_geometry={:?} root_pos=({}, {})",
+            surface_object_id,
+            decoration_mode,
+            self.frame_rect,
+            self.content_rect,
+            anchor,
+            configured_insets,
+            explicit_geometry,
+            window_geometry,
+            root_pos.0,
+            root_pos.1,
+        );
+        root_pos
     }
 }
 

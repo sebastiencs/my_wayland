@@ -929,6 +929,16 @@ pub mod xdg_toplevel {
             xdg_surface: &mut XdgSurface,
             dispatcher: &mut ClientDispatcher,
         ) {
+            log::debug!(
+                "AAA xdg_toplevel schedule_configure: toplevel={:?} xdg_surface={:?} current_size=({}, {}) configure_bounds={:?} decoration_mode_for_configure={:?} states={:?}",
+                self.id,
+                self.xdg_surface,
+                self.current_width,
+                self.current_height,
+                configure_bounds,
+                self.decoration_mode_for_configure(),
+                self.effective_states(),
+            );
             self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_configure(dispatcher);
             self.send_decoration_configure_if_needed(state, dispatcher);
@@ -970,6 +980,17 @@ pub mod xdg_toplevel {
             dispatcher: &mut ClientDispatcher,
         ) {
             if let Some(geometry) = initial_tiled_geometry {
+                let configure_size = geometry
+                    .configure_size_for_decoration_mode(self.decoration_mode_for_configure());
+                log::debug!(
+                    "AAA xdg_toplevel send_initial_configure tiled: toplevel={:?} xdg_surface={:?} decoration_mode_for_configure={:?} geometry={:?} configure_size={:?} configure_bounds={:?}",
+                    self.id,
+                    self.xdg_surface,
+                    self.decoration_mode_for_configure(),
+                    geometry,
+                    configure_size,
+                    configure_bounds,
+                );
                 self.send_tiled_layout_configure(
                     client,
                     state,
@@ -979,6 +1000,15 @@ pub mod xdg_toplevel {
                     dispatcher,
                 );
             } else {
+                log::debug!(
+                    "AAA xdg_toplevel send_initial_configure generic: toplevel={:?} xdg_surface={:?} current_size=({}, {}) configure_bounds={:?} decoration_mode_for_configure={:?}",
+                    self.id,
+                    self.xdg_surface,
+                    self.current_width,
+                    self.current_height,
+                    configure_bounds,
+                    self.decoration_mode_for_configure(),
+                );
                 self.schedule_configure(client, state, configure_bounds, xdg_surface, dispatcher);
             }
         }
@@ -994,6 +1024,16 @@ pub mod xdg_toplevel {
         ) {
             let (width, height) =
                 geometry.configure_size_for_decoration_mode(self.decoration_mode_for_configure());
+            log::debug!(
+                "AAA xdg_toplevel send_tiled_layout_configure: toplevel={:?} xdg_surface={:?} decoration_mode_for_configure={:?} geometry={:?} configure_size=({}, {}) resizing={}",
+                self.id,
+                self.xdg_surface,
+                self.decoration_mode_for_configure(),
+                geometry,
+                width,
+                height,
+                resizing,
+            );
             self.send_layout_configure(
                 client,
                 state,
@@ -1022,6 +1062,19 @@ pub mod xdg_toplevel {
             dispatcher: &mut ClientDispatcher,
         ) {
             let states = self.layout_states(tiled_edges, fullscreen, resizing);
+            log::debug!(
+                "AAA xdg_toplevel send_layout_configure: toplevel={:?} xdg_surface={:?} width={} height={} configure_bounds={:?} tiled_edges={} fullscreen={} resizing={} decoration_mode_for_configure={:?} states={:?}",
+                self.id,
+                self.xdg_surface,
+                width,
+                height,
+                configure_bounds,
+                tiled_edges,
+                fullscreen,
+                resizing,
+                self.decoration_mode_for_configure(),
+                states,
+            );
             self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_event(
                 proto_xdg_toplevel::Event::Configure {
