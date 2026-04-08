@@ -22,8 +22,8 @@ pub(crate) use {
         request_toplevel_move, request_toplevel_resize, window_hit_at,
     },
     pick::{
-        build_protocol_window_target, rect_contains_point, resize_edges_for_pointer, scene_pick_at,
-        scene_pick_for_pointer, surface_focus_pick_at,
+        build_protocol_move_target, build_protocol_resize_target, rect_contains_point,
+        resize_edges_for_pointer, scene_pick_at, scene_pick_for_pointer, surface_focus_pick_at,
     },
     types::{
         ActiveGrabState, HitSemantics, InteractionIntent, InteractionStartOptions,

@@ -23,8 +23,7 @@ use crate::{
         wp_fractional_scale_v1::WpFractionalScaleV1,
         xdg_surface::XdgSurface,
         zwlr_layer_surface_v1::{
-            output_usable_bounds, output_usable_bounds_with_snapshot, LayerLayoutObjectSnapshot,
-            ZwlrLayerSurfaceV1,
+            output_usable_bounds, LayerLayoutObjectSnapshot, ZwlrLayerSurfaceV1,
         },
     },
     ENABLE_DAMAGE,
@@ -683,25 +682,6 @@ impl WlSurface {
         surface: Resolved<WlSurfaceId>,
     ) -> Option<OutputId> {
         state.output_id_for_surface_object(surface.object_id(), self)
-    }
-
-    pub fn configure_bounds_for_object(
-        &self,
-        state: &State,
-        surface: Resolved<WlSurfaceId>,
-    ) -> Option<(i32, i32)> {
-        self.configure_bounds_with_snapshot_for_object(state, surface, None)
-    }
-
-    pub fn configure_bounds_with_snapshot_for_object(
-        &self,
-        state: &State,
-        surface: Resolved<WlSurfaceId>,
-        snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
-    ) -> Option<(i32, i32)> {
-        self.preferred_output_id_for_object(state, surface)
-            .and_then(|output_id| output_usable_bounds_with_snapshot(state, output_id, snapshot))
-            .map(|bounds| (bounds.width, bounds.height))
     }
 
     pub fn send_preferred_buffer_state_for_object(
@@ -1775,9 +1755,7 @@ impl WlSurface {
             && self.role == Role::XdgSurface
             && !self.has_cursor_role()
             && !self.has_dnd_icon_role())
-        .then(|| {
-            crate::tiling::effective_decoration_insets_for_surface(state, resolved_surface, self)
-        });
+        .then(|| crate::root_geometry::effective_decoration_insets_for_surface(state, self));
         if let Some(shell_surface) = self.shell_surface {
             self.send_preferred_fractional_scale_for_object(state, resolved_surface, dispatcher);
             self.send_preferred_buffer_state_for_object(state, resolved_surface, dispatcher);
@@ -1785,9 +1763,9 @@ impl WlSurface {
                 ShellSurfaceObject::XdgSurface(xdg_surface_id) => {
                     let layout_snapshot =
                         LayerLayoutObjectSnapshot::for_surface(resolved_surface, self);
-                    let configure_bounds = self.configure_bounds_with_snapshot_for_object(
-                        state,
+                    let configure_bounds = state.configure_bounds_for_surface_with_ref(
                         resolved_surface,
+                        self,
                         Some(layout_snapshot),
                     );
                     let mut xdg_surface = xdg_surface_id.grab(state);
@@ -1889,11 +1867,8 @@ impl WlSurface {
             );
         }
         if let Some(old_effective_insets) = old_effective_insets {
-            let new_effective_insets = crate::tiling::effective_decoration_insets_for_surface(
-                state,
-                resolved_surface,
-                self,
-            );
+            let new_effective_insets =
+                crate::root_geometry::effective_decoration_insets_for_surface(state, self);
             if old_effective_insets != new_effective_insets
                 && (state.is_tiled_root_surface(resolved_surface)
                     || state.root_surface_is_fullscreen(resolved_surface))
@@ -1904,25 +1879,8 @@ impl WlSurface {
                 }
             }
         }
-        if self.is_root()
-            && self.role == Role::XdgSurface
-            && !self.has_cursor_role()
-            && !self.has_dnd_icon_role()
-        {
-            let surface_bounds = Self::local_surface_tree_bounds_from_ref(state, self);
-            let window_geometry = self.xdg_surface().and_then(|xdg_surface_id| {
-                state
-                    .objects
-                    .try_ref_object::<XdgSurface>(xdg_surface_id.object_id())
-                    .and_then(|xdg_surface| {
-                        crate::tiling::effective_window_geometry_for_surface(
-                            state,
-                            resolved_surface,
-                            self,
-                            xdg_surface.current_window_geometry(),
-                        )
-                    })
-            });
+        if !self.has_cursor_role() && !self.has_dnd_icon_role() {
+            state.mark_root_geometry_dirty_for_surface(resolved_surface);
         }
         let is_mapped = self.global_logical_bounds().is_some();
         if was_mapped != is_mapped {
@@ -3136,7 +3094,7 @@ mod tests {
         );
         assert!(state
             .managed_root_surface_state(root(&state, surface_object_id))
-            .is_some_and(|managed| managed.pending_initial_layout));
+            .is_some_and(|managed| managed.awaiting_initial_layout));
     }
 
     #[test]
@@ -3210,7 +3168,7 @@ mod tests {
         );
         assert!(!state
             .managed_root_surface_state(root(&state, surface_object_id))
-            .is_some_and(|managed| managed.pending_initial_layout));
+            .is_some_and(|managed| managed.awaiting_initial_layout));
     }
 
     #[test]
@@ -3251,7 +3209,7 @@ mod tests {
     }
 
     #[test]
-    fn first_map_clears_pending_initial_layout_state() {
+    fn first_map_clears_awaiting_initial_layout_state() {
         let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(5usize));
         let _output_id =
@@ -3275,7 +3233,7 @@ mod tests {
         );
         assert!(state
             .managed_root_surface_state(root(&state, surface_object_id))
-            .is_some_and(|managed| managed.pending_initial_layout));
+            .is_some_and(|managed| managed.awaiting_initial_layout));
 
         let buffer_object_id =
             insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(90), 2, 2);
@@ -3295,7 +3253,7 @@ mod tests {
 
         assert!(!state
             .managed_root_surface_state(root(&state, surface_object_id))
-            .is_some_and(|managed| managed.pending_initial_layout));
+            .is_some_and(|managed| managed.awaiting_initial_layout));
     }
 
     #[test]
@@ -3402,17 +3360,27 @@ mod tests {
 
         assert_eq!(
             state
-                .tiled_root_surface_content_rect(root(&state, surface_object_id))
+                .committed_root_geometry(root(&state, surface_object_id))
                 .unwrap()
+                .client_window_rect
                 .width,
-            1278
+            1280
         );
         assert_eq!(
             state
-                .tiled_root_surface_frame_rect(root(&state, surface_object_id))
+                .committed_root_geometry(root(&state, surface_object_id))
                 .unwrap()
+                .placement_rect
                 .width,
             1280
+        );
+        assert_eq!(
+            state
+                .committed_root_geometry(root(&state, surface_object_id))
+                .unwrap()
+                .decoration_insets
+                .right,
+            2
         );
 
         let resized_buffer_object_id =
@@ -3437,17 +3405,27 @@ mod tests {
 
         assert_eq!(
             state
-                .tiled_root_surface_content_rect(root(&state, surface_object_id))
+                .committed_root_geometry(root(&state, surface_object_id))
                 .unwrap()
+                .client_window_rect
                 .width,
             1280
         );
         assert_eq!(
             state
-                .tiled_root_surface_frame_rect(root(&state, surface_object_id))
+                .committed_root_geometry(root(&state, surface_object_id))
                 .unwrap()
+                .placement_rect
                 .width,
             1280
+        );
+        assert_eq!(
+            state
+                .committed_root_geometry(root(&state, surface_object_id))
+                .unwrap()
+                .decoration_insets
+                .right,
+            0
         );
     }
 
@@ -3476,7 +3454,7 @@ mod tests {
         );
         assert!(state
             .managed_root_surface_state(root(&state, first_surface_object_id))
-            .is_some_and(|managed| managed.pending_initial_layout));
+            .is_some_and(|managed| managed.awaiting_initial_layout));
 
         let second_surface_object_id = create_root_xdg_toplevel(
             &mut state,
@@ -3576,6 +3554,64 @@ mod tests {
     }
 
     #[test]
+    fn root_commit_refreshes_cached_geometry_for_non_xdg_roots() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let surface_id = WlSurfaceId::from(210);
+        let (surface_resolved, _) =
+            client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
+        let surface_object_id = surface_resolved.object_id();
+        state.register_root_surface(surface_object_id);
+        let initial_buffer =
+            insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(410), 200, 40);
+
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(initial_buffer, 0, 0, 200, 40);
+        }
+
+        state.mark_root_geometry_dirty(root(&state, surface_object_id));
+        let _ = state.committed_root_geometry(root(&state, surface_object_id));
+        assert_eq!(
+            state.root_geometry_cache[&root(&state, surface_object_id)]
+                .get()
+                .geometry
+                .unwrap()
+                .placement_rect,
+            RectI { x: 0, y: 0, width: 200, height: 40 }
+        );
+
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.set_root_position(50, 60);
+        }
+
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
+        }
+
+        let _ = state.committed_root_geometry(root(&state, surface_object_id));
+        assert_eq!(
+            state.root_geometry_cache[&root(&state, surface_object_id)]
+                .get()
+                .geometry
+                .unwrap()
+                .placement_rect,
+            RectI { x: 50, y: 60, width: 200, height: 40 }
+        );
+    }
+
+    #[test]
     fn surface_defaults_match_region_protocol_defaults() {
         let surface = WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(1), 6);
         assert_eq!(surface.on_screen.input_region, RegionValue::infinite());
@@ -3632,9 +3668,9 @@ mod tests {
             Some(output_id)
         );
         assert_eq!(
-            surface.configure_bounds_for_object(
-                &state,
+            state.configure_bounds_for_surface(
                 Resolved::new(ClientId::from_raw(4), WlSurfaceId::from(3), surface_object_id),
+                None,
             ),
             Some((200, 120))
         );
@@ -3658,7 +3694,10 @@ mod tests {
         let resolved =
             Resolved::new(ClientId::from_raw(4), WlSurfaceId::from(11u32), surface_object_id);
         assert_eq!(surface.preferred_output_id_for_object(&state, resolved), Some(output_id));
-        assert_eq!(surface.configure_bounds_for_object(&state, resolved), Some((200, 120)));
+        assert_eq!(
+            state.configure_bounds_for_surface_with_ref(resolved, &surface, None),
+            Some((200, 120))
+        );
     }
 
     #[test]

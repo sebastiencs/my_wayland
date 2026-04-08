@@ -34,7 +34,7 @@ use crate::{
     wayland_objects::{
         ext_workspace_manager_v1::publish_workspace_state_changed,
         hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1, wl_data_offer::WlDataOffer,
-        wl_display::WlDisplay, wl_output::WlOutput, wl_surface::WlSurface,
+        wl_display::WlDisplay, wl_output::WlOutput,
         wp_presentation_feedback::WpPresentationFeedback,
         zwlr_gamma_control_v1::ZwlrGammaControlV1,
         zwlr_layer_surface_v1::relayout_client_layer_surfaces, zxdg_output_v1::ZxdgOutputV1,
@@ -1594,12 +1594,10 @@ impl Client {
             }
             let tiled_geometry = state.tiled_root_surface_geometry(root_surface);
             let resizing = tiled_resize_surfaces.contains(&root_surface);
-            let surface_configure_bounds = wl_surface
-                .rref(state)
-                .configure_bounds_for_object(state, wl_surface);
-            let pending_floating_restore =
+            let surface_configure_bounds = state.configure_bounds_for_surface(wl_surface, None);
+            let scheduled_floating_restore =
                 if tiled_geometry.is_none() && !state.root_surface_is_fullscreen(root_surface) {
-                    state.take_pending_floating_rect_restore(root_surface)
+                    state.take_scheduled_floating_restore_state(root_surface)
                 } else {
                     None
                 };
@@ -1614,30 +1612,39 @@ impl Client {
             if let Some(mode) = desired_decoration_mode {
                 toplevel.schedule_decoration_mode(mode);
             }
-            let configure_bounds = tiled_geometry
-                .map(|geometry| {
-                    geometry.configure_size_for_decoration_mode(
-                        toplevel.decoration_mode_for_configure(),
-                    )
-                })
+            let tiled_configure_geometry =
+                tiled_geometry
+                    .zip(desired_decoration_mode)
+                    .map(|(geometry, decoration_mode)| {
+                        crate::root_geometry::project_configure_geometry(
+                            geometry,
+                            decoration_mode,
+                            state.configured_decoration_insets(),
+                        )
+                    });
+            let configure_bounds = tiled_configure_geometry
+                .map(|geometry| geometry.size)
                 .or(surface_configure_bounds);
-            if let Some(geometry) = tiled_geometry {
+            if let Some((geometry, configure_geometry)) =
+                tiled_geometry.zip(tiled_configure_geometry)
+            {
                 toplevel.send_tiled_layout_configure(
                     self,
                     state,
                     &mut xdg_surface,
                     geometry,
+                    configure_geometry,
                     resizing,
                     dispatcher,
                 );
-            } else if let Some(rect) = pending_floating_restore {
+            } else if let Some(remembered_state) = scheduled_floating_restore {
                 toplevel.send_interactive_resize_configure(
                     self,
                     state,
                     configure_bounds,
                     &mut xdg_surface,
-                    rect.width,
-                    rect.height,
+                    remembered_state.configure_size.0,
+                    remembered_state.configure_size.1,
                     false,
                     dispatcher,
                 );
@@ -2168,10 +2175,7 @@ impl Model for Client {
                 let configure_bounds = {
                     xdg_surface.try_ref(state).and_then(|xdg_surface| {
                         let wl_surface = xdg_surface.wl_surface();
-                        let surface = state
-                            .objects
-                            .try_ref_object::<WlSurface>(wl_surface.object_id())?;
-                        surface.configure_bounds_for_object(state, wl_surface)
+                        state.configure_bounds_for_surface(wl_surface, None)
                     })
                 };
                 let mut xdg_surface = xdg_surface.grab(state);

@@ -377,10 +377,9 @@ impl Model for AcquireReadyWaiter {
                         self.waiter_id,
                         self.surface
                     );
-                    if let Some(bounds) = self
-                        .surface
-                        .try_ref(state)
-                        .and_then(|surface| surface.global_logical_bounds())
+                    if let Some(bounds) = state
+                        .root_surface_for_surface(self.surface)
+                        .and_then(|root_surface| state.root_surface_visual_outer_rect(root_surface))
                     {
                         schedule_outputs_for_rect(state, bounds, dispatcher);
                     } else {

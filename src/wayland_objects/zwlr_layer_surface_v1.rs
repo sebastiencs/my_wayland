@@ -686,6 +686,8 @@ impl ZwlrLayerSurfaceV1 {
 
         if let Some(mut surface) = self.surface.try_grab(state) {
             surface.set_root_position(placement.rect.x, placement.rect.y);
+            drop(surface);
+            state.mark_root_geometry_dirty(self.surface);
         }
 
         let should_send_configure = self.initial_commit_complete
@@ -1370,7 +1372,8 @@ mod tests {
             runner::Dispatcher,
             state::{GrabbedObject, State},
             test_support::{
-                state_for_tests, test_output_drm1_crtc, test_resolved_wl_surface_client1,
+                insert_root_surface, resolved_wl_surface, state_for_tests, test_output_drm1_crtc,
+                test_resolved_wl_surface_client1,
             },
             wayland_objects::wl_display::WlDisplay,
         },
@@ -1512,6 +1515,71 @@ mod tests {
         let updated = reserve_usable_bounds_for_snapshot(bounds, snapshot);
 
         assert_eq!(updated, RectI { x: 0, y: 25, width: 200, height: 75 });
+    }
+
+    #[test]
+    fn initial_fullscreen_geometry_uses_usable_bounds_when_layers_reserve_space() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_drm1_crtc(1, 0, 0, 100, 80));
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let root_object_id = insert_root_surface(&mut state, 40);
+        let root_surface = resolved_wl_surface(&state, root_object_id);
+        state
+            .managed_root_surfaces
+            .get_mut(&root_surface)
+            .unwrap()
+            .fullscreen = true;
+
+        let mut layer_surface = ZwlrLayerSurfaceV1::new(
+            ZwlrLayerSurfaceV1Id::from(41u32),
+            fake_layer_manager(2),
+            5,
+            root_surface,
+            Some(output_id),
+            LayerShellLayer::Top,
+            "panel".to_string(),
+        );
+        layer_surface.assigned_output_id = Some(output_id);
+        layer_surface.mapped = true;
+        layer_surface.current.anchor = ANCHOR_TOP | ANCHOR_LEFT | ANCHOR_RIGHT;
+        layer_surface.current.desired_width = 0;
+        layer_surface.current.desired_height = 10;
+        layer_surface.current.exclusive_zone = 10;
+        let (_, layer_surface_object_id) = state.insert_object(layer_surface);
+        let layer_surface_resolved = Resolved::new(
+            ClientId::from_raw(1),
+            ZwlrLayerSurfaceV1Id::from(41u32),
+            layer_surface_object_id,
+        );
+        {
+            let mut surface = state
+                .objects
+                .grab_object::<crate::wayland_objects::wl_surface::WlSurface>(root_object_id);
+            assert!(surface
+                .set_role(
+                    crate::wayland_objects::wl_surface::Role::LayerSurface,
+                    &mut client_dispatcher,
+                )
+                .is_ok());
+            surface.set_layer_surface_impl(layer_surface_resolved);
+        }
+        state.register_layer_surface_object(layer_surface_resolved);
+
+        let geometry = crate::tiling::initial_root_geometry_for_surface(
+            &mut state,
+            root_surface,
+            crate::config::DecorationInsets::default(),
+            crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode::ClientSide,
+            None,
+            None,
+            None,
+        )
+        .expect("initial fullscreen geometry should resolve");
+
+        assert!(geometry.fullscreen);
+        assert_eq!(geometry.placement_rect, RectI { x: 0, y: 10, width: 100, height: 70 });
     }
 
     #[test]
@@ -1724,6 +1792,62 @@ mod tests {
         );
 
         assert!(needs_refresh);
+    }
+
+    #[test]
+    fn apply_layout_refreshes_cached_root_geometry_on_next_read_after_root_move() {
+        let mut state = state_for_tests();
+        let root_object_id = insert_root_surface(&mut state, 1);
+        {
+            let surface = state
+                .objects
+                .get_mut(root_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(210usize), 0, 0, 200, 40);
+        }
+        let root_surface = resolved_wl_surface(&state, root_object_id);
+        state.mark_root_geometry_dirty(root_surface);
+        let _ = state.committed_root_geometry(root_surface);
+        assert_eq!(
+            state.root_geometry_cache[&root_surface]
+                .get()
+                .geometry
+                .unwrap()
+                .placement_rect,
+            RectI { x: 0, y: 0, width: 200, height: 40 }
+        );
+
+        let mut client = Client::new_for_tests(ClientId::from_raw(3));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let mut layer_surface = ZwlrLayerSurfaceV1::new(
+            ZwlrLayerSurfaceV1Id::from(10u32),
+            fake_layer_manager(2),
+            5,
+            root_surface,
+            None,
+            LayerShellLayer::Top,
+            "panel".to_string(),
+        );
+
+        layer_surface.apply_layout(
+            &mut client,
+            &mut state,
+            &mut client_dispatcher,
+            Some(LayerPlacement {
+                output_id: OutputId::from(1usize),
+                rect: RectI { x: 50, y: 60, width: 200, height: 40 },
+                configure_size: (200, 40),
+                layer: LayerShellLayer::Top,
+            }),
+        );
+
+        let geometry = state
+            .committed_root_geometry(root_surface)
+            .expect("geometry should refresh on read");
+        assert_eq!(geometry.placement_rect, RectI { x: 50, y: 60, width: 200, height: 40 });
+        assert!(state.root_geometry_cache[&root_surface].get().is_fresh());
     }
 
     #[test]

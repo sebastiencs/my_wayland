@@ -17,28 +17,26 @@ use crate::{
         BlurVisualStyle, BorderGradient, BorderVisualStyle, RootSurfaceVisualState,
         ShadowVisualStyle, SurfaceEffectStyle, WindowAnimationState, WindowAnimationValues,
     },
+    root_geometry::{self, CommittedRootGeometry, DecorationFrameLayout},
     seat::SeatState,
     tiling::{self, TiledResizeState, WorkspaceLayout},
     wayland_objects::{
         wl_surface::WlSurface,
         xdg_surface::xdg_toplevel::{ToplevelDecorationMode, XdgToplevel},
+        zwlr_layer_surface_v1::{output_usable_bounds_with_snapshot, LayerLayoutObjectSnapshot},
     },
     xkb::{KeyboardState, Xkb},
 };
 
 use {
     rand::{rngs::OsRng, RngCore},
-    std::collections::{BTreeMap, BTreeSet},
+    std::{
+        cell::Cell,
+        collections::{BTreeMap, BTreeSet},
+    },
 };
 
 pub use crate::indexmap::{Grab, GrabbedObject, IndexMap, IndexMapKey};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct DecorationFrameLayout {
-    pub frame_rect: RectI,
-    pub content_rect: RectI,
-    pub titlebar_rect: Option<RectI>,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RootSurfaceClip {
@@ -404,10 +402,41 @@ pub struct ManagedRootSurfaceState {
     pub mode: ManagedWindowMode,
     pub fullscreen: bool,
     pub mapped: bool,
-    pub pending_initial_layout: bool,
-    pub last_floating_rect: Option<RectI>,
-    pub pending_floating_rect_restore: Option<RectI>,
+    pub awaiting_initial_layout: bool,
+    pub remembered_floating_state: Option<RememberedFloatingState>,
+    pub restore_floating_state_on_next_configure: bool,
     pub visual_animation: WindowAnimationState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RememberedFloatingState {
+    pub root_pos: (i32, i32),
+    pub configure_size: (i32, i32),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RootGeometryCacheEntry {
+    pub geometry: Option<CommittedRootGeometry>,
+    pub dirty: bool,
+    pub revision: u64,
+    pub built_from_revision: u64,
+}
+
+impl RootGeometryCacheEntry {
+    pub(crate) fn is_fresh(self) -> bool {
+        !self.dirty && self.built_from_revision == self.revision
+    }
+
+    fn mark_dirty(&mut self) {
+        self.revision = self.revision.saturating_add(1);
+        self.dirty = true;
+    }
+
+    fn store_geometry(&mut self, geometry: Option<CommittedRootGeometry>) {
+        self.geometry = geometry;
+        self.built_from_revision = self.revision;
+        self.dirty = false;
+    }
 }
 
 #[derive(Debug, Default)]
@@ -777,6 +806,7 @@ pub struct State {
     pub output_workspace_groups: BTreeMap<OutputId, WorkspaceGroupId>,
     pub root_surface_workspaces: BTreeMap<Resolved<WlSurfaceId>, WorkspaceId>,
     pub managed_root_surfaces: BTreeMap<Resolved<WlSurfaceId>, ManagedRootSurfaceState>,
+    pub root_geometry_cache: BTreeMap<Resolved<WlSurfaceId>, Cell<RootGeometryCacheEntry>>,
     pub xdg_toplevel_roles: BTreeMap<Resolved<XdgSurfaceId>, Resolved<XdgToplevelId>>,
     /// Unblocked `hyprland_ctm_control_manager_v1` singleton; new binds are blocked while set.
     pub ctm_control_owner: Option<Resolved<HyprlandCtmControlManagerV1Id>>,
@@ -864,13 +894,14 @@ impl State {
         self.managed_root_surfaces.get(&surface)
     }
 
-    pub fn take_pending_floating_rect_restore(
+    pub fn take_scheduled_floating_restore_state(
         &mut self,
         surface: Resolved<WlSurfaceId>,
-    ) -> Option<RectI> {
-        self.managed_root_surfaces
-            .get_mut(&surface)
-            .and_then(|managed| managed.pending_floating_rect_restore.take())
+    ) -> Option<RememberedFloatingState> {
+        let managed = self.managed_root_surfaces.get_mut(&surface)?;
+        std::mem::take(&mut managed.restore_floating_state_on_next_configure)
+            .then_some(managed.remembered_floating_state)
+            .flatten()
     }
 
     pub fn root_surface_is_mapped(&self, surface: Resolved<WlSurfaceId>) -> bool {
@@ -894,10 +925,10 @@ impl State {
         if managed.mode != ManagedWindowMode::Tiled || managed.mapped {
             return false;
         }
-        if managed.pending_initial_layout {
+        if managed.awaiting_initial_layout {
             return true;
         }
-        managed.pending_initial_layout = true;
+        managed.awaiting_initial_layout = true;
         tiling::mark_workspace_dirty(self, workspace_id);
         true
     }
@@ -913,10 +944,10 @@ impl State {
         let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
             return;
         };
-        if !managed.pending_initial_layout {
+        if !managed.awaiting_initial_layout {
             return;
         }
-        managed.pending_initial_layout = false;
+        managed.awaiting_initial_layout = false;
         tiling::mark_workspace_dirty(self, workspace_id);
     }
 
@@ -1194,11 +1225,12 @@ impl State {
                 mode: ManagedWindowMode::Tiled,
                 fullscreen: false,
                 mapped: false,
-                pending_initial_layout: true,
-                last_floating_rect: None,
-                pending_floating_rect_restore: None,
+                awaiting_initial_layout: true,
+                remembered_floating_state: None,
+                restore_floating_state_on_next_configure: false,
                 visual_animation: initial_animation,
             });
+        self.mark_root_geometry_dirty(surface);
         true
     }
 
@@ -1220,6 +1252,7 @@ impl State {
             }
         }
         self.managed_root_surfaces.remove(&surface);
+        self.root_geometry_cache.remove(&surface);
         Some(workspace_id)
     }
 
@@ -1315,26 +1348,171 @@ impl State {
         tiling::managed_scene_order(self)
     }
 
-    pub fn tiled_root_surface_content_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
-        self.tiled_root_surface_geometry(surface)
-            .map(|geometry| geometry.content_rect)
+    pub fn committed_root_geometry(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<CommittedRootGeometry> {
+        if !self.root_surfaces.contains(&surface) {
+            debug_assert!(
+                !self.root_geometry_cache.contains_key(&surface),
+                "non-root surface retained root geometry cache entry"
+            );
+            return None;
+        }
+        let Some(entry_cell) = self.root_geometry_cache.get(&surface) else {
+            debug_assert!(false, "registered root surface missing geometry cache entry");
+            return self.resolve_committed_root_geometry(surface);
+        };
+        let entry = entry_cell.get();
+        if entry.is_fresh() {
+            return entry.geometry;
+        }
+        let geometry = self.resolve_committed_root_geometry(surface);
+        let mut refreshed = entry;
+        refreshed.store_geometry(geometry);
+        entry_cell.set(refreshed);
+        geometry
     }
 
-    pub fn tiled_root_surface_frame_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
-        self.tiled_root_surface_geometry(surface)
-            .map(|geometry| geometry.frame_rect)
+    fn committed_root_geometry_with_surface_ref(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+        surface_ref: &WlSurface,
+    ) -> Option<CommittedRootGeometry> {
+        if !self.root_surfaces.contains(&surface) {
+            debug_assert!(
+                !self.root_geometry_cache.contains_key(&surface),
+                "non-root surface retained root geometry cache entry"
+            );
+            return None;
+        }
+        let Some(entry_cell) = self.root_geometry_cache.get(&surface) else {
+            debug_assert!(false, "registered root surface missing geometry cache entry");
+            return self.resolve_committed_root_geometry_with_surface(surface, surface_ref);
+        };
+        let entry = entry_cell.get();
+        if entry.is_fresh() {
+            return entry.geometry;
+        }
+        let geometry = self.resolve_committed_root_geometry_with_surface(surface, surface_ref);
+        let mut refreshed = entry;
+        refreshed.store_geometry(geometry);
+        entry_cell.set(refreshed);
+        geometry
     }
 
-    pub fn tiled_root_surface_edges(&self, surface: Resolved<WlSurfaceId>) -> Option<u32> {
-        self.tiled_root_surface_geometry(surface)
-            .map(|geometry| geometry.tiled_edges)
+    pub fn configure_bounds_for_surface(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+        snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+    ) -> Option<(i32, i32)> {
+        let surface_ref = surface.try_ref(self)?;
+        self.configure_bounds_for_surface_with_ref(surface, surface_ref, snapshot)
+    }
+
+    pub fn configure_bounds_for_surface_with_ref(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+        surface_ref: &WlSurface,
+        snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+    ) -> Option<(i32, i32)> {
+        self.output_id_for_surface_object(surface.object_id(), &surface_ref)
+            .and_then(|output_id| output_usable_bounds_with_snapshot(self, output_id, snapshot))
+            .map(|bounds| (bounds.width, bounds.height))
+    }
+
+    pub fn mark_root_geometry_dirty(&mut self, surface: Resolved<WlSurfaceId>) {
+        if !self.root_surfaces.contains(&surface) {
+            return;
+        }
+        let Some(entry) = self.root_geometry_cache.get_mut(&surface) else {
+            debug_assert!(false, "registered root surface missing geometry cache entry");
+            return;
+        };
+        entry.get_mut().mark_dirty();
+    }
+
+    pub fn mark_root_geometry_dirty_for_surface(&mut self, surface: Resolved<WlSurfaceId>) {
+        let root_surface = if self.root_surfaces.contains(&surface) {
+            Some(surface)
+        } else {
+            self.root_surface_for_surface(surface)
+        };
+        if let Some(root_surface) = root_surface {
+            self.mark_root_geometry_dirty(root_surface);
+        }
+    }
+
+    pub fn ensure_root_geometry_fresh(
+        &mut self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<CommittedRootGeometry> {
+        if !self.root_surfaces.contains(&surface) {
+            self.root_geometry_cache.remove(&surface);
+            return None;
+        }
+        self.committed_root_geometry(surface)
+    }
+
+    pub fn ensure_root_geometry_fresh_for_surface(
+        &mut self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<CommittedRootGeometry> {
+        let root_surface = if self.root_surfaces.contains(&surface) {
+            Some(surface)
+        } else {
+            self.root_surface_for_surface(surface)
+        }?;
+        self.ensure_root_geometry_fresh(root_surface)
+    }
+
+    fn resolve_committed_root_geometry(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<CommittedRootGeometry> {
+        let surface_ref = surface.try_ref(self)?;
+        self.resolve_committed_root_geometry_with_surface(surface, &surface_ref)
+    }
+
+    fn resolve_committed_root_geometry_with_surface(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+        surface_ref: &WlSurface,
+    ) -> Option<CommittedRootGeometry> {
+        self.resolve_committed_root_geometry_with_surface_and_overrides(
+            surface,
+            surface_ref,
+            root_geometry::GeometryBuildOverrides {
+                decoration_mode: None,
+                explicit_window_geometry: None,
+                decoration_insets: None,
+                root_pos: Some(surface_ref.root_position()),
+            },
+        )
+    }
+
+    fn resolve_committed_root_geometry_with_surface_and_overrides(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+        surface_ref: &WlSurface,
+        overrides: root_geometry::GeometryBuildOverrides,
+    ) -> Option<CommittedRootGeometry> {
+        let layout_allocation = tiling::layout_allocation_for_surface(self, surface);
+        root_geometry::build_committed_root_geometry(
+            self,
+            surface,
+            surface_ref,
+            layout_allocation,
+            overrides,
+        )
     }
 
     pub fn tiled_root_surface_geometry(
         &self,
         surface: Resolved<WlSurfaceId>,
-    ) -> Option<tiling::TiledSurfaceGeometry> {
-        tiling::tiled_geometry_for_surface(self, surface)
+    ) -> Option<CommittedRootGeometry> {
+        self.committed_root_geometry(surface)
+            .filter(|geometry| geometry.tiled_edges != 0 || geometry.fullscreen)
     }
 
     fn root_surface_xdg_toplevel(&self, object_id: ObjectId) -> Option<&XdgToplevel> {
@@ -1387,59 +1565,28 @@ impl State {
         Self::resolve_xdg_decoration_mode_policy(selected_policy, requested_mode)
     }
 
-    pub fn root_surface_content_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
-        self.tiled_root_surface_content_rect(surface).or_else(|| {
-            self.objects
-                .try_ref_object::<WlSurface>(surface.object_id())
-                .and_then(WlSurface::global_logical_bounds)
-        })
+    pub fn root_surface_client_window_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
+        self.committed_root_geometry(surface)
+            .map(|geometry| geometry.client_window_rect)
     }
 
-    pub fn root_surface_interactive_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
-        if let Some(layout) = self.root_surface_decoration_layout(surface) {
-            return Some(layout.frame_rect);
-        }
-        if let Some(frame_rect) = self.tiled_root_surface_frame_rect(surface) {
-            return Some(frame_rect);
-        }
-
-        let wl_surface = self
-            .objects
-            .try_ref_object::<WlSurface>(surface.object_id())?;
-        let xdg_surface_id = wl_surface.xdg_surface()?;
-        let _xdg_surface = xdg_surface_id.rref(self);
-        let xdg_surface = self.objects.iter().find_map(|(_object_id, object)| {
-            object
-                .downcast_ref::<crate::wayland_objects::xdg_surface::XdgSurface>()
-                .filter(|xdg_surface| {
-                    xdg_surface.wl_surface().wayland_id() == wl_surface.surface_id()
-                })
-        })?;
-
-        assert_eq!(xdg_surface.wl_surface().wayland_id(), wl_surface.surface_id());
-        let _ = xdg_surface_id;
-        let window_geometry = xdg_surface.window_geometry_rect_for_surface(surface, self);
-        let (root_x, root_y) = wl_surface.root_position();
-        RectI::new(
-            root_x.saturating_add(window_geometry.x),
-            root_y.saturating_add(window_geometry.y),
-            window_geometry.width,
-            window_geometry.height,
-        )
-        .or_else(|| wl_surface.global_logical_bounds())
+    pub fn root_surface_binding_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
+        self.committed_root_geometry(surface)
+            .map(|geometry| geometry.binding_rect)
     }
 
     pub fn root_surface_decoration_insets(
         &self,
         surface: Resolved<WlSurfaceId>,
     ) -> Option<DecorationInsets> {
-        if !self.compositor_decorations_enabled(surface) {
-            return None;
-        }
-
-        let insets = self.configured_decoration_insets();
-        (insets.top > 0 || insets.right > 0 || insets.bottom > 0 || insets.left > 0)
-            .then_some(insets)
+        let geometry = self.committed_root_geometry(surface)?;
+        (geometry.decoration_mode == Some(ToplevelDecorationMode::ServerSide)
+            && !geometry.fullscreen
+            && (geometry.decoration_insets.top > 0
+                || geometry.decoration_insets.right > 0
+                || geometry.decoration_insets.bottom > 0
+                || geometry.decoration_insets.left > 0))
+            .then_some(geometry.decoration_insets)
     }
 
     pub fn compositor_decorations_enabled(&self, surface: Resolved<WlSurfaceId>) -> bool {
@@ -1465,21 +1612,14 @@ impl State {
         &self,
         surface: Resolved<WlSurfaceId>,
     ) -> Option<DecorationFrameLayout> {
-        let insets = self.root_surface_decoration_insets(surface)?;
-        let content_rect = self.root_surface_content_rect(surface)?;
-        let frame_rect = self
-            .tiled_root_surface_frame_rect(surface)
-            .or_else(|| inflate_rect_with_insets(content_rect, insets))?;
-        let titlebar_height = insets.top.max(0);
-        let titlebar_rect = (titlebar_height > 0)
-            .then(|| RectI::new(content_rect.x, frame_rect.y, content_rect.width, titlebar_height))
-            .flatten();
-
-        Some(DecorationFrameLayout { frame_rect, content_rect, titlebar_rect })
+        self.committed_root_geometry(surface)?
+            .compositor_decoration_layout
     }
 
     pub fn root_surface_clip(&self, surface: Resolved<WlSurfaceId>) -> Option<RootSurfaceClip> {
-        let outer_rect = self.root_surface_outer_rect(surface)?;
+        let outer_rect = self
+            .root_surface_decoration_layout(surface)
+            .map(|layout| layout.frame_rect)?;
         let rounding = self.config.decorations.border.rounding.max(0);
         (rounding > 0).then(|| {
             RootSurfaceClip::new(
@@ -1522,8 +1662,8 @@ impl State {
     ) -> Option<RectI> {
         self.root_surface_visual_state(surface)
             .map(|visual| visual.influence_bounds())
-            .or_else(|| self.root_surface_outer_rect(surface))
-            .or_else(|| self.root_surface_content_rect(surface))
+            .or_else(|| self.root_surface_visual_outer_rect(surface))
+            .or_else(|| self.root_surface_client_window_rect(surface))
     }
 
     pub fn advance_window_visual_animations(
@@ -1564,9 +1704,15 @@ impl State {
         &self,
         surface: Resolved<WlSurfaceId>,
     ) -> Option<RootSurfaceVisualState> {
-        let outer_rect = self.root_surface_outer_rect(surface)?;
-        let content_rect = self.root_surface_content_rect(surface)?;
-        let compositor_decorations_enabled = self.compositor_decorations_enabled(surface);
+        let geometry = self.committed_root_geometry(surface)?;
+        let compositor_layout = geometry.compositor_decoration_layout;
+        let outer_rect = compositor_layout
+            .map(|layout| layout.frame_rect)
+            .unwrap_or(geometry.visual_outer_rect);
+        let content_rect = compositor_layout
+            .map(|layout| layout.client_window_rect)
+            .unwrap_or(geometry.client_window_rect);
+        let compositor_decorations_enabled = compositor_layout.is_some();
         let has_visible_decoration_ring =
             compositor_decorations_enabled && outer_rect != content_rect;
         let clip = compositor_decorations_enabled
@@ -1628,11 +1774,9 @@ impl State {
         Some(visual_state)
     }
 
-    pub fn root_surface_outer_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
-        self.root_surface_decoration_layout(surface)
-            .map(|layout| layout.frame_rect)
-            .or_else(|| self.tiled_root_surface_frame_rect(surface))
-            .or_else(|| self.root_surface_content_rect(surface))
+    pub fn root_surface_visual_outer_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
+        self.committed_root_geometry(surface)
+            .map(|geometry| geometry.visual_outer_rect)
     }
 
     pub fn root_surface_for_surface(
@@ -1679,6 +1823,24 @@ impl State {
         tiling::is_floating_surface(self, surface)
     }
 
+    fn current_root_surface_remembered_floating_state(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<RememberedFloatingState> {
+        let geometry = self.committed_root_geometry(surface)?;
+        Some(RememberedFloatingState {
+            root_pos: geometry.root_pos,
+            configure_size: crate::root_geometry::project_configure_geometry(
+                geometry,
+                geometry
+                    .decoration_mode
+                    .unwrap_or(ToplevelDecorationMode::ClientSide),
+                self.configured_decoration_insets(),
+            )
+            .size,
+        })
+    }
+
     pub fn set_root_surface_floating(
         &mut self,
         surface: Resolved<WlSurfaceId>,
@@ -1692,11 +1854,7 @@ impl State {
         else {
             return false;
         };
-        let object_id = surface.object_id();
-        let current_bounds = self
-            .objects
-            .try_ref_object::<WlSurface>(object_id)
-            .and_then(|surface| surface.global_logical_bounds());
+        let current_state = self.current_root_surface_remembered_floating_state(surface);
         let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
             return false;
         };
@@ -1705,14 +1863,16 @@ impl State {
             if floating { ManagedWindowMode::Floating } else { ManagedWindowMode::Tiled };
         let mut changed = managed.mode != new_mode;
         if !floating && was_floating {
-            if let Some(bounds) = current_bounds {
-                managed.last_floating_rect = Some(bounds);
+            if let Some(remembered_state) = current_state {
+                managed.remembered_floating_state = Some(remembered_state);
             }
         }
         managed.mode = new_mode;
-        managed.pending_initial_layout = !floating && !managed.mapped;
-        let restore_rect = floating.then_some(managed.last_floating_rect).flatten();
-        managed.pending_floating_rect_restore = if floating { restore_rect } else { None };
+        managed.awaiting_initial_layout = !floating && !managed.mapped;
+        let restore_state = floating
+            .then_some(managed.remembered_floating_state)
+            .flatten();
+        managed.restore_floating_state_on_next_configure = floating && restore_state.is_some();
         if floating {
             managed.fullscreen = false;
             if let Some(workspace) = self.workspaces.try_get_mut(workspace_id) {
@@ -1732,8 +1892,8 @@ impl State {
             self.relayout_dirty_workspaces();
         }
         if floating {
-            if let Some(rect) = restore_rect {
-                self.restore_root_surface_floating_rect(surface, rect);
+            if let Some(remembered_state) = restore_state {
+                self.restore_root_surface_floating_state(surface, remembered_state);
             }
         }
         changed
@@ -1753,11 +1913,8 @@ impl State {
             return false;
         };
         let object_id = surface.object_id();
-        let current_bounds = self
-            .objects
-            .try_ref_object::<WlSurface>(object_id)
-            .and_then(|surface| surface.global_logical_bounds());
-        let mut restore_rect = None;
+        let current_state = self.current_root_surface_remembered_floating_state(surface);
+        let mut restore_state = None;
         if fullscreen {
             let managed_ids = self
                 .managed_root_surfaces
@@ -1771,7 +1928,8 @@ impl State {
                 if let Some(managed) = self.managed_root_surfaces.get_mut(&candidate_surface) {
                     if candidate_surface.object_id() != object_id {
                         if managed.mode == ManagedWindowMode::Floating {
-                            managed.pending_floating_rect_restore = managed.last_floating_rect;
+                            managed.restore_floating_state_on_next_configure =
+                                managed.remembered_floating_state.is_some();
                         }
                         managed.fullscreen = false;
                     }
@@ -1786,11 +1944,11 @@ impl State {
                 .entry(surface)
                 .and_modify(|managed| {
                     if !managed.fullscreen && managed.mode == ManagedWindowMode::Floating {
-                        if let Some(bounds) = current_bounds {
-                            managed.last_floating_rect = Some(bounds);
+                        if let Some(remembered_state) = current_state {
+                            managed.remembered_floating_state = Some(remembered_state);
                         }
                     }
-                    managed.pending_floating_rect_restore = None;
+                    managed.restore_floating_state_on_next_configure = false;
                     managed.fullscreen = true;
                 })
                 .or_insert(ManagedRootSurfaceState {
@@ -1798,9 +1956,9 @@ impl State {
                     mode: ManagedWindowMode::Tiled,
                     fullscreen: true,
                     mapped: false,
-                    pending_initial_layout: true,
-                    last_floating_rect: None,
-                    pending_floating_rect_restore: None,
+                    awaiting_initial_layout: true,
+                    remembered_floating_state: None,
+                    restore_floating_state_on_next_configure: false,
                     visual_animation: initial_animation,
                 });
         } else {
@@ -1813,18 +1971,18 @@ impl State {
                 }
                 managed.fullscreen = false;
                 if managed.mode == ManagedWindowMode::Floating {
-                    restore_rect = managed.last_floating_rect;
-                    managed.pending_floating_rect_restore = restore_rect;
+                    restore_state = managed.remembered_floating_state;
+                    managed.restore_floating_state_on_next_configure = restore_state.is_some();
                 } else {
-                    managed.pending_floating_rect_restore = None;
+                    managed.restore_floating_state_on_next_configure = false;
                 }
             }
             self.sync_root_surface_requested_fullscreen(surface, false);
         }
         tiling::mark_workspace_dirty(self, workspace_id);
         self.relayout_dirty_workspaces();
-        if let Some(rect) = restore_rect {
-            self.restore_root_surface_floating_rect(surface, rect);
+        if let Some(remembered_state) = restore_state {
+            self.restore_root_surface_floating_state(surface, remembered_state);
         }
         true
     }
@@ -1910,12 +2068,16 @@ impl State {
             if managed.workspace_id != workspace_id {
                 continue;
             }
-            managed.last_floating_rect = managed
-                .last_floating_rect
-                .map(|rect| rect.translate(dx, dy));
-            managed.pending_floating_rect_restore = managed
-                .pending_floating_rect_restore
-                .map(|rect| rect.translate(dx, dy));
+            managed.remembered_floating_state =
+                managed
+                    .remembered_floating_state
+                    .map(|remembered_state| RememberedFloatingState {
+                        root_pos: (
+                            remembered_state.root_pos.0 + dx,
+                            remembered_state.root_pos.1 + dy,
+                        ),
+                        ..remembered_state
+                    });
         }
         let Some(surface_ids) = self.workspaces.try_get(workspace_id).map(|workspace| {
             workspace
@@ -1943,20 +2105,24 @@ impl State {
             };
             let (x, y) = wl_surface.root_position();
             wl_surface.set_root_position(x + dx, y + dy);
+            drop(wl_surface);
+            self.mark_root_geometry_dirty(surface);
         }
         tiling::mark_workspace_dirty(self, workspace_id);
         self.relayout_dirty_workspaces();
     }
 
-    fn restore_root_surface_floating_rect(
+    fn restore_root_surface_floating_state(
         &mut self,
         surface: Resolved<WlSurfaceId>,
-        rect: RectI,
+        remembered_state: RememberedFloatingState,
     ) -> bool {
         let Some(mut wl_surface) = surface.try_grab(self) else {
             return false;
         };
-        wl_surface.set_root_position(rect.x, rect.y);
+        wl_surface.set_root_position(remembered_state.root_pos.0, remembered_state.root_pos.1);
+        drop(wl_surface);
+        self.mark_root_geometry_dirty(surface);
         true
     }
 
@@ -2047,9 +2213,13 @@ impl State {
         };
         self.unregister_root_surface(surface);
         self.root_surfaces.push(surface);
+        self.root_geometry_cache
+            .entry(surface)
+            .or_insert_with(|| Cell::new(RootGeometryCacheEntry::default()));
         if let Some(workspace_id) = self.ensure_root_surface_workspace(surface) {
             tiling::mark_workspace_dirty(self, workspace_id);
         }
+        self.mark_root_geometry_dirty(surface);
     }
 
     pub fn sanitize_ctm_control_owner(&mut self) {
@@ -2137,6 +2307,7 @@ impl State {
         if let Some(workspace_id) = self.detach_root_surface_from_workspace(found) {
             tiling::mark_workspace_dirty(self, workspace_id);
         }
+        self.root_geometry_cache.remove(&found);
     }
 
     pub fn raise_root_surface(&mut self, surface: Resolved<WlSurfaceId>) -> bool {
@@ -2215,9 +2386,9 @@ impl State {
             })
             .or_else(|| {
                 self.seat.keyboard_focus().and_then(|focus| {
-                    focus
-                        .try_ref(self)
-                        .and_then(|surface| self.layout_output_id_for_surface(surface))
+                    focus.try_ref(self).and_then(|surface| {
+                        self.layout_output_id_for_surface(focus.surface, surface)
+                    })
                 })
             })
             .or_else(|| self.fallback_output_id())
@@ -2266,7 +2437,7 @@ impl State {
     ) -> Option<OutputId> {
         let resolved_surface =
             Resolved::new(surface.client_id(), surface.surface_id(), surface_object_id);
-        self.layout_output_id_for_surface(surface)
+        self.layout_output_id_for_surface(resolved_surface, surface)
             .or_else(|| {
                 let root_surface = if self.root_surfaces.contains(&resolved_surface) {
                     Some(resolved_surface)
@@ -2437,17 +2608,34 @@ impl State {
             })
     }
 
-    fn layout_output_id_for_surface(&self, surface: &WlSurface) -> Option<OutputId> {
+    fn layout_output_id_for_surface(
+        &self,
+        resolved_surface: Resolved<WlSurfaceId>,
+        surface: &WlSurface,
+    ) -> Option<OutputId> {
         let preferred_output_id = surface.active_output_id().filter(|output_id| {
             self.outputs
                 .try_get(*output_id)
                 .is_some_and(|output| output.enabled)
         });
-        surface
-            .global_logical_bounds()
-            .and_then(|bounds| {
+        let root_surface = (self.root_surfaces.contains(&resolved_surface) || surface.is_root())
+            .then_some(resolved_surface)
+            .or_else(|| {
+                surface
+                    .parent_surface()
+                    .and_then(|parent| self.root_surface_for_surface(*parent))
+            });
+        let geometry = root_surface.and_then(|root_surface| {
+            if root_surface == resolved_surface {
+                self.committed_root_geometry_with_surface_ref(root_surface, surface)
+            } else {
+                self.committed_root_geometry(root_surface)
+            }
+        });
+        geometry
+            .and_then(|geometry| {
                 self.output_layout()
-                    .primary_output_for_rect(bounds, preferred_output_id)
+                    .primary_output_for_rect(geometry.visual_outer_rect, preferred_output_id)
             })
             .or(preferred_output_id)
     }
@@ -2629,6 +2817,122 @@ mod tests {
 
         assert_eq!(visual.outer_rect, visual.content_rect);
         assert!(visual.effects.blur.is_none());
+    }
+
+    #[test]
+    fn protocol_geometry_override_rebuilds_when_cached_decoration_mode_differs() {
+        let mut state = state_for_tests();
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(92u32), ClientId::from_raw(7), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(0usize), 0, 0, 160, 120);
+        }
+        state.register_root_surface(object_id);
+        let surface = root(&state, object_id);
+        state.root_geometry_cache.insert(
+            surface,
+            Cell::new(RootGeometryCacheEntry {
+                geometry: Some(crate::root_geometry::CommittedRootGeometry {
+                    placement_rect: RectI::new(10, 20, 200, 140).unwrap(),
+                    client_window_rect: RectI::new(15, 25, 190, 130).unwrap(),
+                    window_target_rect: RectI::new(10, 20, 200, 140).unwrap(),
+                    binding_rect: RectI::new(10, 20, 200, 140).unwrap(),
+                    visual_outer_rect: RectI::new(10, 20, 200, 140).unwrap(),
+                    compositor_decoration_layout: Some(
+                        crate::root_geometry::DecorationFrameLayout {
+                            frame_rect: RectI::new(10, 20, 200, 140).unwrap(),
+                            client_window_rect: RectI::new(15, 25, 190, 130).unwrap(),
+                            titlebar_rect: None,
+                        },
+                    ),
+                    root_pos: (10, 20),
+                    tiled_edges: 0,
+                    fullscreen: false,
+                    decoration_mode: Some(ToplevelDecorationMode::ServerSide),
+                    decoration_insets: DecorationInsets::default(),
+                    effective_window_geometry: None,
+                }),
+                dirty: false,
+                revision: 0,
+                built_from_revision: 0,
+            }),
+        );
+
+        let surface_ref = surface.try_ref(&state).unwrap();
+        let geometry = crate::root_geometry::resolve_committed_root_geometry_with_overrides(
+            &state,
+            surface,
+            &surface_ref,
+            crate::root_geometry::GeometryBuildOverrides {
+                decoration_mode: Some(ToplevelDecorationMode::ClientSide),
+                explicit_window_geometry: None,
+                decoration_insets: None,
+                root_pos: Some(surface_ref.root_position()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(geometry.decoration_mode, Some(ToplevelDecorationMode::ClientSide));
+        assert_eq!(geometry.client_window_rect, RectI::new(0, 0, 160, 120).unwrap());
+        assert_eq!(geometry.window_target_rect, RectI::new(0, 0, 160, 120).unwrap());
+    }
+
+    #[test]
+    fn committed_root_geometry_rebuilds_dirty_entries_for_readers() {
+        let mut state = state_for_tests();
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(93u32), ClientId::from_raw(8), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(0usize), 0, 0, 160, 120);
+        }
+        state.register_root_surface(object_id);
+        let surface = root(&state, object_id);
+
+        {
+            let mut surface_ref = state.objects.grab_object::<WlSurface>(object_id);
+            surface_ref.set_root_position(45, 55);
+        }
+        state.mark_root_geometry_dirty(surface);
+
+        let geometry = state
+            .committed_root_geometry(surface)
+            .expect("geometry should rebuild for dirty reader");
+
+        assert_eq!(geometry.root_pos, (45, 55));
+        assert_eq!(geometry.placement_rect, RectI::new(45, 55, 160, 120).unwrap());
+        assert!(state.root_geometry_cache[&surface].get().is_fresh());
+    }
+
+    #[test]
+    fn register_root_surface_prepopulates_geometry_cache_entry() {
+        let mut state = state_for_tests();
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(94u32), ClientId::from_raw(9), 6));
+
+        state.register_root_surface(object_id);
+
+        let surface = root(&state, object_id);
+        assert!(state.root_geometry_cache.contains_key(&surface));
+    }
+
+    #[test]
+    fn unregister_root_surface_without_workspace_clears_geometry_cache_entry() {
+        let mut state = state_for_tests();
+        let (_, object_id) = state.insert_object(WlSurface::new(
+            WlSurfaceId::from(95u32),
+            ClientId::from_raw(10),
+            6,
+        ));
+
+        state.register_root_surface(object_id);
+        let surface = root(&state, object_id);
+        state.root_surface_workspaces.remove(&surface);
+
+        state.unregister_root_surface(surface);
+
+        assert!(!state.root_geometry_cache.contains_key(&surface));
     }
 
     #[derive(Debug)]
@@ -3023,7 +3327,7 @@ mod tests {
         assert_eq!(managed.workspace_id, workspace_id);
         assert_eq!(managed.mode, ManagedWindowMode::Tiled);
         assert!(!managed.fullscreen);
-        assert_eq!(managed.pending_floating_rect_restore, None);
+        assert!(!managed.restore_floating_state_on_next_configure);
 
         assert!(state.set_root_surface_floating(root(&state, object_id), true));
         assert_eq!(
@@ -3139,7 +3443,7 @@ mod tests {
     }
 
     #[test]
-    fn floating_mode_restores_last_floating_rect_when_reenabled() {
+    fn floating_mode_restores_remembered_floating_state_when_reenabled() {
         let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
         let output_id =
@@ -3159,14 +3463,16 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(object_id);
             surface.set_root_position(250, 180);
         }
+        state.mark_root_geometry_dirty(root(&state, object_id));
+        let _ = state.committed_root_geometry(root(&state, object_id));
 
         assert!(state.set_root_surface_floating(root(&state, object_id), false));
         assert_eq!(
             state
                 .managed_root_surface_state(root(&state, object_id))
                 .unwrap()
-                .last_floating_rect,
-            Some(RectI { x: 250, y: 180, width: 120, height: 90 })
+                .remembered_floating_state,
+            Some(RememberedFloatingState { root_pos: (250, 180), configure_size: (120, 90) })
         );
 
         assert!(state.set_root_surface_floating(root(&state, object_id), true));
@@ -3179,8 +3485,8 @@ mod tests {
             state
                 .managed_root_surface_state(root(&state, object_id))
                 .unwrap()
-                .pending_floating_rect_restore,
-            Some(RectI { x: 250, y: 180, width: 120, height: 90 })
+                .restore_floating_state_on_next_configure,
+            true
         );
     }
 
@@ -3253,6 +3559,8 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(object_id);
             surface.set_root_position(320, 240);
         }
+        state.mark_root_geometry_dirty(root(&state, object_id));
+        let _ = state.committed_root_geometry(root(&state, object_id));
 
         assert!(state.set_root_surface_fullscreen(root(&state, object_id), true));
         assert!(state.set_root_surface_fullscreen(root(&state, object_id), false));
@@ -3266,8 +3574,65 @@ mod tests {
             state
                 .managed_root_surface_state(root(&state, object_id))
                 .unwrap()
-                .pending_floating_rect_restore,
-            Some(RectI { x: 320, y: 240, width: 160, height: 120 })
+                .restore_floating_state_on_next_configure,
+            true
+        );
+    }
+
+    #[test]
+    fn remembered_floating_state_uses_root_pos_and_configure_size() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
+
+        let (_, object_id) = state.insert_object(WlSurface::new(
+            WlSurfaceId::from(19u32),
+            ClientId::from_raw(10),
+            6,
+        ));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(1usize), 20, 30, 120, 90);
+        }
+        state.register_root_surface(object_id);
+        let root_surface = root(&state, object_id);
+        state.root_geometry_cache.insert(
+            root_surface,
+            Cell::new(RootGeometryCacheEntry {
+                geometry: Some(crate::root_geometry::CommittedRootGeometry {
+                    placement_rect: RectI { x: 40, y: 50, width: 120, height: 90 },
+                    client_window_rect: RectI { x: 50, y: 60, width: 100, height: 70 },
+                    window_target_rect: RectI { x: 40, y: 50, width: 120, height: 90 },
+                    binding_rect: RectI { x: 40, y: 50, width: 120, height: 90 },
+                    visual_outer_rect: RectI { x: 40, y: 50, width: 120, height: 90 },
+                    compositor_decoration_layout: None,
+                    root_pos: (40, 50),
+                    tiled_edges: 0,
+                    fullscreen: false,
+                    decoration_mode: None,
+                    decoration_insets: DecorationInsets::default(),
+                    effective_window_geometry: None,
+                }),
+                dirty: false,
+                revision: 0,
+                built_from_revision: 0,
+            }),
+        );
+        state
+            .managed_root_surfaces
+            .get_mut(&root_surface)
+            .unwrap()
+            .mode = ManagedWindowMode::Floating;
+
+        assert!(state.set_root_surface_floating(root_surface, false));
+        assert_eq!(
+            state
+                .managed_root_surface_state(root_surface)
+                .unwrap()
+                .remembered_floating_state,
+            Some(RememberedFloatingState { root_pos: (40, 50), configure_size: (120, 90) })
         );
     }
 
@@ -3321,7 +3686,8 @@ mod tests {
             .managed_root_surfaces
             .get_mut(&surface)
             .unwrap()
-            .last_floating_rect = Some(RectI { x: 10, y: 20, width: 50, height: 50 });
+            .remembered_floating_state =
+            Some(RememberedFloatingState { root_pos: (10, 20), configure_size: (50, 50) });
 
         state.move_workspace_to_group_output(left_workspace, right_group);
 
@@ -3329,13 +3695,13 @@ mod tests {
             state
                 .managed_root_surface_state(root(&state, object_id))
                 .unwrap()
-                .last_floating_rect,
-            Some(RectI { x: 210, y: 20, width: 50, height: 50 })
+                .remembered_floating_state,
+            Some(RememberedFloatingState { root_pos: (210, 20), configure_size: (50, 50) })
         );
     }
 
     #[test]
-    fn moving_workspace_between_outputs_translates_pending_floating_restore_rects() {
+    fn moving_workspace_between_outputs_keeps_scheduled_floating_restore() {
         let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
         let left_output =
@@ -3354,7 +3720,13 @@ mod tests {
             .managed_root_surfaces
             .get_mut(&surface)
             .unwrap()
-            .pending_floating_rect_restore = Some(RectI { x: 10, y: 20, width: 50, height: 50 });
+            .remembered_floating_state =
+            Some(RememberedFloatingState { root_pos: (10, 20), configure_size: (50, 50) });
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .restore_floating_state_on_next_configure = true;
 
         state.move_workspace_to_group_output(left_workspace, right_group);
 
@@ -3362,8 +3734,14 @@ mod tests {
             state
                 .managed_root_surface_state(root(&state, object_id))
                 .unwrap()
-                .pending_floating_rect_restore,
-            Some(RectI { x: 210, y: 20, width: 50, height: 50 })
+                .remembered_floating_state,
+            Some(RememberedFloatingState { root_pos: (210, 20), configure_size: (50, 50) })
+        );
+        assert!(
+            state
+                .managed_root_surface_state(root(&state, object_id))
+                .unwrap()
+                .restore_floating_state_on_next_configure
         );
     }
 

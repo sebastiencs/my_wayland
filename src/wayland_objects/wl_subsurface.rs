@@ -71,6 +71,7 @@ impl Object for WlSubsurface {
 
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
+                let old_root_surface = state.root_surface_for_surface(self.parent);
                 if let Some(mut surface) = self.surface.try_grab(state) {
                     surface.unmap_due_to_parent_loss(client, state, dispatcher);
                     surface.destroy_subsurface_role();
@@ -79,12 +80,16 @@ impl Object for WlSubsurface {
                     parent_surface.remove_child_from_tree(self.surface);
                 }
                 state.register_root_surface(self.surface.object_id());
+                if let Some(root_surface) = old_root_surface {
+                    state.mark_root_geometry_dirty_for_surface(root_surface);
+                }
+                let child_root_surface = self.surface.clone();
+                state.mark_root_geometry_dirty_for_surface(child_root_surface);
                 use crate::wayland_objects::wl_display::WlDisplay;
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
                 if let Some(bounds) = state
-                    .objects
-                    .try_ref_object::<WlSurface>(self.surface.object_id())
-                    .and_then(|surface| surface.global_logical_bounds())
+                    .root_surface_for_surface(self.surface)
+                    .and_then(|root_surface| state.root_surface_visual_outer_rect(root_surface))
                 {
                     schedule_outputs_for_rect(state, bounds, dispatcher);
                 } else {
@@ -96,6 +101,8 @@ impl Object for WlSubsurface {
                     return Ok(());
                 };
                 surface.set_subsurface_position(x, y);
+                drop(surface);
+                state.mark_root_geometry_dirty_for_surface(self.parent);
             }
             PlaceAbove { sibling } => {
                 let sibling = client.resolve_or_disconnect(sibling, state, dispatcher)?;

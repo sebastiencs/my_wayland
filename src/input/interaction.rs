@@ -4,15 +4,13 @@ use crate::{
     protocol_generated::{xdg_toplevel::ResizeEdge, WlSurfaceId, XdgToplevelId},
     runner::Dispatcher,
     state::State,
-    wayland_objects::xdg_surface::xdg_toplevel::{
-        InteractiveSizeConstraints, ToplevelDecorationMode,
-    },
+    wayland_objects::xdg_surface::xdg_toplevel::InteractiveSizeConstraints,
 };
 
 use super::{
-    apply_interaction_intent, build_protocol_window_target, rect_contains_point,
-    resize_cursor_icon_names, resize_edges_for_pointer, scene_pick_at, HitSemantics,
-    InteractionIntent, WindowHit, WindowRoleSnapshot, WindowTarget,
+    apply_interaction_intent, build_protocol_move_target, build_protocol_resize_target,
+    rect_contains_point, resize_cursor_icon_names, resize_edges_for_pointer, scene_pick_at,
+    HitSemantics, InteractionIntent, WindowHit, WindowRoleSnapshot, WindowTarget,
     POINTER_INTERACTION_START_OPTIONS, PROTOCOL_INTERACTION_START_OPTIONS,
 };
 
@@ -55,7 +53,9 @@ pub(crate) fn begin_decoration_pointer_action(
 pub(crate) fn window_hit_at(state: &State, pointer_pos: (f64, f64)) -> Option<WindowHit> {
     let target = scene_pick_at(state, pointer_pos).window_target?;
     let semantics = classify_window_semantics(state, &target, pointer_pos);
-    let binding_resize_edges = resize_edges_for_pointer(target.interactive_rect, pointer_pos);
+    let binding_resize_edges = rect_contains_point(target.geometry.binding_rect, pointer_pos)
+        .then(|| resize_edges_for_pointer(target.geometry.binding_rect, pointer_pos))
+        .unwrap_or(0);
     Some(WindowHit { target, semantics, binding_resize_edges })
 }
 
@@ -76,6 +76,8 @@ pub(crate) fn request_toplevel_move(
     surface: Resolved<WlSurfaceId>,
     serial: u32,
     root_surface: Resolved<WlSurfaceId>,
+    xdg_toplevel: Resolved<XdgToplevelId>,
+    configure_decoration_mode: crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode,
     is_maximized: bool,
     is_fullscreen: bool,
 ) -> bool {
@@ -85,14 +87,7 @@ pub(crate) fn request_toplevel_move(
     {
         return false;
     }
-    let Some(xdg_toplevel) = root_surface
-        .try_ref(state)
-        .and_then(|root| root.xdg_surface())
-        .and_then(|xdg_surface| state.xdg_toplevel(xdg_surface))
-    else {
-        return false;
-    };
-    let Some(target) = build_protocol_window_target(
+    let Some(target) = build_protocol_move_target(
         state,
         root_surface,
         WindowRoleSnapshot::XdgToplevel {
@@ -100,7 +95,7 @@ pub(crate) fn request_toplevel_move(
             size_constraints: InteractiveSizeConstraints::default(),
             is_maximized,
             is_fullscreen,
-            decoration_mode: ToplevelDecorationMode::ClientSide,
+            decoration_mode: configure_decoration_mode,
         },
     ) else {
         return false;
@@ -124,6 +119,7 @@ pub(crate) fn request_toplevel_resize(
     serial: u32,
     root_surface: Resolved<WlSurfaceId>,
     xdg_toplevel: Resolved<XdgToplevelId>,
+    configure_decoration_mode: crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode,
     size_constraints: InteractiveSizeConstraints,
     is_maximized: bool,
     is_fullscreen: bool,
@@ -135,7 +131,7 @@ pub(crate) fn request_toplevel_resize(
     {
         return false;
     }
-    let Some(target) = build_protocol_window_target(
+    let Some(target) = build_protocol_resize_target(
         state,
         root_surface,
         WindowRoleSnapshot::XdgToplevel {
@@ -143,7 +139,7 @@ pub(crate) fn request_toplevel_resize(
             size_constraints,
             is_maximized,
             is_fullscreen,
-            decoration_mode: ToplevelDecorationMode::ClientSide,
+            decoration_mode: configure_decoration_mode,
         },
     ) else {
         return false;
@@ -168,9 +164,8 @@ fn interaction_intent_for_pointer_binding(
     }
     match action {
         config::MouseBindingAction::MoveWindow => Some(InteractionIntent::StartMove(hit.target)),
-        config::MouseBindingAction::ResizeWindow => {
-            Some(InteractionIntent::StartResize(hit.target, hit.binding_resize_edges))
-        }
+        config::MouseBindingAction::ResizeWindow => (hit.binding_resize_edges != 0)
+            .then_some(InteractionIntent::StartResize(hit.target, hit.binding_resize_edges)),
     }
 }
 
@@ -187,7 +182,7 @@ fn classify_window_semantics(
         return HitSemantics::SurfaceContent;
     };
     if !rect_contains_point(layout.frame_rect, pointer_pos)
-        || rect_contains_point(layout.content_rect, pointer_pos)
+        || rect_contains_point(layout.client_window_rect, pointer_pos)
     {
         return HitSemantics::SurfaceContent;
     }
@@ -202,31 +197,31 @@ fn classify_window_semantics(
         .map(|insets| insets.left.max(insets.right).max(insets.bottom).max(6))
         .unwrap_or(6);
     let top_resize_height =
-        (layout.content_rect.y - layout.frame_rect.y).clamp(1, border_resize_height);
+        (layout.client_window_rect.y - layout.frame_rect.y).clamp(1, border_resize_height);
     let top_resize_limit = layout.frame_rect.y.saturating_add(top_resize_height);
 
-    if x < layout.content_rect.x {
-        return HitSemantics::CompositorResize(if y < layout.content_rect.y {
+    if x < layout.client_window_rect.x {
+        return HitSemantics::CompositorResize(if y < layout.client_window_rect.y {
             ResizeEdge::TopLeft as u32
-        } else if y >= layout.content_rect.y2() {
+        } else if y >= layout.client_window_rect.y2() {
             ResizeEdge::BottomLeft as u32
         } else {
             ResizeEdge::Left as u32
         });
     }
-    if x >= layout.content_rect.x2() {
-        return HitSemantics::CompositorResize(if y < layout.content_rect.y {
+    if x >= layout.client_window_rect.x2() {
+        return HitSemantics::CompositorResize(if y < layout.client_window_rect.y {
             ResizeEdge::TopRight as u32
-        } else if y >= layout.content_rect.y2() {
+        } else if y >= layout.client_window_rect.y2() {
             ResizeEdge::BottomRight as u32
         } else {
             ResizeEdge::Right as u32
         });
     }
-    if y >= layout.content_rect.y2() {
+    if y >= layout.client_window_rect.y2() {
         return HitSemantics::CompositorResize(ResizeEdge::Bottom as u32);
     }
-    if y < layout.content_rect.y {
+    if y < layout.client_window_rect.y {
         if y < top_resize_limit {
             return HitSemantics::CompositorResize(ResizeEdge::Top as u32);
         }

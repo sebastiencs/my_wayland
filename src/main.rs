@@ -183,6 +183,7 @@ mod protocol_generated;
 mod queue;
 mod region;
 mod render;
+mod root_geometry;
 pub mod runner;
 mod seat;
 mod state;
@@ -285,6 +286,7 @@ fn main() {
         output_workspace_groups: Default::default(),
         root_surface_workspaces: Default::default(),
         managed_root_surfaces: Default::default(),
+        root_geometry_cache: Default::default(),
         xdg_toplevel_roles: Default::default(),
         ctm_control_owner: None,
         data_offers_by_source: Default::default(),

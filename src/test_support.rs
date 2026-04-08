@@ -42,6 +42,7 @@ pub fn state_for_tests_with_config(config: RuntimeConfig) -> State {
         output_workspace_groups: Default::default(),
         root_surface_workspaces: Default::default(),
         managed_root_surfaces: Default::default(),
+        root_geometry_cache: Default::default(),
         xdg_toplevel_roles: Default::default(),
         ctm_control_owner: None,
         data_offers_by_source: Default::default(),

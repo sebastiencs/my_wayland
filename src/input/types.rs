@@ -1,7 +1,7 @@
 use crate::{
     clients::{ClientId, Resolved},
     protocol_generated::{WlSurfaceId, XdgToplevelId},
-    region::RectI,
+    root_geometry::WindowTargetGeometry,
     tiling::TiledResizeState,
     wayland_objects::xdg_surface::xdg_toplevel::{
         InteractiveSizeConstraints, ToplevelDecorationMode,
@@ -59,11 +59,7 @@ pub(crate) enum WindowRoleSnapshot {
 pub(crate) struct WindowSnapshot {
     pub root_surface: Resolved<WlSurfaceId>,
     pub role: WindowRoleSnapshot,
-    pub initial_root_pos: (i32, i32),
-    pub initial_size: (i32, i32),
-    pub content_rect: RectI,
-    pub interactive_rect: RectI,
-    pub outer_rect: RectI,
+    pub geometry: WindowTargetGeometry,
 }
 
 impl WindowSnapshot {
@@ -121,7 +117,7 @@ pub(crate) enum ActiveGrab {
     Move {
         root_surface: Resolved<WlSurfaceId>,
         initial_pointer_pos: (f64, f64),
-        initial_root_pos: (i32, i32),
+        initial_geometry: WindowTargetGeometry,
     },
     Resize {
         root_surface: Resolved<WlSurfaceId>,
@@ -129,8 +125,7 @@ pub(crate) enum ActiveGrab {
         size_constraints: InteractiveSizeConstraints,
         edges: u32,
         initial_pointer_pos: (f64, f64),
-        initial_root_pos: (i32, i32),
-        initial_size: (i32, i32),
+        initial_geometry: WindowTargetGeometry,
         last_size: (i32, i32),
     },
     ResizeTiled {

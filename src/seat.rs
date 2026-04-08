@@ -14,13 +14,14 @@ use crate::{
         Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlKeyboardId, WlPointerId, WlSeatId,
         WlSurfaceId, XdgPopupId, XdgToplevelId,
     },
+    root_geometry::WindowTargetGeometry,
     runner::Dispatcher,
     state::{
         DragNegotiationState, DragPhase, DragState, DragTargetState, SelectionSourceState, State,
     },
     tiling::TiledResizeState,
     wayland_objects::{
-        xdg_surface::xdg_toplevel::InteractiveSizeConstraints,
+        xdg_surface::xdg_toplevel::{InteractiveSizeConstraints, ToplevelDecorationMode},
         zwlr_layer_surface_v1::LayerLayoutObjectSnapshot,
     },
     xkb::KeyboardModifiers,
@@ -843,12 +844,12 @@ impl SeatState {
         &mut self,
         _client_id: ClientId,
         root_surface: Resolved<WlSurfaceId>,
-        initial_root_pos: (i32, i32),
+        initial_geometry: WindowTargetGeometry,
     ) {
         self.pointer_interactive_grab = Some(PointerInteractiveGrab::Move {
             root_surface,
             initial_pointer_pos: self.pointer_pos,
-            initial_root_pos,
+            initial_geometry,
         });
     }
 
@@ -859,8 +860,7 @@ impl SeatState {
         xdg_toplevel: Resolved<XdgToplevelId>,
         size_constraints: InteractiveSizeConstraints,
         edges: u32,
-        initial_root_pos: (i32, i32),
-        initial_size: (i32, i32),
+        initial_geometry: WindowTargetGeometry,
     ) {
         self.pointer_interactive_grab = Some(PointerInteractiveGrab::Resize {
             root_surface,
@@ -868,9 +868,8 @@ impl SeatState {
             size_constraints,
             edges,
             initial_pointer_pos: self.pointer_pos,
-            initial_root_pos,
-            initial_size,
-            last_size: initial_size,
+            initial_geometry,
+            last_size: initial_geometry.resize_size,
         });
     }
 
@@ -1466,6 +1465,8 @@ pub fn request_toplevel_move(
     surface: Resolved<WlSurfaceId>,
     serial: u32,
     root_surface: Resolved<WlSurfaceId>,
+    xdg_toplevel: Resolved<XdgToplevelId>,
+    configure_decoration_mode: ToplevelDecorationMode,
     is_maximized: bool,
     is_fullscreen: bool,
 ) -> bool {
@@ -1476,6 +1477,8 @@ pub fn request_toplevel_move(
         surface,
         serial,
         root_surface,
+        xdg_toplevel,
+        configure_decoration_mode,
         is_maximized,
         is_fullscreen,
     )
@@ -1489,6 +1492,7 @@ pub fn request_toplevel_resize(
     serial: u32,
     root_surface: Resolved<WlSurfaceId>,
     xdg_toplevel: Resolved<XdgToplevelId>,
+    configure_decoration_mode: ToplevelDecorationMode,
     size_constraints: InteractiveSizeConstraints,
     is_maximized: bool,
     is_fullscreen: bool,
@@ -1502,6 +1506,7 @@ pub fn request_toplevel_resize(
         serial,
         root_surface,
         xdg_toplevel,
+        configure_decoration_mode,
         size_constraints,
         is_maximized,
         is_fullscreen,
@@ -1729,12 +1734,13 @@ mod xdg_seat_tests {
             },
             region::RectI,
             state::{
-                DragPhase, DragSource, DragState, DragTargetState, ObjectId, State, WorkspaceGroup,
+                BackendOutputRef, DragPhase, DragSource, DragState, DragTargetState, DrmId,
+                ObjectId, State, WorkspaceGroup,
             },
             test_support::{
                 fake_focus, focus_for_surface, get_toplevel_request, insert_wl_subsurface,
                 raw_request_from_event, resolved_wl_surface as root, state_for_tests,
-                test_client_and_dispatcher,
+                test_client_and_dispatcher, test_output_with_crtc_name,
             },
             wayland_objects::{
                 wl_seat::WlSeat,
@@ -1764,6 +1770,12 @@ mod xdg_seat_tests {
         let object_id = resolved.object_id();
         state.register_root_surface(object_id);
         object_id
+    }
+
+    fn ensure_test_root_geometry(state: &mut State, object_id: ObjectId) {
+        let root_surface = root(state, object_id);
+        state.mark_root_geometry_dirty(root_surface);
+        let _ = state.committed_root_geometry(root_surface);
     }
 
     fn insert_xdg_surface(
@@ -2311,6 +2323,7 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(900usize), 40, 50, 120, 80);
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         state.config = RuntimeConfig::parse_for_test(
             r#"
@@ -2456,6 +2469,7 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(950usize), 40, 50, 120, 80);
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         state.seat.pointer_pos = (80.0, 44.0);
         handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
@@ -2502,6 +2516,7 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(901usize), 10, 20, 80, 60);
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         state.config = RuntimeConfig::parse_for_test(
             r#"
@@ -2572,6 +2587,7 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(951usize), 40, 50, 120, 80);
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         state.seat.pointer_pos = (35.0, 90.0);
         handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
@@ -2663,12 +2679,68 @@ mod xdg_seat_tests {
                 height: 92,
             }));
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         let target = scene_pick_at(&state, (36.0, 44.0))
             .window_target
             .expect("target on CSD chrome");
         assert_eq!(target.root_surface.object_id(), wl_surface_object_id);
-        assert_eq!(target.interactive_rect, RectI::new(34, 38, 126, 92).unwrap());
+        assert_eq!(target.geometry.target_rect, RectI::new(34, 38, 126, 92).unwrap());
+        assert_eq!(target.geometry.binding_rect, RectI::new(40, 50, 120, 80).unwrap());
+
+        let hit = window_hit_at(&state, (36.0, 44.0)).expect("shadow-area hit");
+        assert_eq!(hit.binding_resize_edges, 0);
+    }
+
+    #[test]
+    fn positive_origin_csd_titlebar_still_builds_window_target() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(8);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(330),
+            XdgSurfaceId::from(340),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(340),
+            XdgToplevelId::from(350),
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(962usize), 40, 50, 800, 600);
+        }
+        {
+            let xdg_surface = state
+                .objects
+                .get_mut(xdg_surface_object_id)
+                .downcast_mut::<XdgSurface>()
+                .unwrap();
+            xdg_surface.test_set_current_window_geometry(Some(RectI {
+                x: 0,
+                y: 32,
+                width: 800,
+                height: 568,
+            }));
+        }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
+
+        let target = scene_pick_at(&state, (100.0, 60.0))
+            .window_target
+            .expect("target on positive-origin CSD titlebar");
+        assert_eq!(target.root_surface.object_id(), wl_surface_object_id);
+        assert_eq!(target.geometry.target_rect, RectI::new(40, 50, 800, 600).unwrap());
     }
 
     #[test]
@@ -2727,6 +2799,7 @@ mod xdg_seat_tests {
                 .unwrap();
             lower_surface.test_map(ObjectId::from(959usize), 40, 50, 120, 80);
         }
+        ensure_test_root_geometry(&mut state, lower_surface_object_id);
         {
             let upper_surface = state
                 .objects
@@ -2735,6 +2808,7 @@ mod xdg_seat_tests {
                 .unwrap();
             upper_surface.test_map(ObjectId::from(960usize), 60, 60, 120, 80);
         }
+        ensure_test_root_geometry(&mut state, upper_surface_object_id);
 
         let pick = scene_pick_at(&state, (90.0, 55.0));
 
@@ -2746,6 +2820,51 @@ mod xdg_seat_tests {
                 .object_id(),
             upper_surface_object_id
         );
+    }
+
+    #[test]
+    fn unmapped_window_geometry_does_not_create_a_window_target() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(270),
+            XdgSurfaceId::from(280),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(280),
+            XdgToplevelId::from(290),
+        );
+        {
+            let xdg_surface = state
+                .objects
+                .get_mut(xdg_surface_object_id)
+                .downcast_mut::<XdgSurface>()
+                .unwrap();
+            xdg_surface.test_set_current_window_geometry(Some(RectI {
+                x: 0,
+                y: 0,
+                width: 120,
+                height: 80,
+            }));
+        }
+        let root_surface =
+            Resolved::new(client.client_id(), WlSurfaceId::from(270), wl_surface_object_id);
+        state.mark_root_geometry_dirty(root_surface);
+        let _ = state.committed_root_geometry(root_surface);
+
+        let pick = scene_pick_at(&state, (10.0, 10.0));
+
+        assert!(pick.surface_focus.is_none());
+        assert!(pick.window_target.is_none());
     }
 
     #[test]
@@ -2777,6 +2896,7 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(955usize), 40, 50, 120, 80);
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         let hit = window_hit_at(&state, (80.0, 90.0)).expect("content hit");
         assert_eq!(hit.target.root_surface.object_id(), wl_surface_object_id);
@@ -2812,6 +2932,7 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(957usize), 10, 20, 90, 60);
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         let hit = window_hit_at(&state, (85.0, 50.0)).expect("content hit");
         assert_eq!(hit.semantics, HitSemantics::SurfaceContent);
@@ -2867,6 +2988,7 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(956usize), 40, 50, 120, 80);
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         let titlebar_hit = window_hit_at(&state, (80.0, 44.0)).expect("titlebar hit");
         assert_eq!(titlebar_hit.semantics, HitSemantics::CompositorMove);
@@ -2928,6 +3050,7 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(958usize), 40, 50, 120, 80);
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         let corner_hit = window_hit_at(&state, (34.0, 38.0)).expect("corner hit");
         assert_eq!(corner_hit.semantics, HitSemantics::SurfaceContent);
@@ -2982,6 +3105,7 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(953usize), 40, 50, 120, 80);
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         handle_pointer_motion_absolute(&mut state, &mut dispatcher, 35.0, 90.0, 100);
         assert_named_cursor_matches_any(&state.seat, super::POINTER_RESIZE_W_CURSOR_ICON_NAMES);
@@ -3031,6 +3155,7 @@ mod xdg_seat_tests {
             surface.test_map(ObjectId::from(902usize), 15, 25, 100, 80);
             surface.test_set_input_region(crate::region::RegionValue::empty());
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         state.config = RuntimeConfig::parse_for_test(
             r#"
@@ -3108,6 +3233,85 @@ mod xdg_seat_tests {
                 )
             }
         ));
+    }
+
+    #[test]
+    fn compositor_mouse_move_binding_uses_restored_floating_origin_after_tiled_promotion() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_with_crtc_name(
+            BackendOutputRef::new(DrmId::from(1usize)),
+            1,
+            0,
+            0,
+            1280,
+            720,
+        ));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(261),
+            XdgSurfaceId::from(271),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(271),
+            XdgToplevelId::from(281),
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(904usize), 20, 30, 120, 90);
+        }
+        if state.root_surface_workspace(root(&state, wl_surface_object_id)) != Some(workspace_id) {
+            assert!(state.assign_root_surface_to_workspace(
+                root(&state, wl_surface_object_id),
+                workspace_id
+            ));
+        }
+
+        assert!(state.set_root_surface_floating(root(&state, wl_surface_object_id), true));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(wl_surface_object_id);
+            surface.set_root_position(250, 180);
+        }
+        state.mark_root_geometry_dirty(root(&state, wl_surface_object_id));
+        let _ = state.committed_root_geometry(root(&state, wl_surface_object_id));
+        assert!(state.set_root_surface_floating(root(&state, wl_surface_object_id), false));
+
+        state.config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:left" = { action = "move-window" }
+            "#,
+            &state.xkb,
+        )
+        .unwrap();
+        state.keyboard.update_key(125, true);
+        state.seat.pointer_pos = (70.0, 80.0);
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Move { initial_geometry, .. })
+                if initial_geometry.root_pos == (250, 180)
+        ));
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(wl_surface_object_id)
+            .unwrap();
+        assert_eq!(surface.root_position(), (250, 180));
     }
 
     #[test]
@@ -3298,6 +3502,7 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(905usize), 30, 40, 120, 90);
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         state.config = RuntimeConfig::parse_for_test(
             r#"
@@ -3354,6 +3559,7 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.test_map(ObjectId::from(906usize), 10, 10, 100, 80);
         }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         state.config = RuntimeConfig::parse_for_test(
             r#"

@@ -5,6 +5,7 @@ use crate::{
     cursor::CursorSourceRef,
     drm::{schedule_active_output, schedule_outputs_for_points, schedule_outputs_for_rects},
     protocol_generated::{xdg_toplevel::ResizeEdge, WlSurfaceId, XdgToplevelId},
+    root_geometry::WindowTargetGeometry,
     runner::Dispatcher,
     seat::{dispatch_client_action, dispatch_client_event, refresh_pointer_focus, SeatClientEvent},
     state::State,
@@ -38,15 +39,17 @@ pub(crate) fn apply_interaction_intent(
             true
         }
         InteractionIntent::StartMove(target) | InteractionIntent::StartResize(target, _) => {
-            if options.prepare_window {
+            let target = if options.prepare_window {
                 prepare_window_for_pointer_grab(
                     state,
                     dispatcher,
                     &target,
                     intent,
                     options.promote_tiled_on_move,
-                );
-            }
+                )
+            } else {
+                target
+            };
             start_window_grab(state, dispatcher, &target, intent)
         }
         InteractionIntent::DismissPopupGrab | InteractionIntent::None => false,
@@ -61,16 +64,21 @@ pub(crate) fn apply_pointer_interactive_grab(
         return false;
     };
     match grab {
-        ActiveGrabState::Move { root_surface, initial_pointer_pos, initial_root_pos, .. } => {
+        ActiveGrabState::Move { root_surface, initial_pointer_pos, initial_geometry, .. } => {
             let dx = (state.seat.pointer_pos.0 - initial_pointer_pos.0).round() as i32;
             let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
+            let old_bounds = interactive_damage_rect(state, root_surface);
             let Some(mut surface) = root_surface.try_grab(state) else {
                 abort_pointer_interactive_grab(state, dispatcher, 0);
                 return true;
             };
-            let old_bounds = surface.global_logical_bounds();
-            surface.set_root_position(initial_root_pos.0 + dx, initial_root_pos.1 + dy);
-            let new_bounds = surface.global_logical_bounds();
+            surface.set_root_position(
+                initial_geometry.root_pos.0 + dx,
+                initial_geometry.root_pos.1 + dy,
+            );
+            drop(surface);
+            state.mark_root_geometry_dirty(root_surface);
+            let new_bounds = interactive_damage_rect(state, root_surface);
             dispatch_client_action(
                 dispatcher,
                 root_surface.client_id(),
@@ -89,42 +97,43 @@ pub(crate) fn apply_pointer_interactive_grab(
             size_constraints,
             edges,
             initial_pointer_pos,
-            initial_root_pos,
-            initial_size,
+            initial_geometry,
             mut last_size,
         } => {
             let dx = (state.seat.pointer_pos.0 - initial_pointer_pos.0).round() as i32;
             let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
-            let (mut width, mut height) = initial_size;
-            let (mut x, mut y) = initial_root_pos;
+            let (mut width, mut height) = initial_geometry.resize_size;
+            let (mut x, mut y) = initial_geometry.root_pos;
 
             if edges & 4 != 0 {
-                width = initial_size.0 - dx;
+                width = initial_geometry.resize_size.0 - dx;
             }
             if edges & 8 != 0 {
-                width = initial_size.0 + dx;
+                width = initial_geometry.resize_size.0 + dx;
             }
             if edges & 1 != 0 {
-                height = initial_size.1 - dy;
+                height = initial_geometry.resize_size.1 - dy;
             }
             if edges & 2 != 0 {
-                height = initial_size.1 + dy;
+                height = initial_geometry.resize_size.1 + dy;
             }
             (width, height) = size_constraints.clamp(width, height);
             if edges & 4 != 0 {
-                x = initial_root_pos.0 + (initial_size.0 - width);
+                x = initial_geometry.root_pos.0 + (initial_geometry.resize_size.0 - width);
             }
             if edges & 1 != 0 {
-                y = initial_root_pos.1 + (initial_size.1 - height);
+                y = initial_geometry.root_pos.1 + (initial_geometry.resize_size.1 - height);
             }
 
+            let old_bounds = interactive_damage_rect(state, root_surface);
             let Some(mut surface) = root_surface.try_grab(state) else {
                 abort_pointer_interactive_grab(state, dispatcher, 0);
                 return true;
             };
-            let old_bounds = surface.global_logical_bounds();
             surface.set_root_position(x, y);
-            let new_bounds = surface.global_logical_bounds();
+            drop(surface);
+            state.mark_root_geometry_dirty(root_surface);
+            let new_bounds = interactive_damage_rect(state, root_surface);
             dispatch_client_action(
                 dispatcher,
                 root_surface.client_id(),
@@ -157,8 +166,7 @@ pub(crate) fn apply_pointer_interactive_grab(
                 size_constraints,
                 edges,
                 initial_pointer_pos,
-                initial_root_pos,
-                initial_size,
+                initial_geometry,
                 last_size,
             });
         }
@@ -272,7 +280,8 @@ fn prepare_window_for_pointer_grab(
     target: &WindowTarget,
     intent: InteractionIntent,
     promote_tiled_on_move: bool,
-) {
+) -> WindowTarget {
+    let mut target = *target;
     if promote_tiled_on_move
         && matches!(intent, InteractionIntent::StartMove(_))
         && state.is_tiled_root_surface(target.root_surface)
@@ -280,11 +289,19 @@ fn prepare_window_for_pointer_grab(
     {
         dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
         schedule_active_output(state, dispatcher);
+        target =
+            crate::input::pick::build_window_target(state, target.root_surface).unwrap_or(target);
     }
 
     state.raise_root_surface(target.root_surface);
-    schedule_outputs_for_rects(state, [target.interactive_rect], dispatcher);
+    schedule_outputs_for_rects(
+        state,
+        [interactive_damage_rect(state, target.root_surface)
+            .unwrap_or(target.geometry.target_rect)],
+        dispatcher,
+    );
     set_keyboard_focus(state, dispatcher, Some(SurfaceFocus::new(target.root_surface)));
+    target
 }
 
 fn start_window_grab(
@@ -299,7 +316,7 @@ fn start_window_grab(
             dispatcher,
             target.client_id(),
             target.root_surface,
-            target.initial_root_pos,
+            target.geometry,
         ),
         (
             InteractionIntent::StartResize(_, edges),
@@ -322,8 +339,7 @@ fn start_window_grab(
                     xdg_toplevel,
                     size_constraints,
                     edges,
-                    target.initial_root_pos,
-                    target.initial_size,
+                    target.geometry,
                 )
             }
         }
@@ -336,12 +352,12 @@ fn start_interactive_move(
     dispatcher: &mut Dispatcher,
     client_id: ClientId,
     root_surface: Resolved<WlSurfaceId>,
-    initial_root_pos: (i32, i32),
+    initial_geometry: WindowTargetGeometry,
 ) -> bool {
     begin_compositor_pointer_grab(state, dispatcher, POINTER_MOVE_CURSOR_ICON_NAMES);
     state
         .seat
-        .start_toplevel_move(client_id, root_surface, initial_root_pos);
+        .start_toplevel_move(client_id, root_surface, initial_geometry);
     true
 }
 
@@ -353,8 +369,7 @@ fn start_interactive_resize(
     xdg_toplevel: Resolved<XdgToplevelId>,
     size_constraints: InteractiveSizeConstraints,
     edges: u32,
-    initial_root_pos: (i32, i32),
-    initial_size: (i32, i32),
+    initial_geometry: WindowTargetGeometry,
 ) -> bool {
     begin_compositor_pointer_grab(state, dispatcher, resize_cursor_icon_names(edges));
     state.seat.start_toplevel_resize(
@@ -363,8 +378,7 @@ fn start_interactive_resize(
         xdg_toplevel,
         size_constraints,
         edges,
-        initial_root_pos,
-        initial_size,
+        initial_geometry,
     );
     true
 }
@@ -451,6 +465,68 @@ fn refresh_visible_cursor_surface_outputs(state: &State, dispatcher: &mut Dispat
             dispatcher,
             cursor.surface.client_id(),
             ClientAction::RefreshSurfaceOutputs,
+        );
+    }
+}
+
+fn interactive_damage_rect(
+    state: &State,
+    root_surface: Resolved<WlSurfaceId>,
+) -> Option<crate::region::RectI> {
+    state
+        .root_surface_visual_outer_rect(root_surface)
+        .or_else(|| state.root_surface_client_window_rect(root_surface))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        clients::{ClientId, Resolved},
+        config::DecorationInsets,
+        protocol_generated::WlSurfaceId,
+        region::RectI,
+        root_geometry::CommittedRootGeometry,
+        test_support::state_for_tests,
+        wayland_objects::wl_surface::WlSurface,
+    };
+
+    use super::interactive_damage_rect;
+
+    #[test]
+    fn interactive_damage_rect_prefers_visual_outer_rect() {
+        let mut state = state_for_tests();
+        let root_surface_id = WlSurfaceId::from(71u32);
+        let root_object_id = state
+            .insert_object(WlSurface::new(root_surface_id, ClientId::from_raw(7), 6))
+            .1;
+        state.register_root_surface(root_object_id);
+        let root_surface = Resolved::new(ClientId::from_raw(7), root_surface_id, root_object_id);
+        state.root_geometry_cache.insert(
+            root_surface,
+            std::cell::Cell::new(crate::state::RootGeometryCacheEntry {
+                geometry: Some(CommittedRootGeometry {
+                    placement_rect: RectI { x: 20, y: 30, width: 120, height: 90 },
+                    client_window_rect: RectI { x: 30, y: 40, width: 100, height: 70 },
+                    window_target_rect: RectI { x: 20, y: 30, width: 120, height: 90 },
+                    binding_rect: RectI { x: 20, y: 30, width: 120, height: 90 },
+                    visual_outer_rect: RectI { x: 15, y: 25, width: 130, height: 100 },
+                    compositor_decoration_layout: None,
+                    root_pos: (20, 30),
+                    tiled_edges: 0,
+                    fullscreen: false,
+                    decoration_mode: None,
+                    decoration_insets: DecorationInsets::default(),
+                    effective_window_geometry: None,
+                }),
+                dirty: false,
+                revision: 0,
+                built_from_revision: 0,
+            }),
+        );
+
+        assert_eq!(
+            interactive_damage_rect(&state, root_surface),
+            Some(RectI { x: 15, y: 25, width: 130, height: 100 })
         );
     }
 }

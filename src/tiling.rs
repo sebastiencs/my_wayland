@@ -5,8 +5,8 @@ use crate::{
     config::DecorationInsets,
     protocol_generated::{xdg_toplevel, WlSurfaceId, XdgSurfaceId},
     region::RectI,
+    root_geometry::{self, CommittedRootGeometry},
     state::{ManagedWindowMode, ObjectId, State, WorkspaceId},
-    transform::SizeI,
     wayland_objects::{
         wl_surface::{Role, WlSurface},
         xdg_surface::xdg_toplevel::{ToplevelDecorationMode, XdgToplevel},
@@ -30,133 +30,16 @@ pub struct GapPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LayoutOperation {
     surface_object_id: Resolved<WlSurfaceId>,
-    geometry: TiledSurfaceGeometry,
+    allocation: LayoutAllocation,
 }
 
 type DecorationInsetsMap = BTreeMap<Resolved<WlSurfaceId>, DecorationInsets>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TiledSurfaceGeometry {
+pub struct LayoutAllocation {
     pub frame_rect: RectI,
-    pub content_rect: RectI,
     pub tiled_edges: u32,
     pub fullscreen: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GeometryOwnership {
-    Compositor,
-    Client,
-}
-
-impl GeometryOwnership {
-    fn for_decoration_mode(decoration_mode: ToplevelDecorationMode) -> Self {
-        match decoration_mode {
-            ToplevelDecorationMode::ServerSide => Self::Compositor,
-            ToplevelDecorationMode::ClientSide => Self::Client,
-        }
-    }
-
-    fn decoration_insets(
-        self,
-        fallback: DecorationInsets,
-        surface: &WlSurface,
-        effective_window_geometry: Option<RectI>,
-    ) -> DecorationInsets {
-        match self {
-            Self::Compositor => fallback,
-            Self::Client => effective_window_geometry
-                .and_then(|window_geometry| {
-                    decoration_insets_from_window_geometry(surface, window_geometry)
-                })
-                .unwrap_or(fallback),
-        }
-    }
-}
-
-fn root_position_from_anchor(
-    fallback_rect: RectI,
-    anchor_rect: RectI,
-    effective_window_geometry: Option<RectI>,
-) -> (i32, i32) {
-    effective_window_geometry
-        .map(|window_geometry| {
-            (
-                anchor_rect.x.saturating_sub(window_geometry.x),
-                anchor_rect.y.saturating_sub(window_geometry.y),
-            )
-        })
-        .unwrap_or((fallback_rect.x, fallback_rect.y))
-}
-
-impl TiledSurfaceGeometry {
-    pub fn configure_rect_for_decoration_mode(
-        self,
-        decoration_mode: ToplevelDecorationMode,
-    ) -> RectI {
-        if decoration_mode == ToplevelDecorationMode::ServerSide {
-            self.content_rect
-        } else {
-            self.frame_rect
-        }
-    }
-
-    pub fn configure_size_for_decoration_mode(
-        self,
-        decoration_mode: ToplevelDecorationMode,
-    ) -> (i32, i32) {
-        let rect = self.configure_rect_for_decoration_mode(decoration_mode);
-        (rect.width, rect.height)
-    }
-
-    pub fn root_position_for_surface(
-        self,
-        state: &State,
-        surface_object_id: Resolved<WlSurfaceId>,
-        surface: &WlSurface,
-    ) -> (i32, i32) {
-        let Some((_, toplevel)) = xdg_toplevel_for_surface_ids(state, surface.xdg_surface()) else {
-            log::debug!(
-                "AAA tiled_root_position fallback_no_toplevel surface={:?} frame_rect={:?} content_rect={:?} root_pos=({}, {})",
-                surface_object_id,
-                self.frame_rect,
-                self.content_rect,
-                self.content_rect.x,
-                self.content_rect.y,
-            );
-            return (self.content_rect.x, self.content_rect.y);
-        };
-        let decoration_mode = toplevel.decoration_mode();
-        let explicit_window_geometry = toplevel.window_geometry();
-        let effective_window_geometry = toplevel.window_geometry().and_then(|window_geometry| {
-            effective_window_geometry_for_surface(
-                state,
-                surface_object_id,
-                surface,
-                Some(window_geometry),
-            )
-        });
-        let anchor_rect = self.configure_rect_for_decoration_mode(decoration_mode);
-        let root_pos = match GeometryOwnership::for_decoration_mode(decoration_mode) {
-            GeometryOwnership::Compositor => (self.content_rect.x, self.content_rect.y),
-            GeometryOwnership::Client => {
-                root_position_from_anchor(self.content_rect, anchor_rect, effective_window_geometry)
-            }
-        };
-        log::debug!(
-            "AAA tiled_root_position surface={:?} decoration_mode={:?} frame_rect={:?} content_rect={:?} anchor_rect={:?} explicit_window_geometry={:?} effective_window_geometry={:?} root_pos=({}, {})",
-            surface_object_id,
-            decoration_mode,
-            self.frame_rect,
-            self.content_rect,
-            anchor_rect,
-            explicit_window_geometry,
-            effective_window_geometry,
-            root_pos.0,
-            root_pos.1,
-        );
-        root_pos
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1020,68 +903,15 @@ impl LayoutNode {
     }
 }
 
-pub fn tiled_geometry_for_surface(
-    state: &State,
-    surface_object_id: Resolved<WlSurfaceId>,
-) -> Option<TiledSurfaceGeometry> {
-    let workspace_id = state.root_surface_workspace(surface_object_id)?;
-    let workspace = state.workspaces.try_get(workspace_id)?;
-    if let Some(rect) = workspace.layout.tiled_rect(surface_object_id) {
-        return Some(build_tiled_surface_geometry(
-            rect,
-            tiled_decoration_insets(state, surface_object_id),
-            workspace
-                .layout
-                .tiled_edges(surface_object_id)
-                .unwrap_or_default(),
-            false,
-        ));
-    }
-    workspace
-        .layout
-        .fullscreen
-        .as_ref()
-        .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id)
-        .then(|| workspace_usable_bounds(state, workspace_id))
-        .flatten()
-        .map(|rect| {
-            build_tiled_surface_geometry(
-                rect,
-                DecorationInsets::default(),
-                EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
-                true,
-            )
-        })
-}
-
-pub fn tiled_content_rect_for_surface(
-    state: &State,
-    surface_object_id: Resolved<WlSurfaceId>,
-) -> Option<RectI> {
-    tiled_geometry_for_surface(state, surface_object_id).map(|geometry| geometry.content_rect)
-}
-
-pub fn tiled_frame_rect_for_surface(
-    state: &State,
-    surface_object_id: Resolved<WlSurfaceId>,
-) -> Option<RectI> {
-    tiled_geometry_for_surface(state, surface_object_id).map(|geometry| geometry.frame_rect)
-}
-
-pub fn tiled_edges_for_surface(
-    state: &State,
-    surface_object_id: Resolved<WlSurfaceId>,
-) -> Option<u32> {
-    tiled_geometry_for_surface(state, surface_object_id).map(|geometry| geometry.tiled_edges)
-}
-
-pub fn initial_tiled_surface_geometry_for_surface(
+pub fn initial_root_geometry_for_surface(
     state: &mut State,
     surface: Resolved<WlSurfaceId>,
     surface_decoration_insets: DecorationInsets,
+    decoration_mode: ToplevelDecorationMode,
+    explicit_window_geometry: Option<RectI>,
     target_min_size: Option<(i32, i32)>,
     configure_bounds: Option<(i32, i32)>,
-) -> Option<TiledSurfaceGeometry> {
+) -> Option<CommittedRootGeometry> {
     let surface_object_id = surface;
     if !state.prepare_root_surface_initial_layout(surface_object_id) {
         return None;
@@ -1099,7 +929,7 @@ pub fn initial_tiled_surface_geometry_for_surface(
             if *object_id == surface_object_id {
                 return state
                     .managed_root_surface_state(*object_id)
-                    .is_some_and(|managed| managed.pending_initial_layout);
+                    .is_some_and(|managed| managed.awaiting_initial_layout);
             }
             is_managed_root_surface_live(state, *object_id)
         })
@@ -1119,14 +949,10 @@ pub fn initial_tiled_surface_geometry_for_surface(
             .is_some_and(|managed| managed.fullscreen && candidate_set.contains(object_id))
             .then_some(*object_id)
     });
-    let fullscreen_bounds = state
-        .workspace_output_id(workspace_id)
-        .and_then(|output_id| state.output_bounds(output_id))
-        .map(|bounds| {
-            let (width, height) = configure_bounds.unwrap_or((bounds.width, bounds.height));
-            RectI { x: bounds.x, y: bounds.y, width, height }
-        })
-        .or_else(|| workspace_usable_bounds(state, workspace_id))?;
+    let fullscreen_bounds = workspace_usable_bounds(state, workspace_id).map(|bounds| {
+        let (width, height) = configure_bounds.unwrap_or((bounds.width, bounds.height));
+        RectI { x: bounds.x, y: bounds.y, width, height }
+    })?;
     let tiling_bounds = workspace_tiling_bounds(state, workspace_id, fullscreen_bounds);
     let min_sizes = state
         .managed_root_surfaces
@@ -1167,29 +993,65 @@ pub fn initial_tiled_surface_geometry_for_surface(
         &decoration_insets,
         &min_sizes,
     );
-    let frame_rect = predictive_layout
-        .tiled_rect(surface_object_id)
-        .or_else(|| {
-            predictive_layout
-                .fullscreen
-                .as_ref()
-                .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id)
-                .then_some(fullscreen_bounds)
-        })?;
-    let fullscreen = predictive_layout
+    let allocation = predictive_layout
         .fullscreen
         .as_ref()
-        .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id);
-    let tiled_edges = predictive_layout
-        .tiled_edges(surface_object_id)
-        .or_else(|| fullscreen.then_some(EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT))
-        .unwrap_or_default();
-    Some(build_tiled_surface_geometry(
-        frame_rect,
-        if fullscreen { DecorationInsets::default() } else { surface_decoration_insets },
-        tiled_edges,
-        fullscreen,
+        .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id)
+        .then_some(LayoutAllocation {
+            frame_rect: fullscreen_bounds,
+            tiled_edges: EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
+            fullscreen: true,
+        })
+        .or_else(|| {
+            predictive_layout
+                .tiled_rect(surface_object_id)
+                .map(|frame_rect| LayoutAllocation {
+                    frame_rect,
+                    tiled_edges: predictive_layout
+                        .tiled_edges(surface_object_id)
+                        .unwrap_or_default(),
+                    fullscreen: false,
+                })
+        })?;
+    Some(root_geometry::predictive_tiled_geometry(
+        allocation,
+        decoration_mode,
+        explicit_window_geometry,
+        surface_decoration_insets,
     ))
+}
+
+pub fn layout_allocation_for_surface(
+    state: &State,
+    surface_object_id: Resolved<WlSurfaceId>,
+) -> Option<LayoutAllocation> {
+    let workspace_id = state.root_surface_workspace(surface_object_id)?;
+    let workspace = state.workspaces.try_get(workspace_id)?;
+    if let Some(frame_rect) = workspace
+        .layout
+        .fullscreen
+        .as_ref()
+        .is_some_and(|fullscreen| fullscreen.surface_object_id == surface_object_id)
+        .then(|| workspace_usable_bounds(state, workspace_id))
+        .flatten()
+    {
+        return Some(LayoutAllocation {
+            frame_rect,
+            tiled_edges: EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
+            fullscreen: true,
+        });
+    }
+    workspace
+        .layout
+        .tiled_rect(surface_object_id)
+        .map(|frame_rect| LayoutAllocation {
+            frame_rect,
+            tiled_edges: workspace
+                .layout
+                .tiled_edges(surface_object_id)
+                .unwrap_or_default(),
+            fullscreen: false,
+        })
 }
 
 pub fn is_tiled_surface(state: &State, surface_object_id: Resolved<WlSurfaceId>) -> bool {
@@ -1321,6 +1183,13 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
         sync_workspace_layout(state, workspace_id);
     }
     for workspace_id in workspace_ids {
+        let workspace_surface_ids = state
+            .managed_root_surfaces
+            .iter()
+            .filter_map(|(surface, managed)| {
+                (managed.workspace_id == workspace_id).then_some(*surface)
+            })
+            .collect::<Vec<_>>();
         let Some(fullscreen_bounds) = workspace_usable_bounds(state, workspace_id) else {
             continue;
         };
@@ -1354,21 +1223,36 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
                 continue;
             };
             let previous_root_pos = surface.root_position();
-            let (rx, ry) = tiled_root_position_for_geometry(
+            let Some(geometry) = root_geometry::build_committed_root_geometry(
                 state,
                 operation.surface_object_id,
                 &surface,
-                operation.geometry,
-            );
+                Some(operation.allocation),
+                root_geometry::GeometryBuildOverrides {
+                    decoration_mode: None,
+                    explicit_window_geometry: None,
+                    decoration_insets: None,
+                    root_pos: Some(previous_root_pos),
+                },
+            ) else {
+                continue;
+            };
             log::debug!(
                 "AAA tiled_apply_root_position surface={:?} previous_root_pos={:?} next_root_pos=({}, {}) geometry={:?}",
                 operation.surface_object_id,
                 previous_root_pos,
-                rx,
-                ry,
-                operation.geometry,
+                geometry.root_pos.0,
+                geometry.root_pos.1,
+                geometry,
             );
-            surface.set_root_position(rx, ry);
+            surface.set_root_position(geometry.root_pos.0, geometry.root_pos.1);
+            drop(surface);
+            state.mark_root_geometry_dirty(operation.surface_object_id);
+        }
+        for surface in workspace_surface_ids {
+            if !state.is_tiled_root_surface(surface) && !state.root_surface_is_fullscreen(surface) {
+                state.mark_root_geometry_dirty(surface);
+            }
         }
     }
 }
@@ -1383,13 +1267,6 @@ fn workspace_gap_policy(state: &State, _workspace_id: WorkspaceId) -> GapPolicy 
         outer_gap: state.config.general.outer_gap,
         inner_gap: state.config.general.inner_gap,
     }
-}
-
-fn tiled_decoration_insets(
-    state: &State,
-    surface_object_id: Resolved<WlSurfaceId>,
-) -> DecorationInsets {
-    effective_decoration_insets(state, surface_object_id)
 }
 
 fn decoration_insets_for_surface(
@@ -1409,123 +1286,12 @@ where
     surface_object_ids
         .into_iter()
         .map(|surface_object_id| {
-            (surface_object_id, effective_decoration_insets(state, surface_object_id))
+            (
+                surface_object_id,
+                root_geometry::effective_decoration_insets(state, surface_object_id),
+            )
         })
         .collect()
-}
-
-pub(crate) fn effective_decoration_insets(
-    state: &State,
-    surface_object_id: Resolved<WlSurfaceId>,
-) -> DecorationInsets {
-    let Some(surface) = state
-        .objects
-        .try_ref_object::<WlSurface>(surface_object_id.object_id())
-    else {
-        return state.configured_decoration_insets();
-    };
-    effective_decoration_insets_for_surface(state, surface_object_id, surface)
-}
-
-pub(crate) fn effective_decoration_insets_for_surface(
-    state: &State,
-    surface_object_id: Resolved<WlSurfaceId>,
-    surface: &WlSurface,
-) -> DecorationInsets {
-    let fallback = state.configured_decoration_insets();
-    let Some((_, toplevel)) = xdg_toplevel_for_surface_ids(state, surface.xdg_surface()) else {
-        return fallback;
-    };
-    let geometry_ownership = GeometryOwnership::for_decoration_mode(toplevel.decoration_mode());
-    let effective_window_geometry = toplevel.window_geometry().and_then(|window_geometry| {
-        effective_window_geometry_for_surface(
-            state,
-            surface_object_id,
-            surface,
-            Some(window_geometry),
-        )
-    });
-    geometry_ownership.decoration_insets(fallback, surface, effective_window_geometry)
-}
-
-pub(crate) fn effective_window_geometry_for_surface(
-    state: &State,
-    _surface_object_id: Resolved<WlSurfaceId>,
-    surface: &WlSurface,
-    window_geometry: Option<RectI>,
-) -> Option<RectI> {
-    let surface_bounds = WlSurface::local_surface_tree_bounds_from_ref(state, surface)?;
-    window_geometry
-        .map(|raw| clamp_window_geometry_to_surface_bounds(raw, surface_bounds))
-        .or(Some(surface_bounds))
-}
-
-/// Places the wl_surface root according to geometry ownership. Client-owned geometry is honored
-/// for CSD, while tiled SSD is anchored directly to the compositor-owned content rect.
-pub(crate) fn tiled_root_position_for_geometry(
-    state: &State,
-    surface_object_id: Resolved<WlSurfaceId>,
-    surface: &WlSurface,
-    geometry: TiledSurfaceGeometry,
-) -> (i32, i32) {
-    geometry.root_position_for_surface(state, surface_object_id, surface)
-}
-
-fn clamp_window_geometry_to_surface_bounds(window_geometry: RectI, surface_bounds: RectI) -> RectI {
-    let x1 = window_geometry
-        .x
-        .clamp(surface_bounds.x, surface_bounds.x2());
-    let y1 = window_geometry
-        .y
-        .clamp(surface_bounds.y, surface_bounds.y2());
-    let x2 = window_geometry
-        .x2()
-        .clamp(surface_bounds.x, surface_bounds.x2());
-    let y2 = window_geometry
-        .y2()
-        .clamp(surface_bounds.y, surface_bounds.y2());
-    RectI::from_extents(x1, y1, x2, y2).unwrap_or(surface_bounds)
-}
-
-pub(crate) fn decoration_insets_from_window_geometry(
-    surface: &WlSurface,
-    window_geometry: RectI,
-) -> Option<DecorationInsets> {
-    let logical_size = surface.logical_size()?;
-    decoration_insets_from_window_geometry_and_logical_size(logical_size, window_geometry)
-}
-
-pub(crate) fn decoration_insets_from_window_geometry_and_logical_size(
-    logical_size: SizeI,
-    window_geometry: RectI,
-) -> Option<DecorationInsets> {
-    let w = logical_size.width;
-    let h = logical_size.height;
-    let gx2 = window_geometry.x2();
-    let gy2 = window_geometry.y2();
-    Some(DecorationInsets {
-        // Padding between the surface buffer [0,w)×[0,h) and the window-geometry rectangle:
-        // negative origin (GTK-style subsurface CSD) and positive origin (content inset from
-        // buffer top-left, e.g. title bar above geometry) are both covered.
-        left: window_geometry
-            .x
-            .saturating_neg()
-            .max(0)
-            .saturating_add(window_geometry.x.max(0)),
-        top: window_geometry
-            .y
-            .saturating_neg()
-            .max(0)
-            .saturating_add(window_geometry.y.max(0)),
-        right: gx2
-            .saturating_sub(w)
-            .max(0)
-            .saturating_add(w.saturating_sub(gx2).max(0)),
-        bottom: gy2
-            .saturating_sub(h)
-            .max(0)
-            .saturating_add(h.saturating_sub(gy2).max(0)),
-    })
 }
 
 fn workspace_tiling_bounds(
@@ -1644,12 +1410,11 @@ fn apply_workspace_layout(
         }
         operations.push(LayoutOperation {
             surface_object_id: fullscreen.surface_object_id,
-            geometry: build_tiled_surface_geometry(
-                fullscreen_bounds,
-                DecorationInsets::default(),
-                EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
-                true,
-            ),
+            allocation: LayoutAllocation {
+                frame_rect: fullscreen_bounds,
+                tiled_edges: EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
+                fullscreen: true,
+            },
         });
         layout.dirty = false;
         return operations;
@@ -1700,12 +1465,7 @@ fn apply_node_layout(
                 };
             operations.push(LayoutOperation {
                 surface_object_id: leaf.surface_object_id,
-                geometry: build_tiled_surface_geometry(
-                    rect,
-                    decoration_insets_for_surface(decoration_insets, leaf.surface_object_id),
-                    tiled_edges,
-                    false,
-                ),
+                allocation: LayoutAllocation { frame_rect: rect, tiled_edges, fullscreen: false },
             });
         }
         LayoutNode::Container(container) => {
@@ -2087,24 +1847,6 @@ fn content_rect_for_tiled_frame(frame_rect: RectI, insets: DecorationInsets) -> 
     shrink_rect(frame_rect, insets)
 }
 
-fn build_tiled_surface_geometry(
-    frame_rect: RectI,
-    decoration_insets: DecorationInsets,
-    tiled_edges: u32,
-    fullscreen: bool,
-) -> TiledSurfaceGeometry {
-    TiledSurfaceGeometry {
-        frame_rect,
-        content_rect: if fullscreen {
-            frame_rect
-        } else {
-            content_rect_for_tiled_frame(frame_rect, decoration_insets)
-        },
-        tiled_edges,
-        fullscreen,
-    }
-}
-
 fn outer_gapped_bounds(usable_bounds: RectI, gap_policy: GapPolicy) -> RectI {
     shrink_rect(
         usable_bounds,
@@ -2285,12 +2027,14 @@ mod tests {
             protocol_generated::{
                 WlSubsurfaceId, WlSurfaceId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
             },
+            root_geometry::CommittedRootGeometry,
             runner::Dispatcher,
             state::{ObjectId, State},
             test_support::{
                 insert_wl_subsurface_client1 as insert_subsurface, resolved_wl_surface as root,
                 state_for_tests, test_resolved_wl_surface_client1,
             },
+            transform::SizeI,
             wayland_objects::{
                 wl_surface::Role,
                 xdg_surface::{xdg_toplevel::ToplevelDecorationMode, XdgSurface},
@@ -2346,6 +2090,29 @@ mod tests {
         let toplevel_object_id = toplevel_resolved.object_id();
         state.register_xdg_toplevel_role(xdg_surface_resolved, toplevel_resolved);
         (surface_object_id, xdg_surface_object_id, toplevel_object_id)
+    }
+
+    fn test_committed_geometry(
+        frame_rect: RectI,
+        client_window_rect: RectI,
+        tiled_edges: u32,
+        fullscreen: bool,
+        root_pos: (i32, i32),
+    ) -> CommittedRootGeometry {
+        CommittedRootGeometry {
+            placement_rect: frame_rect,
+            client_window_rect,
+            window_target_rect: frame_rect,
+            binding_rect: frame_rect,
+            visual_outer_rect: frame_rect,
+            compositor_decoration_layout: None,
+            root_pos,
+            tiled_edges,
+            fullscreen,
+            decoration_mode: None,
+            decoration_insets: DecorationInsets::default(),
+            effective_window_geometry: None,
+        }
     }
 
     #[test]
@@ -2405,9 +2172,8 @@ mod tests {
             operations,
             vec![LayoutOperation {
                 surface_object_id: floating,
-                geometry: TiledSurfaceGeometry {
+                allocation: LayoutAllocation {
                     frame_rect: bounds,
-                    content_rect: bounds,
                     tiled_edges: EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
                     fullscreen: true,
                 },
@@ -2516,7 +2282,7 @@ mod tests {
         assert_eq!(operations.len(), 2);
         let total_width = operations
             .iter()
-            .map(|operation| operation.geometry.frame_rect.width)
+            .map(|operation| operation.allocation.frame_rect.width)
             .sum::<i32>();
         assert_eq!(total_width, bounds.width);
     }
@@ -2548,8 +2314,8 @@ mod tests {
 
         assert_eq!(operations.len(), 2);
         assert_eq!(
-            operations[0].geometry.frame_rect.x2() + 10,
-            operations[1].geometry.frame_rect.x
+            operations[0].allocation.frame_rect.x2() + 10,
+            operations[1].allocation.frame_rect.x
         );
     }
 
@@ -2575,7 +2341,7 @@ mod tests {
         let left_edges = layout.nodes[&left_leaf_id].as_leaf().unwrap().tiled_edges;
         let right_edges = layout.nodes[&right_leaf_id].as_leaf().unwrap().tiled_edges;
 
-        assert_eq!(operations[0].geometry.frame_rect.y, 7);
+        assert_eq!(operations[0].allocation.frame_rect.y, 7);
         assert!(left_edges & EDGE_LEFT != 0);
         assert!(left_edges & EDGE_RIGHT != 0);
         assert!(left_edges & EDGE_TOP != 0);
@@ -2599,21 +2365,21 @@ mod tests {
 
     #[test]
     fn tiled_geometry_uses_content_size_for_server_side_configures() {
-        let geometry = TiledSurfaceGeometry {
-            frame_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-            content_rect: RectI { x: 25, y: 25, width: 1230, height: 750 },
-            tiled_edges: EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
-            fullscreen: false,
-        };
+        let geometry = test_committed_geometry(
+            RectI { x: 20, y: 20, width: 1240, height: 760 },
+            RectI { x: 25, y: 25, width: 1230, height: 750 },
+            EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
+            false,
+            (25, 25),
+        );
 
-        assert_eq!(
-            geometry.configure_size_for_decoration_mode(ToplevelDecorationMode::ServerSide),
-            (1230, 750)
+        let configure_geometry = crate::root_geometry::project_configure_geometry(
+            geometry,
+            ToplevelDecorationMode::ServerSide,
+            DecorationInsets { left: 5, top: 5, right: 5, bottom: 5 },
         );
-        assert_eq!(
-            geometry.configure_size_for_decoration_mode(ToplevelDecorationMode::ClientSide),
-            (1240, 760)
-        );
+
+        assert_eq!(configure_geometry.size, (1230, 750));
     }
 
     #[test]
@@ -2626,7 +2392,7 @@ mod tests {
         {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             surface.test_map(ObjectId::from(901usize), 0, 0, 80, 60);
-            let insets = decoration_insets_from_window_geometry(
+            let insets = root_geometry::decoration_insets_from_window_geometry(
                 &surface,
                 RectI { x: -4, y: -12, width: 90, height: 80 },
             )
@@ -2637,7 +2403,7 @@ mod tests {
 
     #[test]
     fn window_geometry_positive_origin_derives_csd_title_bar_insets() {
-        let insets = decoration_insets_from_window_geometry_and_logical_size(
+        let insets = root_geometry::decoration_insets_from_window_geometry_and_logical_size(
             SizeI { width: 800, height: 600 },
             RectI { x: 0, y: 32, width: 800, height: 568 },
         )
@@ -2711,22 +2477,16 @@ mod tests {
             .objects
             .try_ref_object::<WlSurface>(surface_object_id)
             .unwrap();
-        let geometry = TiledSurfaceGeometry {
-            frame_rect: RectI { x: 10, y: 20, width: 90, height: 80 },
-            content_rect: RectI { x: 14, y: 32, width: 80, height: 60 },
-            tiled_edges: EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
-            fullscreen: false,
-        };
-
-        assert_eq!(
-            tiled_root_position_for_geometry(
-                &state,
-                root(&state, surface_object_id),
-                surface,
-                geometry,
-            ),
-            (14, 32)
+        let geometry = test_committed_geometry(
+            RectI { x: 10, y: 20, width: 90, height: 80 },
+            RectI { x: 14, y: 32, width: 80, height: 60 },
+            EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
+            false,
+            (14, 32),
         );
+
+        let _ = surface;
+        assert_eq!(geometry.root_pos, (14, 32));
     }
 
     #[test]
@@ -2759,26 +2519,20 @@ mod tests {
             .objects
             .try_ref_object::<WlSurface>(surface_object_id)
             .unwrap();
-        let geometry = TiledSurfaceGeometry {
-            frame_rect: RectI { x: 10, y: 20, width: 800, height: 568 },
-            content_rect: RectI { x: 10, y: 52, width: 800, height: 536 },
-            tiled_edges: EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
-            fullscreen: false,
-        };
-
-        assert_eq!(
-            tiled_root_position_for_geometry(
-                &state,
-                root(&state, surface_object_id),
-                surface,
-                geometry,
-            ),
-            (10, -12)
+        let geometry = test_committed_geometry(
+            RectI { x: 10, y: 20, width: 800, height: 568 },
+            RectI { x: 10, y: 52, width: 800, height: 536 },
+            EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
+            false,
+            (10, -12),
         );
+
+        let _ = surface;
+        assert_eq!(geometry.root_pos, (10, -12));
     }
 
     #[test]
-    fn tiled_root_position_ignores_window_geometry_for_server_side_decorations() {
+    fn tiled_root_position_uses_window_geometry_origin_for_server_side_decorations() {
         let mut state = state_for_tests();
         let mut client = Client::new_for_tests(ClientId::from_raw(64));
         let mut dispatcher = Dispatcher::default();
@@ -2807,22 +2561,16 @@ mod tests {
             .objects
             .try_ref_object::<WlSurface>(surface_object_id)
             .unwrap();
-        let geometry = TiledSurfaceGeometry {
-            frame_rect: RectI { x: 645, y: 20, width: 615, height: 760 },
-            content_rect: RectI { x: 650, y: 25, width: 605, height: 750 },
-            tiled_edges: EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
-            fullscreen: false,
-        };
-
-        assert_eq!(
-            tiled_root_position_for_geometry(
-                &state,
-                root(&state, surface_object_id),
-                surface,
-                geometry,
-            ),
-            (650, 25)
+        let geometry = test_committed_geometry(
+            RectI { x: 645, y: 20, width: 615, height: 760 },
+            RectI { x: 650, y: 25, width: 605, height: 750 },
+            EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
+            false,
+            (625, 0),
         );
+
+        let _ = surface;
+        assert_eq!(geometry.root_pos, (625, 0));
     }
 
     #[test]
@@ -2845,7 +2593,7 @@ mod tests {
             );
 
         assert_eq!(
-            effective_decoration_insets(&state, root(&state, surface_object_id),),
+            root_geometry::effective_decoration_insets(&state, root(&state, surface_object_id),),
             DecorationInsets { top: 7, right: 1, bottom: 2, left: 3 }
         );
     }
@@ -2914,7 +2662,7 @@ mod tests {
         }
 
         assert_eq!(
-            effective_decoration_insets(&state, root(&state, surface_object_id),),
+            root_geometry::effective_decoration_insets(&state, root(&state, surface_object_id),),
             DecorationInsets { top: 12, right: 6, bottom: 8, left: 4 }
         );
     }
@@ -2983,7 +2731,7 @@ mod tests {
         }
 
         assert_eq!(
-            effective_decoration_insets(&state, root(&state, surface_object_id),),
+            root_geometry::effective_decoration_insets(&state, root(&state, surface_object_id),),
             DecorationInsets { top: 12, right: 6, bottom: 8, left: 4 }
         );
     }
@@ -3022,7 +2770,7 @@ mod tests {
             .test_set_decoration_mode(ToplevelDecorationMode::ServerSide);
 
         assert_eq!(
-            effective_decoration_insets(&state, root(&state, surface_object_id),),
+            root_geometry::effective_decoration_insets(&state, root(&state, surface_object_id),),
             DecorationInsets { top: 2, right: 3, bottom: 4, left: 5 }
         );
     }
@@ -3044,8 +2792,7 @@ mod tests {
             &BTreeMap::default(),
         );
 
-        assert_eq!(operations[0].geometry.frame_rect, fullscreen_bounds);
-        assert_eq!(operations[0].geometry.content_rect, fullscreen_bounds);
+        assert_eq!(operations[0].allocation.frame_rect, fullscreen_bounds);
     }
 
     #[test]
@@ -3069,8 +2816,22 @@ mod tests {
         );
 
         assert_eq!(operations.len(), 2);
-        assert_eq!(operations[0].geometry.content_rect.y, 10);
-        assert_eq!(operations[1].geometry.content_rect.y, 0);
+        assert_eq!(
+            content_rect_for_tiled_frame(
+                operations[0].allocation.frame_rect,
+                DecorationInsets { top: 10, right: 0, bottom: 0, left: 0 }
+            )
+            .y,
+            10
+        );
+        assert_eq!(
+            content_rect_for_tiled_frame(
+                operations[1].allocation.frame_rect,
+                DecorationInsets::default()
+            )
+            .y,
+            0
+        );
     }
 
     #[test]
@@ -3092,9 +2853,9 @@ mod tests {
 
         let total_width = operations
             .iter()
-            .map(|operation| operation.geometry.frame_rect.width)
+            .map(|operation| operation.allocation.frame_rect.width)
             .sum::<i32>();
-        let gap = operations[1].geometry.frame_rect.x - operations[0].geometry.frame_rect.x2();
+        let gap = operations[1].allocation.frame_rect.x - operations[0].allocation.frame_rect.x2();
         assert_eq!(total_width + gap, 8);
     }
 

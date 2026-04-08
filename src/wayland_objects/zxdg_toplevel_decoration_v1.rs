@@ -57,22 +57,25 @@ impl ZxdgToplevelDecorationV1 {
         send_xdg_configure: bool,
     ) {
         let root_surface = self.root_surface(client, state);
-        let Some(mut toplevel) = self.toplevel.try_grab(state) else {
-            return;
-        };
         let effective_mode =
             state.xdg_decoration_mode_for_surface(root_surface, true, self.requested_mode);
+        let Some(toplevel) = self.toplevel.try_ref_mut(state) else {
+            return;
+        };
         toplevel.schedule_decoration_mode(effective_mode);
         let xdg_surface = toplevel.xdg_surface();
         if !send_xdg_configure {
             return;
         }
+        let configure_bounds = {
+            let xdg_surface = xdg_surface.rref(state);
+            XdgToplevel::configure_bounds_for_xdg_surface(client, state, xdg_surface)
+        };
         let mut xdg_surface = xdg_surface.grab(state);
-        let configure_bounds =
-            XdgToplevel::configure_bounds_for_xdg_surface(client, state, &*xdg_surface);
         if !xdg_surface.initial_commit_complete() {
             return;
         }
+        let mut toplevel = self.toplevel.grab(state);
         if !force_xdg_configure
             && toplevel.decoration_mode_for_configure() == toplevel.decoration_mode()
         {
@@ -103,7 +106,7 @@ impl ZxdgToplevelDecorationV1 {
     ) {
         let target_mode =
             state.xdg_decoration_mode_for_surface(self.root_surface(client, state), false, None);
-        let Some(mut toplevel) = self.toplevel.try_grab(state) else {
+        let Some(toplevel) = self.toplevel.try_ref_mut(state) else {
             return;
         };
         let changed = toplevel.schedule_decoration_mode(target_mode);
@@ -111,12 +114,15 @@ impl ZxdgToplevelDecorationV1 {
         if !changed {
             return;
         }
+        let configure_bounds = {
+            let xdg_surface = xdg_surface.rref(state);
+            XdgToplevel::configure_bounds_for_xdg_surface(client, state, xdg_surface)
+        };
         let mut xdg_surface = xdg_surface.grab(state);
-        let configure_bounds =
-            XdgToplevel::configure_bounds_for_xdg_surface(client, state, &*xdg_surface);
         if !xdg_surface.initial_commit_complete() {
             return;
         }
+        let mut toplevel = self.toplevel.grab(state);
         toplevel.schedule_configure(client, state, configure_bounds, &mut xdg_surface, dispatcher);
     }
 }

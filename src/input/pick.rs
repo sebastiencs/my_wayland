@@ -4,7 +4,8 @@ use crate::{
     region::RectI,
     state::State,
     wayland_objects::{
-        wl_surface::{Role, StackEntry},
+        wl_surface::{Role, StackEntry, WlSurface},
+        xdg_surface::xdg_toplevel::ToplevelDecorationMode,
         zwlr_layer_surface_v1::ordered_scene_root_surfaces,
     },
 };
@@ -26,12 +27,13 @@ pub(crate) fn scene_pick_at(state: &State, pointer_pos: (f64, f64)) -> ScenePick
             continue;
         }
         let root_hit = hit_test_subtree(state, root_surface, 0, 0, pointer_pos.0, pointer_pos.1);
-        let window_target_for_root = state
-            .root_surface_interactive_rect(root_surface)
-            .filter(|interactive_rect| rect_contains_point(*interactive_rect, pointer_pos))
-            .and_then(|interactive_rect| {
-                build_window_target(state, root_surface, interactive_rect)
-            });
+        let has_mapped_bounds =
+            WlSurface::local_surface_tree_bounds_from_ref(state, &surface).is_some();
+        let window_target_for_root = has_mapped_bounds
+            .then(|| state.committed_root_geometry(root_surface))
+            .flatten()
+            .filter(|geometry| rect_contains_point(geometry.window_target_rect, pointer_pos))
+            .and_then(|_| build_window_target(state, root_surface));
         if root_hit.is_some() || window_target_for_root.is_some() {
             surface_focus = root_hit;
             window_target = window_target_for_root;
@@ -62,44 +64,46 @@ pub(crate) fn resolve_window_target(
     state: &State,
     root_surface: Resolved<WlSurfaceId>,
 ) -> Option<WindowTarget> {
-    let interactive_rect = state.root_surface_interactive_rect(root_surface)?;
-    build_window_target(state, root_surface, interactive_rect)
+    build_window_target(state, root_surface)
 }
 
-pub(crate) fn build_protocol_window_target(
+pub(crate) fn build_protocol_move_target(
     state: &State,
     root_surface: Resolved<WlSurfaceId>,
     role: WindowRoleSnapshot,
 ) -> Option<WindowTarget> {
     let surface = root_surface.try_ref(state)?;
-    let content_rect = surface
-        .global_logical_bounds()
-        .or_else(|| state.root_surface_content_rect(root_surface))?;
-    let interactive_rect = content_rect;
-    let outer_rect = content_rect;
-    Some(WindowSnapshot {
+    let decoration_mode = protocol_decoration_mode(role)?;
+    let geometry = crate::root_geometry::resolve_protocol_move_target_geometry(
+        state,
         root_surface,
-        role,
-        initial_root_pos: surface.root_position(),
-        initial_size: surface
-            .logical_size()
-            .map(|size| (size.width, size.height))?,
-        content_rect,
-        interactive_rect,
-        outer_rect,
-    })
+        &surface,
+        decoration_mode,
+    )?;
+    Some(WindowSnapshot { root_surface, role, geometry })
+}
+
+pub(crate) fn build_protocol_resize_target(
+    state: &State,
+    root_surface: Resolved<WlSurfaceId>,
+    role: WindowRoleSnapshot,
+) -> Option<WindowTarget> {
+    let surface = root_surface.try_ref(state)?;
+    let geometry = crate::root_geometry::resolve_protocol_resize_target_geometry(
+        state,
+        root_surface,
+        &surface,
+        protocol_decoration_mode(role)?,
+    )?;
+    Some(WindowSnapshot { root_surface, role, geometry })
 }
 
 pub(crate) fn build_window_target(
     state: &State,
     root_surface: Resolved<WlSurfaceId>,
-    interactive_rect: RectI,
 ) -> Option<WindowTarget> {
     let surface = root_surface.try_ref(state)?;
-    let content_rect = state.root_surface_content_rect(root_surface)?;
-    let outer_rect = state
-        .root_surface_outer_rect(root_surface)
-        .unwrap_or(interactive_rect);
+    let geometry = state.committed_root_geometry(root_surface)?;
     let role = match surface.role() {
         Role::XdgSurface => surface
             .xdg_surface()
@@ -113,14 +117,15 @@ pub(crate) fn build_window_target(
     Some(WindowSnapshot {
         root_surface,
         role,
-        initial_root_pos: surface.root_position(),
-        initial_size: surface
-            .logical_size()
-            .map(|size| (size.width, size.height))?,
-        content_rect,
-        interactive_rect,
-        outer_rect,
+        geometry: crate::root_geometry::project_window_target_geometry(geometry),
     })
+}
+
+fn protocol_decoration_mode(role: WindowRoleSnapshot) -> Option<ToplevelDecorationMode> {
+    match role {
+        WindowRoleSnapshot::XdgToplevel { decoration_mode, .. } => Some(decoration_mode),
+        WindowRoleSnapshot::Unsupported => None,
+    }
 }
 
 pub(crate) fn resolve_xdg_window_role_snapshot(
@@ -250,4 +255,145 @@ fn hit_test_subtree(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        clients::{ClientId, Resolved},
+        config::DecorationInsets,
+        protocol_generated::{WlSurfaceId, XdgToplevelId},
+        region::RectI,
+        root_geometry::CommittedRootGeometry,
+        state::ObjectId,
+        test_support::state_for_tests,
+        wayland_objects::{
+            wl_surface::WlSurface,
+            xdg_surface::xdg_toplevel::{InteractiveSizeConstraints, ToplevelDecorationMode},
+        },
+    };
+
+    use super::{build_protocol_move_target, build_protocol_resize_target, WindowRoleSnapshot};
+
+    #[test]
+    fn protocol_window_target_uses_projected_geometry_root_position() {
+        let mut state = state_for_tests();
+        let root_surface_id = WlSurfaceId::from(41u32);
+        let root_object_id = state
+            .insert_object(WlSurface::new(root_surface_id, ClientId::from_raw(7), 6))
+            .1;
+        state.register_root_surface(root_object_id);
+        let root_surface = Resolved::new(ClientId::from_raw(7), root_surface_id, root_object_id);
+        {
+            let surface = state
+                .objects
+                .get_mut(root_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.set_root_position(20, 30);
+        }
+        state.root_geometry_cache.insert(
+            root_surface,
+            std::cell::Cell::new(crate::state::RootGeometryCacheEntry {
+                geometry: Some(CommittedRootGeometry {
+                    placement_rect: RectI { x: 20, y: 30, width: 120, height: 80 },
+                    client_window_rect: RectI { x: 20, y: 30, width: 120, height: 80 },
+                    window_target_rect: RectI { x: 20, y: 30, width: 120, height: 80 },
+                    binding_rect: RectI { x: 20, y: 30, width: 120, height: 80 },
+                    visual_outer_rect: RectI { x: 20, y: 30, width: 120, height: 80 },
+                    compositor_decoration_layout: None,
+                    root_pos: (20, 30),
+                    tiled_edges: 0,
+                    fullscreen: false,
+                    decoration_mode: Some(ToplevelDecorationMode::ClientSide),
+                    decoration_insets: DecorationInsets::default(),
+                    effective_window_geometry: Some(RectI { x: 0, y: 0, width: 120, height: 80 }),
+                }),
+                dirty: false,
+                revision: 0,
+                built_from_revision: 0,
+            }),
+        );
+
+        let target = build_protocol_move_target(
+            &state,
+            root_surface,
+            WindowRoleSnapshot::XdgToplevel {
+                xdg_toplevel: Resolved::new(
+                    ClientId::from_raw(7),
+                    XdgToplevelId::from(42u32),
+                    ObjectId::from(42usize),
+                ),
+                size_constraints: InteractiveSizeConstraints::default(),
+                is_maximized: false,
+                is_fullscreen: false,
+                decoration_mode: ToplevelDecorationMode::ClientSide,
+            },
+        )
+        .expect("protocol target");
+
+        assert_eq!(target.geometry.root_pos, (20, 30));
+        assert_eq!(target.geometry.resize_size, (120, 80));
+    }
+
+    #[test]
+    fn protocol_resize_target_keeps_live_ssd_anchor_but_uses_configure_size() {
+        let mut state = state_for_tests();
+        let root_surface_id = WlSurfaceId::from(51u32);
+        let root_object_id = state
+            .insert_object(WlSurface::new(root_surface_id, ClientId::from_raw(8), 6))
+            .1;
+        state.register_root_surface(root_object_id);
+        let root_surface = Resolved::new(ClientId::from_raw(8), root_surface_id, root_object_id);
+        {
+            let surface = state
+                .objects
+                .get_mut(root_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.set_root_position(25, 25);
+        }
+        state.root_geometry_cache.insert(
+            root_surface,
+            std::cell::Cell::new(crate::state::RootGeometryCacheEntry {
+                geometry: Some(CommittedRootGeometry {
+                    placement_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                    client_window_rect: RectI { x: 25, y: 25, width: 1230, height: 750 },
+                    window_target_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                    binding_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                    visual_outer_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                    compositor_decoration_layout: None,
+                    root_pos: (25, 25),
+                    tiled_edges: 0,
+                    fullscreen: false,
+                    decoration_mode: Some(ToplevelDecorationMode::ServerSide),
+                    decoration_insets: DecorationInsets { top: 5, right: 5, bottom: 5, left: 5 },
+                    effective_window_geometry: Some(RectI { x: 0, y: 0, width: 1230, height: 750 }),
+                }),
+                dirty: false,
+                revision: 0,
+                built_from_revision: 0,
+            }),
+        );
+
+        let target = build_protocol_resize_target(
+            &state,
+            root_surface,
+            WindowRoleSnapshot::XdgToplevel {
+                xdg_toplevel: Resolved::new(
+                    ClientId::from_raw(8),
+                    XdgToplevelId::from(52u32),
+                    ObjectId::from(52usize),
+                ),
+                size_constraints: InteractiveSizeConstraints::default(),
+                is_maximized: false,
+                is_fullscreen: false,
+                decoration_mode: ToplevelDecorationMode::ServerSide,
+            },
+        )
+        .expect("protocol resize target");
+
+        assert_eq!(target.geometry.root_pos, (25, 25));
+        assert_eq!(target.geometry.resize_size, (1230, 750));
+    }
 }

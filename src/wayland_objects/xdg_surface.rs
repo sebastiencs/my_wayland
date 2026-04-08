@@ -316,20 +316,12 @@ impl XdgSurface {
             .or(self.current_window_geometry)
     }
 
-    fn clamp_geometry_to_surface_bounds(raw: RectI, surface_bounds: RectI) -> RectI {
-        let x1 = raw.x.clamp(surface_bounds.x, surface_bounds.x2());
-        let y1 = raw.y.clamp(surface_bounds.y, surface_bounds.y2());
-        let x2 = raw.x2().clamp(surface_bounds.x, surface_bounds.x2());
-        let y2 = raw.y2().clamp(surface_bounds.y, surface_bounds.y2());
-        RectI::from_extents(x1, y1, x2, y2).unwrap_or(surface_bounds)
-    }
-
     pub(crate) fn effective_window_geometry(
         &self,
         surface: Resolved<WlSurfaceId>,
         state: &State,
     ) -> RectI {
-        let Some(surface_bounds) = WlSurface::local_surface_tree_bounds(state, surface) else {
+        let Some(surface_ref) = surface.try_ref(state) else {
             return self.current_window_geometry.unwrap_or(RectI {
                 x: 0,
                 y: 0,
@@ -337,9 +329,12 @@ impl XdgSurface {
                 height: 0,
             });
         };
-        self.current_window_geometry
-            .map(|raw| Self::clamp_geometry_to_surface_bounds(raw, surface_bounds))
-            .unwrap_or(surface_bounds)
+        crate::root_geometry::effective_window_geometry_for_surface(
+            state,
+            &surface_ref,
+            self.current_window_geometry,
+        )
+        .unwrap_or(RectI { x: 0, y: 0, width: 0, height: 0 })
     }
 
     pub(crate) fn apply_commit_role_changes(
@@ -447,7 +442,7 @@ impl XdgSurface {
                                 committed_window_geometry
                                     .and_then(|window_geometry| {
                                         current_logical_size.and_then(|logical_size| {
-                                            crate::tiling::decoration_insets_from_window_geometry_and_logical_size(
+                                            crate::root_geometry::decoration_insets_from_window_geometry_and_logical_size(
                                                 logical_size,
                                                 window_geometry,
                                             )
@@ -458,14 +453,17 @@ impl XdgSurface {
                             (toplevel.minimum_size(), insets)
                         })
                         .unwrap_or((None, fallback_decoration_insets));
-                    let initial_tiled_geometry =
-                        crate::tiling::initial_tiled_surface_geometry_for_surface(
-                            state,
-                            surface_id,
-                            surface_decoration_insets,
-                            target_min_size,
-                            configure_bounds,
-                        );
+                    let initial_tiled_geometry = crate::tiling::initial_root_geometry_for_surface(
+                        state,
+                        surface_id,
+                        surface_decoration_insets,
+                        id.try_ref(state)
+                            .map(|toplevel| toplevel.decoration_mode_for_configure())
+                            .unwrap_or(xdg_toplevel::ToplevelDecorationMode::ClientSide),
+                        committed_window_geometry,
+                        target_min_size,
+                        configure_bounds,
+                    );
                     let mut xdg_toplevel = id.grab(state);
                     xdg_toplevel.send_initial_configure(
                         client,
@@ -898,10 +896,7 @@ pub mod xdg_toplevel {
             state: &State,
             xdg_surface: &XdgSurface,
         ) -> Option<(i32, i32)> {
-            let wl_surface = xdg_surface.wl_surface();
-            wl_surface
-                .try_ref(state)
-                .and_then(|surface| surface.configure_bounds_for_object(state, wl_surface))
+            state.configure_bounds_for_surface(xdg_surface.wl_surface(), None)
         }
 
         fn send_configure_bounds(
@@ -965,16 +960,22 @@ pub mod xdg_toplevel {
             client: &Client,
             state: &State,
             configure_bounds: Option<(i32, i32)>,
-            initial_tiled_geometry: Option<crate::tiling::TiledSurfaceGeometry>,
+            initial_tiled_geometry: Option<crate::root_geometry::CommittedRootGeometry>,
             xdg_surface: &mut XdgSurface,
             dispatcher: &mut ClientDispatcher,
         ) {
             if let Some(geometry) = initial_tiled_geometry {
+                let configure_geometry = crate::root_geometry::project_configure_geometry(
+                    geometry,
+                    self.decoration_mode_for_configure(),
+                    state.configured_decoration_insets(),
+                );
                 self.send_tiled_layout_configure(
                     client,
                     state,
                     xdg_surface,
                     geometry,
+                    configure_geometry,
                     false,
                     dispatcher,
                 );
@@ -988,16 +989,16 @@ pub mod xdg_toplevel {
             client: &Client,
             state: &State,
             xdg_surface: &mut XdgSurface,
-            geometry: crate::tiling::TiledSurfaceGeometry,
+            geometry: crate::root_geometry::CommittedRootGeometry,
+            configure_geometry: crate::root_geometry::ConfigureGeometry,
             resizing: bool,
             dispatcher: &mut ClientDispatcher,
         ) {
-            let (width, height) =
-                geometry.configure_size_for_decoration_mode(self.decoration_mode_for_configure());
+            let (width, height) = configure_geometry.size;
             self.send_layout_configure(
                 client,
                 state,
-                Some((width, height)),
+                Some(configure_geometry.size),
                 xdg_surface,
                 width,
                 height,
@@ -1499,6 +1500,9 @@ pub mod xdg_toplevel {
                         return Ok(());
                     };
                     let root_surface = state.root_surface_for_surface(surface).unwrap_or(surface);
+                    let Some(xdg_toplevel) = client.resolve(self.id, state) else {
+                        return Ok(());
+                    };
                     if !crate::input::request_toplevel_move(
                         state,
                         dispatcher,
@@ -1506,6 +1510,8 @@ pub mod xdg_toplevel {
                         surface,
                         serial,
                         root_surface,
+                        xdg_toplevel,
+                        self.decoration_mode_for_configure(),
                         self.is_maximized(),
                         state.root_surface_is_fullscreen(root_surface),
                     ) {
@@ -1555,6 +1561,7 @@ pub mod xdg_toplevel {
                         serial,
                         root_surface,
                         xdg_toplevel,
+                        configure_decoration_mode: self.decoration_mode_for_configure(),
                         size_constraints: self.interactive_size_constraints(),
                         is_maximized: self.is_maximized(),
                         is_fullscreen: state.root_surface_is_fullscreen(root_surface),
@@ -1652,6 +1659,7 @@ pub mod xdg_toplevel {
             serial: u32,
             root_surface: Resolved<WlSurfaceId>,
             xdg_toplevel: Resolved<XdgToplevelId>,
+            configure_decoration_mode: ToplevelDecorationMode,
             size_constraints: InteractiveSizeConstraints,
             is_maximized: bool,
             is_fullscreen: bool,
@@ -1673,6 +1681,7 @@ pub mod xdg_toplevel {
                     serial,
                     root_surface,
                     xdg_toplevel,
+                    configure_decoration_mode,
                     size_constraints,
                     is_maximized,
                     is_fullscreen,
@@ -1686,6 +1695,7 @@ pub mod xdg_toplevel {
                         serial,
                         root_surface,
                         xdg_toplevel,
+                        configure_decoration_mode,
                         size_constraints,
                         is_maximized,
                         is_fullscreen,
@@ -1823,11 +1833,24 @@ pub mod xdg_toplevel {
                 ),
                 7,
             );
-            let geometry = crate::tiling::TiledSurfaceGeometry {
-                frame_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                content_rect: RectI { x: 25, y: 25, width: 1230, height: 750 },
+            let geometry = crate::root_geometry::CommittedRootGeometry {
+                placement_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                client_window_rect: RectI { x: 25, y: 25, width: 1230, height: 750 },
+                window_target_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                binding_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                visual_outer_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                compositor_decoration_layout: None,
+                root_pos: (25, 25),
                 tiled_edges: crate::tiling::EDGE_TOP | crate::tiling::EDGE_LEFT,
                 fullscreen: false,
+                decoration_mode: Some(ToplevelDecorationMode::ServerSide),
+                decoration_insets: crate::config::DecorationInsets {
+                    top: 5,
+                    right: 5,
+                    bottom: 5,
+                    left: 5,
+                },
+                effective_window_geometry: Some(RectI { x: 0, y: 0, width: 1230, height: 750 }),
             };
 
             toplevel.schedule_decoration_mode(ToplevelDecorationMode::ServerSide);
@@ -1836,6 +1859,11 @@ pub mod xdg_toplevel {
                 &state,
                 &mut xdg_surface,
                 geometry,
+                crate::root_geometry::project_configure_geometry(
+                    geometry,
+                    ToplevelDecorationMode::ServerSide,
+                    state.configured_decoration_insets(),
+                ),
                 false,
                 &mut client_dispatcher,
             );
@@ -1849,6 +1877,82 @@ pub mod xdg_toplevel {
             };
             assert_eq!((configure.width, configure.height), (1230, 750));
             assert_eq!(configure.decoration_mode, ToplevelDecorationMode::ServerSide);
+        }
+
+        #[test]
+        fn tiled_layout_configure_uses_frame_size_when_pending_mode_switches_to_client_side() {
+            let state = crate::test_support::state_for_tests();
+            let mut client =
+                crate::clients::Client::new_for_tests(crate::clients::ClientId::from_raw(1));
+            let mut dispatcher = crate::runner::Dispatcher::default();
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut xdg_surface = XdgSurface::new(
+                crate::protocol_generated::XdgSurfaceId::from(9),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    crate::protocol_generated::XdgWmBaseId::from(10),
+                    ObjectId::from(10usize),
+                ),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    crate::protocol_generated::WlSurfaceId::from(11),
+                    ObjectId::from(11usize),
+                ),
+                7,
+            );
+            let mut toplevel = XdgToplevel::new(
+                XdgToplevelId::from(12),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    crate::protocol_generated::XdgSurfaceId::from(9),
+                    ObjectId::from(9usize),
+                ),
+                7,
+            );
+            let geometry = crate::root_geometry::CommittedRootGeometry {
+                placement_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                client_window_rect: RectI { x: 25, y: 25, width: 1230, height: 750 },
+                window_target_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                binding_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                visual_outer_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
+                compositor_decoration_layout: None,
+                root_pos: (25, 25),
+                tiled_edges: crate::tiling::EDGE_TOP | crate::tiling::EDGE_LEFT,
+                fullscreen: false,
+                decoration_mode: Some(ToplevelDecorationMode::ServerSide),
+                decoration_insets: crate::config::DecorationInsets {
+                    top: 5,
+                    right: 5,
+                    bottom: 5,
+                    left: 5,
+                },
+                effective_window_geometry: Some(RectI { x: 0, y: 0, width: 1230, height: 750 }),
+            };
+
+            toplevel.schedule_decoration_mode(ToplevelDecorationMode::ClientSide);
+            toplevel.send_tiled_layout_configure(
+                &client,
+                &state,
+                &mut xdg_surface,
+                geometry,
+                crate::root_geometry::project_configure_geometry(
+                    geometry,
+                    ToplevelDecorationMode::ClientSide,
+                    state.configured_decoration_insets(),
+                ),
+                false,
+                &mut client_dispatcher,
+            );
+
+            let pending = xdg_surface
+                .pending_configures
+                .back()
+                .expect("pending configure");
+            let super::super::ConfigureState::Toplevel(configure) = &pending.state else {
+                panic!("expected toplevel configure");
+            };
+            assert_eq!((configure.width, configure.height), (1240, 760));
+            assert_eq!(configure.decoration_mode, ToplevelDecorationMode::ClientSide);
         }
 
         #[test]
