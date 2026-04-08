@@ -1743,7 +1743,7 @@ impl WlSurface {
     }
 
     fn on_commit(
-        &mut self,
+        mut self: GrabbedObject<Self>,
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
@@ -1755,30 +1755,35 @@ impl WlSurface {
             && self.role == Role::XdgSurface
             && !self.has_cursor_role()
             && !self.has_dnd_icon_role())
-        .then(|| crate::root_geometry::effective_decoration_insets_for_surface(state, self));
+        .then(|| crate::root_geometry::effective_decoration_insets_for_surface(state, &*self));
         if let Some(shell_surface) = self.shell_surface {
             self.send_preferred_fractional_scale_for_object(state, resolved_surface, dispatcher);
             self.send_preferred_buffer_state_for_object(state, resolved_surface, dispatcher);
             match shell_surface {
                 ShellSurfaceObject::XdgSurface(xdg_surface_id) => {
                     let layout_snapshot =
-                        LayerLayoutObjectSnapshot::for_surface(resolved_surface, self);
+                        LayerLayoutObjectSnapshot::for_surface(resolved_surface, &*self);
                     let configure_bounds = state.configure_bounds_for_surface_with_ref(
                         resolved_surface,
-                        self,
+                        &self,
                         Some(layout_snapshot),
                     );
+                    let logical_size = self.logical_size();
+                    let has_pending_buffer_attach = self.has_pending_buffer_attach();
+                    let pending_buffer = self.pending.buffer;
+                    drop(self);
                     let mut xdg_surface = xdg_surface_id.grab(state);
                     let Some(role_changes) = xdg_surface.on_commit(
                         client,
                         state,
                         dispatcher,
-                        self.logical_size(),
-                        self.has_pending_buffer_attach(),
-                        matches!(self.pending.buffer, Some(None)),
+                        logical_size,
+                        has_pending_buffer_attach,
+                        matches!(pending_buffer, Some(None)),
                         configure_bounds,
                     ) else {
-                        self.clear_failed_surface_commit();
+                        let mut this = resolved_surface.ref_mut(state);
+                        this.clear_failed_surface_commit();
                         return;
                     };
                     drop(xdg_surface);
@@ -1790,7 +1795,7 @@ impl WlSurface {
                         client,
                         state,
                         dispatcher,
-                        self,
+                        &self,
                         self.has_pending_buffer_attach(),
                         matches!(self.pending.buffer, Some(None)),
                     ) {
@@ -1800,35 +1805,36 @@ impl WlSurface {
                 }
             }
         }
+        let mut this = resolved_surface.grab(state);
 
-        if !self.validate_pending_mapping(client, state, dispatcher) {
-            self.clear_failed_surface_commit();
+        if !this.validate_pending_mapping(client, state, dispatcher) {
+            this.clear_failed_surface_commit();
             return;
         }
 
-        if !self.validate_pending_sync(client, state, dispatcher) {
-            self.clear_failed_surface_commit();
+        if !this.validate_pending_sync(client, state, dispatcher) {
+            this.clear_failed_surface_commit();
             return;
         }
 
-        let payload = self.build_commit_payload();
-        let frame_callbacks = std::mem::take(&mut self.pending_frame_callbacks);
-        let presentation_feedbacks = std::mem::take(&mut self.pending_presentation_feedbacks);
+        let payload = this.build_commit_payload();
+        let frame_callbacks = std::mem::take(&mut this.pending_frame_callbacks);
+        let presentation_feedbacks = std::mem::take(&mut this.pending_presentation_feedbacks);
 
-        if self.behaves_synchronized(state) {
+        if this.behaves_synchronized(state) {
             let discarded =
-                self.cache_commit_payload(payload, frame_callbacks, presentation_feedbacks);
-            self.discard_presentation_feedbacks(client, state, dispatcher, discarded);
+                this.cache_commit_payload(payload, frame_callbacks, presentation_feedbacks);
+            this.discard_presentation_feedbacks(client, state, dispatcher, discarded);
             return;
         }
 
-        let has_cached_commit = self.cached_commit.is_some();
+        let has_cached_commit = this.cached_commit.is_some();
         let (changed, needs_frame) = if has_cached_commit {
             let discarded =
-                self.cache_commit_payload(payload, frame_callbacks, presentation_feedbacks);
-            self.discard_presentation_feedbacks(client, state, dispatcher, discarded);
-            let cached_commit = self.cached_commit.take().unwrap();
-            self.apply_surface_update(
+                this.cache_commit_payload(payload, frame_callbacks, presentation_feedbacks);
+            this.discard_presentation_feedbacks(client, state, dispatcher, discarded);
+            let cached_commit = this.cached_commit.take().unwrap();
+            this.apply_surface_update(
                 client,
                 state,
                 dispatcher,
@@ -1838,7 +1844,7 @@ impl WlSurface {
                 false,
             )
         } else {
-            self.apply_surface_update(
+            this.apply_surface_update(
                 client,
                 state,
                 dispatcher,
@@ -1858,7 +1864,7 @@ impl WlSurface {
             log::debug!(
                 "wl_surface commit scheduling RefreshSurfaceOutputs client={:?} surface={:?} changed={}",
                 client.client_id(),
-                self.id,
+                this.id,
                 changed
             );
             dispatcher.dispatch_to(
@@ -1868,7 +1874,7 @@ impl WlSurface {
         }
         if let Some(old_effective_insets) = old_effective_insets {
             let new_effective_insets =
-                crate::root_geometry::effective_decoration_insets_for_surface(state, self);
+                crate::root_geometry::effective_decoration_insets_for_surface(state, &this);
             if old_effective_insets != new_effective_insets
                 && (state.is_tiled_root_surface(resolved_surface)
                     || state.root_surface_is_fullscreen(resolved_surface))
@@ -1879,12 +1885,12 @@ impl WlSurface {
                 }
             }
         }
-        if !self.has_cursor_role() && !self.has_dnd_icon_role() {
+        if !this.has_cursor_role() && !this.has_dnd_icon_role() {
             state.mark_root_geometry_dirty_for_surface(resolved_surface);
         }
-        let is_mapped = self.global_logical_bounds().is_some();
+        let is_mapped = this.global_logical_bounds().is_some();
         if was_mapped != is_mapped {
-            if let Some(ShellSurfaceObject::XdgSurface(xdg_surface_id)) = self.shell_surface {
+            if let Some(ShellSurfaceObject::XdgSurface(xdg_surface_id)) = this.shell_surface {
                 let xdg_surface_object_id = xdg_surface_id.object_id();
                 if state
                     .objects
@@ -1903,16 +1909,16 @@ impl WlSurface {
         }
 
         if changed || needs_frame {
-            if let Some(bounds) = self.global_logical_bounds() {
-                schedule_outputs(state, self.output_membership_ids(), dispatcher);
+            if let Some(bounds) = this.global_logical_bounds() {
+                schedule_outputs(state, this.output_membership_ids(), dispatcher);
                 schedule_outputs_for_rect(state, bounds, dispatcher);
             } else {
-                schedule_outputs(state, self.output_membership_ids(), dispatcher);
+                schedule_outputs(state, this.output_membership_ids(), dispatcher);
                 schedule_active_output(state, dispatcher);
             }
         }
 
-        if matches!(self.shell_surface, Some(ShellSurfaceObject::LayerSurface(_))) {
+        if matches!(this.shell_surface, Some(ShellSurfaceObject::LayerSurface(_))) {
             dispatcher.dispatch(ClientManagerAction::LayerShellLayoutChanged);
         }
     }
