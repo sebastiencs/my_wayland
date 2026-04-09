@@ -1756,7 +1756,7 @@ impl WlSurface {
             && !self.has_cursor_role()
             && !self.has_dnd_icon_role())
         .then(|| crate::root_geometry::effective_decoration_insets_for_surface(state, &*self));
-        if let Some(shell_surface) = self.shell_surface {
+        let mut this = if let Some(shell_surface) = self.shell_surface {
             self.send_preferred_fractional_scale_for_object(state, resolved_surface, dispatcher);
             self.send_preferred_buffer_state_for_object(state, resolved_surface, dispatcher);
             match shell_surface {
@@ -1788,6 +1788,7 @@ impl WlSurface {
                     };
                     drop(xdg_surface);
                     pending_xdg_role_changes = Some((xdg_surface_id, role_changes));
+                    resolved_surface.grab(state)
                 }
                 ShellSurfaceObject::LayerSurface(layer_surface_id) => {
                     let mut layer_surface = layer_surface_id.grab(state);
@@ -1802,10 +1803,12 @@ impl WlSurface {
                         self.clear_failed_surface_commit();
                         return;
                     }
+                    self
                 }
             }
-        }
-        let mut this = resolved_surface.grab(state);
+        } else {
+            self
+        };
 
         if !this.validate_pending_mapping(client, state, dispatcher) {
             this.clear_failed_surface_commit();
