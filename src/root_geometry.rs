@@ -321,11 +321,9 @@ pub fn build_committed_root_geometry(
     layout_allocation: Option<LayoutAllocation>,
     overrides: GeometryBuildOverrides,
 ) -> Option<CommittedRootGeometry> {
-    let xdg_surface = surface.xdg_surface().and_then(|xdg_surface| {
-        state
-            .objects
-            .try_ref_object::<XdgSurface>(xdg_surface.object_id())
-    });
+    let xdg_surface = surface
+        .xdg_surface()
+        .and_then(|xdg_surface| xdg_surface.try_ref(state));
     let toplevel = surface
         .xdg_surface()
         .and_then(|xdg_surface| state.xdg_toplevel(xdg_surface));

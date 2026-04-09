@@ -535,6 +535,28 @@ impl Client {
         state.objects[obj_id].downcast_ref().unwrap()
     }
 
+    pub fn with_ungrabbed<O: ObjectWithId, R>(
+        &self,
+        object: GrabbedObject<O>,
+        state: &mut State,
+        fun: impl FnOnce(&mut State) -> R,
+    ) -> (GrabbedObject<O>, R) {
+        let object_id = self.resolve_this(&object, state);
+        drop(object);
+        let result = fun(state);
+        let object = object_id.grab(state);
+        (object, result)
+    }
+
+    pub fn resolve_this<O: ObjectWithId>(
+        &self,
+        this: &GrabbedObject<O>,
+        state: &State,
+    ) -> Resolved<O::Id> {
+        self.resolve::<O::Id>(O::Id::from(this.id()), state)
+            .unwrap()
+    }
+
     /// Resolve a client-visible Wayland id to a live compositor object of the
     /// expected interface type.
     pub fn resolve<K>(&self, id: K, state: &State) -> Option<Resolved<K>>

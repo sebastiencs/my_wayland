@@ -1583,28 +1583,20 @@ pub mod xdg_toplevel {
                 SetMaximized => {
                     self.requested_maximized = true;
                     let mut xdg_surface = self.xdg_surface.grab(state);
-                    let configure_bounds =
-                        Self::configure_bounds_for_xdg_surface(client, state, &xdg_surface);
-                    self.schedule_configure(
-                        client,
-                        state,
-                        configure_bounds,
-                        &mut xdg_surface,
-                        dispatcher,
-                    );
+                    let (mut this, bounds) = client.with_ungrabbed(self, state, |state| {
+                        Self::configure_bounds_for_xdg_surface(client, state, &xdg_surface)
+                    });
+                    this.schedule_configure(client, state, bounds, &mut xdg_surface, dispatcher);
                 }
                 UnsetMaximized => {
                     self.requested_maximized = false;
-                    let mut xdg_surface = self.xdg_surface.grab(state);
-                    let configure_bounds =
-                        Self::configure_bounds_for_xdg_surface(client, state, &xdg_surface);
-                    self.schedule_configure(
-                        client,
-                        state,
-                        configure_bounds,
-                        &mut xdg_surface,
-                        dispatcher,
-                    );
+                    let xdg_surface = self.xdg_surface;
+                    let (mut this, bounds) = client.with_ungrabbed(self, state, |state| {
+                        let xdg_surface = xdg_surface.rref(state);
+                        Self::configure_bounds_for_xdg_surface(client, state, &xdg_surface)
+                    });
+                    let mut xdg_surface = this.xdg_surface.grab(state);
+                    this.schedule_configure(client, state, bounds, &mut xdg_surface, dispatcher);
                 }
                 SetFullscreen { output: _ } => {
                     self.requested_fullscreen = true;
