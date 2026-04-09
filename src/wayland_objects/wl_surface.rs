@@ -1768,9 +1768,11 @@ impl WlSurface {
                         &self,
                         Some(layout_snapshot),
                     );
-                    let logical_size = self.logical_size();
-                    let has_pending_buffer_attach = self.has_pending_buffer_attach();
-                    let pending_buffer = self.pending.buffer;
+                    let (logical_size, has_pending_buffer_attach, is_null_buffer_commit) = (
+                        self.logical_size(),
+                        self.has_pending_buffer_attach(),
+                        matches!(self.pending.buffer, Some(None)),
+                    );
                     drop(self);
                     let mut xdg_surface = xdg_surface_id.grab(state);
                     let Some(role_changes) = xdg_surface.on_commit(
@@ -1779,14 +1781,13 @@ impl WlSurface {
                         dispatcher,
                         logical_size,
                         has_pending_buffer_attach,
-                        matches!(pending_buffer, Some(None)),
+                        is_null_buffer_commit,
                         configure_bounds,
                     ) else {
                         let mut this = resolved_surface.ref_mut(state);
                         this.clear_failed_surface_commit();
                         return;
                     };
-                    drop(xdg_surface);
                     pending_xdg_role_changes = Some((xdg_surface_id, role_changes));
                     resolved_surface.grab(state)
                 }
