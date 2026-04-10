@@ -377,14 +377,22 @@ pub fn build_committed_root_geometry(
             Some(ToplevelDecorationMode::ClientSide) => placement_rect,
             _ => fallback_client_window_rect,
         };
-        let computed_root_pos = effective_window_geometry
-            .map(|window_geometry| {
-                (
-                    anchor_rect.x.saturating_sub(window_geometry.x),
-                    anchor_rect.y.saturating_sub(window_geometry.y),
-                )
-            })
-            .unwrap_or((fallback_client_window_rect.x, fallback_client_window_rect.y));
+        // With server-side decorations the compositor owns the frame; `client_window_rect` is the
+        // content region. Client `set_window_geometry` may still carry CSD-era insets (e.g. GTK);
+        // subtracting them here shifts the root surface and misaligns pixels vs our SSD border.
+        let computed_root_pos = match decoration_mode {
+            Some(ToplevelDecorationMode::ServerSide) => {
+                (fallback_client_window_rect.x, fallback_client_window_rect.y)
+            }
+            _ => effective_window_geometry
+                .map(|window_geometry| {
+                    (
+                        anchor_rect.x.saturating_sub(window_geometry.x),
+                        anchor_rect.y.saturating_sub(window_geometry.y),
+                    )
+                })
+                .unwrap_or((fallback_client_window_rect.x, fallback_client_window_rect.y)),
+        };
         let client_window_rect = anchor_rect;
         let compositor_decoration_layout = compositor_decoration_layout(
             placement_rect,
@@ -465,6 +473,38 @@ pub fn build_committed_root_geometry(
         fullscreen,
     );
 
+    if decoration_mode == Some(ToplevelDecorationMode::ServerSide)
+        && !fullscreen
+        && (decoration_insets.top > 0
+            || decoration_insets.right > 0
+            || decoration_insets.bottom > 0
+            || decoration_insets.left > 0)
+    {
+        log::debug!(
+            target: "state_management::root_geometry",
+            "ssd_insets surface={:?} layout_allocated={} placement={:?} client_window={:?} \
+             visual_outer={:?} window_target={:?} binding={:?} root_pos={:?} \
+             surface_root_pos={:?} local_surface_bounds={:?} insets=({},{},{},{}) \
+             effective_wg={:?} compositor_decoration={:?}",
+            surface_object_id,
+            layout_allocation.is_some(),
+            placement_rect,
+            client_window_rect,
+            visual_outer_rect,
+            window_target_rect,
+            binding_rect,
+            computed_root_pos,
+            surface.root_position(),
+            local_surface_bounds,
+            decoration_insets.top,
+            decoration_insets.right,
+            decoration_insets.bottom,
+            decoration_insets.left,
+            effective_window_geometry,
+            compositor_decoration_layout,
+        );
+    }
+
     Some(CommittedRootGeometry {
         placement_rect,
         client_window_rect,
@@ -502,14 +542,19 @@ pub fn predictive_tiled_geometry(
     } else {
         fallback_client_window_rect
     };
-    let root_pos = explicit_window_geometry
-        .map(|window_geometry| {
-            (
-                anchor_rect.x.saturating_sub(window_geometry.x),
-                anchor_rect.y.saturating_sub(window_geometry.y),
-            )
-        })
-        .unwrap_or((fallback_client_window_rect.x, fallback_client_window_rect.y));
+    let root_pos = match decoration_mode {
+        ToplevelDecorationMode::ServerSide => {
+            (fallback_client_window_rect.x, fallback_client_window_rect.y)
+        }
+        _ => explicit_window_geometry
+            .map(|window_geometry| {
+                (
+                    anchor_rect.x.saturating_sub(window_geometry.x),
+                    anchor_rect.y.saturating_sub(window_geometry.y),
+                )
+            })
+            .unwrap_or((fallback_client_window_rect.x, fallback_client_window_rect.y)),
+    };
     let client_window_rect = anchor_rect;
     let compositor_decoration_layout = compositor_decoration_layout(
         placement_rect,
