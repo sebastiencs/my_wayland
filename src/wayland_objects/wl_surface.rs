@@ -283,6 +283,7 @@ pub struct SurfaceRenderState {
     pub opaque_region: DamageRegion,
     pub sync: SurfaceSyncState,
     pub presentation_feedbacks: Vec<SurfacePresentationFeedback>,
+    pub inherit_root_clip: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1919,8 +1920,8 @@ impl WlSurface {
         }
 
         if changed || needs_frame {
-            if let Some(bounds) =
-                bounds_after_first_map_relayout.or_else(|| this.global_logical_bounds())
+            if let Some(bounds) = bounds_after_first_map_relayout
+                .or_else(|| state.surface_scene_bounds_with_ref(resolved_surface, &this))
             {
                 schedule_outputs(state, this.output_membership_ids(), dispatcher);
                 schedule_outputs_for_rect(state, bounds, dispatcher);
@@ -2207,6 +2208,7 @@ impl WlSurface {
                 .translated(x, y),
             sync: self.on_screen.sync.clone(),
             presentation_feedbacks: Vec::new(),
+            inherit_root_clip: true,
         })
     }
 
@@ -2441,7 +2443,8 @@ impl WlSurface {
         }
         let changed = self.apply_cached_commit(client, state, dispatcher, false);
         if changed {
-            if let Some(bounds) = self.global_logical_bounds() {
+            let surface = client.resolve(self.id, state).unwrap();
+            if let Some(bounds) = state.surface_scene_bounds_with_ref(surface, self) {
                 schedule_outputs(state, self.output_membership_ids(), dispatcher);
                 schedule_outputs_for_rect(state, bounds, dispatcher);
             } else {
@@ -2499,6 +2502,7 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         let object = client.resolve(self.id, state).unwrap();
+        let scene_bounds = state.surface_scene_bounds_with_ref(object, self);
         state.seat.clear_cursor_surface(object);
         self.discard_all_presentation_feedbacks(client, state, dispatcher);
         for child_surface in self.child_surface_ids() {
@@ -2513,7 +2517,7 @@ impl WlSurface {
         state.unregister_root_surface(object);
         use crate::wayland_objects::wl_display::WlDisplay;
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
-        if let Some(bounds) = self.global_logical_bounds() {
+        if let Some(bounds) = scene_bounds {
             schedule_outputs(state, self.output_membership_ids(), dispatcher);
             schedule_outputs_for_rect(state, bounds, dispatcher);
         } else {

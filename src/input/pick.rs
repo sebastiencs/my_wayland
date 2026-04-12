@@ -224,6 +224,16 @@ fn hit_test_subtree(
     let surface = surface_id.try_ref(state)?;
     let surface_state = surface.render_state_at(base_x, base_y)?;
     let stack = surface.current_stack().to_vec();
+    let popup_children = state.popup_child_surfaces(surface_id);
+
+    for popup_surface in popup_children.into_iter().rev() {
+        let Some((popup_x, popup_y)) = state.surface_scene_origin(popup_surface) else {
+            continue;
+        };
+        if let Some(hit) = hit_test_subtree(state, popup_surface, popup_x, popup_y, x, y) {
+            return Some(hit);
+        }
+    }
 
     for entry in stack.iter().rev() {
         match *entry {
@@ -265,18 +275,51 @@ mod tests {
     use crate::{
         clients::{ClientId, Resolved},
         config::DecorationInsets,
-        protocol_generated::{WlSurfaceId, XdgToplevelId},
+        protocol_generated::{WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId},
         region::RectI,
         root_geometry::CommittedRootGeometry,
         state::ObjectId,
         test_support::state_for_tests,
         wayland_objects::{
             wl_surface::WlSurface,
-            xdg_surface::xdg_toplevel::{InteractiveSizeConstraints, ToplevelDecorationMode},
+            xdg_popup::XdgPopup,
+            xdg_positioner::PositionerState,
+            xdg_surface::{
+                xdg_toplevel::{InteractiveSizeConstraints, ToplevelDecorationMode},
+                XdgSurface,
+            },
         },
     };
 
-    use super::{build_protocol_move_target, build_protocol_resize_target, WindowRoleSnapshot};
+    use super::{
+        build_protocol_move_target, build_protocol_resize_target, scene_pick_at, WindowRoleSnapshot,
+    };
+
+    fn insert_test_xdg_surface(
+        state: &mut crate::state::State,
+        client_id: ClientId,
+        wl_surface_id: WlSurfaceId,
+        xdg_surface_id: XdgSurfaceId,
+    ) -> (Resolved<WlSurfaceId>, Resolved<XdgSurfaceId>) {
+        let (_, surface_object_id) =
+            state.insert_object(WlSurface::new(wl_surface_id, client_id, 6));
+        state.register_root_surface(surface_object_id);
+        let wl_surface = Resolved::new(client_id, wl_surface_id, surface_object_id);
+        let (_, xdg_surface_object_id) = state.insert_object(XdgSurface::new(
+            xdg_surface_id,
+            Resolved::new(client_id, XdgWmBaseId::from(1), ObjectId::from(1usize)),
+            wl_surface,
+            7,
+        ));
+        let xdg_surface = Resolved::new(client_id, xdg_surface_id, xdg_surface_object_id);
+        state
+            .objects
+            .get_mut(surface_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_xdg_surface_impl(xdg_surface);
+        (wl_surface, xdg_surface)
+    }
 
     #[test]
     fn protocol_window_target_uses_projected_geometry_root_position() {
@@ -390,5 +433,98 @@ mod tests {
 
         assert_eq!(target.geometry.root_pos, (25, 25));
         assert_eq!(target.geometry.resize_size, (1230, 750));
+    }
+
+    #[test]
+    fn scene_pick_prefers_popup_child_and_tracks_parent_motion() {
+        let mut state = state_for_tests();
+        let client_id = ClientId::from_raw(7);
+        let (parent_wl, parent_xdg) = insert_test_xdg_surface(
+            &mut state,
+            client_id,
+            WlSurfaceId::from(61),
+            XdgSurfaceId::from(62),
+        );
+        let (popup_wl, popup_xdg) = insert_test_xdg_surface(
+            &mut state,
+            client_id,
+            WlSurfaceId::from(63),
+            XdgSurfaceId::from(64),
+        );
+        state
+            .objects
+            .get_mut(parent_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(401usize), 640, 0, 640, 800);
+        state
+            .objects
+            .get_mut(parent_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_root_position(640, 0);
+        state
+            .objects
+            .get_mut(popup_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(402usize), 0, 0, 299, 457);
+
+        let (_, popup_object_id) = state.insert_object(XdgPopup::new(
+            XdgPopupId::from(65),
+            popup_xdg,
+            Some(parent_xdg),
+            PositionerState::default(),
+            7,
+        ));
+        let popup = Resolved::new(client_id, XdgPopupId::from(65), popup_object_id);
+        state
+            .objects
+            .get_mut(popup_object_id)
+            .downcast_mut::<XdgPopup>()
+            .unwrap()
+            .apply_acked_configure(RectI { x: 387, y: 40, width: 253, height: 411 });
+        state
+            .objects
+            .get_mut(popup_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_current_window_geometry(Some(RectI {
+                x: 23,
+                y: 21,
+                width: 253,
+                height: 411,
+            }));
+        state
+            .objects
+            .get_mut(popup_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_popup_role(popup);
+        state
+            .objects
+            .get_mut(parent_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .add_popup_child(popup);
+
+        let initial_pick = scene_pick_at(&state, (1010.0, 25.0));
+        assert_eq!(initial_pick.surface_focus.map(|focus| focus.target.surface), Some(popup_wl));
+
+        state
+            .objects
+            .get_mut(parent_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_root_position(700, 10);
+
+        let moved_pick = scene_pick_at(&state, (1070.0, 35.0));
+        assert_eq!(moved_pick.surface_focus.map(|focus| focus.target.surface), Some(popup_wl));
+        assert_eq!(
+            scene_pick_at(&state, (1010.0, 25.0))
+                .surface_focus
+                .map(|focus| focus.target.surface),
+            Some(parent_wl)
+        );
     }
 }

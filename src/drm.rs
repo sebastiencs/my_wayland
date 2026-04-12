@@ -3823,10 +3823,11 @@ fn collect_surface_snapshots(
     surface: Resolved<WlSurfaceId>,
     base_x: i32,
     base_y: i32,
+    inherit_root_clip: bool,
     retired_candidates: &mut Vec<RetiredBufferCandidate>,
     snapshots: &mut Vec<crate::wayland_objects::wl_surface::SurfaceRenderState>,
 ) {
-    let (stack, surface_state) = {
+    let (stack, mut surface_state) = {
         let mut surface_obj = state.objects.grab_object::<WlSurface>(surface.object_id());
         retired_candidates.extend(surface_obj.take_retired_buffers());
         let Some(surface_state) = surface_obj.take_render_state_at(surface, base_x, base_y) else {
@@ -3834,6 +3835,7 @@ fn collect_surface_snapshots(
         };
         (surface_obj.current_stack().to_vec(), surface_state)
     };
+    surface_state.inherit_root_clip = inherit_root_clip;
 
     for entry in &stack {
         if let StackEntry::Child(child_surface_id) = *entry {
@@ -3849,12 +3851,27 @@ fn collect_surface_snapshots(
                 child_surface_id,
                 child_base.0,
                 child_base.1,
+                inherit_root_clip,
                 retired_candidates,
                 snapshots,
             );
         } else {
             snapshots.push(surface_state.clone());
         }
+    }
+    for popup_surface in state.popup_child_surfaces(surface) {
+        let Some((popup_x, popup_y)) = state.surface_scene_origin(popup_surface) else {
+            continue;
+        };
+        collect_surface_snapshots(
+            state,
+            popup_surface,
+            popup_x,
+            popup_y,
+            false,
+            retired_candidates,
+            snapshots,
+        );
     }
 }
 
@@ -4412,8 +4429,13 @@ fn push_scene_items_from_snapshots(
             .surface
             .expect("rendered surface snapshots carry their object id");
         let surface_key = surface;
-        let (mask, opaque_region, opaque) = if let Some(clip) = root_clip {
-            (SceneItemMask::RoundedClip { clip }, DamageRegion::new(), false)
+        let (mask, opaque_region, opaque) = if surface_state.inherit_root_clip {
+            if let Some(clip) = root_clip {
+                (SceneItemMask::RoundedClip { clip }, DamageRegion::new(), false)
+            } else {
+                let opaque = !opaque_region.is_empty();
+                (SceneItemMask::None, opaque_region, opaque)
+            }
         } else {
             let opaque = !opaque_region.is_empty();
             (SceneItemMask::None, opaque_region, opaque)
@@ -4531,6 +4553,7 @@ fn collect_cursor_surface_snapshots(
         cursor.surface,
         base_x,
         base_y,
+        true,
         retired_candidates,
         &mut snapshots,
     );
@@ -4713,6 +4736,7 @@ fn collect_render_items(
             root_surface,
             0,
             0,
+            true,
             &mut retired_candidates,
             &mut snapshots,
         );
@@ -5914,16 +5938,48 @@ mod surface_tree_render_tests {
         super::{collect_cursor_surface_snapshots, collect_surface_snapshots},
         crate::{
             clients::ClientId,
-            protocol_generated::{WlSubsurfaceId, WlSurfaceId},
+            protocol_generated::{
+                WlSubsurfaceId, WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgWmBaseId,
+            },
             state::ObjectId,
             test_support::{
                 insert_root_surface as insert_surface,
                 insert_wl_subsurface_client1 as insert_subsurface, resolved_wl_surface as root,
                 state_for_tests,
             },
-            wayland_objects::wl_surface::WlSurface,
+            wayland_objects::{
+                wl_surface::WlSurface, xdg_popup::XdgPopup, xdg_positioner::PositionerState,
+                xdg_surface::XdgSurface,
+            },
         },
     };
+
+    fn insert_test_xdg_surface(
+        state: &mut crate::state::State,
+        client_id: ClientId,
+        wl_surface_id: WlSurfaceId,
+        xdg_surface_id: XdgSurfaceId,
+    ) -> (crate::clients::Resolved<WlSurfaceId>, crate::clients::Resolved<XdgSurfaceId>) {
+        let (_, surface_object_id) =
+            state.insert_object(WlSurface::new(wl_surface_id, client_id, 6));
+        state.register_root_surface(surface_object_id);
+        let wl_surface = crate::clients::Resolved::new(client_id, wl_surface_id, surface_object_id);
+        let (_, xdg_surface_object_id) = state.insert_object(XdgSurface::new(
+            xdg_surface_id,
+            crate::clients::Resolved::new(client_id, XdgWmBaseId::from(1), ObjectId::from(1usize)),
+            wl_surface,
+            7,
+        ));
+        let xdg_surface =
+            crate::clients::Resolved::new(client_id, xdg_surface_id, xdg_surface_object_id);
+        state
+            .objects
+            .get_mut(surface_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_xdg_surface_impl(xdg_surface);
+        (wl_surface, xdg_surface)
+    }
 
     #[test]
     fn collect_surface_snapshots_walks_below_self_above() {
@@ -5979,7 +6035,15 @@ mod surface_tree_render_tests {
         let mut retired = Vec::new();
         let mut snapshots = Vec::new();
         let root_resolved = root(&state, root_object_id);
-        collect_surface_snapshots(&mut state, root_resolved, 0, 0, &mut retired, &mut snapshots);
+        collect_surface_snapshots(
+            &mut state,
+            root_resolved,
+            0,
+            0,
+            true,
+            &mut retired,
+            &mut snapshots,
+        );
 
         let ids: Vec<_> = snapshots
             .iter()
@@ -6033,7 +6097,15 @@ mod surface_tree_render_tests {
         let mut retired = Vec::new();
         let mut snapshots = Vec::new();
         let root_resolved = root(&state, root_object_id);
-        collect_surface_snapshots(&mut state, root_resolved, 0, 0, &mut retired, &mut snapshots);
+        collect_surface_snapshots(
+            &mut state,
+            root_resolved,
+            0,
+            0,
+            true,
+            &mut retired,
+            &mut snapshots,
+        );
         let ids: Vec<_> = snapshots
             .iter()
             .map(|snapshot| snapshot.buffer.object_id())
@@ -6097,7 +6169,15 @@ mod surface_tree_render_tests {
         let mut retired = Vec::new();
         let mut snapshots = Vec::new();
         let root_resolved = root(&state, root_object_id);
-        collect_surface_snapshots(&mut state, root_resolved, 0, 0, &mut retired, &mut snapshots);
+        collect_surface_snapshots(
+            &mut state,
+            root_resolved,
+            0,
+            0,
+            true,
+            &mut retired,
+            &mut snapshots,
+        );
 
         let positions: Vec<_> = snapshots
             .iter()
@@ -6162,5 +6242,146 @@ mod surface_tree_render_tests {
             })
             .collect();
         assert_eq!(ids, vec![WlSurfaceId::from(1), WlSurfaceId::from(2)]);
+    }
+
+    #[test]
+    fn collect_surface_snapshots_places_popups_relative_to_parent_without_root_clip() {
+        let mut state = state_for_tests();
+        let client_id = ClientId::from_raw(1);
+        let (parent_wl, parent_xdg) = insert_test_xdg_surface(
+            &mut state,
+            client_id,
+            WlSurfaceId::from(90),
+            XdgSurfaceId::from(91),
+        );
+        let (popup_wl, popup_xdg) = insert_test_xdg_surface(
+            &mut state,
+            client_id,
+            WlSurfaceId::from(92),
+            XdgSurfaceId::from(93),
+        );
+        let (nested_wl, nested_xdg) = insert_test_xdg_surface(
+            &mut state,
+            client_id,
+            WlSurfaceId::from(94),
+            XdgSurfaceId::from(95),
+        );
+
+        state
+            .objects
+            .get_mut(parent_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(300usize), 640, 0, 640, 800);
+        state
+            .objects
+            .get_mut(parent_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_root_position(640, 0);
+        state
+            .objects
+            .get_mut(popup_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(301usize), 0, 0, 299, 457);
+        state
+            .objects
+            .get_mut(nested_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(302usize), 0, 0, 110, 140);
+
+        let (_, popup_object_id) = state.insert_object(XdgPopup::new(
+            XdgPopupId::from(96),
+            popup_xdg,
+            Some(parent_xdg),
+            PositionerState::default(),
+            7,
+        ));
+        let popup = crate::clients::Resolved::new(client_id, XdgPopupId::from(96), popup_object_id);
+        state
+            .objects
+            .get_mut(popup_object_id)
+            .downcast_mut::<XdgPopup>()
+            .unwrap()
+            .apply_acked_configure(crate::region::RectI { x: 387, y: 40, width: 253, height: 411 });
+        state
+            .objects
+            .get_mut(popup_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_current_window_geometry(Some(crate::region::RectI {
+                x: 23,
+                y: 21,
+                width: 253,
+                height: 411,
+            }));
+        state
+            .objects
+            .get_mut(popup_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_popup_role(popup);
+        state
+            .objects
+            .get_mut(parent_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .add_popup_child(popup);
+
+        let (_, nested_popup_object_id) = state.insert_object(XdgPopup::new(
+            XdgPopupId::from(97),
+            nested_xdg,
+            Some(popup_xdg),
+            PositionerState::default(),
+            7,
+        ));
+        let nested_popup =
+            crate::clients::Resolved::new(client_id, XdgPopupId::from(97), nested_popup_object_id);
+        state
+            .objects
+            .get_mut(nested_popup_object_id)
+            .downcast_mut::<XdgPopup>()
+            .unwrap()
+            .apply_acked_configure(crate::region::RectI { x: 50, y: 60, width: 100, height: 120 });
+        state
+            .objects
+            .get_mut(nested_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_current_window_geometry(Some(crate::region::RectI {
+                x: 5,
+                y: 6,
+                width: 100,
+                height: 120,
+            }));
+        state
+            .objects
+            .get_mut(nested_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_popup_role(nested_popup);
+        state
+            .objects
+            .get_mut(popup_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .add_popup_child(nested_popup);
+
+        let mut retired = Vec::new();
+        let mut snapshots = Vec::new();
+        collect_surface_snapshots(&mut state, parent_wl, 0, 0, true, &mut retired, &mut snapshots);
+
+        let positions: Vec<_> = snapshots
+            .iter()
+            .map(|snapshot| (snapshot.x, snapshot.y))
+            .collect();
+        let clip_flags: Vec<_> = snapshots
+            .iter()
+            .map(|snapshot| snapshot.inherit_root_clip)
+            .collect();
+        assert_eq!(positions, vec![(640, 0), (1004, 19), (1049, 73)]);
+        assert_eq!(clip_flags, vec![true, false, false]);
     }
 }

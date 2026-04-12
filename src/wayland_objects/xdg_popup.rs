@@ -102,6 +102,10 @@ impl XdgPopup {
         self.current_geometry = geometry;
     }
 
+    pub fn current_geometry(&self) -> RectI {
+        self.current_geometry
+    }
+
     pub fn send_popup_done(&self, dispatcher: &mut ClientDispatcher) {
         self.send_event(xdg_popup::Event::PopupDone, dispatcher);
     }

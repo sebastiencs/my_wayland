@@ -183,6 +183,12 @@ impl XdgSurface {
         self.initial_commit_complete = complete;
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_set_popup_role(&mut self, popup: Resolved<XdgPopupId>) {
+        self.role_kind = Some(RoleKind::Popup);
+        self.role_object = RoleObject::Popup(popup);
+    }
+
     fn send_wm_base_error(
         &self,
         client: &Client,
@@ -565,6 +571,10 @@ impl XdgSurface {
         self.popup_children.last().copied() == Some(popup)
     }
 
+    pub(crate) fn popup_children(&self) -> &[Resolved<XdgPopupId>] {
+        &self.popup_children
+    }
+
     pub(crate) fn destroy_toplevel_role(&mut self, toplevel: Resolved<XdgToplevelId>) {
         if self.role_object == RoleObject::Toplevel(toplevel) {
             self.role_object = RoleObject::None;
@@ -678,11 +688,9 @@ impl Object for XdgSurface {
                     XdgPopup::new(id, this, parent, positioner_state, self.wm_base_version);
                 let (popup, _) = client.insert_object(state, popup_obj);
                 self.role_object = RoleObject::Popup(popup);
+                let _ = state.clear_root_surface_workspace_assignment(self.wl_surface);
                 if let Some(parent_surface_id) = parent {
                     let popup_surface = self.wl_surface;
-                    let parent_xdg_surface = parent_surface_id.rref(state);
-                    let parent_surface = parent_xdg_surface.wl_surface();
-                    let _ = state.inherit_root_surface_workspace(popup_surface, parent_surface);
                     let parent_surface = parent_surface_id.ref_mut(state);
                     parent_surface.add_popup_child(popup);
                 }
@@ -2080,16 +2088,92 @@ mod tests {
         super::*,
         crate::{
             clients::{Client, ClientId, ClientManagerAction, RawEvent},
-            protocol_generated::{WaylandId, WlSurfaceId, XdgToplevelId},
+            protocol_generated::{
+                WaylandId, WlSurfaceId, XdgPopupId, XdgToplevelId, ZwlrLayerShellV1Id,
+                ZwlrLayerSurfaceV1Id,
+            },
             runner::Dispatcher,
             state::{ObjectId, State},
             test_support::{resolved_wl_surface as root, state_for_tests, test_output_drm0_wh},
             wayland_objects::{
-                wl_surface::Role, xdg_surface::xdg_toplevel::XdgToplevel,
+                wl_surface::Role,
+                xdg_popup::XdgPopup,
+                xdg_positioner::PositionerState,
+                xdg_surface::xdg_toplevel::XdgToplevel,
+                zwlr_layer_surface_v1::{LayerShellLayer, ZwlrLayerSurfaceV1},
                 zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
             },
         },
     };
+
+    fn insert_test_xdg_surface(
+        state: &mut State,
+        client_id: ClientId,
+        wl_surface_id: WlSurfaceId,
+        xdg_surface_id: XdgSurfaceId,
+    ) -> (Resolved<WlSurfaceId>, Resolved<XdgSurfaceId>) {
+        let (_, surface_object_id) =
+            state.insert_object(WlSurface::new(wl_surface_id, client_id, 6));
+        state.register_root_surface(surface_object_id);
+        let wl_surface = Resolved::new(client_id, wl_surface_id, surface_object_id);
+        let (_, xdg_surface_object_id) = state.insert_object(XdgSurface::new(
+            xdg_surface_id,
+            Resolved::new(client_id, XdgWmBaseId::from(1), ObjectId::from(1usize)),
+            wl_surface,
+            7,
+        ));
+        let xdg_surface = Resolved::new(client_id, xdg_surface_id, xdg_surface_object_id);
+        state
+            .objects
+            .get_mut(surface_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_xdg_surface_impl(xdg_surface);
+        (wl_surface, xdg_surface)
+    }
+
+    fn insert_test_popup(
+        state: &mut State,
+        client_id: ClientId,
+        popup_id: XdgPopupId,
+        popup_xdg_surface: Resolved<XdgSurfaceId>,
+        parent_xdg_surface: Option<Resolved<XdgSurfaceId>>,
+        geometry: RectI,
+        window_geometry: RectI,
+    ) -> Resolved<XdgPopupId> {
+        let (_, popup_object_id) = state.insert_object(XdgPopup::new(
+            popup_id,
+            popup_xdg_surface,
+            parent_xdg_surface,
+            PositionerState::default(),
+            7,
+        ));
+        let popup = Resolved::new(client_id, popup_id, popup_object_id);
+        state
+            .objects
+            .get_mut(popup_object_id)
+            .downcast_mut::<XdgPopup>()
+            .unwrap()
+            .apply_acked_configure(geometry);
+        {
+            let popup_xdg = state
+                .objects
+                .get_mut(popup_xdg_surface.object_id())
+                .downcast_mut::<XdgSurface>()
+                .unwrap();
+            popup_xdg.test_set_current_window_geometry(Some(window_geometry));
+            popup_xdg.test_set_popup_role(popup);
+        }
+        if let Some(parent_xdg_surface) = parent_xdg_surface {
+            state
+                .objects
+                .get_mut(parent_xdg_surface.object_id())
+                .downcast_mut::<XdgSurface>()
+                .unwrap()
+                .add_popup_child(popup);
+        }
+        popup
+    }
 
     #[test]
     fn geometry_commit_updates_toplevel_window_geometry() {
@@ -2410,5 +2494,195 @@ mod tests {
             ClientManagerAction::PublishWorkspaceStateChanged { affected_outputs }
                 if affected_outputs == &vec![output_id]
         )));
+    }
+
+    #[test]
+    fn popup_scene_origin_tracks_parent_move_and_nested_popup_offsets() {
+        let mut state = state_for_tests();
+        let client_id = ClientId::from_raw(7);
+        let (parent_wl, parent_xdg) = insert_test_xdg_surface(
+            &mut state,
+            client_id,
+            WlSurfaceId::from(60),
+            XdgSurfaceId::from(61),
+        );
+        let (popup_wl, popup_xdg) = insert_test_xdg_surface(
+            &mut state,
+            client_id,
+            WlSurfaceId::from(62),
+            XdgSurfaceId::from(63),
+        );
+        let (nested_wl, nested_xdg) = insert_test_xdg_surface(
+            &mut state,
+            client_id,
+            WlSurfaceId::from(64),
+            XdgSurfaceId::from(65),
+        );
+        state
+            .objects
+            .get_mut(parent_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(960usize), 640, 0, 640, 800);
+        state
+            .objects
+            .get_mut(parent_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_root_position(640, 0);
+        state
+            .objects
+            .get_mut(popup_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(961usize), 0, 0, 299, 457);
+        state
+            .objects
+            .get_mut(nested_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(962usize), 0, 0, 110, 140);
+
+        let popup = insert_test_popup(
+            &mut state,
+            client_id,
+            XdgPopupId::from(66),
+            popup_xdg,
+            Some(parent_xdg),
+            RectI { x: 387, y: 40, width: 253, height: 411 },
+            RectI { x: 23, y: 21, width: 253, height: 411 },
+        );
+        insert_test_popup(
+            &mut state,
+            client_id,
+            XdgPopupId::from(67),
+            nested_xdg,
+            Some(popup_xdg),
+            RectI { x: 50, y: 60, width: 100, height: 120 },
+            RectI { x: 5, y: 6, width: 100, height: 120 },
+        );
+
+        assert_eq!(state.root_surface_for_surface(popup_wl), Some(parent_wl));
+        assert_eq!(state.root_surface_for_surface(nested_wl), Some(parent_wl));
+        assert_eq!(state.surface_scene_origin(popup_wl), Some((1004, 19)));
+        assert_eq!(state.surface_scene_origin(nested_wl), Some((1049, 73)));
+
+        state
+            .objects
+            .get_mut(popup.object_id())
+            .downcast_mut::<XdgPopup>()
+            .unwrap()
+            .apply_acked_configure(RectI { x: 420, y: 50, width: 253, height: 411 });
+        state
+            .objects
+            .get_mut(parent_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_root_position(700, 10);
+
+        assert_eq!(state.surface_scene_origin(popup_wl), Some((1097, 39)));
+        assert_eq!(state.surface_scene_origin(nested_wl), Some((1142, 93)));
+    }
+
+    #[test]
+    fn layer_parent_popup_scene_origin_uses_layer_root_transform() {
+        let mut state = state_for_tests();
+        let client_id = ClientId::from_raw(9);
+        let (_, layer_root_object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(70), client_id, 6));
+        state.register_root_surface(layer_root_object_id);
+        let layer_root = Resolved::new(client_id, WlSurfaceId::from(70), layer_root_object_id);
+        state
+            .objects
+            .get_mut(layer_root_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(970usize), 50, 60, 200, 40);
+        state
+            .objects
+            .get_mut(layer_root_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_root_position(50, 60);
+
+        let (_, layer_object_id) = state.insert_object(ZwlrLayerSurfaceV1::new(
+            ZwlrLayerSurfaceV1Id::from(71),
+            Resolved::new(client_id, ZwlrLayerShellV1Id::from(1), ObjectId::from(1usize)),
+            5,
+            layer_root,
+            None,
+            LayerShellLayer::Top,
+            "panel".to_string(),
+        ));
+        let layer_surface =
+            Resolved::new(client_id, ZwlrLayerSurfaceV1Id::from(71), layer_object_id);
+        state
+            .objects
+            .get_mut(layer_root_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_layer_surface_impl(layer_surface);
+
+        let (popup_wl, popup_xdg) = insert_test_xdg_surface(
+            &mut state,
+            client_id,
+            WlSurfaceId::from(72),
+            XdgSurfaceId::from(73),
+        );
+        state
+            .objects
+            .get_mut(popup_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(971usize), 0, 0, 40, 50);
+        state
+            .objects
+            .get_mut(popup_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_popup_parent_layer_surface(Some(layer_surface));
+
+        let (_, popup_object_id) = state.insert_object(XdgPopup::new(
+            XdgPopupId::from(74),
+            popup_xdg,
+            None,
+            PositionerState::default(),
+            7,
+        ));
+        let popup = Resolved::new(client_id, XdgPopupId::from(74), popup_object_id);
+        state
+            .objects
+            .get_mut(popup_object_id)
+            .downcast_mut::<XdgPopup>()
+            .unwrap()
+            .assign_layer_parent(layer_surface)
+            .expect("layer parent assignment should succeed");
+        state
+            .objects
+            .get_mut(popup_object_id)
+            .downcast_mut::<XdgPopup>()
+            .unwrap()
+            .apply_acked_configure(RectI { x: 12, y: 18, width: 30, height: 40 });
+        state
+            .objects
+            .get_mut(popup_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_popup_role(popup);
+        state
+            .objects
+            .get_mut(popup_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_current_window_geometry(Some(RectI { x: 2, y: 3, width: 30, height: 40 }));
+        state
+            .objects
+            .get_mut(layer_object_id)
+            .downcast_mut::<ZwlrLayerSurfaceV1>()
+            .unwrap()
+            .add_popup_child(popup);
+
+        assert_eq!(state.root_surface_for_surface(popup_wl), Some(layer_root));
+        assert_eq!(state.surface_scene_origin(popup_wl), Some((60, 75)));
     }
 }

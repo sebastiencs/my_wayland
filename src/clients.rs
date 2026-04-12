@@ -1581,6 +1581,9 @@ impl Client {
             if surface.client_id() != self.id || !surface.is_root() {
                 continue;
             }
+            if state.is_popup_root_surface(root_surface) {
+                continue;
+            }
             if surface.has_cursor_role() {
                 if let Some((active_surface, base_x, base_y)) = active_cursor_surface {
                     if active_surface == root_surface {
@@ -1914,6 +1917,12 @@ fn refresh_surface_tree_outputs(
             );
         }
     }
+    for popup_surface in state.popup_child_surfaces(surface) {
+        let Some((popup_x, popup_y)) = state.surface_scene_origin(popup_surface) else {
+            continue;
+        };
+        refresh_surface_tree_outputs(client, state, dispatcher, popup_surface, popup_x, popup_y);
+    }
 }
 
 fn clear_surface_tree_outputs(
@@ -1940,6 +1949,9 @@ fn clear_surface_tree_outputs(
         if let crate::wayland_objects::wl_surface::StackEntry::Child(child_surface) = entry {
             clear_surface_tree_outputs(client, state, dispatcher, child_surface);
         }
+    }
+    for popup_surface in state.popup_child_surfaces(surface) {
+        clear_surface_tree_outputs(client, state, dispatcher, popup_surface);
     }
 }
 

@@ -22,7 +22,10 @@ use crate::{
     tiling::{self, TiledResizeState, WorkspaceLayout},
     wayland_objects::{
         wl_surface::WlSurface,
-        xdg_surface::xdg_toplevel::{ToplevelDecorationMode, XdgToplevel},
+        xdg_surface::{
+            xdg_toplevel::{ToplevelDecorationMode, XdgToplevel},
+            XdgSurface,
+        },
         zwlr_layer_surface_v1::{output_usable_bounds_with_snapshot, LayerLayoutObjectSnapshot},
     },
     xkb::{KeyboardState, Xkb},
@@ -887,7 +890,14 @@ impl State {
     }
 
     pub fn root_surface_workspace(&self, surface: Resolved<WlSurfaceId>) -> Option<WorkspaceId> {
-        self.root_surface_workspaces.get(&surface).copied()
+        self.root_surface_workspaces
+            .get(&surface)
+            .copied()
+            .or_else(|| {
+                let parent_surface = self.popup_parent_surface(surface)?;
+                let parent_root = self.root_surface_for_surface(parent_surface)?;
+                self.root_surface_workspaces.get(&parent_root).copied()
+            })
     }
 
     pub fn managed_root_surface_state(
@@ -1256,6 +1266,27 @@ impl State {
         }
         self.managed_root_surfaces.remove(&surface);
         self.root_geometry_cache.remove(&surface);
+        Some(workspace_id)
+    }
+
+    pub fn clear_root_surface_workspace_assignment(
+        &mut self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<WorkspaceId> {
+        let workspace_id = self.root_surface_workspaces.remove(&surface)?;
+        if let Some(workspace) = self.workspaces.try_get_mut(workspace_id) {
+            workspace.root_surfaces.remove(&surface);
+            workspace.layout.remove_surface(surface);
+            if workspace
+                .layout
+                .fullscreen
+                .as_ref()
+                .is_some_and(|fullscreen| fullscreen.surface_object_id == surface)
+            {
+                workspace.layout.set_fullscreen(None);
+            }
+        }
+        self.managed_root_surfaces.remove(&surface);
         Some(workspace_id)
     }
 
@@ -1796,6 +1827,10 @@ impl State {
         mut surface: Resolved<WlSurfaceId>,
     ) -> Option<Resolved<WlSurfaceId>> {
         loop {
+            if let Some(parent_surface) = self.popup_parent_surface(surface) {
+                surface = parent_surface;
+                continue;
+            }
             if self.root_surfaces.contains(&surface) {
                 return Some(surface);
             }
@@ -1805,6 +1840,106 @@ impl State {
             }
             surface = *wl_surface.parent_surface()?;
         }
+    }
+
+    pub fn popup_parent_surface(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<Resolved<WlSurfaceId>> {
+        let wl_surface = surface.try_ref(self)?;
+        self.popup_parent_surface_with_ref(surface, wl_surface)
+    }
+
+    pub fn popup_parent_surface_with_ref(
+        &self,
+        _surface: Resolved<WlSurfaceId>,
+        wl_surface: &WlSurface,
+    ) -> Option<Resolved<WlSurfaceId>> {
+        let xdg_surface = wl_surface.xdg_surface()?.try_ref(self)?;
+        let popup = xdg_surface.popup_role()?.try_ref(self)?;
+        popup
+            .parent_surface()
+            .and_then(|parent_xdg| parent_xdg.try_ref(self))
+            .map(XdgSurface::wl_surface)
+            .or_else(|| {
+                popup
+                    .parent_layer_surface()
+                    .and_then(|parent_layer| parent_layer.try_ref(self))
+                    .map(|layer| layer.surface())
+            })
+    }
+
+    pub fn is_popup_root_surface(&self, surface: Resolved<WlSurfaceId>) -> bool {
+        self.popup_parent_surface(surface).is_some()
+    }
+
+    pub fn popup_child_surfaces(
+        &self,
+        parent_surface: Resolved<WlSurfaceId>,
+    ) -> Vec<Resolved<WlSurfaceId>> {
+        let Some(parent_surface_ref) = parent_surface.try_ref(self) else {
+            return Vec::new();
+        };
+        let popup_ids = parent_surface_ref
+            .xdg_surface()
+            .and_then(|xdg_surface| xdg_surface.try_ref(self))
+            .map(|xdg_surface| xdg_surface.popup_children().to_vec())
+            .or_else(|| {
+                parent_surface_ref
+                    .layer_surface()
+                    .and_then(|layer_surface| layer_surface.try_ref(self))
+                    .map(|layer_surface| layer_surface.popup_children().to_vec())
+            })
+            .unwrap_or_default();
+        popup_ids
+            .into_iter()
+            .filter_map(|popup_id| {
+                let popup = popup_id.try_ref(self)?;
+                let xdg_surface = popup.xdg_surface().try_ref(self)?;
+                Some(xdg_surface.wl_surface())
+            })
+            .collect()
+    }
+
+    pub fn surface_scene_origin(&self, surface: Resolved<WlSurfaceId>) -> Option<(i32, i32)> {
+        let wl_surface = surface.try_ref(self)?;
+        self.surface_scene_origin_with_ref(surface, wl_surface)
+    }
+
+    pub fn surface_scene_origin_with_ref(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+        wl_surface: &WlSurface,
+    ) -> Option<(i32, i32)> {
+        if let Some(parent_surface) = self.popup_parent_surface_with_ref(surface, wl_surface) {
+            let parent_origin = self.surface_scene_origin(parent_surface)?;
+            let xdg_surface_id = wl_surface.xdg_surface()?;
+            let xdg_surface = xdg_surface_id.try_ref(self)?;
+            let popup_id = xdg_surface.popup_role()?;
+            let popup = popup_id.try_ref(self)?;
+            let local_window_geometry = xdg_surface.window_geometry_rect_for_surface(surface, self);
+            let geometry = popup.current_geometry();
+            return Some((
+                parent_origin.0 + geometry.x - local_window_geometry.x,
+                parent_origin.1 + geometry.y - local_window_geometry.y,
+            ));
+        }
+        Some(wl_surface.root_position())
+    }
+
+    pub fn surface_scene_bounds(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
+        let wl_surface = surface.try_ref(self)?;
+        self.surface_scene_bounds_with_ref(surface, wl_surface)
+    }
+
+    pub fn surface_scene_bounds_with_ref(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+        wl_surface: &WlSurface,
+    ) -> Option<RectI> {
+        let origin = self.surface_scene_origin_with_ref(surface, wl_surface)?;
+        WlSurface::local_surface_tree_bounds_from_ref(self, wl_surface)
+            .map(|bounds| bounds.translate(origin.0, origin.1))
     }
 
     pub fn focused_root_surface(&self) -> Option<Resolved<WlSurfaceId>> {

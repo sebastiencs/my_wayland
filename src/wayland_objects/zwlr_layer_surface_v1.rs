@@ -311,6 +311,10 @@ impl ZwlrLayerSurfaceV1 {
         self.popup_children.last().copied() == Some(popup)
     }
 
+    pub fn popup_children(&self) -> &[Resolved<XdgPopupId>] {
+        &self.popup_children
+    }
+
     fn dismiss_popup_children(
         &mut self,
         client: &mut Client,
@@ -1119,6 +1123,9 @@ pub fn ordered_scene_root_surfaces_with_snapshot(
         if surface.role() == crate::wayland_objects::wl_surface::Role::LayerSurface {
             continue;
         }
+        if state.is_popup_root_surface(root_surface) {
+            continue;
+        }
         if !state.root_surface_is_visible(root_surface) {
             continue;
         }
@@ -1269,6 +1276,7 @@ impl Object for ZwlrLayerSurfaceV1 {
                     let xdg_surface = popup_object.xdg_surface().rref(state);
                     xdg_surface.wl_surface()
                 };
+                let _ = state.clear_root_surface_workspace_assignment(popup_surface_id);
                 let mut popup_surface = popup_surface_id.ref_mut(state);
                 popup_surface.set_popup_parent_layer_surface(Some(this));
                 self.add_popup_child(popup);
