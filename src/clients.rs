@@ -571,6 +571,19 @@ impl Client {
         (object, result)
     }
 
+    pub fn with_ungrabbed_mut<O: ObjectWithId, R>(
+        &mut self,
+        object: GrabbedObject<O>,
+        state: &mut State,
+        fun: impl FnOnce(&mut State, &mut Client) -> R,
+    ) -> (GrabbedObject<O>, R) {
+        let object_id = self.resolve_this(&object, state);
+        drop(object);
+        let result = fun(state, self);
+        let object = object_id.grab(state);
+        (object, result)
+    }
+
     pub fn resolve_this<O: ObjectWithId>(
         &self,
         this: &GrabbedObject<O>,

@@ -1846,7 +1846,9 @@ impl WlSurface {
 
         if let Some((xdg_surface_id, role_changes)) = pending_xdg_role_changes {
             let mut xdg_surface = xdg_surface_id.grab(state);
-            xdg_surface.apply_commit_role_changes(client, state, dispatcher, role_changes);
+            (this, _) = client.with_ungrabbed_mut(this, state, |state, client| {
+                xdg_surface.apply_commit_role_changes(client, state, dispatcher, role_changes);
+            });
         }
 
         if changed {
