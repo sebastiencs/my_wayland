@@ -151,19 +151,10 @@ impl XdgPopup {
     }
 
     fn computed_geometry(&self, client: &Client, state: &State) -> RectI {
-        let popup_id = self.id;
-        let positioner_dbg = format!("{:?}", self.positioner);
         match self.parent {
             PopupParent::XdgSurface(parent_surface_id) => {
                 if !parent_surface_id.exists(state) {
-                    let r = self.positioner.geometry().unwrap_or(self.current_geometry);
-                    log::debug!(
-                        "AAA xdg_popup computed_geometry popup={:?} parent=xdg_surface(missing) positioner={} -> {:?}",
-                        popup_id,
-                        positioner_dbg,
-                        r
-                    );
-                    return r;
+                    return self.positioner.geometry().unwrap_or(self.current_geometry);
                 }
                 let parent_surface = parent_surface_id.rref(state);
                 let parent_geometry = parent_surface.parent_geometry(client, state);
@@ -179,44 +170,15 @@ impl XdgPopup {
                     height: parent_geometry.height,
                 };
                 let Some(mut geometry) = self.positioner.geometry_in_bounds(bounds) else {
-                    log::debug!(
-                        "AAA xdg_popup computed_geometry popup={:?} parent_xdg={:?} parent_geometry={:?} parent_wl_root_pos=({},{}) bounds_for_positioner={:?} positioner={} geometry_in_bounds=None -> fallback current_geometry={:?}",
-                        popup_id,
-                        parent_surface_id,
-                        parent_geometry,
-                        parent_wl_root.0,
-                        parent_wl_root.1,
-                        bounds,
-                        positioner_dbg,
-                        self.current_geometry
-                    );
                     return self.current_geometry;
                 };
                 geometry.x += parent_geometry.x;
                 geometry.y += parent_geometry.y;
-                log::debug!(
-                    "AAA xdg_popup computed_geometry popup={:?} parent_xdg={:?} parent_geometry={:?} parent_wl_root_pos=({},{}) bounds_for_positioner={:?} positioner={} -> {:?}",
-                    popup_id,
-                    parent_surface_id,
-                    parent_geometry,
-                    parent_wl_root.0,
-                    parent_wl_root.1,
-                    bounds,
-                    positioner_dbg,
-                    geometry
-                );
                 geometry
             }
             PopupParent::LayerSurface(parent_layer_surface_id) => {
                 let Some(parent_layer_surface) = parent_layer_surface_id.try_ref(state) else {
-                    let r = self.positioner.geometry().unwrap_or(self.current_geometry);
-                    log::debug!(
-                        "AAA xdg_popup computed_geometry popup={:?} parent=layer_surface(missing) positioner={} -> {:?}",
-                        popup_id,
-                        positioner_dbg,
-                        r
-                    );
-                    return r;
+                    return self.positioner.geometry().unwrap_or(self.current_geometry);
                 };
                 let parent_geometry = parent_layer_surface.popup_anchor_geometry(state);
                 let bounds = RectI {
@@ -226,40 +188,13 @@ impl XdgPopup {
                     height: parent_geometry.height,
                 };
                 let Some(mut geometry) = self.positioner.geometry_in_bounds(bounds) else {
-                    log::debug!(
-                        "AAA xdg_popup computed_geometry popup={:?} parent_layer={:?} parent_anchor_geometry={:?} bounds_for_positioner={:?} positioner={} geometry_in_bounds=None -> fallback current_geometry={:?}",
-                        popup_id,
-                        parent_layer_surface_id,
-                        parent_geometry,
-                        bounds,
-                        positioner_dbg,
-                        self.current_geometry
-                    );
                     return self.current_geometry;
                 };
                 geometry.x += parent_geometry.x;
                 geometry.y += parent_geometry.y;
-                log::debug!(
-                    "AAA xdg_popup computed_geometry popup={:?} parent_layer={:?} parent_anchor_geometry={:?} bounds_for_positioner={:?} positioner={} -> {:?}",
-                    popup_id,
-                    parent_layer_surface_id,
-                    parent_geometry,
-                    bounds,
-                    positioner_dbg,
-                    geometry
-                );
                 geometry
             }
-            PopupParent::None => {
-                let r = self.positioner.geometry().unwrap_or(self.current_geometry);
-                log::debug!(
-                    "AAA xdg_popup computed_geometry popup={:?} parent=None positioner={} -> {:?}",
-                    popup_id,
-                    positioner_dbg,
-                    r
-                );
-                r
-            }
+            PopupParent::None => self.positioner.geometry().unwrap_or(self.current_geometry),
         }
     }
 
@@ -271,47 +206,6 @@ impl XdgPopup {
         dispatcher: &mut ClientDispatcher,
     ) {
         let geometry = self.computed_geometry(client, state);
-        let popup_wl = xdg_surface.wl_surface();
-        let popup_wl_root = popup_wl
-            .try_ref(state)
-            .map(|s| s.root_position())
-            .unwrap_or((0, 0));
-        let parent_wl_root = self
-            .parent_surface()
-            .and_then(|p| p.try_ref(state))
-            .map(|px| {
-                let pw = px.wl_surface();
-                pw.try_ref(state)
-                    .map(|s| s.root_position())
-                    .unwrap_or((0, 0))
-            });
-        let parent_committed = self.parent_surface().and_then(|p| {
-            let pw = p.rref(state).wl_surface();
-            let root = state.root_surface_for_surface(pw)?;
-            state
-                .committed_root_geometry(root)
-                .map(|g| (root, g.root_pos, g.content_rect_global(), g.layout_rect_global))
-        });
-        log::debug!(
-            "AAA xdg_popup send_configure_sequence popup={:?} xdg_surface={:?} popup_wl={:?} popup_wl_root_pos=({},{}) parent_wl_root_pos={:?} parent_committed_root=(root={:?} root_pos={:?} content_rect_global={:?} layout_rect_global={:?}) mapped={} explicit_grab={} pending_reposition_token_pre_take={:?} -> send xdg_popup.configure x,y,w,h={},{},{},{}",
-            self.id,
-            xdg_surface.wl_surface(),
-            popup_wl,
-            popup_wl_root.0,
-            popup_wl_root.1,
-            parent_wl_root,
-            parent_committed.map(|(r, rp, c, l)| r),
-            parent_committed.map(|(_, rp, _, _)| rp),
-            parent_committed.map(|(_, _, c, _)| c),
-            parent_committed.map(|(_, _, _, l)| l),
-            self.mapped,
-            self.explicit_grab,
-            self.pending_reposition_token,
-            geometry.x,
-            geometry.y,
-            geometry.width,
-            geometry.height
-        );
         if let Some(token) = self.pending_reposition_token.take() {
             if self.wm_base_version >= xdg_popup::REPOSITIONED_SINCE {
                 self.send_event(xdg_popup::Event::Repositioned { token }, dispatcher);
@@ -326,12 +220,7 @@ impl XdgPopup {
             },
             dispatcher,
         );
-        let serial = xdg_surface.queue_popup_configure(geometry, dispatcher);
-        log::debug!(
-            "AAA xdg_popup send_configure_sequence queued xdg_surface.configure serial={} geometry={:?}",
-            serial,
-            geometry
-        );
+        xdg_surface.queue_popup_configure(geometry, dispatcher);
     }
 
     pub fn send_initial_configure(

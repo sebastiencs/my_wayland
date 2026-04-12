@@ -367,34 +367,6 @@ impl XdgSurface {
         }
         if role_changes.map_popup {
             if let RoleObject::Popup(id) = self.role_object {
-                let popup_wl = self.wl_surface();
-                let (rx, ry) = popup_wl
-                    .try_ref(state)
-                    .map(|s| s.root_position())
-                    .unwrap_or((0, 0));
-                let parent_summary = id.try_ref(state).and_then(|popup| {
-                    popup.parent_surface().map(|parent_xdg| {
-                        let pwl = parent_xdg.rref(state).wl_surface();
-                        let pr = pwl
-                            .try_ref(state)
-                            .map(|s| s.root_position())
-                            .unwrap_or((0, 0));
-                        let committed = state
-                            .root_surface_for_surface(pwl)
-                            .and_then(|root| state.committed_root_geometry(root));
-                        (parent_xdg, pr, committed.map(|g| g.content_rect_global()))
-                    })
-                });
-                log::debug!(
-                    "AAA xdg_surface apply_commit_role_changes map_popup popup_xdg={:?} popup_wl={:?} popup_wl_root_pos=({},{}) parent_summary=(parent_xdg={:?} parent_wl_root_pos={:?} parent_content_rect_global={:?})",
-                    self.id,
-                    popup_wl,
-                    rx,
-                    ry,
-                    parent_summary.map(|(px, _, _)| px),
-                    parent_summary.map(|(_, pr, _)| pr),
-                    parent_summary.map(|(_, _, c)| c),
-                );
                 let mut popup = id.grab(state);
                 popup.mark_mapped();
             }
@@ -405,18 +377,6 @@ impl XdgSurface {
                 toplevel.reset_on_unmap();
             }
             if let RoleObject::Popup(id) = self.role_object {
-                let popup_wl = self.wl_surface();
-                let (rx, ry) = popup_wl
-                    .try_ref(state)
-                    .map(|s| s.root_position())
-                    .unwrap_or((0, 0));
-                log::debug!(
-                    "AAA xdg_surface apply_commit_role_changes reset_on_unmap popup_xdg={:?} popup_wl={:?} popup_wl_root_pos=({},{})",
-                    self.id,
-                    popup_wl,
-                    rx,
-                    ry
-                );
                 let mut popup = id.grab(state);
                 popup.mark_unmapped();
             }
@@ -677,13 +637,6 @@ impl Object for XdgSurface {
                     return Ok(());
                 }
                 let this = client.resolve(self.id, state).unwrap();
-                log::debug!(
-                    "AAA xdg_surface get_popup popup_xdg={:?} popup_wl={:?} parent_xdg={:?} positioner_state={:?}",
-                    self.id,
-                    self.wl_surface,
-                    parent,
-                    positioner_state
-                );
                 let popup_obj =
                     XdgPopup::new(id, this, parent, positioner_state, self.wm_base_version);
                 let (popup, _) = client.insert_object(state, popup_obj);
@@ -749,53 +702,8 @@ impl Object for XdgSurface {
                     }
                     ConfigureState::Popup(PopupConfigureState { geometry }) => {
                         if let RoleObject::Popup(popup_resolved) = self.role_object {
-                            let popup_wl = self.wl_surface;
-                            let (before_rx, before_ry) = popup_wl
-                                .try_ref(state)
-                                .map(|s| s.root_position())
-                                .unwrap_or((0, 0));
-                            let parent_placement =
-                                popup_resolved.try_ref(state).and_then(|popup_obj| {
-                                    popup_obj.parent_surface().map(|parent_xdg| {
-                                        let pwl = parent_xdg.rref(state).wl_surface();
-                                        let pr = pwl
-                                            .try_ref(state)
-                                            .map(|s| s.root_position())
-                                            .unwrap_or((0, 0));
-                                        let root = state.root_surface_for_surface(pwl);
-                                        let geo =
-                                            root.and_then(|r| state.committed_root_geometry(r));
-                                        (parent_xdg, pwl, pr, root, geo)
-                                    })
-                                });
                             let mut popup = popup_resolved.ref_mut(state);
                             popup.apply_acked_configure(geometry);
-                            let (after_rx, after_ry) = popup_wl
-                                .try_ref(state)
-                                .map(|s| s.root_position())
-                                .unwrap_or((0, 0));
-                            log::debug!(
-                                "AAA xdg_surface ack_configure popup serial={} acked_geometry={:?} popup_xdg={:?} popup_wl={:?} popup_wl_root_pos_before=({},{}) after=({},{}) parent=(xdg={:?} wl={:?} wl_root=({},{}) root_surface={:?} committed_root_pos={:?} content_rect_global={:?} layout_rect_global={:?})",
-                                acked.serial,
-                                geometry,
-                                self.id,
-                                popup_wl,
-                                before_rx,
-                                before_ry,
-                                after_rx,
-                                after_ry,
-                                parent_placement.map(|(pxd, _, _, _, _)| pxd),
-                                parent_placement.map(|(_, pwl, _, _, _)| pwl),
-                                parent_placement.map(|(_, _, pr, _, _)| pr.0).unwrap_or(0),
-                                parent_placement.map(|(_, _, pr, _, _)| pr.1).unwrap_or(0),
-                                parent_placement.map(|(_, _, _, root, _)| root),
-                                parent_placement
-                                    .and_then(|(_, _, _, _, g)| g.map(|geo| geo.root_pos)),
-                                parent_placement
-                                    .and_then(|(_, _, _, _, g)| g.map(|geo| geo.content_rect_global())),
-                                parent_placement
-                                    .and_then(|(_, _, _, _, g)| g.map(|geo| geo.layout_rect_global)),
-                            );
                         }
                     }
                 }

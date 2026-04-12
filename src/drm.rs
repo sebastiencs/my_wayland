@@ -4587,23 +4587,6 @@ fn collect_render_items(
         })
         .collect();
     for root_surface in root_surfaces {
-        if let Some(surface_ref) = root_surface.try_ref(state) {
-            if let Some(xdg_id) = surface_ref.xdg_surface() {
-                if let Some(xdg) = xdg_id.try_ref(state) {
-                    if xdg.popup_role().is_some() {
-                        let (rx, ry) = surface_ref.root_position();
-                        log::debug!(
-                            "AAA drm collect_render_items xdg_popup root_surface_object_id={:?} root_position=({},{}) global_logical_bounds={:?} committed_root_geometry={:?}",
-                            root_surface.object_id(),
-                            rx,
-                            ry,
-                            surface_ref.global_logical_bounds(),
-                            state.committed_root_geometry(root_surface),
-                        );
-                    }
-                }
-            }
-        }
         let visual_state = state.root_surface_visual_state(root_surface);
         let root_clip = visual_state.and_then(|visual| visual.clip);
         push_root_surface_effect_elements(
