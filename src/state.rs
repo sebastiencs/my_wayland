@@ -1,5 +1,5 @@
 use crate::{
-    clients::{ClientId, Resolved},
+    clients::{ClientId, ProcessInfo, Resolved},
     config::{
         DecorationInsets, OutputScaleSetting, RoundingPower, RuntimeConfig, XdgDecorationModePolicy,
     },
@@ -33,6 +33,7 @@ use {
     std::{
         cell::Cell,
         collections::{BTreeMap, BTreeSet},
+        rc::Rc,
     },
 };
 
@@ -796,6 +797,7 @@ pub struct DragState {
 pub struct State {
     pub objects: Box<IndexMap<ObjectId, Box<dyn Object>>>,
     pub root_surfaces: Vec<Resolved<WlSurfaceId>>,
+    pub(crate) root_surface_process_info: BTreeMap<Resolved<WlSurfaceId>, Option<Rc<ProcessInfo>>>,
     pub layer_surface_objects: BTreeSet<Resolved<ZwlrLayerSurfaceV1Id>>,
     pub inputs: IndexMap<InputId, Input>,
     pub drm: IndexMap<DrmId, Drm>,
@@ -807,6 +809,7 @@ pub struct State {
     pub root_surface_workspaces: BTreeMap<Resolved<WlSurfaceId>, WorkspaceId>,
     pub managed_root_surfaces: BTreeMap<Resolved<WlSurfaceId>, ManagedRootSurfaceState>,
     pub root_geometry_cache: BTreeMap<Resolved<WlSurfaceId>, Cell<RootGeometryCacheEntry>>,
+    pub(crate) client_process_info: BTreeMap<ClientId, Option<Rc<ProcessInfo>>>,
     pub xdg_toplevel_roles: BTreeMap<Resolved<XdgSurfaceId>, Resolved<XdgToplevelId>>,
     /// Unblocked `hyprland_ctm_control_manager_v1` singleton; new binds are blocked while set.
     pub ctm_control_owner: Option<Resolved<HyprlandCtmControlManagerV1Id>>,
@@ -2222,6 +2225,13 @@ impl State {
         };
         self.unregister_root_surface(surface);
         self.root_surfaces.push(surface);
+        self.root_surface_process_info.insert(
+            surface,
+            self.client_process_info
+                .get(&surface.client_id())
+                .cloned()
+                .flatten(),
+        );
         self.root_geometry_cache
             .entry(surface)
             .or_insert_with(|| Cell::new(RootGeometryCacheEntry::default()));
@@ -2313,10 +2323,46 @@ impl State {
             return;
         };
         self.root_surfaces.retain(|candidate| *candidate != found);
+        self.root_surface_process_info.remove(&found);
         if let Some(workspace_id) = self.detach_root_surface_from_workspace(found) {
             tiling::mark_workspace_dirty(self, workspace_id);
         }
         self.root_geometry_cache.remove(&found);
+    }
+
+    pub(crate) fn set_client_process_info(
+        &mut self,
+        client_id: ClientId,
+        info: Option<Rc<ProcessInfo>>,
+    ) {
+        self.client_process_info.insert(client_id, info.clone());
+        for surface in self
+            .root_surfaces
+            .iter()
+            .copied()
+            .filter(|surface| surface.client_id() == client_id)
+        {
+            self.root_surface_process_info.insert(surface, info.clone());
+        }
+    }
+
+    pub fn clear_client_process_info(&mut self, client_id: ClientId) {
+        self.client_process_info.remove(&client_id);
+        for info in self
+            .root_surface_process_info
+            .iter_mut()
+            .filter(|(surface, _)| surface.client_id() == client_id)
+            .map(|(_, info)| info)
+        {
+            *info = None;
+        }
+    }
+
+    pub fn root_surface_command(&self, surface: Resolved<WlSurfaceId>) -> Option<&str> {
+        self.root_surface_process_info
+            .get(&surface)
+            .and_then(|info| info.as_ref())
+            .map(|info| info.command())
     }
 
     pub fn raise_root_surface(&mut self, surface: Resolved<WlSurfaceId>) -> bool {

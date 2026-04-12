@@ -1237,14 +1237,6 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
             ) else {
                 continue;
             };
-            log::debug!(
-                "AAA tiled_apply_root_position surface={:?} previous_root_pos={:?} next_root_pos=({}, {}) geometry={:?}",
-                operation.surface_object_id,
-                previous_root_pos,
-                geometry.root_pos.0,
-                geometry.root_pos.1,
-                geometry,
-            );
             surface.set_root_position(geometry.root_pos.0, geometry.root_pos.1);
             drop(surface);
             state.mark_root_geometry_dirty(operation.surface_object_id);
@@ -2543,7 +2535,7 @@ mod tests {
         let mut client = Client::new_for_tests(ClientId::from_raw(64));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
-        let (surface_object_id, _xdg_surface_object_id, toplevel_object_id) =
+        let (surface_object_id, xdg_surface_object_id, toplevel_object_id) =
             insert_root_xdg_toplevel(
                 &mut state,
                 &mut client,
@@ -2560,23 +2552,65 @@ mod tests {
                 .downcast_mut::<XdgToplevel>()
                 .unwrap();
             toplevel.set_decoration_mode(ToplevelDecorationMode::ServerSide);
+        }
+        {
+            let xdg_surface = state
+                .objects
+                .get_mut(xdg_surface_object_id)
+                .downcast_mut::<XdgSurface>()
+                .unwrap();
+            xdg_surface.test_set_current_window_geometry(Some(RectI {
+                x: 25,
+                y: 25,
+                width: 360,
+                height: 750,
+            }));
+        }
+        {
+            let toplevel = state
+                .objects
+                .get_mut(toplevel_object_id)
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
             toplevel.set_window_geometry(Some(RectI { x: 25, y: 25, width: 360, height: 750 }));
+        }
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(902usize), 0, 0, 410, 800);
         }
 
         let surface = state
             .objects
             .try_ref_object::<WlSurface>(surface_object_id)
             .unwrap();
-        let geometry = test_committed_geometry(
-            RectI { x: 645, y: 20, width: 615, height: 760 },
-            RectI { x: 650, y: 25, width: 605, height: 750 },
-            EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
-            false,
-            (625, 0),
-        );
+        let geometry = crate::root_geometry::build_committed_root_geometry(
+            &state,
+            root(&state, surface_object_id),
+            surface,
+            Some(LayoutAllocation {
+                frame_rect: RectI { x: 645, y: 20, width: 615, height: 760 },
+                tiled_edges: EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
+                fullscreen: false,
+            }),
+            crate::root_geometry::GeometryBuildOverrides {
+                decoration_mode: None,
+                explicit_window_geometry: None,
+                decoration_insets: Some(DecorationInsets { top: 5, right: 5, bottom: 5, left: 5 }),
+                root_pos: Some(surface.root_position()),
+            },
+        )
+        .expect("committed geometry");
 
-        let _ = surface;
         assert_eq!(geometry.root_pos, (625, 0));
+        assert_eq!(geometry.logical_window_rect_global(), RectI::new(650, 25, 360, 750));
+        assert_eq!(
+            geometry.content_rect_global(),
+            RectI { x: 650, y: 25, width: 605, height: 750 }
+        );
     }
 
     #[test]

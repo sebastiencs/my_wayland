@@ -1626,21 +1626,6 @@ impl WlSurface {
             }
         }
 
-        let SurfaceChanges { buffer_changed, mapping_changed } = changes;
-        if buffer_changed || mapping_changed {
-            log::debug!(
-                "wl_surface commit applied surface={:?} buffer={:?} logical_size={:?} pos=({}, {}) transform={:?} scale={} viewport={:?}",
-                self.id,
-                self.on_screen.buffer_object_id,
-                self.on_screen.logical_size,
-                self.on_screen.x,
-                self.on_screen.y,
-                self.on_screen.buffer_transform,
-                self.on_screen.buffer_scale,
-                self.on_screen.viewport
-            );
-        }
-
         if !committed_damage.is_empty() {
             log::debug!(
                 "wl_surface commit damage applied surface={:?} local_damage={:?}",
@@ -1651,7 +1636,7 @@ impl WlSurface {
 
         self.discard_presentation_feedbacks(client, state, dispatcher, previous_feedbacks);
 
-        buffer_changed || mapping_changed || !committed_damage.is_empty()
+        changes.buffer_changed || changes.mapping_changed || !committed_damage.is_empty()
     }
 
     fn apply_cached_commit(
@@ -1893,6 +1878,7 @@ impl WlSurface {
             state.mark_root_geometry_dirty_for_surface(resolved_surface);
         }
         let is_mapped = this.global_logical_bounds().is_some();
+        let mut bounds_after_first_map_relayout = None;
         if was_mapped != is_mapped {
             if let Some(ShellSurfaceObject::XdgSurface(xdg_surface_id)) = this.shell_surface {
                 let xdg_surface_object_id = xdg_surface_id.object_id();
@@ -1902,7 +1888,25 @@ impl WlSurface {
                     .is_some_and(XdgSurface::is_toplevel_parent)
                 {
                     if is_mapped {
+                        let relayout_first_map = state
+                            .managed_root_surface_state(resolved_surface)
+                            .is_some_and(|managed| {
+                                managed.awaiting_initial_layout
+                                    && (managed.fullscreen
+                                        || managed.mode == crate::state::ManagedWindowMode::Tiled)
+                            });
                         state.confirm_root_surface_mapped(resolved_surface);
+                        if relayout_first_map {
+                            let (regrabbed, relayout_bounds) =
+                                client.with_ungrabbed(this, state, |state| {
+                                    state.relayout_dirty_workspaces();
+                                    resolved_surface
+                                        .try_ref(state)
+                                        .and_then(|surface| surface.global_logical_bounds())
+                                });
+                            this = regrabbed;
+                            bounds_after_first_map_relayout = relayout_bounds;
+                        }
                         dispatcher.dispatch_post_action(PostWlSurface::FocusNewToplevel {
                             root_surface: resolved_surface,
                         });
@@ -1913,7 +1917,9 @@ impl WlSurface {
         }
 
         if changed || needs_frame {
-            if let Some(bounds) = this.global_logical_bounds() {
+            if let Some(bounds) =
+                bounds_after_first_map_relayout.or_else(|| this.global_logical_bounds())
+            {
                 schedule_outputs(state, this.output_membership_ids(), dispatcher);
                 schedule_outputs_for_rect(state, bounds, dispatcher);
             } else {
@@ -3093,6 +3099,9 @@ mod tests {
         assert_eq!(toplevel.test_current_size(), (1280, 720));
         let states = toplevel.test_current_states();
         assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::Maximized as u32))
+        );
+        assert!(
             states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledLeft as u32))
         );
         assert!(
@@ -3264,6 +3273,78 @@ mod tests {
         assert!(!state
             .managed_root_surface_state(root(&state, surface_object_id))
             .is_some_and(|managed| managed.awaiting_initial_layout));
+    }
+
+    #[test]
+    fn first_map_tiled_server_side_updates_root_position_before_returning() {
+        let mut state = state_for_tests();
+        state.config.decorations.border.thickness = 5;
+        let backend = BackendOutputRef::new(DrmId::from(24usize));
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+
+        let surface_object_id = create_root_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            WlSurfaceId::from(200),
+            XdgSurfaceId::from(201),
+            XdgToplevelId::from(202),
+        );
+        commit_initial_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            surface_object_id,
+            XdgSurfaceId::from(201),
+        );
+
+        {
+            let toplevel = state
+                .objects
+                .get_mut(client.object_id(XdgToplevelId::from(202)))
+                .downcast_mut::<XdgToplevel>()
+                .unwrap();
+            toplevel.test_set_decoration_mode(ToplevelDecorationMode::ServerSide);
+        }
+
+        let buffer_object_id = insert_test_shm_buffer(
+            &mut state,
+            client.client_id(),
+            WlBufferId::from(203),
+            1270,
+            710,
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.pending.buffer = Some(Some(resolved_buffer(buffer_object_id)));
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
+        }
+
+        let surface = state
+            .objects
+            .try_ref_object::<WlSurface>(surface_object_id)
+            .unwrap();
+        assert_eq!(surface.root_position(), (5, 5));
+        assert_eq!(
+            surface.global_logical_bounds(),
+            Some(RectI { x: 5, y: 5, width: 1270, height: 710 })
+        );
+        assert!(!state
+            .managed_root_surface_state(root(&state, surface_object_id))
+            .is_some_and(|managed| managed.awaiting_initial_layout));
+        assert!(dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::WorkspaceStateChanged)
+        }));
     }
 
     #[test]

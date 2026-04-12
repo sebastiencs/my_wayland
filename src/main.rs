@@ -276,6 +276,7 @@ fn main() {
     let mut state = State {
         objects: Default::default(),
         root_surfaces: Default::default(),
+        root_surface_process_info: Default::default(),
         layer_surface_objects: Default::default(),
         inputs: Default::default(),
         drm: Default::default(),
@@ -287,6 +288,7 @@ fn main() {
         root_surface_workspaces: Default::default(),
         managed_root_surfaces: Default::default(),
         root_geometry_cache: Default::default(),
+        client_process_info: Default::default(),
         xdg_toplevel_roles: Default::default(),
         ctm_control_owner: None,
         data_offers_by_source: Default::default(),

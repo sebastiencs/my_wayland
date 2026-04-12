@@ -83,6 +83,7 @@ impl ZxdgToplevelDecorationV1 {
         }
         toplevel.schedule_configure_with_known_decoration(
             self,
+            state,
             configure_bounds,
             &mut xdg_surface,
             dispatcher,

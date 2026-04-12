@@ -345,9 +345,11 @@ impl XdgSurface {
         role_changes: CommitRoleChanges,
     ) {
         if role_changes.apply_window_geometry {
+            let pending_window_geometry = self.pending_window_geometry;
             if self.pending_window_geometry.is_some() {
                 self.current_window_geometry = self.pending_window_geometry.take();
             }
+            let surface = self.wl_surface();
             if let RoleObject::Toplevel(id) = self.role_object {
                 if let Some(mut toplevel) = id.try_grab(state) {
                     toplevel.set_window_geometry(self.current_window_geometry);
@@ -853,6 +855,10 @@ pub mod xdg_toplevel {
             let mut states = BTreeSet::default();
             if fullscreen {
                 states.insert(proto_xdg_toplevel::State::Fullscreen);
+            } else if tiled_edges != 0 {
+                // Match Hyprland's tiled startup hint so GTK clients settle into the compositor's
+                // managed frame earlier instead of briefly presenting a smaller intermediate size.
+                states.insert(proto_xdg_toplevel::State::Maximized);
             }
             for state in self.current_states.iter().cloned() {
                 if matches!(
@@ -918,19 +924,20 @@ pub mod xdg_toplevel {
 
         pub(crate) fn schedule_configure(
             &mut self,
-            client: &Client,
+            _client: &Client,
             state: &State,
             configure_bounds: Option<(i32, i32)>,
             xdg_surface: &mut XdgSurface,
             dispatcher: &mut ClientDispatcher,
         ) {
+            let states = self.effective_states();
             self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_configure(dispatcher);
             self.send_decoration_configure_if_needed(state, dispatcher);
             xdg_surface.queue_toplevel_configure(
                 self.current_width,
                 self.current_height,
-                self.effective_states(),
+                states,
                 self.decoration_mode_for_configure(),
                 dispatcher,
             );
@@ -939,17 +946,19 @@ pub mod xdg_toplevel {
         pub(crate) fn schedule_configure_with_known_decoration(
             &mut self,
             decoration: &ZxdgToplevelDecorationV1,
+            state: &State,
             configure_bounds: Option<(i32, i32)>,
             xdg_surface: &mut XdgSurface,
             dispatcher: &mut ClientDispatcher,
         ) {
+            let states = self.effective_states();
             self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_configure(dispatcher);
             decoration.send_configure_mode(self.decoration_mode_for_configure(), dispatcher);
             xdg_surface.queue_toplevel_configure(
                 self.current_width,
                 self.current_height,
-                self.effective_states(),
+                states,
                 self.decoration_mode_for_configure(),
                 dispatcher,
             );
@@ -1187,6 +1196,10 @@ pub mod xdg_toplevel {
                 || self
                     .current_states
                     .contains(&proto_xdg_toplevel::State::Fullscreen)
+        }
+
+        fn has_known_configure_size(&self) -> bool {
+            self.current_width > 0 && self.current_height > 0
         }
 
         fn relayout_after_constraint_change(
@@ -1582,14 +1595,22 @@ pub mod xdg_toplevel {
                 }
                 SetMaximized => {
                     self.requested_maximized = true;
-                    let mut xdg_surface = self.xdg_surface.grab(state);
+                    if !self.has_known_configure_size() {
+                        return Ok(());
+                    }
+                    let xdg_surface = self.xdg_surface;
                     let (mut this, bounds) = client.with_ungrabbed(self, state, |state| {
+                        let mut xdg_surface = xdg_surface.rref(state);
                         Self::configure_bounds_for_xdg_surface(client, state, &xdg_surface)
                     });
+                    let mut xdg_surface = this.xdg_surface.grab(state);
                     this.schedule_configure(client, state, bounds, &mut xdg_surface, dispatcher);
                 }
                 UnsetMaximized => {
                     self.requested_maximized = false;
+                    if !self.has_known_configure_size() {
+                        return Ok(());
+                    }
                     let xdg_surface = self.xdg_surface;
                     let (mut this, bounds) = client.with_ungrabbed(self, state, |state| {
                         let xdg_surface = xdg_surface.rref(state);
@@ -1726,7 +1747,7 @@ pub mod xdg_toplevel {
                 false,
             );
 
-            assert!(!states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
+            assert!(states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
             assert!(states.contains(&(proto_xdg_toplevel::State::TiledLeft as u32)));
             assert!(states.contains(&(proto_xdg_toplevel::State::TiledRight as u32)));
         }

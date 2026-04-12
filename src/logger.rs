@@ -7,15 +7,18 @@ pub const ENABLE_NOISY_LOG: bool = false;
 
 struct MyLogger {
     file: Option<std::fs::File>,
+    /// Monotonic clock origin for easy delta between log lines (e.g. client commits).
+    start: std::time::Instant,
 }
 
 impl MyLogger {
     #[allow(unused)]
     fn new() -> std::io::Result<Self> {
-        return Ok(Self { file: None });
+        let start = std::time::Instant::now();
+        return Ok(Self { file: None, start });
 
         if crate::utils::is_x11() {
-            return Ok(Self { file: None });
+            return Ok(Self { file: None, start });
         }
 
         let file = std::fs::OpenOptions::new()
@@ -29,7 +32,7 @@ impl MyLogger {
         // let file = None;
 
         redirect_to_file(file.as_ref())?;
-        Ok(Self { file })
+        Ok(Self { file, start })
     }
 }
 
@@ -58,6 +61,11 @@ impl log::Log for MyLogger {
     fn log(&self, record: &log::Record) {
         use owo_colors::{OwoColorize, Style};
 
+        let mono = self.start.elapsed();
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+
         let target = record.target();
         let target = target.strip_prefix("state_management::").unwrap_or(target);
         let target = target.on_black().bright_black();
@@ -72,7 +80,11 @@ impl log::Log for MyLogger {
         };
 
         eprintln!(
-            "[{:5}] {}{}{} {}",
+            "[t+{:>5}.{:03}s | unix.{:}.{:03}] [{:5}] {}{}{} {}",
+            mono.as_secs(),
+            mono.subsec_millis(),
+            wall.as_secs(),
+            wall.subsec_millis(),
             record.level().style(level_style),
             "[".on_black().bright_black(),
             target,

@@ -306,9 +306,15 @@ impl Model for ClientManager {
 }
 
 #[derive(Debug)]
-struct ProcessInfo {
+pub(crate) struct ProcessInfo {
     command: Rc<str>,
     cred: libc::ucred,
+}
+
+impl ProcessInfo {
+    pub(crate) fn command(&self) -> &str {
+        &self.command
+    }
 }
 
 const MIN_SERVER_ID: u32 = 0xff00_0000;
@@ -504,15 +510,32 @@ impl Client {
             log::error!("Unable to `getsockopt` of new client: {:?}", e);
             return;
         }
-        let comm = match std::fs::read(format!("/proc/{}/comm", cred.pid)) {
-            Ok(comm) => comm,
-            Err(e) => {
-                log::error!("Unable to read `comm` of new client: {:?}", e);
-                return;
+        let command = match std::fs::read(format!("/proc/{}/cmdline", cred.pid)) {
+            Ok(cmdline) if !cmdline.is_empty() => {
+                let argv = cmdline
+                    .split(|byte| *byte == 0)
+                    .filter(|arg| !arg.is_empty())
+                    .map(String::from_utf8_lossy)
+                    .map(|arg| arg.into_owned())
+                    .collect::<Vec<_>>();
+                if argv.is_empty() {
+                    None
+                } else {
+                    Some(argv.join(" "))
+                }
             }
+            Ok(_) | Err(_) => match std::fs::read(format!("/proc/{}/comm", cred.pid)) {
+                Ok(comm) => Some(String::from_utf8_lossy(&comm).trim().to_string()),
+                Err(e) => {
+                    log::error!("Unable to read process name of new client: {:?}", e);
+                    None
+                }
+            },
         };
-        let command = String::from_utf8_lossy(&comm);
-        let command = Rc::from(command.trim());
+        let Some(command) = command else {
+            return;
+        };
+        let command = Rc::from(command);
 
         self.info = Some(Rc::new(ProcessInfo { command, cred }))
     }
@@ -2049,6 +2072,7 @@ impl Model for Client {
         match action {
             Start => {
                 self.read_process_info();
+                state.set_client_process_info(self.id, self.info.clone());
                 log::info!(
                     "new client_id={:?} command={:?}",
                     self.id,
@@ -2255,6 +2279,7 @@ impl Model for Client {
                 if let Some(id) = self.reader_id.take() {
                     dispatcher.stop_model(id);
                 };
+                state.clear_client_process_info(self.id);
                 state.activation_tokens.remove_client(self.id);
                 let client_objects: Vec<(WaylandId, ObjectId)> = self
                     .objects

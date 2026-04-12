@@ -478,22 +478,18 @@ pub fn build_committed_root_geometry(
                 allocation.fullscreen,
                 decoration_insets,
             );
-            // With server-side decorations the compositor owns the frame; `client_window_rect` is the
-            // content region. Client `set_window_geometry` may still carry CSD-era insets (e.g. GTK);
-            // subtracting them here shifts the root surface and misaligns pixels vs our SSD border.
-            let computed_root_pos = match decoration_mode {
-                Some(ToplevelDecorationMode::ServerSide) => {
-                    (content_rect_global.x, content_rect_global.y)
-                }
-                _ => effective_window_geometry
-                    .map(|window_geometry| {
-                        (
-                            content_rect_global.x.saturating_sub(window_geometry.x),
-                            content_rect_global.y.saturating_sub(window_geometry.y),
-                        )
-                    })
-                    .unwrap_or((content_rect_global.x, content_rect_global.y)),
-            };
+            // The compositor still owns SSD frame sizing, but the client's effective window-geometry
+            // origin tells us where its real content lives inside the root surface. Align the root
+            // so that content lands on the compositor content rect even when clients keep a positive
+            // origin under SSD (for example GTK calculators with their own internal padding).
+            let computed_root_pos = effective_window_geometry
+                .map(|window_geometry| {
+                    (
+                        content_rect_global.x.saturating_sub(window_geometry.x),
+                        content_rect_global.y.saturating_sub(window_geometry.y),
+                    )
+                })
+                .unwrap_or((content_rect_global.x, content_rect_global.y));
             (layout_rect_global, content_rect_global, computed_root_pos, allocation.tiled_edges)
         } else {
             let translated_surface_bounds =
@@ -531,41 +527,6 @@ pub fn build_committed_root_geometry(
         fullscreen,
     };
 
-    if decoration_mode == Some(ToplevelDecorationMode::ServerSide)
-        && !fullscreen
-        && (decoration_insets.top > 0
-            || decoration_insets.right > 0
-            || decoration_insets.bottom > 0
-            || decoration_insets.left > 0)
-    {
-        log::debug!(
-            target: "state_management::root_geometry",
-            "ssd_insets surface={:?} layout_allocated={} layout_rect={:?} content_rect={:?} \
-             logical_window_rect={:?} surface_bounds_global={:?} \
-             visual_outer={:?} window_target={:?} binding={:?} root_pos={:?} \
-             surface_root_pos={:?} local_surface_bounds={:?} insets=({},{},{},{}) \
-             logical_window_local={:?} decoration_layout={:?}",
-            surface_object_id,
-            layout_allocation.is_some(),
-            geometry.layout_rect_global,
-            geometry.content_rect_global(),
-            geometry.logical_window_rect_global(),
-            geometry.surface_bounds_global(),
-            geometry.surface_bounds_global(),
-            geometry.window_target_rect(),
-            geometry.binding_rect(surface.logical_size()),
-            computed_root_pos,
-            surface.root_position(),
-            local_surface_bounds,
-            decoration_insets.top,
-            decoration_insets.right,
-            decoration_insets.bottom,
-            decoration_insets.left,
-            geometry.logical_window_local,
-            geometry.decoration_layout(),
-        );
-    }
-
     Some(geometry)
 }
 
@@ -586,17 +547,14 @@ pub fn predictive_tiled_geometry(
         layout_allocation.fullscreen,
         decoration_insets,
     );
-    let root_pos = match decoration_mode {
-        ToplevelDecorationMode::ServerSide => (content_rect_global.x, content_rect_global.y),
-        _ => explicit_window_geometry
-            .map(|window_geometry| {
-                (
-                    content_rect_global.x.saturating_sub(window_geometry.x),
-                    content_rect_global.y.saturating_sub(window_geometry.y),
-                )
-            })
-            .unwrap_or((content_rect_global.x, content_rect_global.y)),
-    };
+    let root_pos = explicit_window_geometry
+        .map(|window_geometry| {
+            (
+                content_rect_global.x.saturating_sub(window_geometry.x),
+                content_rect_global.y.saturating_sub(window_geometry.y),
+            )
+        })
+        .unwrap_or((content_rect_global.x, content_rect_global.y));
     let logical_window_local = explicit_window_geometry
         .or_else(|| rect_in_root_local_space(content_rect_global, root_pos));
     CommittedRootGeometry {
