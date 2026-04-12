@@ -2100,18 +2100,24 @@ mod tests {
         root_pos: (i32, i32),
     ) -> CommittedRootGeometry {
         CommittedRootGeometry {
-            placement_rect: frame_rect,
-            client_window_rect,
-            window_target_rect: frame_rect,
-            binding_rect: frame_rect,
-            visual_outer_rect: frame_rect,
-            compositor_decoration_layout: None,
+            layout_rect_global: frame_rect,
             root_pos,
-            tiled_edges,
-            fullscreen,
+            surface_bounds_local: crate::region::RectI::new(
+                frame_rect.x.saturating_sub(root_pos.0),
+                frame_rect.y.saturating_sub(root_pos.1),
+                frame_rect.width,
+                frame_rect.height,
+            ),
+            logical_window_local: crate::region::RectI::new(
+                client_window_rect.x.saturating_sub(root_pos.0),
+                client_window_rect.y.saturating_sub(root_pos.1),
+                client_window_rect.width,
+                client_window_rect.height,
+            ),
             decoration_mode: None,
             decoration_insets: DecorationInsets::default(),
-            effective_window_geometry: None,
+            tiled_edges,
+            fullscreen,
         }
     }
 

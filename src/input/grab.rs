@@ -474,8 +474,8 @@ fn interactive_damage_rect(
     root_surface: Resolved<WlSurfaceId>,
 ) -> Option<crate::region::RectI> {
     state
-        .root_surface_visual_outer_rect(root_surface)
-        .or_else(|| state.root_surface_client_window_rect(root_surface))
+        .root_surface_surface_bounds_global(root_surface)
+        .or_else(|| state.root_surface_content_rect_global(root_surface))
 }
 
 #[cfg(test)]
@@ -505,18 +505,14 @@ mod tests {
             root_surface,
             std::cell::Cell::new(crate::state::RootGeometryCacheEntry {
                 geometry: Some(CommittedRootGeometry {
-                    placement_rect: RectI { x: 20, y: 30, width: 120, height: 90 },
-                    client_window_rect: RectI { x: 30, y: 40, width: 100, height: 70 },
-                    window_target_rect: RectI { x: 20, y: 30, width: 120, height: 90 },
-                    binding_rect: RectI { x: 20, y: 30, width: 120, height: 90 },
-                    visual_outer_rect: RectI { x: 15, y: 25, width: 130, height: 100 },
-                    compositor_decoration_layout: None,
+                    layout_rect_global: RectI { x: 20, y: 30, width: 120, height: 90 },
                     root_pos: (20, 30),
-                    tiled_edges: 0,
-                    fullscreen: false,
+                    surface_bounds_local: Some(RectI { x: -5, y: -5, width: 130, height: 100 }),
+                    logical_window_local: Some(RectI { x: 10, y: 10, width: 100, height: 70 }),
                     decoration_mode: None,
                     decoration_insets: DecorationInsets::default(),
-                    effective_window_geometry: None,
+                    tiled_edges: 0,
+                    fullscreen: false,
                 }),
                 dirty: false,
                 revision: 0,

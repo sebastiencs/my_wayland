@@ -32,7 +32,7 @@ pub(crate) fn scene_pick_at(state: &State, pointer_pos: (f64, f64)) -> ScenePick
         let window_target_for_root = has_mapped_bounds
             .then(|| state.committed_root_geometry(root_surface))
             .flatten()
-            .filter(|geometry| rect_contains_point(geometry.window_target_rect, pointer_pos))
+            .filter(|geometry| rect_contains_point(geometry.window_target_rect(), pointer_pos))
             .and_then(|_| build_window_target(state, root_surface));
         if root_hit.is_some() || window_target_for_root.is_some() {
             surface_focus = root_hit;
@@ -117,7 +117,10 @@ pub(crate) fn build_window_target(
     Some(WindowSnapshot {
         root_surface,
         role,
-        geometry: crate::root_geometry::project_window_target_geometry(geometry),
+        geometry: crate::root_geometry::project_window_target_geometry(
+            geometry,
+            surface.logical_size(),
+        ),
     })
 }
 
@@ -296,18 +299,14 @@ mod tests {
             root_surface,
             std::cell::Cell::new(crate::state::RootGeometryCacheEntry {
                 geometry: Some(CommittedRootGeometry {
-                    placement_rect: RectI { x: 20, y: 30, width: 120, height: 80 },
-                    client_window_rect: RectI { x: 20, y: 30, width: 120, height: 80 },
-                    window_target_rect: RectI { x: 20, y: 30, width: 120, height: 80 },
-                    binding_rect: RectI { x: 20, y: 30, width: 120, height: 80 },
-                    visual_outer_rect: RectI { x: 20, y: 30, width: 120, height: 80 },
-                    compositor_decoration_layout: None,
+                    layout_rect_global: RectI { x: 20, y: 30, width: 120, height: 80 },
                     root_pos: (20, 30),
-                    tiled_edges: 0,
-                    fullscreen: false,
+                    surface_bounds_local: Some(RectI { x: 0, y: 0, width: 120, height: 80 }),
+                    logical_window_local: Some(RectI { x: 0, y: 0, width: 120, height: 80 }),
                     decoration_mode: Some(ToplevelDecorationMode::ClientSide),
                     decoration_insets: DecorationInsets::default(),
-                    effective_window_geometry: Some(RectI { x: 0, y: 0, width: 120, height: 80 }),
+                    tiled_edges: 0,
+                    fullscreen: false,
                 }),
                 dirty: false,
                 revision: 0,
@@ -357,18 +356,14 @@ mod tests {
             root_surface,
             std::cell::Cell::new(crate::state::RootGeometryCacheEntry {
                 geometry: Some(CommittedRootGeometry {
-                    placement_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                    client_window_rect: RectI { x: 25, y: 25, width: 1230, height: 750 },
-                    window_target_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                    binding_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                    visual_outer_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                    compositor_decoration_layout: None,
+                    layout_rect_global: RectI { x: 20, y: 20, width: 1240, height: 760 },
                     root_pos: (25, 25),
-                    tiled_edges: 0,
-                    fullscreen: false,
+                    surface_bounds_local: Some(RectI { x: -5, y: -5, width: 1240, height: 760 }),
+                    logical_window_local: Some(RectI { x: 0, y: 0, width: 1230, height: 750 }),
                     decoration_mode: Some(ToplevelDecorationMode::ServerSide),
                     decoration_insets: DecorationInsets { top: 5, right: 5, bottom: 5, left: 5 },
-                    effective_window_geometry: Some(RectI { x: 0, y: 0, width: 1230, height: 750 }),
+                    tiled_edges: 0,
+                    fullscreen: false,
                 }),
                 dirty: false,
                 revision: 0,

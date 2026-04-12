@@ -1565,14 +1565,20 @@ impl State {
         Self::resolve_xdg_decoration_mode_policy(selected_policy, requested_mode)
     }
 
-    pub fn root_surface_client_window_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
+    pub fn root_surface_content_rect_global(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<RectI> {
         self.committed_root_geometry(surface)
-            .map(|geometry| geometry.client_window_rect)
+            .map(|geometry| geometry.content_rect_global())
     }
 
     pub fn root_surface_binding_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
-        self.committed_root_geometry(surface)
-            .map(|geometry| geometry.binding_rect)
+        let geometry = self.committed_root_geometry(surface)?;
+        let logical_size = surface
+            .try_ref(self)
+            .and_then(|surface| surface.logical_size());
+        Some(geometry.binding_rect(logical_size))
     }
 
     pub fn root_surface_decoration_insets(
@@ -1612,8 +1618,7 @@ impl State {
         &self,
         surface: Resolved<WlSurfaceId>,
     ) -> Option<DecorationFrameLayout> {
-        self.committed_root_geometry(surface)?
-            .compositor_decoration_layout
+        self.committed_root_geometry(surface)?.decoration_layout()
     }
 
     pub fn root_surface_clip(&self, surface: Resolved<WlSurfaceId>) -> Option<RootSurfaceClip> {
@@ -1662,8 +1667,8 @@ impl State {
     ) -> Option<RectI> {
         self.root_surface_visual_state(surface)
             .map(|visual| visual.influence_bounds())
-            .or_else(|| self.root_surface_visual_outer_rect(surface))
-            .or_else(|| self.root_surface_client_window_rect(surface))
+            .or_else(|| self.root_surface_surface_bounds_global(surface))
+            .or_else(|| self.root_surface_content_rect_global(surface))
     }
 
     pub fn advance_window_visual_animations(
@@ -1705,13 +1710,14 @@ impl State {
         surface: Resolved<WlSurfaceId>,
     ) -> Option<RootSurfaceVisualState> {
         let geometry = self.committed_root_geometry(surface)?;
-        let compositor_layout = geometry.compositor_decoration_layout;
+        let compositor_layout = geometry.decoration_layout();
         let outer_rect = compositor_layout
             .map(|layout| layout.frame_rect)
-            .unwrap_or(geometry.visual_outer_rect);
+            .or_else(|| geometry.surface_bounds_global())
+            .unwrap_or_else(|| geometry.content_rect_global());
         let content_rect = compositor_layout
             .map(|layout| layout.client_window_rect)
-            .unwrap_or(geometry.client_window_rect);
+            .unwrap_or_else(|| geometry.content_rect_global());
         let compositor_decorations_enabled = compositor_layout.is_some();
         let has_visible_decoration_ring =
             compositor_decorations_enabled && outer_rect != content_rect;
@@ -1774,9 +1780,12 @@ impl State {
         Some(visual_state)
     }
 
-    pub fn root_surface_visual_outer_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
+    pub fn root_surface_surface_bounds_global(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<RectI> {
         self.committed_root_geometry(surface)
-            .map(|geometry| geometry.visual_outer_rect)
+            .and_then(|geometry| geometry.surface_bounds_global())
     }
 
     pub fn root_surface_for_surface(
@@ -2634,8 +2643,9 @@ impl State {
         });
         geometry
             .and_then(|geometry| {
+                let surface_bounds_global = geometry.surface_bounds_global()?;
                 self.output_layout()
-                    .primary_output_for_rect(geometry.visual_outer_rect, preferred_output_id)
+                    .primary_output_for_rect(surface_bounds_global, preferred_output_id)
             })
             .or(preferred_output_id)
     }
@@ -2834,24 +2844,14 @@ mod tests {
             surface,
             Cell::new(RootGeometryCacheEntry {
                 geometry: Some(crate::root_geometry::CommittedRootGeometry {
-                    placement_rect: RectI::new(10, 20, 200, 140).unwrap(),
-                    client_window_rect: RectI::new(15, 25, 190, 130).unwrap(),
-                    window_target_rect: RectI::new(10, 20, 200, 140).unwrap(),
-                    binding_rect: RectI::new(10, 20, 200, 140).unwrap(),
-                    visual_outer_rect: RectI::new(10, 20, 200, 140).unwrap(),
-                    compositor_decoration_layout: Some(
-                        crate::root_geometry::DecorationFrameLayout {
-                            frame_rect: RectI::new(10, 20, 200, 140).unwrap(),
-                            client_window_rect: RectI::new(15, 25, 190, 130).unwrap(),
-                            titlebar_rect: None,
-                        },
-                    ),
+                    layout_rect_global: RectI::new(10, 20, 200, 140).unwrap(),
                     root_pos: (10, 20),
+                    surface_bounds_local: Some(RectI::new(0, 0, 200, 140).unwrap()),
+                    logical_window_local: Some(RectI::new(5, 5, 190, 130).unwrap()),
+                    decoration_mode: Some(ToplevelDecorationMode::ServerSide),
+                    decoration_insets: DecorationInsets { top: 5, right: 5, bottom: 5, left: 5 },
                     tiled_edges: 0,
                     fullscreen: false,
-                    decoration_mode: Some(ToplevelDecorationMode::ServerSide),
-                    decoration_insets: DecorationInsets::default(),
-                    effective_window_geometry: None,
                 }),
                 dirty: false,
                 revision: 0,
@@ -2874,8 +2874,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(geometry.decoration_mode, Some(ToplevelDecorationMode::ClientSide));
-        assert_eq!(geometry.client_window_rect, RectI::new(0, 0, 160, 120).unwrap());
-        assert_eq!(geometry.window_target_rect, RectI::new(0, 0, 160, 120).unwrap());
+        assert_eq!(geometry.content_rect_global(), RectI::new(0, 0, 160, 120).unwrap());
+        assert_eq!(geometry.window_target_rect(), RectI::new(0, 0, 160, 120).unwrap());
     }
 
     #[test]
@@ -2901,7 +2901,7 @@ mod tests {
             .expect("geometry should rebuild for dirty reader");
 
         assert_eq!(geometry.root_pos, (45, 55));
-        assert_eq!(geometry.placement_rect, RectI::new(45, 55, 160, 120).unwrap());
+        assert_eq!(geometry.layout_rect_global, RectI::new(45, 55, 160, 120).unwrap());
         assert!(state.root_geometry_cache[&surface].get().is_fresh());
     }
 
@@ -3602,18 +3602,14 @@ mod tests {
             root_surface,
             Cell::new(RootGeometryCacheEntry {
                 geometry: Some(crate::root_geometry::CommittedRootGeometry {
-                    placement_rect: RectI { x: 40, y: 50, width: 120, height: 90 },
-                    client_window_rect: RectI { x: 50, y: 60, width: 100, height: 70 },
-                    window_target_rect: RectI { x: 40, y: 50, width: 120, height: 90 },
-                    binding_rect: RectI { x: 40, y: 50, width: 120, height: 90 },
-                    visual_outer_rect: RectI { x: 40, y: 50, width: 120, height: 90 },
-                    compositor_decoration_layout: None,
+                    layout_rect_global: RectI { x: 40, y: 50, width: 120, height: 90 },
                     root_pos: (40, 50),
-                    tiled_edges: 0,
-                    fullscreen: false,
+                    surface_bounds_local: Some(RectI { x: 0, y: 0, width: 120, height: 90 }),
+                    logical_window_local: Some(RectI { x: 10, y: 10, width: 100, height: 70 }),
                     decoration_mode: None,
                     decoration_insets: DecorationInsets::default(),
-                    effective_window_geometry: None,
+                    tiled_edges: 0,
+                    fullscreen: false,
                 }),
                 dirty: false,
                 revision: 0,

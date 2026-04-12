@@ -1826,15 +1826,10 @@ pub mod xdg_toplevel {
                 7,
             );
             let geometry = crate::root_geometry::CommittedRootGeometry {
-                placement_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                client_window_rect: RectI { x: 25, y: 25, width: 1230, height: 750 },
-                window_target_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                binding_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                visual_outer_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                compositor_decoration_layout: None,
+                layout_rect_global: RectI { x: 20, y: 20, width: 1240, height: 760 },
                 root_pos: (25, 25),
-                tiled_edges: crate::tiling::EDGE_TOP | crate::tiling::EDGE_LEFT,
-                fullscreen: false,
+                surface_bounds_local: Some(RectI { x: -5, y: -5, width: 1240, height: 760 }),
+                logical_window_local: Some(RectI { x: 0, y: 0, width: 1230, height: 750 }),
                 decoration_mode: Some(ToplevelDecorationMode::ServerSide),
                 decoration_insets: crate::config::DecorationInsets {
                     top: 5,
@@ -1842,7 +1837,8 @@ pub mod xdg_toplevel {
                     bottom: 5,
                     left: 5,
                 },
-                effective_window_geometry: Some(RectI { x: 0, y: 0, width: 1230, height: 750 }),
+                tiled_edges: crate::tiling::EDGE_TOP | crate::tiling::EDGE_LEFT,
+                fullscreen: false,
             };
 
             toplevel.schedule_decoration_mode(ToplevelDecorationMode::ServerSide);
@@ -1902,15 +1898,10 @@ pub mod xdg_toplevel {
                 7,
             );
             let geometry = crate::root_geometry::CommittedRootGeometry {
-                placement_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                client_window_rect: RectI { x: 25, y: 25, width: 1230, height: 750 },
-                window_target_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                binding_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                visual_outer_rect: RectI { x: 20, y: 20, width: 1240, height: 760 },
-                compositor_decoration_layout: None,
+                layout_rect_global: RectI { x: 20, y: 20, width: 1240, height: 760 },
                 root_pos: (25, 25),
-                tiled_edges: crate::tiling::EDGE_TOP | crate::tiling::EDGE_LEFT,
-                fullscreen: false,
+                surface_bounds_local: Some(RectI { x: -5, y: -5, width: 1240, height: 760 }),
+                logical_window_local: Some(RectI { x: 0, y: 0, width: 1230, height: 750 }),
                 decoration_mode: Some(ToplevelDecorationMode::ServerSide),
                 decoration_insets: crate::config::DecorationInsets {
                     top: 5,
@@ -1918,7 +1909,8 @@ pub mod xdg_toplevel {
                     bottom: 5,
                     left: 5,
                 },
-                effective_window_geometry: Some(RectI { x: 0, y: 0, width: 1230, height: 750 }),
+                tiled_edges: crate::tiling::EDGE_TOP | crate::tiling::EDGE_LEFT,
+                fullscreen: false,
             };
 
             toplevel.schedule_decoration_mode(ToplevelDecorationMode::ClientSide);

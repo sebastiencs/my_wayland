@@ -30,51 +30,131 @@ pub struct DecorationFrameLayout {
 }
 
 /// Final committed geometry snapshot for one root surface.
-/// Each field has a single role: placement, client window, whole-window targeting, compositor chrome, or visuals.
-/// This is the single geometry object consumed by configure, input, and rendering code.
-/// Callers should read the field matching their subsystem instead of inferring semantics.
+///
+/// This struct stores only canonical facts:
+/// compositor layout in global space, the committed root-surface origin, the
+/// committed surface/logical bounds in root-local space, and effective
+/// decoration metadata. Consumers should derive subsystem-specific rectangles
+/// such as input targets, visual extents, and decoration layout through the
+/// projection methods below instead of caching separate copies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommittedRootGeometry {
-    /// Layout/compositor placement rectangle for the root surface as a whole.
-    pub placement_rect: RectI,
-    /// Client-visible window rectangle used for protocol/configure semantics.
-    pub client_window_rect: RectI,
-    /// Rectangle that should answer whole-window targeting and focus hits.
-    pub window_target_rect: RectI,
-    /// Rectangle that should answer compositor bindings and resize-edge inference.
-    pub binding_rect: RectI,
-    /// Full visual bounds used for rendering, clips, and damage calculations.
-    pub visual_outer_rect: RectI,
-    /// Explicit compositor-owned SSD chrome layout, if any.
-    pub compositor_decoration_layout: Option<DecorationFrameLayout>,
+    /// Global compositor layout slot for the root surface.
+    ///
+    /// Under server-side decorations this is the outer frame rect. Under
+    /// client-side or undecorated paths it matches the compositor-assigned
+    /// outer content slot.
+    pub layout_rect_global: RectI,
     /// Current root `wl_surface` origin in global compositor coordinates.
     pub root_pos: (i32, i32),
-    /// Tiled edge mask exported to xdg_toplevel configure state.
-    pub tiled_edges: u32,
-    /// Whether this snapshot represents fullscreen layout semantics.
-    pub fullscreen: bool,
+    /// Full committed root surface-tree bounds in root-local coordinates.
+    ///
+    /// Translating this by `root_pos` yields the actual visual extent used for
+    /// rendering, output selection, and damage decisions.
+    pub surface_bounds_local: Option<RectI>,
+    /// Effective client-declared window geometry in root-local coordinates.
+    ///
+    /// This preserves the protocol/logical window box independently from the
+    /// compositor's chosen layout/content rect.
+    pub logical_window_local: Option<RectI>,
     /// Effective decoration mode used when this snapshot was built.
     pub decoration_mode: Option<ToplevelDecorationMode>,
     /// Effective per-edge decoration insets used by final geometry resolution.
     pub decoration_insets: DecorationInsets,
-    /// Effective xdg window geometry after clamping to known surface bounds.
-    pub effective_window_geometry: Option<RectI>,
+    /// Tiled edge mask exported to xdg_toplevel configure state.
+    pub tiled_edges: u32,
+    /// Whether this snapshot represents fullscreen layout semantics.
+    pub fullscreen: bool,
 }
 
+impl CommittedRootGeometry {
+    /// Derive the compositor content rect in global space.
+    ///
+    /// This is the rectangle used for configure/content sizing and corresponds
+    /// to the old stored `client_window_rect`.
+    pub fn content_rect_global(self) -> RectI {
+        project_content_rect_global(
+            self.layout_rect_global,
+            self.decoration_mode,
+            self.fullscreen,
+            self.decoration_insets,
+        )
+    }
+
+    /// Derive the client-declared logical window rectangle in global space.
+    pub fn logical_window_rect_global(self) -> Option<RectI> {
+        self.logical_window_local
+            .and_then(|rect| translate_local_rect_to_global(rect, self.root_pos))
+    }
+
+    /// Derive the committed visual surface-tree bounds in global space.
+    pub fn surface_bounds_global(self) -> Option<RectI> {
+        translated_surface_tree_bounds(self.surface_bounds_local, self.root_pos)
+    }
+
+    /// Derive the whole outer frame rect in global space.
+    pub fn frame_rect_global(self) -> RectI {
+        if compositor_decorations_enabled(self.decoration_mode, self.fullscreen) {
+            self.layout_rect_global
+        } else {
+            self.content_rect_global()
+        }
+    }
+
+    /// Derive compositor-owned SSD chrome layout, if any.
+    pub fn decoration_layout(self) -> Option<DecorationFrameLayout> {
+        compositor_decoration_layout(
+            self.frame_rect_global(),
+            self.content_rect_global(),
+            self.decoration_insets,
+            self.decoration_mode,
+            self.fullscreen,
+        )
+    }
+
+    /// Derive the whole-window target rect for focus and pick semantics.
+    pub fn window_target_rect(self) -> RectI {
+        self.decoration_layout()
+            .map(|layout| layout.frame_rect)
+            .or_else(|| self.surface_bounds_global())
+            .unwrap_or_else(|| self.content_rect_global())
+    }
+
+    /// Derive the compositor binding rect used for resize-edge inference.
+    pub fn binding_rect(self, logical_size: Option<SizeI>) -> RectI {
+        self.decoration_layout()
+            .map(|layout| layout.frame_rect)
+            .or_else(|| {
+                non_ssd_binding_rect(logical_size, self.logical_window_local, self.root_pos)
+            })
+            .or_else(|| self.surface_bounds_global())
+            .unwrap_or_else(|| self.content_rect_global())
+    }
+}
+
+/// Geometry projected for xdg configure events.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConfigureGeometry {
+    /// Global configure window rect implied by the requested decoration mode.
     pub window_rect: RectI,
+    /// Width and height sent to the client for the configure.
     pub size: (i32, i32),
 }
 
+/// Geometry projected for interactive move/resize targeting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WindowTargetGeometry {
+    /// Global root `wl_surface` origin to apply before hit/input transforms.
     pub root_pos: (i32, i32),
+    /// Width and height that interactive resize should treat as the window size.
     pub resize_size: (i32, i32),
+    /// Whole-window target rect used for focus and move hits.
     pub target_rect: RectI,
+    /// Rect used for compositor binding and resize-edge inference.
     pub binding_rect: RectI,
 }
 
+/// Project configure geometry for a committed snapshot and pending decoration policy.
 pub fn project_configure_geometry(
     geometry: CommittedRootGeometry,
     pending_decoration_mode: ToplevelDecorationMode,
@@ -82,24 +162,38 @@ pub fn project_configure_geometry(
 ) -> ConfigureGeometry {
     let window_rect =
         if geometry.fullscreen || pending_decoration_mode == ToplevelDecorationMode::ClientSide {
-            geometry.placement_rect
+            geometry.layout_rect_global
         } else if geometry.decoration_mode == Some(ToplevelDecorationMode::ServerSide) {
-            geometry.client_window_rect
+            geometry.content_rect_global()
         } else {
-            shrink_rect(geometry.placement_rect, configured_decoration_insets)
+            project_content_rect_global(
+                geometry.layout_rect_global,
+                Some(ToplevelDecorationMode::ServerSide),
+                geometry.fullscreen,
+                configured_decoration_insets,
+            )
         };
     ConfigureGeometry { window_rect, size: (window_rect.width, window_rect.height) }
 }
 
-pub fn project_window_target_geometry(geometry: CommittedRootGeometry) -> WindowTargetGeometry {
+/// Project interaction target geometry from a committed snapshot.
+pub fn project_window_target_geometry(
+    geometry: CommittedRootGeometry,
+    logical_size: Option<SizeI>,
+) -> WindowTargetGeometry {
     WindowTargetGeometry {
         root_pos: geometry.root_pos,
-        resize_size: (geometry.client_window_rect.width, geometry.client_window_rect.height),
-        target_rect: geometry.window_target_rect,
-        binding_rect: geometry.binding_rect,
+        resize_size: {
+            let content_rect = geometry.content_rect_global();
+            (content_rect.width, content_rect.height)
+        },
+        target_rect: geometry.window_target_rect(),
+        binding_rect: geometry.binding_rect(logical_size),
     }
 }
 
+/// Resolve a committed geometry snapshot, reusing cache entries when the requested
+/// overrides do not change the canonical stored facts.
 pub fn resolve_committed_root_geometry_with_overrides(
     state: &State,
     surface_object_id: Resolved<WlSurfaceId>,
@@ -139,6 +233,8 @@ fn cached_geometry_reusable_for_overrides(
         })
 }
 
+/// Protocol move targets use the committed interaction projections for the
+/// decoration mode currently negotiated with the client.
 pub fn resolve_protocol_move_target_geometry(
     state: &State,
     surface_object_id: Resolved<WlSurfaceId>,
@@ -156,9 +252,11 @@ pub fn resolve_protocol_move_target_geometry(
             root_pos: Some(surface.root_position()),
         },
     )?;
-    Some(project_window_target_geometry(geometry))
+    Some(project_window_target_geometry(geometry, surface.logical_size()))
 }
 
+/// Protocol resize targets combine committed targeting rects with configure-sized
+/// resize dimensions for the pending decoration mode.
 pub fn resolve_protocol_resize_target_geometry(
     state: &State,
     surface_object_id: Resolved<WlSurfaceId>,
@@ -184,16 +282,20 @@ pub fn resolve_protocol_resize_target_geometry(
             state.configured_decoration_insets(),
         )
         .size,
-        target_rect: geometry.window_target_rect,
-        binding_rect: geometry.binding_rect,
+        target_rect: geometry.window_target_rect(),
+        binding_rect: geometry.binding_rect(surface.logical_size()),
     })
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GeometryBuildOverrides {
+    /// Force a specific decoration mode while projecting geometry.
     pub decoration_mode: Option<ToplevelDecorationMode>,
+    /// Override the effective logical window geometry in root-local space.
     pub explicit_window_geometry: Option<RectI>,
+    /// Override the effective decoration insets.
     pub decoration_insets: Option<DecorationInsets>,
+    /// Override the committed root origin in global coordinates.
     pub root_pos: Option<(i32, i32)>,
 }
 
@@ -241,6 +343,8 @@ pub fn effective_decoration_insets(
     effective_decoration_insets_for_surface(state, surface)
 }
 
+/// Compute effective decoration insets for a surface using the current
+/// decoration ownership policy and the surface's effective logical geometry.
 pub fn effective_decoration_insets_for_surface(
     state: &State,
     surface: &WlSurface,
@@ -260,6 +364,7 @@ pub fn effective_decoration_insets_for_surface(
     geometry_ownership.decoration_insets(fallback, surface, effective_window_geometry)
 }
 
+/// Derive CSD-style decoration insets from a client-declared window geometry.
 pub fn decoration_insets_from_window_geometry(
     surface: &WlSurface,
     window_geometry: RectI,
@@ -268,6 +373,7 @@ pub fn decoration_insets_from_window_geometry(
     decoration_insets_from_window_geometry_and_logical_size(logical_size, window_geometry)
 }
 
+/// Derive CSD-style decoration insets from a logical size and window geometry.
 pub fn decoration_insets_from_window_geometry_and_logical_size(
     logical_size: SizeI,
     window_geometry: RectI,
@@ -298,6 +404,8 @@ pub fn decoration_insets_from_window_geometry_and_logical_size(
     })
 }
 
+/// Clamp explicit window geometry to committed surface bounds, or fall back to
+/// committed surface-tree bounds when the client did not provide one.
 pub fn effective_window_geometry_for_surface(
     state: &State,
     surface: &WlSurface,
@@ -314,6 +422,12 @@ pub fn effective_window_geometry_for_surface(
     }
 }
 
+/// Build the canonical committed geometry snapshot for a root surface.
+///
+/// The builder first resolves effective logical geometry and decoration policy,
+/// then computes compositor layout in global space and stores only canonical
+/// layout/root-local facts. Consumers should derive subsystem-specific views
+/// from the returned snapshot instead of storing duplicate rectangles.
 pub fn build_committed_root_geometry(
     state: &State,
     surface_object_id: Resolved<WlSurfaceId>,
@@ -355,123 +469,67 @@ pub fn build_committed_root_geometry(
     });
 
     let local_surface_bounds = WlSurface::local_surface_tree_bounds_from_ref(state, surface);
-    let (
-        placement_rect,
-        client_window_rect,
-        window_target_rect,
-        binding_rect,
-        visual_outer_rect,
-        computed_root_pos,
-        tiled_edges,
-    ) = if let Some(allocation) = layout_allocation {
-        let placement_rect = allocation.frame_rect;
-        let fallback_client_window_rect =
-            if decoration_mode == Some(ToplevelDecorationMode::ClientSide) {
-                placement_rect
-            } else if allocation.fullscreen {
-                placement_rect
-            } else {
-                shrink_rect(placement_rect, decoration_insets)
+    let (layout_rect_global, logical_window_rect_global, computed_root_pos, tiled_edges) =
+        if let Some(allocation) = layout_allocation {
+            let layout_rect_global = allocation.frame_rect;
+            let content_rect_global = project_content_rect_global(
+                layout_rect_global,
+                decoration_mode,
+                allocation.fullscreen,
+                decoration_insets,
+            );
+            // With server-side decorations the compositor owns the frame; `client_window_rect` is the
+            // content region. Client `set_window_geometry` may still carry CSD-era insets (e.g. GTK);
+            // subtracting them here shifts the root surface and misaligns pixels vs our SSD border.
+            let computed_root_pos = match decoration_mode {
+                Some(ToplevelDecorationMode::ServerSide) => {
+                    (content_rect_global.x, content_rect_global.y)
+                }
+                _ => effective_window_geometry
+                    .map(|window_geometry| {
+                        (
+                            content_rect_global.x.saturating_sub(window_geometry.x),
+                            content_rect_global.y.saturating_sub(window_geometry.y),
+                        )
+                    })
+                    .unwrap_or((content_rect_global.x, content_rect_global.y)),
             };
-        let anchor_rect = match decoration_mode {
-            Some(ToplevelDecorationMode::ClientSide) => placement_rect,
-            _ => fallback_client_window_rect,
-        };
-        // With server-side decorations the compositor owns the frame; `client_window_rect` is the
-        // content region. Client `set_window_geometry` may still carry CSD-era insets (e.g. GTK);
-        // subtracting them here shifts the root surface and misaligns pixels vs our SSD border.
-        let computed_root_pos = match decoration_mode {
-            Some(ToplevelDecorationMode::ServerSide) => {
-                (fallback_client_window_rect.x, fallback_client_window_rect.y)
-            }
-            _ => effective_window_geometry
-                .map(|window_geometry| {
-                    (
-                        anchor_rect.x.saturating_sub(window_geometry.x),
-                        anchor_rect.y.saturating_sub(window_geometry.y),
+            (layout_rect_global, content_rect_global, computed_root_pos, allocation.tiled_edges)
+        } else {
+            let translated_surface_bounds =
+                translated_surface_tree_bounds(local_surface_bounds, root_pos);
+            let logical_window_rect_global = effective_window_geometry
+                .and_then(|window_geometry| {
+                    project_window_geometry_from_surface_bounds(
+                        window_geometry,
+                        translated_surface_bounds,
+                        local_surface_bounds,
+                        root_pos,
                     )
                 })
-                .unwrap_or((fallback_client_window_rect.x, fallback_client_window_rect.y)),
+                .or(translated_surface_bounds)?;
+            let layout_rect_global = if compositor_decorations_enabled(decoration_mode, fullscreen)
+            {
+                inflate_rect_with_insets(logical_window_rect_global, decoration_insets)
+            } else {
+                logical_window_rect_global
+            };
+            (layout_rect_global, logical_window_rect_global, root_pos, 0)
         };
-        let client_window_rect = anchor_rect;
-        let compositor_decoration_layout = compositor_decoration_layout(
-            placement_rect,
-            client_window_rect,
-            decoration_insets,
-            decoration_mode,
-            fullscreen,
-        );
-        let visual_outer_rect =
-            translated_surface_tree_bounds(local_surface_bounds, computed_root_pos)
-                .unwrap_or(client_window_rect);
-        let window_target_rect = compositor_decoration_layout
-            .map(|layout| layout.frame_rect)
-            .unwrap_or(visual_outer_rect);
-        let binding_rect = compositor_decoration_layout
-            .map(|layout| layout.frame_rect)
-            .unwrap_or(client_window_rect);
-        (
-            placement_rect,
-            client_window_rect,
-            window_target_rect,
-            binding_rect,
-            visual_outer_rect,
-            computed_root_pos,
-            allocation.tiled_edges,
-        )
-    } else {
-        let translated_surface_bounds =
-            translated_surface_tree_bounds(local_surface_bounds, root_pos);
-        let client_window_rect = effective_window_geometry
-            .and_then(|window_geometry| {
-                project_window_geometry_from_surface_bounds(
-                    window_geometry,
-                    translated_surface_bounds,
-                    local_surface_bounds,
-                    root_pos,
-                )
-            })
-            .or(translated_surface_bounds)?;
-        let placement_rect = if compositor_decorations_enabled(decoration_mode, fullscreen) {
-            inflate_rect_with_insets(client_window_rect, decoration_insets)
-        } else {
-            client_window_rect
-        };
-        let compositor_decoration_layout = compositor_decoration_layout(
-            placement_rect,
-            client_window_rect,
-            decoration_insets,
-            decoration_mode,
-            fullscreen,
-        );
-        let visual_outer_rect = translated_surface_bounds.unwrap_or(client_window_rect);
-        let window_target_rect = compositor_decoration_layout
-            .map(|layout| layout.frame_rect)
-            .unwrap_or(visual_outer_rect);
-        let binding_rect = compositor_decoration_layout
-            .map(|layout| layout.frame_rect)
-            .unwrap_or_else(|| {
-                non_ssd_binding_rect(surface.logical_size(), effective_window_geometry, root_pos)
-                    .unwrap_or(client_window_rect)
-            });
-        (
-            placement_rect,
-            client_window_rect,
-            window_target_rect,
-            binding_rect,
-            visual_outer_rect,
-            root_pos,
-            0,
-        )
-    };
 
-    let compositor_decoration_layout = compositor_decoration_layout(
-        placement_rect,
-        client_window_rect,
-        decoration_insets,
+    let logical_window_local = effective_window_geometry
+        .or_else(|| rect_in_root_local_space(logical_window_rect_global, computed_root_pos));
+
+    let geometry = CommittedRootGeometry {
+        layout_rect_global,
+        root_pos: computed_root_pos,
+        surface_bounds_local: local_surface_bounds,
+        logical_window_local,
         decoration_mode,
+        decoration_insets,
+        tiled_edges,
         fullscreen,
-    );
+    };
 
     if decoration_mode == Some(ToplevelDecorationMode::ServerSide)
         && !fullscreen
@@ -482,17 +540,20 @@ pub fn build_committed_root_geometry(
     {
         log::debug!(
             target: "state_management::root_geometry",
-            "ssd_insets surface={:?} layout_allocated={} placement={:?} client_window={:?} \
+            "ssd_insets surface={:?} layout_allocated={} layout_rect={:?} content_rect={:?} \
+             logical_window_rect={:?} surface_bounds_global={:?} \
              visual_outer={:?} window_target={:?} binding={:?} root_pos={:?} \
              surface_root_pos={:?} local_surface_bounds={:?} insets=({},{},{},{}) \
-             effective_wg={:?} compositor_decoration={:?}",
+             logical_window_local={:?} decoration_layout={:?}",
             surface_object_id,
             layout_allocation.is_some(),
-            placement_rect,
-            client_window_rect,
-            visual_outer_rect,
-            window_target_rect,
-            binding_rect,
+            geometry.layout_rect_global,
+            geometry.content_rect_global(),
+            geometry.logical_window_rect_global(),
+            geometry.surface_bounds_global(),
+            geometry.surface_bounds_global(),
+            geometry.window_target_rect(),
+            geometry.binding_rect(surface.logical_size()),
             computed_root_pos,
             surface.root_position(),
             local_surface_bounds,
@@ -500,96 +561,57 @@ pub fn build_committed_root_geometry(
             decoration_insets.right,
             decoration_insets.bottom,
             decoration_insets.left,
-            effective_window_geometry,
-            compositor_decoration_layout,
+            geometry.logical_window_local,
+            geometry.decoration_layout(),
         );
     }
 
-    Some(CommittedRootGeometry {
-        placement_rect,
-        client_window_rect,
-        window_target_rect,
-        binding_rect,
-        visual_outer_rect,
-        compositor_decoration_layout,
-        root_pos: computed_root_pos,
-        tiled_edges,
-        fullscreen,
-        decoration_mode,
-        decoration_insets,
-        effective_window_geometry,
-    })
+    Some(geometry)
 }
 
+/// Build a predictive committed geometry snapshot for initial tiled configure
+/// paths before a real committed surface-tree snapshot is available.
 pub fn predictive_tiled_geometry(
     layout_allocation: LayoutAllocation,
     decoration_mode: ToplevelDecorationMode,
     explicit_window_geometry: Option<RectI>,
     decoration_insets: DecorationInsets,
 ) -> CommittedRootGeometry {
-    let placement_rect = layout_allocation.frame_rect;
+    let layout_rect_global = layout_allocation.frame_rect;
     let decoration_insets =
         if layout_allocation.fullscreen { DecorationInsets::default() } else { decoration_insets };
-    let fallback_client_window_rect = if decoration_mode == ToplevelDecorationMode::ClientSide {
-        placement_rect
-    } else if layout_allocation.fullscreen {
-        placement_rect
-    } else {
-        shrink_rect(placement_rect, decoration_insets)
-    };
-    let anchor_rect = if decoration_mode == ToplevelDecorationMode::ClientSide {
-        placement_rect
-    } else {
-        fallback_client_window_rect
-    };
+    let content_rect_global = project_content_rect_global(
+        layout_rect_global,
+        Some(decoration_mode),
+        layout_allocation.fullscreen,
+        decoration_insets,
+    );
     let root_pos = match decoration_mode {
-        ToplevelDecorationMode::ServerSide => {
-            (fallback_client_window_rect.x, fallback_client_window_rect.y)
-        }
+        ToplevelDecorationMode::ServerSide => (content_rect_global.x, content_rect_global.y),
         _ => explicit_window_geometry
             .map(|window_geometry| {
                 (
-                    anchor_rect.x.saturating_sub(window_geometry.x),
-                    anchor_rect.y.saturating_sub(window_geometry.y),
+                    content_rect_global.x.saturating_sub(window_geometry.x),
+                    content_rect_global.y.saturating_sub(window_geometry.y),
                 )
             })
-            .unwrap_or((fallback_client_window_rect.x, fallback_client_window_rect.y)),
+            .unwrap_or((content_rect_global.x, content_rect_global.y)),
     };
-    let client_window_rect = anchor_rect;
-    let compositor_decoration_layout = compositor_decoration_layout(
-        placement_rect,
-        client_window_rect,
-        decoration_insets,
-        Some(decoration_mode),
-        layout_allocation.fullscreen,
-    );
+    let logical_window_local = explicit_window_geometry
+        .or_else(|| rect_in_root_local_space(content_rect_global, root_pos));
     CommittedRootGeometry {
-        placement_rect,
-        client_window_rect,
-        window_target_rect: compositor_decoration_layout
-            .map(|layout| layout.frame_rect)
-            .unwrap_or(placement_rect),
-        binding_rect: compositor_decoration_layout
-            .map(|layout| layout.frame_rect)
-            .unwrap_or_else(|| {
-                non_ssd_binding_rect(
-                    Some(SizeI { width: placement_rect.width, height: placement_rect.height }),
-                    explicit_window_geometry,
-                    root_pos,
-                )
-                .unwrap_or(client_window_rect)
-            }),
-        visual_outer_rect: client_window_rect,
-        compositor_decoration_layout,
+        layout_rect_global,
         root_pos,
-        tiled_edges: layout_allocation.tiled_edges,
-        fullscreen: layout_allocation.fullscreen,
+        surface_bounds_local: None,
+        logical_window_local,
         decoration_mode: Some(decoration_mode),
         decoration_insets,
-        effective_window_geometry: explicit_window_geometry,
+        tiled_edges: layout_allocation.tiled_edges,
+        fullscreen: layout_allocation.fullscreen,
     }
 }
 
+/// Resolve the effective insets used for the current decoration mode.
 fn decoration_insets_for_surface(
     state: &State,
     _surface_object_id: Resolved<WlSurfaceId>,
@@ -613,12 +635,14 @@ fn decoration_insets_for_surface(
     }
 }
 
+/// Derive the resize/binding rect for non-SSD windows from logical size and the
+/// effective logical window box in root-local coordinates.
 fn non_ssd_binding_rect(
     logical_size: Option<SizeI>,
-    effective_window_geometry: Option<RectI>,
+    logical_window_local: Option<RectI>,
     root_pos: (i32, i32),
 ) -> Option<RectI> {
-    let Some(window_geometry) = effective_window_geometry else {
+    let Some(window_geometry) = logical_window_local else {
         return None;
     };
     let logical_size = logical_size?;
@@ -650,6 +674,7 @@ fn non_ssd_binding_rect(
     )
 }
 
+/// Whether compositor-owned decorations should be projected for this snapshot.
 fn compositor_decorations_enabled(
     decoration_mode: Option<ToplevelDecorationMode>,
     fullscreen: bool,
@@ -657,6 +682,7 @@ fn compositor_decorations_enabled(
     decoration_mode == Some(ToplevelDecorationMode::ServerSide) && !fullscreen
 }
 
+/// Build compositor-owned SSD chrome layout from outer frame and content rects.
 fn compositor_decoration_layout(
     frame_rect: RectI,
     client_window_rect: RectI,
@@ -685,20 +711,37 @@ fn compositor_decoration_layout(
     })
 }
 
+/// Translate committed root-local surface bounds into global compositor space.
 fn translated_surface_tree_bounds(
     local_surface_bounds: Option<RectI>,
     root_pos: (i32, i32),
 ) -> Option<RectI> {
-    local_surface_bounds.and_then(|local_bounds| {
-        RectI::new(
-            root_pos.0.saturating_add(local_bounds.x),
-            root_pos.1.saturating_add(local_bounds.y),
-            local_bounds.width,
-            local_bounds.height,
-        )
-    })
+    local_surface_bounds
+        .and_then(|local_bounds| translate_local_rect_to_global(local_bounds, root_pos))
 }
 
+/// Translate a root-local rect into global compositor space.
+fn translate_local_rect_to_global(local_rect: RectI, root_pos: (i32, i32)) -> Option<RectI> {
+    RectI::new(
+        root_pos.0.saturating_add(local_rect.x),
+        root_pos.1.saturating_add(local_rect.y),
+        local_rect.width,
+        local_rect.height,
+    )
+}
+
+/// Express a global rect in root-local coordinates for the current root origin.
+fn rect_in_root_local_space(global_rect: RectI, root_pos: (i32, i32)) -> Option<RectI> {
+    RectI::new(
+        global_rect.x.saturating_sub(root_pos.0),
+        global_rect.y.saturating_sub(root_pos.1),
+        global_rect.width,
+        global_rect.height,
+    )
+}
+
+/// Project root-local window geometry into global compositor coordinates using
+/// the best available committed surface bounds snapshot.
 fn project_window_geometry_from_surface_bounds(
     window_geometry: RectI,
     translated_surface_bounds: Option<RectI>,
@@ -725,6 +768,7 @@ fn project_window_geometry_from_surface_bounds(
     }
 }
 
+/// Inflate a global rect by positive decoration insets.
 fn inflate_rect_with_insets(rect: RectI, insets: DecorationInsets) -> RectI {
     RectI::from_extents(
         rect.x.saturating_sub(insets.left.max(0)),
@@ -735,6 +779,22 @@ fn inflate_rect_with_insets(rect: RectI, insets: DecorationInsets) -> RectI {
     .unwrap_or(rect)
 }
 
+/// Project the compositor content rect from the global layout slot and the
+/// effective decoration ownership for this snapshot.
+fn project_content_rect_global(
+    layout_rect_global: RectI,
+    decoration_mode: Option<ToplevelDecorationMode>,
+    fullscreen: bool,
+    decoration_insets: DecorationInsets,
+) -> RectI {
+    if fullscreen || decoration_mode == Some(ToplevelDecorationMode::ClientSide) {
+        layout_rect_global
+    } else {
+        shrink_rect(layout_rect_global, decoration_insets)
+    }
+}
+
+/// Shrink a global rect by positive decoration insets.
 fn shrink_rect(rect: RectI, insets: DecorationInsets) -> RectI {
     if rect.width <= 0 || rect.height <= 0 {
         return rect;
@@ -747,6 +807,8 @@ fn shrink_rect(rect: RectI, insets: DecorationInsets) -> RectI {
         .unwrap_or(rect)
 }
 
+/// Clamp explicit logical window geometry so it never escapes the committed
+/// surface-tree bounds.
 fn clamp_window_geometry_to_surface_bounds(window_geometry: RectI, surface_bounds: RectI) -> RectI {
     let x1 = window_geometry
         .x

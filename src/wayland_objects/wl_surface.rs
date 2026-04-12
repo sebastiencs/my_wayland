@@ -3372,7 +3372,7 @@ mod tests {
             state
                 .committed_root_geometry(root(&state, surface_object_id))
                 .unwrap()
-                .client_window_rect
+                .content_rect_global()
                 .width,
             1280
         );
@@ -3380,7 +3380,7 @@ mod tests {
             state
                 .committed_root_geometry(root(&state, surface_object_id))
                 .unwrap()
-                .placement_rect
+                .layout_rect_global
                 .width,
             1280
         );
@@ -3417,7 +3417,7 @@ mod tests {
             state
                 .committed_root_geometry(root(&state, surface_object_id))
                 .unwrap()
-                .client_window_rect
+                .content_rect_global()
                 .width,
             1280
         );
@@ -3425,7 +3425,7 @@ mod tests {
             state
                 .committed_root_geometry(root(&state, surface_object_id))
                 .unwrap()
-                .placement_rect
+                .layout_rect_global
                 .width,
             1280
         );
@@ -3592,7 +3592,7 @@ mod tests {
                 .get()
                 .geometry
                 .unwrap()
-                .placement_rect,
+                .layout_rect_global,
             RectI { x: 0, y: 0, width: 200, height: 40 }
         );
 
@@ -3616,7 +3616,7 @@ mod tests {
                 .get()
                 .geometry
                 .unwrap()
-                .placement_rect,
+                .layout_rect_global,
             RectI { x: 50, y: 60, width: 200, height: 40 }
         );
     }

@@ -89,7 +89,7 @@ impl Object for WlSubsurface {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
                 if let Some(bounds) = state
                     .root_surface_for_surface(self.surface)
-                    .and_then(|root_surface| state.root_surface_visual_outer_rect(root_surface))
+                    .and_then(|root_surface| state.root_surface_surface_bounds_global(root_surface))
                 {
                     schedule_outputs_for_rect(state, bounds, dispatcher);
                 } else {

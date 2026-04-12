@@ -1579,7 +1579,7 @@ mod tests {
         .expect("initial fullscreen geometry should resolve");
 
         assert!(geometry.fullscreen);
-        assert_eq!(geometry.placement_rect, RectI { x: 0, y: 10, width: 100, height: 70 });
+        assert_eq!(geometry.layout_rect_global, RectI { x: 0, y: 10, width: 100, height: 70 });
     }
 
     #[test]
@@ -1814,7 +1814,7 @@ mod tests {
                 .get()
                 .geometry
                 .unwrap()
-                .placement_rect,
+                .layout_rect_global,
             RectI { x: 0, y: 0, width: 200, height: 40 }
         );
 
@@ -1846,7 +1846,7 @@ mod tests {
         let geometry = state
             .committed_root_geometry(root_surface)
             .expect("geometry should refresh on read");
-        assert_eq!(geometry.placement_rect, RectI { x: 50, y: 60, width: 200, height: 40 });
+        assert_eq!(geometry.layout_rect_global, RectI { x: 50, y: 60, width: 200, height: 40 });
         assert!(state.root_geometry_cache[&root_surface].get().is_fresh());
     }
 
