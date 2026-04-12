@@ -85,10 +85,14 @@ impl Object for WpFractionalScaleManagerV1 {
                     let mut surface = surface_resolved.grab(state);
                     let _ = surface.set_fractional_scale_object(object);
                 }
+                let surface = surface_resolved.rref(state);
+                let preferred_output_id =
+                    surface.preferred_output_id_for_object(&state, surface_resolved);
+
                 let mut surface = surface_resolved.grab(state);
                 surface.send_preferred_fractional_scale_for_object(
                     state,
-                    surface_resolved,
+                    preferred_output_id,
                     dispatcher,
                 );
             }

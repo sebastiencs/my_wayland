@@ -688,10 +688,9 @@ impl WlSurface {
     pub fn send_preferred_buffer_state_for_object(
         &mut self,
         state: &State,
-        surface: Resolved<WlSurfaceId>,
+        preferred_output_id: Option<OutputId>,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let preferred_output_id = self.preferred_output_id_for_object(state, surface);
         self.send_preferred_buffer_state_with_output(preferred_output_id, state, dispatcher);
     }
 
@@ -716,10 +715,9 @@ impl WlSurface {
     pub fn send_preferred_fractional_scale_for_object(
         &mut self,
         state: &State,
-        surface: Resolved<WlSurfaceId>,
+        preferred_output_id: Option<OutputId>,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let preferred_output_id = self.preferred_output_id_for_object(state, surface);
         self.send_preferred_fractional_scale_with_output(preferred_output_id, state, dispatcher);
     }
 
@@ -1743,23 +1741,27 @@ impl WlSurface {
             && !self.has_dnd_icon_role())
         .then(|| crate::root_geometry::effective_decoration_insets_for_surface(state, &*self));
         let mut this = if let Some(shell_surface) = self.shell_surface {
-            self.send_preferred_fractional_scale_for_object(state, resolved_surface, dispatcher);
-            self.send_preferred_buffer_state_for_object(state, resolved_surface, dispatcher);
+            let (mut this, preferred_output_id) = client.with_ungrabbed(self, state, |state| {
+                let this = resolved_surface.rref(state);
+                this.preferred_output_id_for_object(state, resolved_surface)
+            });
+            this.send_preferred_fractional_scale_for_object(state, preferred_output_id, dispatcher);
+            this.send_preferred_buffer_state_for_object(state, preferred_output_id, dispatcher);
             match shell_surface {
                 ShellSurfaceObject::XdgSurface(xdg_surface_id) => {
                     let layout_snapshot =
-                        LayerLayoutObjectSnapshot::for_surface(resolved_surface, &*self);
+                        LayerLayoutObjectSnapshot::for_surface(resolved_surface, &*this);
                     let configure_bounds = state.configure_bounds_for_surface_with_ref(
                         resolved_surface,
-                        &self,
+                        &this,
                         Some(layout_snapshot),
                     );
                     let (logical_size, has_pending_buffer_attach, is_null_buffer_commit) = (
-                        self.logical_size(),
-                        self.has_pending_buffer_attach(),
-                        matches!(self.pending.buffer, Some(None)),
+                        this.logical_size(),
+                        this.has_pending_buffer_attach(),
+                        matches!(this.pending.buffer, Some(None)),
                     );
-                    drop(self);
+                    drop(this);
                     let mut xdg_surface = xdg_surface_id.grab(state);
                     let Some(role_changes) = xdg_surface.on_commit(
                         client,
@@ -1783,14 +1785,14 @@ impl WlSurface {
                         client,
                         state,
                         dispatcher,
-                        &self,
-                        self.has_pending_buffer_attach(),
-                        matches!(self.pending.buffer, Some(None)),
+                        &this,
+                        this.has_pending_buffer_attach(),
+                        matches!(this.pending.buffer, Some(None)),
                     ) {
-                        self.clear_failed_surface_commit();
+                        this.clear_failed_surface_commit();
                         return;
                     }
-                    self
+                    this
                 }
             }
         } else {
@@ -3821,9 +3823,11 @@ mod tests {
         let (client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
+        let id = Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(9), surface_object_id);
+        let preferred_output_id = surface.preferred_output_id_for_object(&state, id);
         surface.send_preferred_buffer_state_for_object(
             &state,
-            Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(9), surface_object_id),
+            preferred_output_id,
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
@@ -3837,9 +3841,11 @@ mod tests {
 
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let id = Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(9), surface_object_id);
+        let preferred_output_id = surface.preferred_output_id_for_object(&state, id);
         surface.send_preferred_buffer_state_for_object(
             &state,
-            Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(9), surface_object_id),
+            preferred_output_id,
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
@@ -3880,9 +3886,11 @@ mod tests {
         let (client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
+        let id = Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(10), surface_object_id);
+        let preferred_output_id = surface.preferred_output_id_for_object(&state, id);
         surface.send_preferred_fractional_scale_for_object(
             &state,
-            Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(10), surface_object_id),
+            preferred_output_id,
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
@@ -3898,9 +3906,11 @@ mod tests {
 
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let id = Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(10), surface_object_id);
+        let preferred_output_id = surface.preferred_output_id_for_object(&state, id);
         surface.send_preferred_fractional_scale_for_object(
             &state,
-            Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(10), surface_object_id),
+            preferred_output_id,
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
@@ -3949,9 +3959,11 @@ mod tests {
 
         let (client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let id = Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(10), surface_object_id);
+        let preferred_output_id = surface.preferred_output_id_for_object(&state, id);
         surface.send_preferred_fractional_scale_for_object(
             &state,
-            Resolved::new(ClientId::from_raw(7), WlSurfaceId::from(11), surface_object_id),
+            preferred_output_id,
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
@@ -3960,9 +3972,11 @@ mod tests {
         let mut dispatcher = Dispatcher::default();
         surface.update_output_membership(vec![right_output]);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let id = Resolved::new(ClientId::from_raw(6), WlSurfaceId::from(10), surface_object_id);
+        let preferred_output_id = surface.preferred_output_id_for_object(&state, id);
         surface.send_preferred_fractional_scale_for_object(
             &state,
-            Resolved::new(ClientId::from_raw(7), WlSurfaceId::from(11), surface_object_id),
+            preferred_output_id,
             &mut client_dispatcher,
         );
         drop(client_dispatcher);
