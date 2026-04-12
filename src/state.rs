@@ -1450,7 +1450,7 @@ impl State {
         surface_ref: &WlSurface,
         snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
     ) -> Option<(i32, i32)> {
-        self.output_id_for_surface_object(surface.object_id(), &surface_ref)
+        self.output_id_for_surface_object(surface, &surface_ref)
             .and_then(|output_id| output_usable_bounds_with_snapshot(self, output_id, snapshot))
             .map(|bounds| (bounds.width, bounds.height))
     }
@@ -2622,15 +2622,13 @@ impl State {
 
     pub fn output_id_for_surface_object(
         &self,
-        surface_object_id: ObjectId,
+        surface_id: Resolved<WlSurfaceId>,
         surface: &WlSurface,
     ) -> Option<OutputId> {
-        let resolved_surface =
-            Resolved::new(surface.client_id(), surface.surface_id(), surface_object_id);
-        self.layout_output_id_for_surface(resolved_surface, surface)
+        self.layout_output_id_for_surface(surface_id, surface)
             .or_else(|| {
-                let root_surface = if self.root_surfaces.contains(&resolved_surface) {
-                    Some(resolved_surface)
+                let root_surface = if self.root_surfaces.contains(&surface_id) {
+                    Some(surface_id)
                 } else if let Some(parent_surface) = surface.parent_surface() {
                     self.root_surface_for_surface(*parent_surface)
                 } else {
@@ -3439,15 +3437,17 @@ mod tests {
         ));
         let (_, surface_object_id) =
             state.insert_object(WlSurface::new(WlSurfaceId::from(1), ClientId::from_raw(2), 6));
+        let surface_resolved = crate::clients::Resolved::new(
+            ClientId::from_raw(2),
+            WlSurfaceId::from(1),
+            surface_object_id,
+        );
         let surface = state
             .objects
             .try_ref_object::<WlSurface>(surface_object_id)
             .unwrap();
 
-        assert_eq!(
-            state.output_id_for_surface_object(surface_object_id, &surface),
-            Some(output_id)
-        );
+        assert_eq!(state.output_id_for_surface_object(surface_resolved, surface), Some(output_id));
     }
 
     #[test]

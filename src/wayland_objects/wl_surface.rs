@@ -682,7 +682,7 @@ impl WlSurface {
         state: &State,
         surface: Resolved<WlSurfaceId>,
     ) -> Option<OutputId> {
-        state.output_id_for_surface_object(surface.object_id(), self)
+        state.output_id_for_surface_object(surface, self)
     }
 
     pub fn send_preferred_buffer_state_for_object(
@@ -1735,7 +1735,7 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         let was_mapped = self.global_logical_bounds().is_some();
-        let resolved_surface = client.resolve(self.id, state).unwrap();
+        let resolved_surface = client.resolve_this(&self, state);
         let mut pending_xdg_role_changes = None;
         let old_effective_insets = (self.is_root()
             && self.role == Role::XdgSurface
