@@ -1925,9 +1925,17 @@ impl WlSurface {
         }
 
         if changed || needs_frame {
-            if let Some(bounds) = bounds_after_first_map_relayout
-                .or_else(|| state.surface_scene_bounds_with_ref(resolved_surface, &this))
-            {
+            if let Some(bounds) = match bounds_after_first_map_relayout {
+                Some(bounds) => Some(bounds),
+                None => {
+                    let bounds;
+                    (this, bounds) = client.with_ungrabbed(this, state, |state| {
+                        let surface = resolved_surface.rref(state);
+                        state.surface_scene_bounds_with_ref(resolved_surface, surface)
+                    });
+                    bounds
+                }
+            } {
                 schedule_outputs(state, this.output_membership_ids(), dispatcher);
                 schedule_outputs_for_rect(state, bounds, dispatcher);
             } else {
