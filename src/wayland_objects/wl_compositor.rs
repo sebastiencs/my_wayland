@@ -57,7 +57,7 @@ impl Object for WlCompositor {
             CreateSurface { id } => {
                 let (resolved, _) = client
                     .insert_object(state, WlSurface::new(id, client.client_id(), self.version));
-                state.register_root_surface(resolved.object_id());
+                state.register_root_surface(resolved);
             }
             CreateRegion { id } => {
                 let _ = client.insert_object(state, WlRegion::new(id));

@@ -499,8 +499,8 @@ mod tests {
         let root_object_id = state
             .insert_object(WlSurface::new(root_surface_id, ClientId::from_raw(7), 6))
             .1;
-        state.register_root_surface(root_object_id);
         let root_surface = Resolved::new(ClientId::from_raw(7), root_surface_id, root_object_id);
+        state.register_root_surface(root_surface);
         state.root_geometry_cache.insert(
             root_surface,
             std::cell::Cell::new(crate::state::RootGeometryCacheEntry {

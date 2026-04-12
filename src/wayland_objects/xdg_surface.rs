@@ -2114,8 +2114,8 @@ mod tests {
     ) -> (Resolved<WlSurfaceId>, Resolved<XdgSurfaceId>) {
         let (_, surface_object_id) =
             state.insert_object(WlSurface::new(wl_surface_id, client_id, 6));
-        state.register_root_surface(surface_object_id);
         let wl_surface = Resolved::new(client_id, wl_surface_id, surface_object_id);
+        state.register_root_surface(wl_surface);
         let (_, xdg_surface_object_id) = state.insert_object(XdgSurface::new(
             xdg_surface_id,
             Resolved::new(client_id, XdgWmBaseId::from(1), ObjectId::from(1usize)),
@@ -2197,7 +2197,7 @@ mod tests {
                 .set_role(Role::XdgSurface, &mut client_dispatcher)
                 .is_ok());
         }
-        state.register_root_surface(surface_object_id);
+        state.register_root_surface(surface_resolved);
 
         let xdg_surface = XdgSurface {
             id: xdg_surface_id,
@@ -2418,7 +2418,7 @@ mod tests {
                 .set_role(Role::XdgSurface, &mut client_dispatcher)
                 .is_ok());
         }
-        state.register_root_surface(surface_object_id);
+        state.register_root_surface(surface_resolved);
 
         let (xdg_surface_resolved, _) = client.insert_object(
             &mut state,
@@ -2590,8 +2590,8 @@ mod tests {
         let client_id = ClientId::from_raw(9);
         let (_, layer_root_object_id) =
             state.insert_object(WlSurface::new(WlSurfaceId::from(70), client_id, 6));
-        state.register_root_surface(layer_root_object_id);
         let layer_root = Resolved::new(client_id, WlSurfaceId::from(70), layer_root_object_id);
+        state.register_root_surface(layer_root);
         state
             .objects
             .get_mut(layer_root_object_id)

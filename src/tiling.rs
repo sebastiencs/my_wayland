@@ -2050,7 +2050,7 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
             assert!(surface.set_role(Role::XdgSurface, dispatcher).is_ok());
         }
-        state.register_root_surface(surface_object_id);
+        state.register_root_surface(surface_resolved);
 
         let (xdg_surface_resolved, _) = client.insert_object(
             state,

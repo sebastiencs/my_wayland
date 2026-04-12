@@ -1707,7 +1707,7 @@ mod surface_tree_hit_test_tests {
             root_b_surface.test_map(ObjectId::from(221usize), 0, 0, 20, 20);
         }
 
-        state.register_root_surface(root_a);
+        state.register_root_surface(root(&state, root_a));
 
         let hit = surface_focus_pick_at(&state, (5.0, 5.0)).unwrap();
         assert_eq!(hit.target.surface_id(), WlSurfaceId::from(1));
@@ -1768,7 +1768,7 @@ mod xdg_seat_tests {
         let (resolved, _) =
             client.insert_object(state, WlSurface::new(surface_id, client.client_id(), 6));
         let object_id = resolved.object_id();
-        state.register_root_surface(object_id);
+        state.register_root_surface(resolved);
         object_id
     }
 

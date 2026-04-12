@@ -2875,7 +2875,7 @@ mod surface_output_refresh_tests {
         let (surface_resolved, _) =
             client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
         let surface_object_id = surface_resolved.object_id();
-        state.register_root_surface(surface_object_id);
+        state.register_root_surface(surface_resolved);
 
         let fractional_object_id = state
             .insert_object(WpFractionalScaleV1::new(

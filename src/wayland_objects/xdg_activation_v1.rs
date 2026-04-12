@@ -130,7 +130,7 @@ mod tests {
         let (surface_resolved, _) =
             client.insert_object(state, WlSurface::new(surface_id, client.client_id(), 6));
         let object_id = surface_resolved.object_id();
-        state.register_root_surface(object_id);
+        state.register_root_surface(surface_resolved);
         state
             .objects
             .get_mut(object_id)

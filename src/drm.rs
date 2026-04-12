@@ -4966,7 +4966,7 @@ mod window_animation_tests {
         state.config.effects.opacity.inactive_alpha = 120;
         state.config.effects.opacity.inactive_dim = 44;
         state.config.animations.window.duration_msec = 120;
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         state.assign_root_surface_to_workspace(root(&state, object_id), workspace_id);
         let surface = root(&state, object_id);
         state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
@@ -5962,8 +5962,8 @@ mod surface_tree_render_tests {
     ) -> (crate::clients::Resolved<WlSurfaceId>, crate::clients::Resolved<XdgSurfaceId>) {
         let (_, surface_object_id) =
             state.insert_object(WlSurface::new(wl_surface_id, client_id, 6));
-        state.register_root_surface(surface_object_id);
         let wl_surface = crate::clients::Resolved::new(client_id, wl_surface_id, surface_object_id);
+        state.register_root_surface(wl_surface);
         let (_, xdg_surface_object_id) = state.insert_object(XdgSurface::new(
             xdg_surface_id,
             crate::clients::Resolved::new(client_id, XdgWmBaseId::from(1), ObjectId::from(1usize)),

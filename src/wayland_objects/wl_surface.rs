@@ -2485,7 +2485,7 @@ impl WlSurface {
             }
         }
 
-        state.register_root_surface(child_surface.object_id());
+        state.register_root_surface(child_surface);
     }
 
     pub fn delete_self(
@@ -2749,8 +2749,10 @@ mod tests {
     }
 
     fn insert_surface(state: &mut State, surface: WlSurface) -> ObjectId {
+        let client_id = surface.client_id();
+        let wl_id = surface.surface_id();
         let object_id = state.insert_object(surface).1;
-        state.register_root_surface(object_id);
+        state.register_root_surface(Resolved::new(client_id, wl_id, object_id));
         object_id
     }
 
@@ -2818,7 +2820,7 @@ mod tests {
         let (surface_resolved, _) =
             client.insert_object(state, WlSurface::new(surface_id, client.client_id(), 6));
         let surface_object_id = surface_resolved.object_id();
-        state.register_root_surface(surface_object_id);
+        state.register_root_surface(surface_resolved);
         {
             let surface = state
                 .objects
@@ -2913,7 +2915,7 @@ mod tests {
         let (surface_resolved, _) = client
             .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(5), client.client_id(), 6));
         let object_id = surface_resolved.object_id();
-        state.register_root_surface(object_id);
+        state.register_root_surface(surface_resolved);
         let surface_id = WlSurfaceId::from(5);
 
         assert!(state.seat.set_cursor_surface(
@@ -2943,7 +2945,7 @@ mod tests {
         let (surface_resolved, _) =
             client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
         let surface_object_id = surface_resolved.object_id();
-        state.register_root_surface(surface_object_id);
+        state.register_root_surface(surface_resolved);
 
         let fractional_id = WpFractionalScaleV1Id::from(6);
         let (fractional_resolved, _) = client.insert_object(
@@ -3026,7 +3028,7 @@ mod tests {
         let (surface_resolved, _) =
             client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
         let surface_object_id = surface_resolved.object_id();
-        state.register_root_surface(surface_object_id);
+        state.register_root_surface(surface_resolved);
 
         let fractional_id = WpFractionalScaleV1Id::from(6);
         let (fractional_resolved, _) = client.insert_object(
@@ -3752,7 +3754,7 @@ mod tests {
         let (surface_resolved, _) =
             client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
         let surface_object_id = surface_resolved.object_id();
-        state.register_root_surface(surface_object_id);
+        state.register_root_surface(surface_resolved);
         let initial_buffer =
             insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(410), 200, 40);
 
@@ -4527,15 +4529,15 @@ mod tests {
         let (parent_resolved_insert, _) = client
             .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(1), client.client_id(), 6));
         let parent_object_id = parent_resolved_insert.object_id();
-        state.register_root_surface(parent_object_id);
+        state.register_root_surface(parent_resolved_insert);
         let (child_resolved_insert, _) = client
             .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(2), client.client_id(), 6));
         let child_object_id = child_resolved_insert.object_id();
-        state.register_root_surface(child_object_id);
+        state.register_root_surface(child_resolved_insert);
         let (grandchild_resolved_insert, _) = client
             .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(3), client.client_id(), 6));
         let grandchild_object_id = grandchild_resolved_insert.object_id();
-        state.register_root_surface(grandchild_object_id);
+        state.register_root_surface(grandchild_resolved_insert);
         let parent_resolved = root(&state, parent_object_id);
         let child_resolved = root(&state, child_object_id);
         let grandchild_resolved = root(&state, grandchild_object_id);

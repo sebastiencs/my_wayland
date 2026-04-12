@@ -70,10 +70,11 @@ pub fn resolved_wl_surface(state: &State, object_id: ObjectId) -> Resolved<WlSur
 
 /// Root `WlSurface` for client 1, wl object version 6.
 pub fn insert_root_surface(state: &mut State, wl_surface_id: u32) -> ObjectId {
+    let wl_id = WlSurfaceId::from(wl_surface_id);
     let object_id = state
-        .insert_object(WlSurface::new(WlSurfaceId::from(wl_surface_id), ClientId::from_raw(1), 6))
+        .insert_object(WlSurface::new(wl_id, ClientId::from_raw(1), 6))
         .1;
-    state.register_root_surface(object_id);
+    state.register_root_surface(Resolved::new(ClientId::from_raw(1), wl_id, object_id));
     object_id
 }
 

@@ -79,7 +79,7 @@ impl Object for WlSubsurface {
                 if let Some(mut parent_surface) = self.parent.try_grab(state) {
                     parent_surface.remove_child_from_tree(self.surface);
                 }
-                state.register_root_surface(self.surface.object_id());
+                state.register_root_surface(self.surface);
                 if let Some(root_surface) = old_root_surface {
                     state.mark_root_geometry_dirty_for_surface(root_surface);
                 }
@@ -199,19 +199,19 @@ mod tests {
             WlSurface::new(WlSurfaceId::from(10), client.client_id(), 6),
         );
         let parent_object_id = parent_resolved.object_id();
-        state.register_root_surface(parent_object_id);
+        state.register_root_surface(parent_resolved);
         let (child_resolved, _) = client.insert_object(
             &mut state,
             WlSurface::new(WlSurfaceId::from(11), client.client_id(), 6),
         );
         let child_object_id = child_resolved.object_id();
-        state.register_root_surface(child_object_id);
+        state.register_root_surface(child_resolved);
         let (stranger_resolved, _) = client.insert_object(
             &mut state,
             WlSurface::new(WlSurfaceId::from(12), client.client_id(), 6),
         );
         let stranger_object_id = stranger_resolved.object_id();
-        state.register_root_surface(stranger_object_id);
+        state.register_root_surface(stranger_resolved);
         let (subsurface_resolved, _) = client.insert_object(
             &mut state,
             WlSubsurface::new(

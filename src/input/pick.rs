@@ -303,8 +303,8 @@ mod tests {
     ) -> (Resolved<WlSurfaceId>, Resolved<XdgSurfaceId>) {
         let (_, surface_object_id) =
             state.insert_object(WlSurface::new(wl_surface_id, client_id, 6));
-        state.register_root_surface(surface_object_id);
         let wl_surface = Resolved::new(client_id, wl_surface_id, surface_object_id);
+        state.register_root_surface(wl_surface);
         let (_, xdg_surface_object_id) = state.insert_object(XdgSurface::new(
             xdg_surface_id,
             Resolved::new(client_id, XdgWmBaseId::from(1), ObjectId::from(1usize)),
@@ -328,8 +328,8 @@ mod tests {
         let root_object_id = state
             .insert_object(WlSurface::new(root_surface_id, ClientId::from_raw(7), 6))
             .1;
-        state.register_root_surface(root_object_id);
         let root_surface = Resolved::new(ClientId::from_raw(7), root_surface_id, root_object_id);
+        state.register_root_surface(root_surface);
         {
             let surface = state
                 .objects
@@ -385,8 +385,8 @@ mod tests {
         let root_object_id = state
             .insert_object(WlSurface::new(root_surface_id, ClientId::from_raw(8), 6))
             .1;
-        state.register_root_surface(root_object_id);
         let root_surface = Resolved::new(ClientId::from_raw(8), root_surface_id, root_object_id);
+        state.register_root_surface(root_surface);
         {
             let surface = state
                 .objects

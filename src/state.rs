@@ -2350,14 +2350,10 @@ impl State {
         self.objects.remove_or_defer(object_id)
     }
 
-    pub fn register_root_surface(&mut self, object_id: ObjectId) {
-        let Some(surface) = self
-            .objects
-            .try_ref_object::<WlSurface>(object_id)
-            .map(|surface| Resolved::new(surface.client_id(), surface.surface_id(), object_id))
-        else {
+    pub fn register_root_surface(&mut self, surface: Resolved<WlSurfaceId>) {
+        if !surface.exists(self) {
             return;
-        };
+        }
         self.unregister_root_surface(surface);
         self.root_surfaces.push(surface);
         self.root_surface_process_info.insert(
@@ -2507,7 +2503,7 @@ impl State {
         if tiling::raise_surface(self, surface) {
             return true;
         }
-        self.register_root_surface(surface.object_id());
+        self.register_root_surface(surface);
         true
     }
 
@@ -2965,7 +2961,7 @@ mod tests {
         state.config.effects.opacity.inactive_alpha = 120;
         state.config.effects.opacity.inactive_dim = 44;
         state.config.animations.window.duration_msec = 120;
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         state.assign_root_surface_to_workspace(root(&state, object_id), workspace_id);
         let surface = root(&state, object_id);
         state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
@@ -2997,7 +2993,7 @@ mod tests {
         }
         state.config.decorations.border.thickness = 0;
         state.config.effects.blur.enabled = true;
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         state.assign_root_surface_to_workspace(root(&state, object_id), workspace_id);
 
         let visual = state
@@ -3017,7 +3013,7 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(object_id);
             surface.test_map(ObjectId::from(0usize), 0, 0, 160, 120);
         }
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         let surface = root(&state, object_id);
         state.root_geometry_cache.insert(
             surface,
@@ -3066,7 +3062,7 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(object_id);
             surface.test_map(ObjectId::from(0usize), 0, 0, 160, 120);
         }
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         let surface = root(&state, object_id);
 
         {
@@ -3090,7 +3086,7 @@ mod tests {
         let (_, object_id) =
             state.insert_object(WlSurface::new(WlSurfaceId::from(94u32), ClientId::from_raw(9), 6));
 
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
 
         let surface = root(&state, object_id);
         assert!(state.root_geometry_cache.contains_key(&surface));
@@ -3105,7 +3101,7 @@ mod tests {
             6,
         ));
 
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         let surface = root(&state, object_id);
         state.root_surface_workspaces.remove(&surface);
 
@@ -3480,7 +3476,7 @@ mod tests {
 
         let (_, object_id) =
             state.insert_object(WlSurface::new(WlSurfaceId::from(10u32), ClientId::from_raw(1), 6));
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         state.assign_root_surface_to_workspace(root(&state, object_id), second_workspace);
 
         assert!(!state.root_surface_is_visible(root(&state, object_id)));
@@ -3499,7 +3495,7 @@ mod tests {
 
         let (_, object_id) =
             state.insert_object(WlSurface::new(WlSurfaceId::from(12u32), ClientId::from_raw(3), 6));
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         assert_eq!(state.root_surface_workspace(root(&state, object_id)), Some(workspace_id));
 
         let managed = state
@@ -3542,7 +3538,7 @@ mod tests {
             ClientId::from_raw(50),
             6,
         ));
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         let surface = state
             .root_surfaces
             .iter()
@@ -3571,7 +3567,7 @@ mod tests {
             ClientId::from_raw(51),
             6,
         ));
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         assert!(state.set_root_surface_floating(root(&state, object_id), true));
         let surface = state
             .root_surfaces
@@ -3609,7 +3605,7 @@ mod tests {
             ClientId::from_raw(52),
             6,
         ));
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         assert!(state.set_root_surface_floating(root(&state, object_id), true));
         let surface = state
             .root_surfaces
@@ -3637,7 +3633,7 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(object_id);
             surface.test_map(ObjectId::from(0usize), 20, 30, 120, 90);
         }
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
 
         assert!(state.set_root_surface_floating(root(&state, object_id), true));
         {
@@ -3683,8 +3679,8 @@ mod tests {
             state.insert_object(WlSurface::new(WlSurfaceId::from(13u32), ClientId::from_raw(4), 6));
         let (_, second_object_id) =
             state.insert_object(WlSurface::new(WlSurfaceId::from(14u32), ClientId::from_raw(5), 6));
-        state.register_root_surface(first_object_id);
-        state.register_root_surface(second_object_id);
+        state.register_root_surface(root(&state, first_object_id));
+        state.register_root_surface(root(&state, second_object_id));
         assert_eq!(state.root_surface_workspace(root(&state, first_object_id)), Some(workspace_id));
         assert_eq!(
             state.root_surface_workspace(root(&state, second_object_id)),
@@ -3734,7 +3730,7 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(object_id);
             surface.test_map(ObjectId::from(0usize), 30, 40, 160, 120);
         }
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         assert!(state.set_root_surface_floating(root(&state, object_id), true));
         {
             let mut surface = state.objects.grab_object::<WlSurface>(object_id);
@@ -3777,7 +3773,7 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(object_id);
             surface.test_map(ObjectId::from(1usize), 20, 30, 120, 90);
         }
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         let root_surface = root(&state, object_id);
         state.root_geometry_cache.insert(
             root_surface,
@@ -3830,7 +3826,7 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(object_id);
             surface.test_map(ObjectId::from(0usize), 10, 20, 50, 50);
         }
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         state.assign_root_surface_to_workspace(root(&state, object_id), left_workspace);
 
         state.move_workspace_to_group_output(left_workspace, right_group);
@@ -3856,7 +3852,7 @@ mod tests {
 
         let (_, object_id) =
             state.insert_object(WlSurface::new(WlSurfaceId::from(16u32), ClientId::from_raw(7), 6));
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         state.assign_root_surface_to_workspace(root(&state, object_id), left_workspace);
         let surface = root(&state, object_id);
         state
@@ -3890,7 +3886,7 @@ mod tests {
 
         let (_, object_id) =
             state.insert_object(WlSurface::new(WlSurfaceId::from(17u32), ClientId::from_raw(8), 6));
-        state.register_root_surface(object_id);
+        state.register_root_surface(root(&state, object_id));
         state.assign_root_surface_to_workspace(root(&state, object_id), left_workspace);
         let surface = root(&state, object_id);
         state

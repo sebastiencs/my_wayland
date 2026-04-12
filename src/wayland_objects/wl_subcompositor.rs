@@ -163,13 +163,13 @@ mod tests {
             WlSurface::new(WlSurfaceId::from(10), client.client_id(), 6),
         );
         let parent_object_id = parent_resolved.object_id();
-        state.register_root_surface(parent_object_id);
+        state.register_root_surface(parent_resolved);
         let (child_resolved, _) = client.insert_object(
             &mut state,
             WlSurface::new(WlSurfaceId::from(11), client.client_id(), 6),
         );
         let child_object_id = child_resolved.object_id();
-        state.register_root_surface(child_object_id);
+        state.register_root_surface(child_resolved);
 
         client.insert_object(&mut state, WlSubcompositor::new(WlSubcompositorId::from(1)));
         client
