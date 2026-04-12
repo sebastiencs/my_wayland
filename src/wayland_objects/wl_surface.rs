@@ -1749,13 +1749,16 @@ impl WlSurface {
             this.send_preferred_buffer_state_for_object(state, preferred_output_id, dispatcher);
             match shell_surface {
                 ShellSurfaceObject::XdgSurface(xdg_surface_id) => {
-                    let layout_snapshot =
-                        LayerLayoutObjectSnapshot::for_surface(resolved_surface, &*this);
-                    let configure_bounds = state.configure_bounds_for_surface_with_ref(
-                        resolved_surface,
-                        &this,
-                        Some(layout_snapshot),
-                    );
+                    let (this, configure_bounds) = client.with_ungrabbed(this, state, |state| {
+                        let this = resolved_surface.rref(state);
+                        let layout_snapshot =
+                            LayerLayoutObjectSnapshot::for_surface(resolved_surface, this);
+                        state.configure_bounds_for_surface_with_ref(
+                            resolved_surface,
+                            this,
+                            Some(layout_snapshot),
+                        )
+                    });
                     let (logical_size, has_pending_buffer_attach, is_null_buffer_commit) = (
                         this.logical_size(),
                         this.has_pending_buffer_attach(),
