@@ -37,27 +37,28 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
     ) -> RequestResult {
         use wp_linux_drm_syncobj_surface_v1::Request::*;
 
-        let Some(mut surface) = self.surface.try_grab(state) else {
-            client.send_protocol_error(
-                dispatcher,
-                self.id.into(),
-                wp_linux_drm_syncobj_surface_v1::Error::NoSurface as u32,
-                "associated wl_surface no longer exists",
-            );
-            return Ok(());
-        };
-
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
-                surface.clear_syncobj_surface_object(Resolved::new(
-                    self.surface.client_id(),
-                    self.id,
-                    client.object_id(self.id),
-                ));
+                if let Some(mut surface) = self.surface.try_grab(state) {
+                    surface.clear_syncobj_surface_object(Resolved::new(
+                        self.surface.client_id(),
+                        self.id,
+                        client.object_id(self.id),
+                    ));
+                }
                 use crate::wayland_objects::wl_display::WlDisplay;
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
             SetAcquirePoint { timeline, point_hi, point_lo } => {
+                let Some(mut surface) = self.surface.try_grab(state) else {
+                    client.send_protocol_error(
+                        dispatcher,
+                        self.id.into(),
+                        wp_linux_drm_syncobj_surface_v1::Error::NoSurface as u32,
+                        "associated wl_surface no longer exists",
+                    );
+                    return Ok(());
+                };
                 let Some(timeline) = client.resolve(timeline, state) else {
                     client.send_protocol_error(
                         dispatcher,
@@ -73,6 +74,15 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
                     AcquireSync::TimelinePoint { timeline: timeline.timeline().clone(), point };
             }
             SetReleasePoint { timeline, point_hi, point_lo } => {
+                let Some(mut surface) = self.surface.try_grab(state) else {
+                    client.send_protocol_error(
+                        dispatcher,
+                        self.id.into(),
+                        wp_linux_drm_syncobj_surface_v1::Error::NoSurface as u32,
+                        "associated wl_surface no longer exists",
+                    );
+                    return Ok(());
+                };
                 let Some(timeline) = client.resolve(timeline, state) else {
                     client.send_protocol_error(
                         dispatcher,

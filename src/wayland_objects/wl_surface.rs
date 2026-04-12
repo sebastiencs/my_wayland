@@ -449,37 +449,17 @@ impl WlSurface {
         self.fractional_scale_object.is_some()
     }
 
-    fn delete_owned_object(
-        client: &mut Client,
-        state: &mut State,
-        dispatcher: &mut ClientDispatcher,
-        id: impl Into<WaylandId>,
-    ) {
-        let id = id.into();
-        if client.object_id_for_wayland(id).is_some() {
-            use crate::wayland_objects::wl_display::WlDisplay;
-            client.delete_id(&WlDisplay::default(), state, dispatcher, id);
-        }
-    }
-
-    fn cleanup_extension_objects(
-        &mut self,
-        client: &mut Client,
-        state: &mut State,
-        dispatcher: &mut ClientDispatcher,
-    ) {
-        if let Some(object_id) = self.fractional_scale_object.take() {
+    fn cleanup_extension_objects(&mut self) {
+        if self.fractional_scale_object.take().is_some() {
             self.preferred_fractional_scale_sent = None;
-            Self::delete_owned_object(client, state, dispatcher, object_id.wayland_id());
         }
 
-        if let Some(viewport_id) = self.viewport_object.take() {
+        if self.viewport_object.take().is_some() {
             self.pending.viewport = SurfaceViewport::default();
-            Self::delete_owned_object(client, state, dispatcher, viewport_id.wayland_id());
         }
 
-        if let Some(syncobj_surface_id) = self.syncobj_surface_object.take() {
-            Self::delete_owned_object(client, state, dispatcher, syncobj_surface_id.wayland_id());
+        if self.syncobj_surface_object.take().is_some() {
+            self.pending.sync = SurfaceSyncState::default();
         }
     }
 
@@ -1883,16 +1863,16 @@ impl WlSurface {
             }
         }
         if !this.has_cursor_role() && !this.has_dnd_icon_role() {
-            state.mark_root_geometry_dirty_for_surface(resolved_surface);
+            (this, _) = client.with_ungrabbed(this, state, |state| {
+                state.mark_root_geometry_dirty_for_surface(resolved_surface);
+            });
         }
         let is_mapped = this.global_logical_bounds().is_some();
         let mut bounds_after_first_map_relayout = None;
         if was_mapped != is_mapped {
             if let Some(ShellSurfaceObject::XdgSurface(xdg_surface_id)) = this.shell_surface {
-                let xdg_surface_object_id = xdg_surface_id.object_id();
-                if state
-                    .objects
-                    .try_ref_object::<XdgSurface>(xdg_surface_object_id)
+                if xdg_surface_id
+                    .try_ref(state)
                     .is_some_and(XdgSurface::is_toplevel_parent)
                 {
                     if is_mapped {
@@ -2526,7 +2506,7 @@ impl WlSurface {
                 parent_surface.remove_child_from_tree(object);
             }
         }
-        self.cleanup_extension_objects(client, state, dispatcher);
+        self.cleanup_extension_objects();
         state.unregister_root_surface(object);
         use crate::wayland_objects::wl_display::WlDisplay;
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
@@ -2955,7 +2935,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_surface_removes_surface_extension_objects() {
+    fn deleting_surface_detaches_surface_extension_objects() {
         let mut state = state_for_tests();
         let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -3021,21 +3001,121 @@ mod tests {
         drop(client_dispatcher);
 
         assert!(!client.contains_object(surface_id, &state));
-        assert!(!client.contains_object(fractional_id, &state));
-        assert!(!client.contains_object(viewport_id, &state));
-        assert!(!client.contains_object(syncobj_surface_id, &state));
+        assert!(client.contains_object(fractional_id, &state));
+        assert!(client.contains_object(viewport_id, &state));
+        assert!(client.contains_object(syncobj_surface_id, &state));
         assert!(state
             .objects
             .try_ref_object::<WpFractionalScaleV1>(fractional_object_id)
-            .is_none());
+            .is_some());
         assert!(state
             .objects
             .try_ref_object::<WpViewport>(viewport_object_id)
-            .is_none());
+            .is_some());
         assert!(state
             .objects
             .try_ref_object::<WpLinuxDrmSyncobjSurfaceV1>(syncobj_surface_object_id)
-            .is_none());
+            .is_some());
+    }
+
+    #[test]
+    fn detached_surface_extension_objects_can_still_be_destroyed() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+        let surface_id = WlSurfaceId::from(5);
+        let (surface_resolved, _) =
+            client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
+        let surface_object_id = surface_resolved.object_id();
+        state.register_root_surface(surface_object_id);
+
+        let fractional_id = WpFractionalScaleV1Id::from(6);
+        let (fractional_resolved, _) = client.insert_object(
+            &mut state,
+            WpFractionalScaleV1::new(
+                fractional_id,
+                Resolved::new(client.client_id(), surface_id, surface_object_id),
+            ),
+        );
+        let viewport_id = WpViewportId::from(7);
+        let (viewport_resolved, _) = client.insert_object(
+            &mut state,
+            WpViewport::new(
+                viewport_id,
+                Resolved::new(client.client_id(), surface_id, surface_object_id),
+            ),
+        );
+        let syncobj_surface_id = WpLinuxDrmSyncobjSurfaceV1Id::from(8);
+        let (syncobj_surface_resolved, _) = client.insert_object(
+            &mut state,
+            WpLinuxDrmSyncobjSurfaceV1::new(
+                syncobj_surface_id,
+                Resolved::new(client.client_id(), surface_id, surface_object_id),
+            ),
+        );
+
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface
+                .set_fractional_scale_object(fractional_resolved)
+                .unwrap();
+            surface.set_viewport_object(viewport_resolved).unwrap();
+            surface
+                .set_syncobj_surface_object(syncobj_surface_resolved)
+                .unwrap();
+        }
+
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.delete_self(&mut client, &mut state, &mut client_dispatcher);
+        }
+
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut fractional = state
+                .objects
+                .grab_object::<WpFractionalScaleV1>(fractional_resolved.object_id());
+            fractional
+                .on(
+                    &mut client,
+                    &mut state,
+                    raw_request_from_event(RawEvent::new(fractional_id.into(), 0, 1)),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut viewport = state
+                .objects
+                .grab_object::<WpViewport>(viewport_resolved.object_id());
+            viewport
+                .on(
+                    &mut client,
+                    &mut state,
+                    raw_request_from_event(RawEvent::new(viewport_id.into(), 0, 1)),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut syncobj_surface = state
+                .objects
+                .grab_object::<WpLinuxDrmSyncobjSurfaceV1>(syncobj_surface_resolved.object_id());
+            syncobj_surface
+                .on(
+                    &mut client,
+                    &mut state,
+                    raw_request_from_event(RawEvent::new(syncobj_surface_id.into(), 0, 1)),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+
+        assert!(!client.contains_object(fractional_id, &state));
+        assert!(!client.contains_object(viewport_id, &state));
+        assert!(!client.contains_object(syncobj_surface_id, &state));
     }
 
     #[test]

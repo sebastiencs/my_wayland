@@ -33,24 +33,25 @@ impl Object for WpViewport {
     ) -> RequestResult {
         use wp_viewport::Request::*;
 
-        let Some(mut surface) = self.surface.try_grab(state) else {
-            client.send_protocol_error(
-                dispatcher,
-                self.id.into(),
-                wp_viewport::Error::NoSurface as u32,
-                "wp_viewport surface no longer exists",
-            );
-            return Ok(());
-        };
-
         match client.parse::<Self>(req).unwrap() {
             Destroy => {
                 let this = client.resolve(self.id, state).unwrap();
-                surface.clear_viewport_object(this);
+                if let Some(mut surface) = self.surface.try_grab(state) {
+                    surface.clear_viewport_object(this);
+                }
                 use crate::wayland_objects::wl_display::WlDisplay;
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
             SetSource { x, y, width, height } => {
+                let Some(mut surface) = self.surface.try_grab(state) else {
+                    client.send_protocol_error(
+                        dispatcher,
+                        self.id.into(),
+                        wp_viewport::Error::NoSurface as u32,
+                        "wp_viewport surface no longer exists",
+                    );
+                    return Ok(());
+                };
                 if x == -1.0 && y == -1.0 && width == -1.0 && height == -1.0 {
                     surface.pending_viewport_mut().src = None;
                     return Ok(());
@@ -67,6 +68,15 @@ impl Object for WpViewport {
                 surface.pending_viewport_mut().src = Some(RectF { x, y, width, height });
             }
             SetDestination { width, height } => {
+                let Some(mut surface) = self.surface.try_grab(state) else {
+                    client.send_protocol_error(
+                        dispatcher,
+                        self.id.into(),
+                        wp_viewport::Error::NoSurface as u32,
+                        "wp_viewport surface no longer exists",
+                    );
+                    return Ok(());
+                };
                 if width == -1 && height == -1 {
                     surface.pending_viewport_mut().dst = None;
                     return Ok(());
