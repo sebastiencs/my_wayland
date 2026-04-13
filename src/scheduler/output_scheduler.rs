@@ -205,7 +205,6 @@ impl OutputScheduler {
     ) {
         self.sync_mode_from_state(state);
         self.clock.request_frame(reason);
-        self.blocked_on_pipeline = false;
         self.try_dispatch_render(dispatcher);
         self.arm_from_clock(dispatcher);
     }
@@ -613,6 +612,46 @@ mod tests {
         assert!(dispatcher.test_has_queued_action_for::<DrmAction, _>(output_id, |action| {
             matches!(action, DrmAction::FlipWatchdog)
         }));
+    }
+
+    #[test]
+    fn request_while_pipeline_blocked_keeps_work_queued_without_redispatch() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output(
+            BackendOutputRef::new(DrmId::from(0usize)),
+            1,
+            0,
+            0,
+            1920,
+            1080,
+            "test-output",
+        ));
+
+        let mut scheduler = OutputScheduler::new(DrmId::from(0usize), output_id);
+        let mut dispatcher = Dispatcher::default();
+        let watchdog_deadline = Instant::now() + Duration::from_millis(10);
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::PipelineBlocked { watchdog_deadline },
+                &mut dispatcher,
+            )
+            .unwrap();
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::RequestFrame { reason: RequestFrameReason::Damage },
+                &mut dispatcher,
+            )
+            .unwrap();
+
+        assert!(!dispatcher.test_has_queued_action_for::<DrmAction, _>(output_id, |action| {
+            matches!(action, DrmAction::RenderFrame { .. })
+        }));
+        let snapshot = state.frame_scheduler.get(&output_id).expect("snapshot");
+        assert!(snapshot.blocked_on_pipeline);
+        assert!(snapshot.clock.pending_work);
+        assert_eq!(snapshot.flip_watchdog_deadline, Some(watchdog_deadline));
     }
 
     #[test]

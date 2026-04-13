@@ -447,10 +447,6 @@ impl DrmOutput {
             .expect("framebuffer dimensions must be non-negative")
     }
 
-    fn request_frame(&mut self) -> bool {
-        self.pipeline.request_frame()
-    }
-
     fn begin_render(&mut self) -> bool {
         self.pipeline.begin_render()
     }
@@ -3350,8 +3346,11 @@ impl DrmOutputModel {
         let frame_time_msec = monotonic_time_msec();
         let ready = {
             let drm = state.drm.get_mut(self.drm_id);
-            drm.output_mut(drm_crtc_id)
-                .is_some_and(DrmOutput::begin_render)
+            if let Some(output) = drm.output_mut(drm_crtc_id) {
+                output.begin_render()
+            } else {
+                false
+            }
         };
         let failed_releases = {
             if !ready {

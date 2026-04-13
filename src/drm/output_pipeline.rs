@@ -29,7 +29,6 @@ struct OutputPipelineCore {
     phase: PipelinePhase,
     displayed_buffer_index: usize,
     render_buffer_index: usize,
-    needs_frame: bool,
     in_flight_releases: Vec<DeferredRelease>,
     present_count: u64,
     damage_history: VecDeque<DamageRegion>,
@@ -54,7 +53,6 @@ impl OutputPipeline {
                 phase: PipelinePhase::Idle,
                 displayed_buffer_index: 0,
                 render_buffer_index: 1,
-                needs_frame: false,
                 in_flight_releases: Vec::new(),
                 present_count: 0,
                 damage_history: VecDeque::new(),
@@ -75,10 +73,6 @@ impl OutputPipeline {
 
     pub(super) fn phase(&self) -> PipelinePhase {
         self.core.phase()
-    }
-
-    pub(super) fn request_frame(&mut self) -> bool {
-        self.core.request_frame()
     }
 
     pub(super) fn begin_render(&mut self) -> bool {
@@ -234,13 +228,8 @@ impl OutputPipelineCore {
         self.phase
     }
 
-    fn request_frame(&mut self) -> bool {
-        self.needs_frame = true;
-        matches!(self.phase, PipelinePhase::Idle)
-    }
-
     fn begin_render(&mut self) -> bool {
-        if !self.needs_frame || !matches!(self.phase, PipelinePhase::Idle) {
+        if !matches!(self.phase, PipelinePhase::Idle) {
             return false;
         }
         self.phase = PipelinePhase::Rendering;
@@ -256,7 +245,6 @@ impl OutputPipelineCore {
 
     fn mark_frame_idle(&mut self) {
         self.phase = PipelinePhase::Idle;
-        self.needs_frame = false;
     }
 
     fn buffer_age(&self) -> Option<usize> {
@@ -279,7 +267,6 @@ impl OutputPipelineCore {
     fn mark_frame_submitted(&mut self, frame: SubmittedFrame) {
         self.phase = PipelinePhase::WaitingForFlip;
         self.waiting_for_flip_since = Some(Instant::now());
-        self.needs_frame = false;
         self.in_flight_frame = Some(frame);
         self.retiring_external_fb = self.displayed_external_fb.take();
         self.retiring_cursor_slot = self.displayed_cursor_slot.take();
@@ -372,7 +359,6 @@ mod tests {
             next_submission_id: 1,
             ..Default::default()
         };
-        assert!(core.request_frame());
         assert!(core.begin_render());
         core.mark_frame_submitted(SubmittedFrame::Composited {
             buffer_index: 1,
@@ -386,22 +372,15 @@ mod tests {
     }
 
     #[test]
-    fn damage_during_waiting_for_flip_is_queued_for_retry() {
+    fn begin_render_starts_immediately_when_pipeline_is_idle() {
         let mut core = OutputPipelineCore {
-            phase: PipelinePhase::WaitingForFlip,
+            phase: PipelinePhase::Idle,
             render_buffer_index: 1,
             force_full_redraw: true,
             next_submission_id: 1,
-            in_flight_frame: Some(SubmittedFrame::Composited {
-                buffer_index: 1,
-                damage: DamageRegion::new(),
-                submission: test_submission(1),
-                damage_blob: None,
-                cursor_slot: None,
-            }),
             ..Default::default()
         };
-        assert!(!core.request_frame());
-        assert!(core.needs_frame);
+        assert!(core.begin_render());
+        assert_eq!(core.phase(), PipelinePhase::Rendering);
     }
 }
