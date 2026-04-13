@@ -370,10 +370,10 @@ impl FrameClock {
             }
             return;
         }
-        let cadence = self.timing_hints.cadence_hint.unwrap_or_else(|| {
-            self.present_interval_hint()
-                .unwrap_or_else(|| self.nominal_interval())
-        });
+        let cadence = self
+            .timing_hints
+            .cadence_hint
+            .unwrap_or_else(|| self.default_cadence());
         let bootstrap_without_present_history = self.last_present.is_none();
         let earliest_base = self
             .last_present
@@ -424,8 +424,18 @@ impl FrameClock {
         refresh_interval(self.nominal_refresh_millihz)
     }
 
-    fn present_interval_hint(&self) -> Option<Duration> {
-        self.present_intervals.iter().copied().max()
+    fn default_cadence(&self) -> Duration {
+        match self.mode {
+            FrameClockMode::Fixed => self.nominal_interval(),
+            FrameClockMode::Variable => self
+                .recent_present_interval_hint()
+                .unwrap_or_else(|| self.nominal_interval()),
+            FrameClockMode::Passive => self.nominal_interval(),
+        }
+    }
+
+    fn recent_present_interval_hint(&self) -> Option<Duration> {
+        self.present_intervals.back().copied()
     }
 
     fn push_present_interval(&mut self, interval: Duration) {
@@ -637,6 +647,30 @@ mod tests {
         assert!(d60.target_present.is_some() && d144.target_present.is_some());
         assert!(d144.target_present.unwrap() < d60.target_present.unwrap());
         assert!(d144.latest_render_start < d60.latest_render_start);
+    }
+
+    #[test]
+    fn fixed_mode_ignores_long_present_gap_for_cadence() {
+        let base = Instant::now();
+        let mut clock = FrameClock::new();
+        clock.update_mode(FrameClockMode::Fixed, 60_000);
+        clock.notify_presented(PresentSample {
+            present_time: base,
+            sequence: 1,
+            flags: PresentFlags { zero_copy: false, refresh_is_constant: true },
+            timing: None,
+        });
+        clock.notify_presented(PresentSample {
+            present_time: base + Duration::from_secs(1),
+            sequence: 2,
+            flags: PresentFlags { zero_copy: false, refresh_is_constant: true },
+            timing: None,
+        });
+        clock.request_frame(RequestFrameReason::Damage);
+
+        let decision = clock.decide(base + Duration::from_secs(1));
+        let target = decision.target_present.expect("target present");
+        assert!(target <= base + Duration::from_secs(1) + refresh_interval(60_000));
     }
 
     #[test]
