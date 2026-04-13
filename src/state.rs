@@ -18,6 +18,10 @@ use crate::{
         ShadowVisualStyle, SurfaceEffectStyle, WindowAnimationState, WindowAnimationValues,
     },
     root_geometry::{self, CommittedRootGeometry, DecorationFrameLayout},
+    scheduler::{
+        frame_clock::VrrRange, output_scheduler::OutputSchedulerSnapshot,
+        presentation::PresentationSubsystem,
+    },
     seat::SeatState,
     tiling::{self, TiledResizeState, WorkspaceLayout},
     wayland_objects::{
@@ -218,6 +222,10 @@ pub struct Output {
     pub global_name: Option<GlobalName>,
     pub gamma_lut_size: u32,
     pub ctm_supported: bool,
+    pub vrr_capable: bool,
+    pub vrr_policy_enabled: bool,
+    pub vrr_enabled: bool,
+    pub vrr_range: Option<VrrRange>,
     pub gamma_control_object_id: Option<Resolved<ZwlrGammaControlV1Id>>,
     pub x: i32,
     pub y: i32,
@@ -242,6 +250,10 @@ impl Output {
             global_name: None,
             gamma_lut_size: 0,
             ctm_supported: false,
+            vrr_capable: false,
+            vrr_policy_enabled: false,
+            vrr_enabled: false,
+            vrr_range: None,
             gamma_control_object_id: None,
             x: 0,
             y: 0,
@@ -274,6 +286,10 @@ impl Output {
             self.enabled = false;
             self.gamma_lut_size = 0;
             self.ctm_supported = false;
+            self.vrr_capable = false;
+            self.vrr_policy_enabled = false;
+            self.vrr_enabled = false;
+            self.vrr_range = None;
             return;
         };
         let connector = &in_use.connector;
@@ -306,6 +322,10 @@ impl Output {
         self.enabled = true;
         self.gamma_lut_size = drm.output_gamma_size(self.drm_crtc_id);
         self.ctm_supported = drm.output_supports_ctm(self.drm_crtc_id);
+        self.vrr_capable = drm.output_vrr_capable(self.drm_crtc_id);
+        self.vrr_policy_enabled = self.vrr_capable;
+        self.vrr_enabled = drm.output_vrr_enabled(self.drm_crtc_id);
+        self.vrr_range = drm.output_vrr_range(self.drm_crtc_id);
         self.current_mode = current_mode;
         self.preferred_mode = preferred_mode;
     }
@@ -821,6 +841,9 @@ pub struct State {
         BTreeMap<Resolved<WlDataSourceId>, BTreeSet<Resolved<WlDataOfferId>>>,
     pub next_workspace_serial: u32,
     pub backend_syncobj_globals: BTreeMap<DrmId, GlobalName>,
+    pub session_active: bool,
+    pub frame_scheduler: BTreeMap<OutputId, OutputSchedulerSnapshot>,
+    pub presentation: PresentationSubsystem,
     pub globals: Globals,
     pub activation_tokens: ActivationTokenStore,
     pub egl: EGL,
@@ -1709,6 +1732,42 @@ impl State {
         &mut self,
         frame_time_msec: u32,
     ) -> WindowAnimationAdvanceResult {
+        self.advance_window_visual_animations_matching(frame_time_msec, |_| true)
+    }
+
+    pub fn advance_window_visual_animations_for_output(
+        &mut self,
+        output_id: OutputId,
+        frame_time_msec: u32,
+    ) -> WindowAnimationAdvanceResult {
+        let Some(output_bounds) = self.output_bounds(output_id) else {
+            return WindowAnimationAdvanceResult {
+                damaged_rects: Vec::new(),
+                has_active_animations: false,
+            };
+        };
+        let included_surfaces = self
+            .managed_root_surfaces
+            .keys()
+            .copied()
+            .filter(|surface| {
+                self.root_surface_animation_damage_rect(*surface)
+                    .is_some_and(|rect| rect.intersects(output_bounds))
+            })
+            .collect::<BTreeSet<_>>();
+        self.advance_window_visual_animations_matching(frame_time_msec, |surface| {
+            included_surfaces.contains(&surface)
+        })
+    }
+
+    fn advance_window_visual_animations_matching<F>(
+        &mut self,
+        frame_time_msec: u32,
+        mut include_surface: F,
+    ) -> WindowAnimationAdvanceResult
+    where
+        F: FnMut(Resolved<WlSurfaceId>) -> bool,
+    {
         let animation_duration = self.config.animations.window.duration_msec;
         let surfaces = self
             .managed_root_surfaces
@@ -1718,6 +1777,9 @@ impl State {
         let mut damaged_rects = Vec::new();
         let mut has_active_animations = false;
         for surface in surfaces {
+            if !include_surface(surface) {
+                continue;
+            }
             let target_values = self.window_animation_target_values(surface);
             let damage_rect = self.root_surface_animation_damage_rect(surface);
             let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
@@ -3246,6 +3308,10 @@ mod tests {
             global_name: None,
             gamma_lut_size: 0,
             ctm_supported: false,
+            vrr_capable: false,
+            vrr_policy_enabled: false,
+            vrr_enabled: false,
+            vrr_range: None,
             gamma_control_object_id: None,
             x: -100,
             y: 20,
@@ -3267,6 +3333,10 @@ mod tests {
             global_name: None,
             gamma_lut_size: 0,
             ctm_supported: false,
+            vrr_capable: false,
+            vrr_policy_enabled: false,
+            vrr_enabled: false,
+            vrr_range: None,
             gamma_control_object_id: None,
             x: 0,
             y: 0,
@@ -3298,6 +3368,10 @@ mod tests {
             global_name: None,
             gamma_lut_size: 0,
             ctm_supported: false,
+            vrr_capable: false,
+            vrr_policy_enabled: false,
+            vrr_enabled: false,
+            vrr_range: None,
             gamma_control_object_id: None,
             x: 0,
             y: 0,
@@ -3319,6 +3393,10 @@ mod tests {
             global_name: None,
             gamma_lut_size: 0,
             ctm_supported: false,
+            vrr_capable: false,
+            vrr_policy_enabled: false,
+            vrr_enabled: false,
+            vrr_range: None,
             gamma_control_object_id: None,
             x: 100,
             y: 0,
@@ -3350,6 +3428,10 @@ mod tests {
             global_name: None,
             gamma_lut_size: 0,
             ctm_supported: false,
+            vrr_capable: false,
+            vrr_policy_enabled: false,
+            vrr_enabled: false,
+            vrr_range: None,
             gamma_control_object_id: None,
             x: 0,
             y: 0,
@@ -3371,6 +3453,10 @@ mod tests {
             global_name: None,
             gamma_lut_size: 0,
             ctm_supported: false,
+            vrr_capable: false,
+            vrr_policy_enabled: false,
+            vrr_enabled: false,
+            vrr_range: None,
             gamma_control_object_id: None,
             x: 200,
             y: 0,

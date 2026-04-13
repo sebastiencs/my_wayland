@@ -189,6 +189,10 @@ impl Udev {
         };
         sync_output_nodes_for_backend(state, drm_id);
         for output_id in state.output_ids_for_backend(BackendOutputRef::new(drm_id)) {
+            dispatcher.dispatch_to(
+                crate::scheduler::output_scheduler_id(output_id),
+                crate::scheduler::OutputSchedulerAction::ModeUpdated,
+            );
             dispatcher.dispatch(ClientManagerAction::OutputStateChanged { output_id });
         }
         sync_color_control_globals(state, dispatcher);
@@ -321,7 +325,13 @@ impl Udev {
             let output_id = state.insert_output(output);
             self.place_output_automatically(output_id, state);
             self.publish_output_node(output_id, state, dispatcher);
+            let output_scheduler = state
+                .drm
+                .get(drm_id)
+                .make_output_scheduler(drm_id, output_id);
             let drm_model = state.drm.get(drm_id).make_output_model(drm_id, output_id);
+            dispatcher
+                .start_model(crate::scheduler::output_scheduler_id(output_id), output_scheduler);
             dispatcher.start_model(output_id, drm_model);
         }
         sync_output_nodes_for_backend(state, drm_id);
@@ -364,6 +374,7 @@ impl Udev {
         state: &mut State,
         dispatcher: &mut Dispatcher,
     ) {
+        dispatcher.stop_model(crate::scheduler::output_scheduler_id(output_id));
         dispatcher.stop_model(output_id);
         dispatcher.dispatch(ClientManagerAction::OutputRemoved { output_id });
         let global_name = state

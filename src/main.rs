@@ -185,6 +185,7 @@ mod region;
 mod render;
 mod root_geometry;
 pub mod runner;
+mod scheduler;
 mod seat;
 mod state;
 mod sync;
@@ -294,6 +295,9 @@ fn main() {
         data_offers_by_source: Default::default(),
         next_workspace_serial: 1,
         backend_syncobj_globals: Default::default(),
+        session_active: true,
+        frame_scheduler: Default::default(),
+        presentation: Default::default(),
         globals,
         activation_tokens: Default::default(),
         egl,

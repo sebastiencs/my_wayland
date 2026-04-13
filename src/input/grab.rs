@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::{
     clients::{ClientAction, ClientId, ClientManagerAction, Resolved},
     cursor::CursorSourceRef,
-    drm::{schedule_active_output, schedule_outputs_for_points, schedule_outputs_for_rects},
+    drm::{request_active_output, request_outputs_for_points, request_outputs_for_rects},
     protocol_generated::{xdg_toplevel::ResizeEdge, WlSurfaceId, XdgToplevelId},
     root_geometry::WindowTargetGeometry,
     runner::Dispatcher,
@@ -86,9 +86,9 @@ pub(crate) fn apply_pointer_interactive_grab(
             );
             if let Some(new_bounds) = new_bounds {
                 let rects = old_bounds.into_iter().chain(std::iter::once(new_bounds));
-                schedule_outputs_for_rects(state, rects, dispatcher);
+                request_outputs_for_rects(state, rects, dispatcher);
             } else {
-                schedule_active_output(state, dispatcher);
+                request_active_output(state, dispatcher);
             }
         }
         ActiveGrabState::Resize {
@@ -141,9 +141,9 @@ pub(crate) fn apply_pointer_interactive_grab(
             );
             if let Some(new_bounds) = new_bounds {
                 let rects = old_bounds.into_iter().chain(std::iter::once(new_bounds));
-                schedule_outputs_for_rects(state, rects, dispatcher);
+                request_outputs_for_rects(state, rects, dispatcher);
             } else {
-                schedule_active_output(state, dispatcher);
+                request_active_output(state, dispatcher);
             }
 
             if last_size != (width, height) {
@@ -175,7 +175,7 @@ pub(crate) fn apply_pointer_interactive_grab(
             let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
             if state.resize_tiled_root_surface_from_state(root_surface, resize_state, dx, dy) {
                 dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
-                schedule_active_output(state, dispatcher);
+                request_active_output(state, dispatcher);
             }
             state.seat.pointer_interactive_grab = Some(ActiveGrabState::ResizeTiled {
                 root_surface,
@@ -288,13 +288,13 @@ fn prepare_window_for_pointer_grab(
         && state.set_root_surface_floating(target.root_surface, true)
     {
         dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
-        schedule_active_output(state, dispatcher);
+        request_active_output(state, dispatcher);
         target =
             crate::input::pick::build_window_target(state, target.root_surface).unwrap_or(target);
     }
 
     state.raise_root_surface(target.root_surface);
-    schedule_outputs_for_rects(
+    request_outputs_for_rects(
         state,
         [interactive_damage_rect(state, target.root_surface)
             .unwrap_or(target.geometry.target_rect)],
@@ -428,7 +428,7 @@ fn update_visible_cursor_for_grab_change(
         dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
     }
     refresh_visible_cursor_surface_outputs(state, dispatcher);
-    schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
+    request_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
 }
 
 fn begin_compositor_pointer_grab(

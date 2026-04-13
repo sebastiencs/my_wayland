@@ -1,7 +1,7 @@
 use {
     crate::{
         clients::{Client, ClientAction, ClientId, Resolved},
-        drm::{kick_window_animation_manager, schedule_outputs_for_rects},
+        drm::{kick_window_animation_manager, request_outputs_for_rects},
         protocol_generated::{WlSeatId, WlSurfaceId},
         runner::Dispatcher,
         seat::{dispatch_client_event, SeatClientEvent},
@@ -69,7 +69,7 @@ pub(crate) fn set_keyboard_focus(
             .unwrap_or(focus.surface);
         state.root_surface_animation_damage_rect(root_surface)
     });
-    schedule_outputs_for_rects(state, affected_rects, dispatcher);
+    request_outputs_for_rects(state, affected_rects, dispatcher);
     kick_window_animation_manager(dispatcher);
     refresh_selection_focus_clients(dispatcher, old_focus, new_focus);
 }

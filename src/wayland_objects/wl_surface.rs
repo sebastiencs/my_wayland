@@ -4,7 +4,7 @@ use crate::{
     clients::{
         Client, ClientDispatcher, ClientId, ClientManagerAction, EventWriter, RawRequest, Resolved,
     },
-    drm::{schedule_active_output, schedule_outputs, schedule_outputs_for_rect},
+    drm::{request_active_output, request_outputs, request_outputs_for_rect},
     input::{set_keyboard_focus_from_surface, SurfaceFocus},
     object::{Object, Parser, PostAction, RequestResult},
     protocol_generated::{
@@ -1916,11 +1916,11 @@ impl WlSurface {
                     bounds
                 }
             } {
-                schedule_outputs(state, this.output_membership_ids(), dispatcher);
-                schedule_outputs_for_rect(state, bounds, dispatcher);
+                request_outputs(state, this.output_membership_ids(), dispatcher);
+                request_outputs_for_rect(state, bounds, dispatcher);
             } else {
-                schedule_outputs(state, this.output_membership_ids(), dispatcher);
-                schedule_active_output(state, dispatcher);
+                request_outputs(state, this.output_membership_ids(), dispatcher);
+                request_active_output(state, dispatcher);
             }
         }
 
@@ -2438,11 +2438,11 @@ impl WlSurface {
         if changed {
             let surface = client.resolve(self.id, state).unwrap();
             if let Some(bounds) = state.surface_scene_bounds_with_ref(surface, self) {
-                schedule_outputs(state, self.output_membership_ids(), dispatcher);
-                schedule_outputs_for_rect(state, bounds, dispatcher);
+                request_outputs(state, self.output_membership_ids(), dispatcher);
+                request_outputs_for_rect(state, bounds, dispatcher);
             } else {
-                schedule_outputs(state, self.output_membership_ids(), dispatcher);
-                schedule_active_output(state, dispatcher);
+                request_outputs(state, self.output_membership_ids(), dispatcher);
+                request_active_output(state, dispatcher);
             }
         }
         changed
@@ -2511,11 +2511,11 @@ impl WlSurface {
         use crate::wayland_objects::wl_display::WlDisplay;
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
         if let Some(bounds) = scene_bounds {
-            schedule_outputs(state, self.output_membership_ids(), dispatcher);
-            schedule_outputs_for_rect(state, bounds, dispatcher);
+            request_outputs(state, self.output_membership_ids(), dispatcher);
+            request_outputs_for_rect(state, bounds, dispatcher);
         } else {
-            schedule_outputs(state, self.output_membership_ids(), dispatcher);
-            schedule_active_output(state, dispatcher);
+            request_outputs(state, self.output_membership_ids(), dispatcher);
+            request_active_output(state, dispatcher);
         }
     }
 

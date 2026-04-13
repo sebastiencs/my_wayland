@@ -16,6 +16,7 @@ use crate::{
         ring::{RecvmsgCompleted, RingId},
     },
     runner::{Dispatcher, Model, Redispatcher},
+    scheduler::{output_scheduler_id, OutputSchedulerAction},
     state::State,
     udev::UdevAction,
 };
@@ -64,6 +65,8 @@ pub enum DbusError {
 #[derive(Debug)]
 enum Pending {
     TakeDevice { devnum: libc::dev_t },
+    SubscribeSessionSignals,
+    GetSessionActive,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -374,35 +377,145 @@ impl Dbus {
         msg_serial
     }
 
-    fn handle_message(&mut self, msg: Message, mut fds: Vec<OwnedFd>, dispatcher: &mut Dispatcher) {
+    fn handle_message(
+        &mut self,
+        state: &mut State,
+        msg: Message,
+        mut fds: Vec<OwnedFd>,
+        dispatcher: &mut Dispatcher,
+    ) {
         use {dbus_message_parser::message::MessageType::*, Value::*};
-
-        let reply_serial = msg.get_reply_serial().map(DbusSerial);
-        let Some(reply_serial) = reply_serial else {
-            return;
-        };
-        let pending = self.pending.remove(&reply_serial).unwrap();
 
         match msg.get_type() {
             MethodCall => todo!(),
-            MethodReturn => match pending {
-                Pending::TakeDevice { devnum } => {
-                    let [UnixFD(raw_fd), Boolean(inactive)] = msg.get_body() else {
-                        panic!();
-                    };
-                    let inactive = *inactive;
-                    let Some(fd) = (!fds.is_empty()).then(|| fds.remove(0)) else {
-                        panic!("TakeDevice reply missing owned fd payload");
-                    };
-                    debug_assert_eq!(fd.as_raw_fd(), *raw_fd);
-                    dispatcher.dispatch(UdevAction::DeviceTaken { fd, inactive, devnum });
+            MethodReturn => {
+                let Some(reply_serial) = msg.get_reply_serial().map(DbusSerial) else {
+                    return;
+                };
+                let Some(pending) = self.pending.remove(&reply_serial) else {
+                    return;
+                };
+                match pending {
+                    Pending::TakeDevice { devnum } => {
+                        let [UnixFD(raw_fd), Boolean(inactive)] = msg.get_body() else {
+                            panic!();
+                        };
+                        let inactive = *inactive;
+                        let Some(fd) = (!fds.is_empty()).then(|| fds.remove(0)) else {
+                            panic!("TakeDevice reply missing owned fd payload");
+                        };
+                        debug_assert_eq!(fd.as_raw_fd(), *raw_fd);
+                        dispatcher.dispatch(UdevAction::DeviceTaken { fd, inactive, devnum });
+                    }
+                    Pending::SubscribeSessionSignals => {}
+                    Pending::GetSessionActive => {
+                        if let [Variant(value)] = msg.get_body() {
+                            if let Boolean(active) = value.as_ref() {
+                                self.dispatch_session_active(state, *active, dispatcher);
+                            }
+                        }
+                    }
                 }
-            },
+            }
             Error => {
+                let pending = msg
+                    .get_reply_serial()
+                    .map(DbusSerial)
+                    .and_then(|serial| self.pending.remove(&serial));
                 log::error!("pending={:?} error={:?}", pending, msg);
             }
-            Signal => todo!(),
+            Signal => self.handle_signal(state, msg, dispatcher),
         }
+    }
+
+    fn handle_signal(&mut self, state: &mut State, msg: Message, dispatcher: &mut Dispatcher) {
+        use Value::{Array, Boolean, DictEntry, String, Variant};
+
+        let is_session_signal = msg
+            .get_path()
+            .is_some_and(|path| path.as_ref() == self.session_path)
+            && msg
+                .get_interface()
+                .is_some_and(|interface| interface.as_ref() == "org.freedesktop.DBus.Properties")
+            && msg
+                .get_member()
+                .is_some_and(|member| member.as_ref() == "PropertiesChanged");
+        if !is_session_signal {
+            return;
+        }
+        let [String(changed_interface), Array(changed_properties), _] = msg.get_body() else {
+            return;
+        };
+        if changed_interface != "org.freedesktop.login1.Session" {
+            return;
+        }
+        for property in changed_properties.as_ref() {
+            let DictEntry(entry) = property else {
+                continue;
+            };
+            let (String(name), Variant(value)) = entry.as_ref() else {
+                continue;
+            };
+            if name == "Active" {
+                if let Boolean(active) = value.as_ref() {
+                    self.dispatch_session_active(state, *active, dispatcher);
+                }
+                return;
+            }
+        }
+    }
+
+    fn dispatch_session_active(
+        &self,
+        state: &mut State,
+        active: bool,
+        dispatcher: &mut Dispatcher,
+    ) {
+        state.session_active = active;
+        for (output_id, _) in state.outputs.iter() {
+            dispatcher.dispatch_to(
+                output_scheduler_id(output_id),
+                OutputSchedulerAction::SessionChanged { active },
+            );
+        }
+    }
+
+    fn send_message(&mut self, msg: Message, pending: Pending, dispatcher: &mut Dispatcher) {
+        let serial = DbusSerial(msg.get_serial());
+        let encoded = msg.encode().unwrap();
+        dispatcher.dispatch(IoUringAction::Write {
+            fd: self.socket.as_raw_fd(),
+            offset: 0,
+            buffer: Box::from(&encoded[..]),
+            dispatch_to: Redispatcher::None,
+        });
+        self.pending.insert(serial, pending);
+    }
+
+    fn subscribe_session_signals(&mut self, dispatcher: &mut Dispatcher) {
+        let mut msg = make_method_call(MethodCallParams {
+            destination: "org.freedesktop.DBus".into(),
+            object_path: "/org/freedesktop/DBus".into(),
+            interface: "org.freedesktop.DBus".into(),
+            member: "AddMatch".into(),
+        });
+        msg.set_serial(self.next_serial().as_u32());
+        msg.add_value(Value::String(format!(
+            "type='signal',sender='org.freedesktop.login1',path='{}',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',arg0='org.freedesktop.login1.Session'",
+            self.session_path
+        )));
+        self.send_message(msg, Pending::SubscribeSessionSignals, dispatcher);
+    }
+
+    fn request_session_active(&mut self, dispatcher: &mut Dispatcher) {
+        let mut msg = make_get(GetParams {
+            destination: "org.freedesktop.login1".into(),
+            object_path: self.session_path.as_str().into(),
+            interface: "org.freedesktop.login1.Session".into(),
+            property: "Active",
+        });
+        msg.set_serial(self.next_serial().as_u32());
+        self.send_message(msg, Pending::GetSessionActive, dispatcher);
     }
 }
 
@@ -418,7 +531,7 @@ impl Model for Dbus {
 
     fn process(
         &mut self,
-        _state: &mut State,
+        state: &mut State,
         action: Self::Action,
         dispatcher: &mut Dispatcher,
     ) -> Result<(), ()> {
@@ -428,14 +541,14 @@ impl Model for Dbus {
             Start => {
                 let fd = self.socket.as_raw_fd();
                 dispatcher.start_model(DBUS_READER_ID, DbusReader::new(fd));
+                self.subscribe_session_signals(dispatcher);
+                self.request_session_active(dispatcher);
             }
             TakeDevice { devnum } => {
                 let serial = self.take_device(devnum, dispatcher);
                 self.pending.insert(serial, Pending::TakeDevice { devnum });
             }
-            MsgReceived { msg, fds } => {
-                self.handle_message(msg, fds, dispatcher);
-            }
+            MsgReceived { msg, fds } => self.handle_message(state, msg, fds, dispatcher),
         };
 
         Ok(())

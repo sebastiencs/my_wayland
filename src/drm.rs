@@ -1,9 +1,9 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     num::NonZeroU32,
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
     rc::Rc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use {drm::control::FbCmd2Flags, khronos_types::gl};
@@ -18,7 +18,6 @@ use {
         },
         Device,
     },
-    nix::sys::timerfd::{self, Expiration, TimerFd, TimerFlags, TimerSetTimeFlags},
     once_cell::sync::Lazy,
 };
 
@@ -55,7 +54,16 @@ use crate::{
 use crate::{
     clients::{ClientAction, ClientId, ClientManagerAction, Resolved},
     protocol_generated::{WlBufferId, WlSurfaceId, WpPresentationFeedbackId},
+    scheduler::{
+        complete_frame_for_timeline, discard_frame_for_timeline, frame_clock::ClockDecision,
+        output_scheduler_id, FrameCompletionOutcome, OutputScheduler, OutputSchedulerAction,
+        PresentationSubsystem, RequestFrameReason,
+    },
 };
+
+mod kms_submit;
+mod output_pipeline;
+mod render_planner;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Format {
@@ -162,31 +170,12 @@ pub struct DrmOutput {
     color_state: OutputColorState,
     presentation_transform: OutputPresentationTransform,
     render_sync_mode: RenderSyncMode,
-    buffers: [RenderBuffer; 2],
-    displayed_buffer_index: usize,
-    render_buffer_index: usize,
-    needs_frame: bool,
-    frame_scheduled: bool,
-    rendering_active: bool,
-    page_flip_pending: bool,
-    in_flight_releases: Vec<DeferredRelease>,
-    present_count: u64,
-    damage_history: VecDeque<DamageRegion>,
-    last_scene: Vec<SceneItemState>,
-    last_submission_had_effects: bool,
-    force_full_redraw: bool,
-    rendered_buffer_present_id: [Option<u64>; 2],
-    in_flight_frame: Option<SubmittedFrame>,
-    displayed_external_fb: Option<DrmFrameBuffer>,
-    retiring_external_fb: Option<DrmFrameBuffer>,
-    displayed_cursor_slot: Option<usize>,
-    retiring_cursor_slot: Option<usize>,
+    pipeline: output_pipeline::OutputPipeline,
     cursor_slots: [Option<CachedCursorPlaneSlot>; 2],
     cursor_plane_state: CursorPlaneState,
     cursor_animation_delay_msec: Option<u32>,
     allow_in_fence_fd: bool,
     allow_fb_damage_clips: bool,
-    next_submission_id: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -396,7 +385,7 @@ struct OutputRenderPlan {
 }
 
 #[derive(Debug)]
-struct OutputSubmission {
+pub(crate) struct OutputSubmission {
     id: u64,
     output_id: Option<OutputId>,
     scene: Vec<SceneItemState>,
@@ -404,12 +393,16 @@ struct OutputSubmission {
     presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
     zero_copy: bool,
     had_effects: bool,
+    scene_build_duration: Duration,
+    render_submit_duration: Duration,
+    submitted_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SubmissionPresentationFeedback {
-    feedback: Resolved<WpPresentationFeedbackId>,
-    version: u32,
+pub(crate) struct SubmissionPresentationFeedback {
+    pub(crate) feedback: Resolved<WpPresentationFeedbackId>,
+    pub(crate) version: u32,
+    pub(crate) surface: Option<SurfaceKey>,
 }
 
 #[derive(Debug)]
@@ -434,6 +427,15 @@ struct CompletedSubmission {
     damage_blob: Option<u64>,
 }
 
+#[derive(Debug)]
+struct SubmittedFrameRegistration {
+    callback_surfaces: Vec<SurfaceKey>,
+    submission_id: u64,
+    output_id: Option<OutputId>,
+    zero_copy: bool,
+    presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
+}
+
 impl DrmOutput {
     fn output_name(&self) -> &str {
         &self.in_use.connector.interface_name
@@ -446,39 +448,19 @@ impl DrmOutput {
     }
 
     fn request_frame(&mut self) -> bool {
-        self.needs_frame = true;
-
-        if self.frame_scheduled || self.rendering_active || self.page_flip_pending {
-            return false;
-        }
-
-        self.frame_scheduled = true;
-        true
+        self.pipeline.request_frame()
     }
 
     fn begin_render(&mut self) -> bool {
-        if !self.needs_frame
-            || !self.frame_scheduled
-            || self.rendering_active
-            || self.page_flip_pending
-        {
-            return false;
-        }
-
-        self.frame_scheduled = false;
-        self.rendering_active = true;
-        true
+        self.pipeline.begin_render()
     }
 
     fn mark_render_failed(&mut self) {
-        self.rendering_active = false;
-        self.force_full_redraw = true;
-        self.in_flight_frame = None;
+        self.pipeline.mark_render_failed();
     }
 
     fn mark_frame_idle(&mut self) {
-        self.rendering_active = false;
-        self.needs_frame = false;
+        self.pipeline.mark_frame_idle();
     }
 
     fn allocate_submission(
@@ -489,94 +471,44 @@ impl DrmOutput {
         presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
         zero_copy: bool,
         had_effects: bool,
+        scene_build_duration: Duration,
+        render_submit_duration: Duration,
+        submitted_at: Instant,
     ) -> OutputSubmission {
-        let id = self.next_submission_id;
-        self.next_submission_id = self.next_submission_id.saturating_add(1);
-        OutputSubmission {
-            id,
+        self.pipeline.allocate_submission(
             output_id,
             scene,
             frame_callback_surfaces,
             presentation_feedbacks,
             zero_copy,
             had_effects,
-        }
+            scene_build_duration,
+            render_submit_duration,
+            submitted_at,
+        )
     }
 
     fn mark_frame_submitted(&mut self, frame: SubmittedFrame) {
-        self.rendering_active = false;
-        self.page_flip_pending = true;
-        self.needs_frame = false;
-        self.in_flight_frame = Some(frame);
-        self.retiring_external_fb = self.displayed_external_fb.take();
-        self.retiring_cursor_slot = self.displayed_cursor_slot.take();
+        self.pipeline.mark_frame_submitted(frame);
     }
 
     fn take_in_flight_presentation_feedbacks_for_discard(
         &mut self,
     ) -> (Vec<SubmissionPresentationFeedback>, Option<u64>) {
-        let Some(in_flight) = self.in_flight_frame.take() else {
-            return (Vec::new(), None);
-        };
-        submitted_frame_feedbacks_for_discard(in_flight)
+        self.pipeline
+            .take_in_flight_presentation_feedbacks_for_discard()
     }
 
-    fn finish_page_flip(&mut self) -> (bool, Option<CompletedSubmission>) {
-        if !self.page_flip_pending {
-            return (false, None);
-        }
-
-        self.page_flip_pending = false;
-        self.present_count = self.present_count.saturating_add(1);
-        let mut completed_submission = None;
-
-        match self.in_flight_frame.take() {
-            Some(SubmittedFrame::Composited {
-                buffer_index,
-                damage,
-                submission,
-                damage_blob,
-                cursor_slot,
-            }) => {
-                self.displayed_buffer_index = buffer_index;
-                self.render_buffer_index = if buffer_index == 0 { 1 } else { 0 };
-                self.rendered_buffer_present_id[buffer_index] = Some(self.present_count);
-                self.damage_history.push_front(damage);
-                while self.damage_history.len() > 4 {
-                    self.damage_history.pop_back();
-                }
-                self.last_scene = submission.scene.clone();
-                self.last_submission_had_effects = submission.had_effects;
-                self.displayed_external_fb = None;
-                self.displayed_cursor_slot = cursor_slot;
-                self.force_full_redraw = false;
-                completed_submission = Some(CompletedSubmission { submission, damage_blob });
-            }
-            Some(SubmittedFrame::DirectScanout { submission, framebuffer, cursor_slot }) => {
-                self.force_full_redraw = true;
-                self.last_scene = submission.scene.clone();
-                self.last_submission_had_effects = false;
-                self.displayed_external_fb = Some(framebuffer);
-                self.displayed_cursor_slot = cursor_slot;
-                self.rendered_buffer_present_id = [None, None];
-                self.damage_history.clear();
-                completed_submission = Some(CompletedSubmission { submission, damage_blob: None });
-            }
-            None => {}
-        }
-        self.retiring_external_fb = None;
-        self.retiring_cursor_slot = None;
-
-        if self.needs_frame && !self.frame_scheduled {
-            self.frame_scheduled = true;
-            return (true, completed_submission);
-        }
-
-        (false, completed_submission)
+    fn finish_page_flip(&mut self) -> Option<CompletedSubmission> {
+        self.pipeline.finish_page_flip()
     }
 
     fn render_buffer(&self) -> &RenderBuffer {
-        &self.buffers[self.render_buffer_index]
+        self.pipeline.render_buffer()
+    }
+
+    fn render_buffer_index(&self) -> usize {
+        self.pipeline.render_buffer_index()
     }
 
     fn render_projection(&self) -> transform::Mat3 {
@@ -589,12 +521,7 @@ impl DrmOutput {
     }
 
     fn buffer_age(&self) -> Option<usize> {
-        let last_presented = self.rendered_buffer_present_id[self.render_buffer_index]?;
-        let age = self
-            .present_count
-            .checked_sub(last_presented)?
-            .saturating_add(1);
-        usize::try_from(age).ok()
+        self.pipeline.buffer_age()
     }
 
     fn cursor_plane_available(&mut self) -> bool {
@@ -627,41 +554,22 @@ impl DrmOutput {
 
     fn preferred_upload_cursor_slot(&self) -> Option<usize> {
         select_cursor_upload_slot(
-            self.displayed_cursor_slot,
+            self.pipeline.displayed_cursor_slot(),
             std::array::from_fn(|index| self.cursor_slot(index).is_some()),
         )
     }
 
     fn has_displayed_cursor_slot(&self) -> bool {
-        self.displayed_cursor_slot.is_some()
+        self.pipeline.has_displayed_cursor_slot()
     }
 
     fn preserve_render_buffer_contents(&self) -> bool {
-        ENABLE_DAMAGE && self.buffer_age().is_some() && !self.force_full_redraw
+        self.pipeline.preserve_render_buffer_contents()
     }
 
     fn accumulate_damage_from_age(&self, base_damage: &DamageRegion) -> DamageRegion {
-        let mut damage = base_damage.clone();
-        if !ENABLE_DAMAGE {
-            damage.add_rect(self.output_bounds());
-            return damage;
-        }
-        let Some(age) = self.buffer_age() else {
-            damage.add_rect(self.output_bounds());
-            return damage;
-        };
-        if age == 0 || self.force_full_redraw {
-            damage.add_rect(self.output_bounds());
-            return damage;
-        }
-        if age.saturating_sub(1) > self.damage_history.len() {
-            damage.add_rect(self.output_bounds());
-            return damage;
-        }
-        for previous in self.damage_history.iter().take(age.saturating_sub(1)) {
-            damage.add_region(previous);
-        }
-        damage
+        self.pipeline
+            .accumulate_damage_from_age(base_damage.clone(), self.output_bounds())
     }
 }
 
@@ -841,6 +749,8 @@ struct Crtc {
     active: bool,
     mode_id: u32,
     color: CrtcColorProperties,
+    vrr_enabled_prop: Option<control::property::Handle>,
+    vrr_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -861,6 +771,7 @@ pub struct Connector {
     pub model_name: Option<String>,
     pub manufacturer_id: String,
     pub interface_name: String,
+    pub vrr_capable: bool,
 }
 
 #[derive(Debug)]
@@ -987,6 +898,75 @@ impl Drm {
     pub fn output_supports_ctm(&self, drm_crtc_id: u32) -> bool {
         self.output(drm_crtc_id)
             .is_some_and(|output| output.in_use.crtc.color.ctm.is_some())
+    }
+
+    pub fn output_vrr_capable(&self, drm_crtc_id: u32) -> bool {
+        self.output(drm_crtc_id)
+            .is_some_and(|output| output.in_use.connector.vrr_capable)
+    }
+
+    pub fn output_vrr_enabled(&self, drm_crtc_id: u32) -> bool {
+        self.output(drm_crtc_id)
+            .is_some_and(|output| output.in_use.crtc.vrr_enabled)
+    }
+
+    pub fn output_vrr_range(
+        &self,
+        drm_crtc_id: u32,
+    ) -> Option<crate::scheduler::frame_clock::VrrRange> {
+        let output = self.output(drm_crtc_id)?;
+        let current_refresh_millihz = self
+            .current_output_mode(drm_crtc_id)?
+            .refresh_millihz
+            .max(0) as u32;
+        let edid = output.in_use.connector.edid.as_ref()?;
+        use edid_rs::MonitorDescriptor;
+        edid.descriptors.0.iter().find_map(|desc| match desc {
+            MonitorDescriptor::RangeLimits { vertical_rate, .. } => {
+                let min_refresh_millihz = u32::from(vertical_rate.0).saturating_mul(1000);
+                let max_refresh_millihz =
+                    current_refresh_millihz.min(u32::from(vertical_rate.1).saturating_mul(1000));
+                (min_refresh_millihz > 0 && max_refresh_millihz >= min_refresh_millihz).then_some(
+                    crate::scheduler::frame_clock::VrrRange {
+                        min_refresh_millihz,
+                        max_refresh_millihz,
+                    },
+                )
+            }
+            _ => None,
+        })
+    }
+
+    pub fn set_output_vrr_enabled(
+        &mut self,
+        drm_crtc_id: u32,
+        enabled: bool,
+    ) -> std::io::Result<()> {
+        let Some(output) = self.output_mut(drm_crtc_id) else {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing DRM output"));
+        };
+        if !output.in_use.connector.vrr_capable {
+            if enabled {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "output does not support VRR",
+                ));
+            }
+            output.in_use.crtc.vrr_enabled = false;
+            return Ok(());
+        }
+        if output.in_use.crtc.vrr_enabled_prop.is_none() {
+            if enabled {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "CRTC does not expose VRR_ENABLED",
+                ));
+            }
+            output.in_use.crtc.vrr_enabled = false;
+            return Ok(());
+        }
+        output.in_use.crtc.vrr_enabled = enabled;
+        Ok(())
     }
 
     pub fn set_output_gamma_lut(
@@ -1145,6 +1125,25 @@ impl Drm {
         Ok(pending)
     }
 
+    fn append_output_vrr_change(
+        &self,
+        drm_crtc_id: u32,
+        changes: &mut control::atomic::AtomicModeReq,
+    ) -> std::io::Result<()> {
+        let Some(output) = self.output(drm_crtc_id) else {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing DRM output"));
+        };
+        let Some(property) = output.in_use.crtc.vrr_enabled_prop else {
+            return Ok(());
+        };
+        changes.add_property(
+            output.in_use.crtc.handle,
+            property,
+            control::property::Value::Boolean(output.in_use.crtc.vrr_enabled),
+        );
+        Ok(())
+    }
+
     fn destroy_pending_color_blobs(&self, blobs: PendingColorBlobs) {
         if let Some(blob_id) = blobs.gamma_blob_id {
             let _ = self.fd.destroy_property_blob(blob_id);
@@ -1247,6 +1246,10 @@ impl Drm {
 
     pub fn make_output_model(&self, drm_id: DrmId, output_id: OutputId) -> DrmOutputModel {
         DrmOutputModel { drm_id, output_id }
+    }
+
+    pub fn make_output_scheduler(&self, drm_id: DrmId, output_id: OutputId) -> OutputScheduler {
+        OutputScheduler::new(drm_id, output_id)
     }
 
     pub fn fd(&self) -> DrmFd {
@@ -1467,7 +1470,9 @@ impl Drm {
         presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
         cursor_plane: Option<CursorPlaneCandidate>,
         had_effects: bool,
-    ) -> std::io::Result<Vec<SurfaceKey>> {
+        scene_build_duration: Duration,
+        render_started_at: Instant,
+    ) -> std::io::Result<SubmittedFrameRegistration> {
         let (primary_plane, fb, crtc) = {
             let output = self
                 .output(drm_crtc_id)
@@ -1562,6 +1567,7 @@ impl Drm {
                 Ok(blobs) => blobs,
                 Err(error) => return Err(error),
             };
+            self.append_output_vrr_change(drm_crtc_id, &mut changes)?;
 
             let commit_result = self.fd.atomic_commit(
                 control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
@@ -1569,6 +1575,9 @@ impl Drm {
             );
             match commit_result {
                 Ok(()) => {
+                    let submitted_at = Instant::now();
+                    let render_submit_duration =
+                        submitted_at.saturating_duration_since(render_started_at);
                     self.finish_output_color_commit(drm_crtc_id, color_blobs);
                     if want_damage_clips && !use_damage_clips {
                         log::warn!(
@@ -1584,16 +1593,20 @@ impl Drm {
                         );
                         self.output_mut(drm_crtc_id).unwrap().allow_in_fence_fd = false;
                     }
-                    let buffer_index = self.output(drm_crtc_id).unwrap().render_buffer_index;
+                    let buffer_index = self.output(drm_crtc_id).unwrap().render_buffer_index();
                     let submission = self.output_mut(drm_crtc_id).unwrap().allocate_submission(
                         output_id,
                         scene,
                         frame_callback_surfaces,
-                        presentation_feedbacks,
+                        presentation_feedbacks.clone(),
                         false,
                         had_effects,
+                        scene_build_duration,
+                        render_submit_duration,
+                        submitted_at,
                     );
                     let callback_surfaces = submission.frame_callback_surfaces.clone();
+                    let submission_id = submission.id;
                     self.output_mut(drm_crtc_id).unwrap().mark_frame_submitted(
                         SubmittedFrame::Composited {
                             buffer_index,
@@ -1603,7 +1616,13 @@ impl Drm {
                             cursor_slot: cursor_plane.map(|cursor| cursor.slot),
                         },
                     );
-                    return Ok(callback_surfaces);
+                    return Ok(SubmittedFrameRegistration {
+                        callback_surfaces,
+                        submission_id,
+                        output_id,
+                        zero_copy: false,
+                        presentation_feedbacks,
+                    });
                 }
                 Err(error) => {
                     self.destroy_pending_color_blobs(color_blobs);
@@ -1644,7 +1663,9 @@ impl Drm {
         frame_callback_surfaces: Vec<SurfaceKey>,
         presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
         cursor_plane: Option<CursorPlaneCandidate>,
-    ) -> std::io::Result<Vec<SurfaceKey>> {
+        scene_build_duration: Duration,
+        render_started_at: Instant,
+    ) -> std::io::Result<SubmittedFrameRegistration> {
         let (primary_plane, crtc) = {
             let output = self
                 .output(drm_crtc_id)
@@ -1740,6 +1761,7 @@ impl Drm {
         }
 
         let color_blobs = self.append_output_color_changes(drm_crtc_id, &mut changes)?;
+        self.append_output_vrr_change(drm_crtc_id, &mut changes)?;
         if let Err(error) = self.fd.atomic_commit(
             control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
             changes,
@@ -1748,15 +1770,21 @@ impl Drm {
             return Err(error);
         }
         self.finish_output_color_commit(drm_crtc_id, color_blobs);
+        let submitted_at = Instant::now();
+        let render_submit_duration = submitted_at.saturating_duration_since(render_started_at);
         let submission = self.output_mut(drm_crtc_id).unwrap().allocate_submission(
             output_id,
             scene,
             frame_callback_surfaces,
-            presentation_feedbacks,
+            presentation_feedbacks.clone(),
             true,
             false,
+            scene_build_duration,
+            render_submit_duration,
+            submitted_at,
         );
         let callback_surfaces = submission.frame_callback_surfaces.clone();
+        let submission_id = submission.id;
         self.output_mut(drm_crtc_id)
             .unwrap()
             .mark_frame_submitted(SubmittedFrame::DirectScanout {
@@ -1764,7 +1792,13 @@ impl Drm {
                 framebuffer: candidate.framebuffer,
                 cursor_slot: cursor_plane.map(|cursor| cursor.slot),
             });
-        Ok(callback_surfaces)
+        Ok(SubmittedFrameRegistration {
+            callback_surfaces,
+            submission_id,
+            output_id,
+            zero_copy: true,
+            presentation_feedbacks,
+        })
     }
 
     fn initialize_cursor_plane_slots(&mut self, drm_crtc_id: u32) {
@@ -2113,31 +2147,12 @@ impl Drm {
             color_state: OutputColorState::default(),
             presentation_transform: OutputPresentationTransform::FlipY,
             render_sync_mode,
-            buffers,
-            displayed_buffer_index: 0,
-            render_buffer_index: 1,
-            needs_frame: false,
-            frame_scheduled: false,
-            rendering_active: false,
-            page_flip_pending: false,
-            in_flight_releases: Vec::new(),
-            present_count: 0,
-            damage_history: VecDeque::new(),
-            last_scene: Vec::new(),
-            last_submission_had_effects: false,
-            force_full_redraw: true,
-            rendered_buffer_present_id: [None, None],
-            in_flight_frame: None,
-            displayed_external_fb: None,
-            retiring_external_fb: None,
-            displayed_cursor_slot: None,
-            retiring_cursor_slot: None,
+            pipeline: output_pipeline::OutputPipeline::new(buffers),
             cursor_slots: [None, None],
             cursor_plane_state: CursorPlaneState::Ready,
             cursor_animation_delay_msec: None,
             allow_in_fence_fd: true,
             allow_fb_damage_clips: true,
-            next_submission_id: 1,
         }
     }
 
@@ -2357,6 +2372,11 @@ impl Drm {
                     .unwrap_or(0),
                 ctm: props.get("CTM").map(|(_, info)| info.handle()),
             },
+            vrr_enabled_prop: props.get("VRR_ENABLED").map(|(_, info)| info.handle()),
+            vrr_enabled: props
+                .get("VRR_ENABLED")
+                .map(|(value, _)| *value != 0)
+                .unwrap_or(false),
         };
 
         (handle, crtc)
@@ -2545,6 +2565,10 @@ impl Drm {
             model_name,
             manufacturer_id,
             interface_name,
+            vrr_capable: props
+                .get("vrr_capable")
+                .map(|(value, _)| *value != 0)
+                .unwrap_or(false),
         };
 
         (connector_handle, connector)
@@ -2942,62 +2966,61 @@ impl ModelInstanceId for OutputId {
 
 pub enum DrmAction {
     Start,
-    ScheduleFrame,
-    RenderFrame,
+    RenderFrame { decision: ClockDecision },
     FlipComplete { sequence: u32, tv_sec: u32, tv_usec: u32, crtc_id: u32 },
-    Stop,
-}
-
-enum DrmCursorAnimationTimerAction {
-    Start,
-    Arm { delay_msec: Option<u32> },
-    Fired,
-    Failed { error: std::io::Error },
+    FlipWatchdog,
+    SessionChanged { active: bool },
     Stop,
 }
 
 pub enum WindowAnimationManagerAction {
     Start,
     Kick,
-    Arm { delay_msec: Option<u32> },
-    Fired,
-    Failed { error: std::io::Error },
+    KickOutput { output_id: OutputId },
     Stop,
 }
 
-struct DrmCursorAnimationTimer {
-    drm_id: DrmId,
-    output_id: OutputId,
-    timer_fd: TimerFd,
-    read_op_id: Option<RingId>,
-}
-
-pub struct WindowAnimationManager {
-    timer_fd: TimerFd,
-    read_op_id: Option<RingId>,
-}
-
-model_instance_id!(DrmCursorAnimationTimerId => DrmCursorAnimationTimer);
+pub struct WindowAnimationManager;
 
 pub fn sync_output_nodes_for_backend(state: &mut State, drm_id: DrmId) {
     state.refresh_outputs_for_backend(BackendOutputRef::new(drm_id));
 }
 
-pub fn schedule_output(state: &State, output_id: OutputId, dispatcher: &mut Dispatcher) {
+pub fn request_output_frame(
+    state: &State,
+    output_id: OutputId,
+    reason: RequestFrameReason,
+    dispatcher: &mut Dispatcher,
+) {
     if state.backend_for_output(output_id).is_none() {
         log::warn!("schedule_output: invalid logical output {:?}", output_id);
         return;
     }
-    dispatcher.dispatch_to(output_id, DrmAction::ScheduleFrame);
+    dispatcher.dispatch_to(
+        output_scheduler_id(output_id),
+        OutputSchedulerAction::RequestFrame { reason },
+    );
 }
 
-pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
+pub fn request_output(state: &State, output_id: OutputId, dispatcher: &mut Dispatcher) {
+    request_output_frame(state, output_id, RequestFrameReason::Damage, dispatcher);
+}
+
+pub fn schedule_output(state: &State, output_id: OutputId, dispatcher: &mut Dispatcher) {
+    request_output(state, output_id, dispatcher);
+}
+
+pub fn request_active_output(state: &State, dispatcher: &mut Dispatcher) {
     let Some(output_id) = state.active_output_id() else {
         log::warn!("schedule_active_output: no active logical output");
         return;
     };
 
-    schedule_output(state, output_id, dispatcher);
+    request_output(state, output_id, dispatcher);
+}
+
+pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
+    request_active_output(state, dispatcher);
 }
 
 fn dispatch_gamma_control_failed_if_pending(
@@ -3017,30 +3040,41 @@ fn dispatch_gamma_control_failed_if_pending(
     }
 }
 
-pub fn schedule_outputs<I>(state: &State, output_ids: I, dispatcher: &mut Dispatcher)
+pub fn request_outputs<I>(state: &State, output_ids: I, dispatcher: &mut Dispatcher)
 where
     I: IntoIterator<Item = OutputId>,
 {
     let mut unique = BTreeSet::new();
     for output_id in output_ids {
         if unique.insert(output_id) {
-            schedule_output(state, output_id, dispatcher);
+            request_output_frame(state, output_id, RequestFrameReason::Damage, dispatcher);
         }
     }
 }
 
-pub fn schedule_outputs_for_rect(state: &State, rect: RectI, dispatcher: &mut Dispatcher) {
+pub fn schedule_outputs<I>(state: &State, output_ids: I, dispatcher: &mut Dispatcher)
+where
+    I: IntoIterator<Item = OutputId>,
+{
+    request_outputs(state, output_ids, dispatcher);
+}
+
+pub fn request_outputs_for_rect(state: &State, rect: RectI, dispatcher: &mut Dispatcher) {
     let output_ids = state.outputs_intersecting_rect(rect);
     if output_ids.is_empty() {
         if let Some(output_id) = state.primary_output_for_rect(rect, None) {
-            schedule_output(state, output_id, dispatcher);
+            request_output(state, output_id, dispatcher);
         }
         return;
     }
-    schedule_outputs(state, output_ids, dispatcher);
+    request_outputs(state, output_ids, dispatcher);
 }
 
-pub fn schedule_outputs_for_rects<I>(state: &State, rects: I, dispatcher: &mut Dispatcher)
+pub fn schedule_outputs_for_rect(state: &State, rect: RectI, dispatcher: &mut Dispatcher) {
+    request_outputs_for_rect(state, rect, dispatcher);
+}
+
+pub fn request_outputs_for_rects<I>(state: &State, rects: I, dispatcher: &mut Dispatcher)
 where
     I: IntoIterator<Item = RectI>,
 {
@@ -3055,10 +3089,17 @@ where
         }
         output_ids.extend(rect_outputs);
     }
-    schedule_outputs(state, output_ids, dispatcher);
+    request_outputs(state, output_ids, dispatcher);
 }
 
-pub fn schedule_outputs_for_points(
+pub fn schedule_outputs_for_rects<I>(state: &State, rects: I, dispatcher: &mut Dispatcher)
+where
+    I: IntoIterator<Item = RectI>,
+{
+    request_outputs_for_rects(state, rects, dispatcher);
+}
+
+pub fn request_outputs_for_points(
     state: &State,
     points: impl IntoIterator<Item = (f64, f64)>,
     dispatcher: &mut Dispatcher,
@@ -3067,26 +3108,68 @@ pub fn schedule_outputs_for_points(
         let (x, y) = state.clamp_point_to_outputs(x.round() as i32, y.round() as i32)?;
         state.output_at_point(x, y)
     });
-    schedule_outputs(state, output_ids, dispatcher);
+    request_outputs(state, output_ids, dispatcher);
+}
+
+pub fn schedule_outputs_for_points(
+    state: &State,
+    points: impl IntoIterator<Item = (f64, f64)>,
+    dispatcher: &mut Dispatcher,
+) {
+    request_outputs_for_points(state, points, dispatcher);
 }
 
 pub fn kick_window_animation_manager(dispatcher: &mut Dispatcher) {
     dispatcher.dispatch(WindowAnimationManagerAction::Kick);
 }
 
-fn arm_window_animation_manager(dispatcher: &mut Dispatcher, delay_msec: Option<u32>) {
-    dispatcher.dispatch(WindowAnimationManagerAction::Arm { delay_msec });
+fn animation_delay_msec_for_output(state: &State, output_id: OutputId) -> Option<u32> {
+    let refresh_millihz = state
+        .outputs
+        .try_get(output_id)
+        .map(|output| output.current_mode.refresh_millihz.max(0) as u32)
+        .filter(|refresh| *refresh > 0)?;
+    let interval_ns = (1_000_000_000_000u64 / u64::from(refresh_millihz)).max(1);
+    Some(((interval_ns + 999_999) / 1_000_000).max(1) as u32)
 }
 
-fn arm_cursor_animation_timer(
-    dispatcher: &mut Dispatcher,
-    output_id: OutputId,
-    delay_msec: Option<u32>,
-) {
-    dispatcher.dispatch_to(
-        DrmCursorAnimationTimerId::from(output_id.as_u64()),
-        DrmCursorAnimationTimerAction::Arm { delay_msec },
-    );
+fn animation_delay_msec_for_rects(state: &State, rects: &[RectI]) -> Option<u32> {
+    let mut output_ids = BTreeSet::new();
+    for &rect in rects {
+        let rect_outputs = state.outputs_intersecting_rect(rect);
+        if rect_outputs.is_empty() {
+            if let Some(output_id) = state.primary_output_for_rect(rect, None) {
+                output_ids.insert(output_id);
+            }
+            continue;
+        }
+        output_ids.extend(rect_outputs);
+    }
+    output_ids
+        .into_iter()
+        .filter_map(|output_id| animation_delay_msec_for_output(state, output_id))
+        .min()
+}
+
+fn active_animation_output_ids(state: &State) -> BTreeSet<OutputId> {
+    let mut output_ids = BTreeSet::new();
+    for (&surface, managed) in &state.managed_root_surfaces {
+        if !managed.visual_animation.is_animating() {
+            continue;
+        }
+        let Some(rect) = state.root_surface_animation_damage_rect(surface) else {
+            continue;
+        };
+        let rect_outputs = state.outputs_intersecting_rect(rect);
+        if rect_outputs.is_empty() {
+            if let Some(output_id) = state.primary_output_for_rect(rect, None) {
+                output_ids.insert(output_id);
+            }
+            continue;
+        }
+        output_ids.extend(rect_outputs);
+    }
+    output_ids
 }
 
 pub fn discard_backend_presentation_feedbacks(
@@ -3094,175 +3177,28 @@ pub fn discard_backend_presentation_feedbacks(
     drm_id: DrmId,
     dispatcher: &mut Dispatcher,
 ) {
-    let discarded = {
+    let discarded_damage_blobs = {
         let drm = state.drm.get_mut(drm_id);
         drm.outputs
             .values_mut()
-            .map(DrmOutput::take_in_flight_presentation_feedbacks_for_discard)
+            .map(|output| output.take_in_flight_presentation_feedbacks_for_discard().1)
             .collect::<Vec<_>>()
     };
-    let mut feedbacks = Vec::new();
-    for (pipeline_feedbacks, damage_blob) in discarded {
-        feedbacks.extend(pipeline_feedbacks);
+    let output_ids = state.output_ids_for_backend(BackendOutputRef::new(drm_id));
+    let mut discarded_feedbacks = Vec::new();
+    for output_id in output_ids {
+        discarded_feedbacks.extend(state.presentation.discard_timeline(output_id));
+    }
+    for damage_blob in discarded_damage_blobs {
         if let Some(blob) = damage_blob {
             let drm = state.drm.get(drm_id);
             let _ = drm.fd.destroy_property_blob(blob);
         }
     }
-    if feedbacks.is_empty() {
+    if discarded_feedbacks.is_empty() {
         return;
     }
-    dispatch_presentation_feedback_discarded(dispatcher, &feedbacks);
-}
-
-fn output_overlap_area(scene: &[SceneItemState], output_rect: RectI) -> i64 {
-    scene
-        .iter()
-        .map(|item| {
-            let x1 = item.bounds.x.max(output_rect.x);
-            let y1 = item.bounds.y.max(output_rect.y);
-            let x2 = item.bounds.x2().min(output_rect.x2());
-            let y2 = item.bounds.y2().min(output_rect.y2());
-            let width = (x2 - x1).max(0) as i64;
-            let height = (y2 - y1).max(0) as i64;
-            width * height
-        })
-        .sum()
-}
-
-fn select_presentation_output_for_scene(
-    state: &State,
-    drm_id: DrmId,
-    scene: &[SceneItemState],
-) -> Option<OutputId> {
-    let backend = BackendOutputRef::new(drm_id);
-    let layout = state.output_layout();
-    let output_ids = state.output_ids_for_backend(backend);
-    let mut best = None;
-    let mut best_area = -1i64;
-    for output_id in output_ids {
-        let Some(output_rect) = layout.bounds(output_id) else {
-            continue;
-        };
-        let area = output_overlap_area(scene, output_rect);
-        if area > best_area {
-            best_area = area;
-            best = Some(output_id);
-        }
-    }
-    best.or_else(|| {
-        state.active_output_id().filter(|output_id| {
-            layout
-                .entry(*output_id)
-                .is_some_and(|entry| entry.backend == backend)
-        })
-    })
-}
-
-fn collect_output_render_plan(
-    state: &mut State,
-    drm_id: DrmId,
-    logical_output_id: Option<OutputId>,
-    frame_time_msec: u32,
-) -> OutputRenderPlan {
-    let logical_output_id = logical_output_id.expect("missing logical output for DRM render plan");
-    let drm_crtc_id = state
-        .output_crtc_id(logical_output_id)
-        .expect("missing DRM CRTC for logical output");
-    let global_bounds = state.output_bounds(logical_output_id).unwrap_or_else(|| {
-        state
-            .drm
-            .get(drm_id)
-            .output(drm_crtc_id)
-            .unwrap()
-            .output_bounds()
-    });
-    let (
-        mut items,
-        mut software_cursor_items,
-        mut frame_elements,
-        deferred_releases,
-        cursor_plane,
-        cursor_animation_delay_msec,
-    ) = collect_render_items(state, drm_id, drm_crtc_id, global_bounds, frame_time_msec);
-    translate_scene_items(&mut items, -global_bounds.x, -global_bounds.y);
-    translate_scene_items(&mut software_cursor_items, -global_bounds.x, -global_bounds.y);
-    translate_recorded_frame_elements(&mut frame_elements, -global_bounds.x, -global_bounds.y);
-    let frame = {
-        let drm = state.drm.get(drm_id);
-        build_frame_plan(
-            drm.output(drm_crtc_id)
-                .expect("missing DRM output pipeline for frame plan"),
-            items,
-            software_cursor_items,
-            frame_elements,
-            cursor_plane,
-        )
-    };
-    let output_id = Some(logical_output_id)
-        .or_else(|| select_presentation_output_for_scene(state, drm_id, &frame.scene));
-    OutputRenderPlan {
-        output_id,
-        global_bounds,
-        local_origin: (global_bounds.x, global_bounds.y),
-        deferred_releases,
-        cursor_animation_delay_msec,
-        frame,
-    }
-}
-
-impl Model for DrmCursorAnimationTimer {
-    type Action = DrmCursorAnimationTimerAction;
-    const START: Option<Self::Action> = Some(DrmCursorAnimationTimerAction::Start);
-    const STOP: Option<Self::Action> = Some(DrmCursorAnimationTimerAction::Stop);
-
-    fn process(
-        &mut self,
-        state: &mut crate::state::State,
-        action: Self::Action,
-        dispatcher: &mut crate::runner::Dispatcher,
-    ) -> Result<(), ()> {
-        match action {
-            DrmCursorAnimationTimerAction::Start => {
-                self.dispatch_read(dispatcher);
-            }
-            DrmCursorAnimationTimerAction::Arm { delay_msec } => {
-                let expiration = delay_msec.map(|delay| {
-                    Expiration::OneShot(Duration::from_millis(u64::from(delay)).into())
-                });
-                if let Err(error) = self.set_expiration(expiration) {
-                    log::warn!("failed to arm cursor animation timer: {:?}", error);
-                }
-            }
-            DrmCursorAnimationTimerAction::Fired => {
-                let keep_animating = state
-                    .output_crtc_id(self.output_id)
-                    .and_then(|drm_crtc_id| {
-                        state
-                            .drm
-                            .get(self.drm_id)
-                            .output(drm_crtc_id)
-                            .and_then(|output| output.cursor_animation_delay_msec)
-                    })
-                    .is_some();
-                if keep_animating {
-                    dispatcher.dispatch_to(self.output_id, DrmAction::ScheduleFrame);
-                }
-                self.dispatch_read(dispatcher);
-            }
-            DrmCursorAnimationTimerAction::Failed { error } => {
-                log::warn!("cursor animation timer read failed: {:?}", error);
-                self.dispatch_read(dispatcher);
-            }
-            DrmCursorAnimationTimerAction::Stop => {
-                let _ = self.set_expiration(None);
-                if let Some(read_op_id) = self.read_op_id.take() {
-                    dispatcher.dispatch(IoUringAction::Cancel { target: read_op_id });
-                }
-            }
-        }
-        Ok(())
-    }
+    PresentationSubsystem::dispatch_discarded(dispatcher, &discarded_feedbacks);
 }
 
 impl Model for WindowAnimationManager {
@@ -3277,119 +3213,27 @@ impl Model for WindowAnimationManager {
         dispatcher: &mut crate::runner::Dispatcher,
     ) -> Result<(), ()> {
         match action {
-            WindowAnimationManagerAction::Start => {
-                self.dispatch_read(dispatcher);
-            }
+            WindowAnimationManagerAction::Start => {}
             WindowAnimationManagerAction::Kick => {
                 self.advance_and_schedule(state, dispatcher, monotonic_time_msec());
             }
-            WindowAnimationManagerAction::Arm { delay_msec } => {
-                if let Err(error) = self.set_expiration(delay_msec) {
-                    log::warn!("failed to arm window animation timer: {:?}", error);
-                }
+            WindowAnimationManagerAction::KickOutput { output_id } => {
+                self.advance_and_schedule_output(
+                    state,
+                    dispatcher,
+                    monotonic_time_msec(),
+                    output_id,
+                );
             }
-            WindowAnimationManagerAction::Fired => {
-                self.read_op_id = None;
-                self.advance_and_schedule(state, dispatcher, monotonic_time_msec());
-                self.dispatch_read(dispatcher);
-            }
-            WindowAnimationManagerAction::Failed { error } => {
-                self.read_op_id = None;
-                log::warn!("window animation timer read failed: {:?}", error);
-                self.dispatch_read(dispatcher);
-            }
-            WindowAnimationManagerAction::Stop => {
-                let _ = self.set_expiration(None);
-                if let Some(read_op_id) = self.read_op_id.take() {
-                    dispatcher.dispatch(IoUringAction::Cancel { target: read_op_id });
-                }
-            }
+            WindowAnimationManagerAction::Stop => {}
         }
         Ok(())
     }
 }
 
-impl DrmCursorAnimationTimer {
-    fn new(drm_id: DrmId, output_id: OutputId) -> Self {
-        let timer_fd = TimerFd::new(
-            timerfd::ClockId::CLOCK_MONOTONIC,
-            TimerFlags::TFD_CLOEXEC | TimerFlags::TFD_NONBLOCK,
-        )
-        .expect("failed to create cursor animation timerfd");
-        Self { drm_id, output_id, timer_fd, read_op_id: None }
-    }
-
-    fn model_id(&self) -> DrmCursorAnimationTimerId {
-        DrmCursorAnimationTimerId::from(self.output_id.as_u64())
-    }
-
-    fn dispatch_read(&mut self, dispatcher: &mut Dispatcher) {
-        if self.read_op_id.is_some() {
-            return;
-        }
-        let read_op_id = RingId::fresh();
-        self.read_op_id = Some(read_op_id);
-        dispatcher.dispatch(IoUringAction::Read {
-            id: Some(read_op_id),
-            fd: self.timer_fd.as_fd().as_raw_fd(),
-            offset: 0,
-            length: std::mem::size_of::<u64>(),
-            dispatch_to: crate::runner::Redispatcher::to_instance(self.model_id(), |result| {
-                match result {
-                    Ok(_) => DrmCursorAnimationTimerAction::Fired,
-                    Err(error) => DrmCursorAnimationTimerAction::Failed { error },
-                }
-            }),
-        });
-    }
-
-    fn set_expiration(&mut self, expiration: Option<Expiration>) -> std::io::Result<()> {
-        self.timer_fd
-            .set(
-                expiration.unwrap_or_else(|| Expiration::OneShot(Duration::ZERO.into())),
-                TimerSetTimeFlags::empty(),
-            )
-            .map_err(std::io::Error::other)
-    }
-}
-
 impl WindowAnimationManager {
     pub fn new() -> Self {
-        let timer_fd = TimerFd::new(
-            timerfd::ClockId::CLOCK_MONOTONIC,
-            TimerFlags::TFD_CLOEXEC | TimerFlags::TFD_NONBLOCK,
-        )
-        .expect("failed to create window animation timerfd");
-        Self { timer_fd, read_op_id: None }
-    }
-
-    fn dispatch_read(&mut self, dispatcher: &mut Dispatcher) {
-        if self.read_op_id.is_some() {
-            return;
-        }
-        let read_op_id = RingId::fresh();
-        self.read_op_id = Some(read_op_id);
-        dispatcher.dispatch(IoUringAction::Read {
-            id: Some(read_op_id),
-            fd: self.timer_fd.as_fd().as_raw_fd(),
-            offset: 0,
-            length: std::mem::size_of::<u64>(),
-            dispatch_to: crate::runner::Redispatcher::to::<Self>(|result| match result {
-                Ok(_) => WindowAnimationManagerAction::Fired,
-                Err(error) => WindowAnimationManagerAction::Failed { error },
-            }),
-        });
-    }
-
-    fn set_expiration(&mut self, delay_msec: Option<u32>) -> std::io::Result<()> {
-        let expiration = delay_msec
-            .map(|delay| Expiration::OneShot(Duration::from_millis(u64::from(delay)).into()));
-        self.timer_fd
-            .set(
-                expiration.unwrap_or_else(|| Expiration::OneShot(Duration::ZERO.into())),
-                TimerSetTimeFlags::empty(),
-            )
-            .map_err(std::io::Error::other)
+        Self
     }
 
     fn advance_and_schedule(
@@ -3399,10 +3243,62 @@ impl WindowAnimationManager {
         frame_time_msec: u32,
     ) {
         let result = state.advance_window_visual_animations(frame_time_msec);
+        let has_no_damage = result.damaged_rects.is_empty();
         if !result.damaged_rects.is_empty() {
-            schedule_outputs_for_rects(state, result.damaged_rects, dispatcher);
+            for rect in result.damaged_rects {
+                let output_ids = state.outputs_intersecting_rect(rect);
+                if output_ids.is_empty() {
+                    if let Some(output_id) = state.primary_output_for_rect(rect, None) {
+                        request_output_frame(
+                            state,
+                            output_id,
+                            RequestFrameReason::Animation,
+                            dispatcher,
+                        );
+                    }
+                    continue;
+                }
+                for output_id in output_ids {
+                    request_output_frame(
+                        state,
+                        output_id,
+                        RequestFrameReason::Animation,
+                        dispatcher,
+                    );
+                }
+            }
         }
-        arm_window_animation_manager(dispatcher, result.has_active_animations.then_some(16));
+        if result.has_active_animations && has_no_damage {
+            let output_ids = active_animation_output_ids(state);
+            for output_id in output_ids {
+                let delay_msec = animation_delay_msec_for_output(state, output_id);
+                dispatcher.dispatch_to(
+                    output_scheduler_id(output_id),
+                    OutputSchedulerAction::ScheduleAnimation { delay_msec },
+                );
+            }
+        }
+    }
+
+    fn advance_and_schedule_output(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut Dispatcher,
+        frame_time_msec: u32,
+        output_id: OutputId,
+    ) {
+        let result = state.advance_window_visual_animations_for_output(output_id, frame_time_msec);
+        if !result.damaged_rects.is_empty() {
+            request_output_frame(state, output_id, RequestFrameReason::Animation, dispatcher);
+            return;
+        }
+        if result.has_active_animations {
+            let delay_msec = animation_delay_msec_for_output(state, output_id);
+            dispatcher.dispatch_to(
+                output_scheduler_id(output_id),
+                OutputSchedulerAction::ScheduleAnimation { delay_msec },
+            );
+        }
     }
 }
 
@@ -3418,24 +3314,20 @@ impl Model for DrmOutputModel {
         dispatcher: &mut crate::runner::Dispatcher,
     ) -> Result<(), ()> {
         match action {
-            DrmAction::Start => {
-                dispatcher.start_model(
-                    self.timer_id(),
-                    DrmCursorAnimationTimer::new(self.drm_id, self.output_id),
-                );
-            }
-            DrmAction::ScheduleFrame => {
-                self.schedule_frame(state, dispatcher);
-            }
-            DrmAction::RenderFrame => {
-                self.render_frame(state, dispatcher);
+            DrmAction::Start => {}
+            DrmAction::RenderFrame { decision } => {
+                self.render_frame(state, dispatcher, decision);
             }
             DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id } => {
                 self.handle_flip_complete(state, dispatcher, sequence, tv_sec, tv_usec, crtc_id);
             }
-            DrmAction::Stop => {
-                dispatcher.stop_model(self.timer_id());
+            DrmAction::FlipWatchdog => {
+                self.handle_flip_watchdog(state, dispatcher);
             }
+            DrmAction::SessionChanged { active } => {
+                self.handle_session_changed(state, dispatcher, active);
+            }
+            DrmAction::Stop => {}
         };
         Ok(())
     }
@@ -3446,25 +3338,12 @@ impl DrmOutputModel {
         self.output_id
     }
 
-    fn timer_id(&self) -> DrmCursorAnimationTimerId {
-        DrmCursorAnimationTimerId::from(self.output_id.as_u64())
-    }
-
-    fn schedule_frame(&mut self, state: &mut crate::state::State, dispatcher: &mut Dispatcher) {
-        let Some(drm_crtc_id) = state.output_crtc_id(self.output_id) else {
-            return;
-        };
-        let scheduled = state
-            .drm
-            .get_mut(self.drm_id)
-            .output_mut(drm_crtc_id)
-            .is_some_and(DrmOutput::request_frame);
-        if scheduled {
-            dispatcher.dispatch_to(self.model_id(), DrmAction::RenderFrame);
-        }
-    }
-
-    fn render_frame(&mut self, state: &mut crate::state::State, dispatcher: &mut Dispatcher) {
+    fn render_frame(
+        &mut self,
+        state: &mut crate::state::State,
+        dispatcher: &mut Dispatcher,
+        decision: ClockDecision,
+    ) {
         let Some(drm_crtc_id) = state.output_crtc_id(self.output_id) else {
             return;
         };
@@ -3476,15 +3355,25 @@ impl DrmOutputModel {
         };
         let failed_releases = {
             if !ready {
-                log::warn!("DrmOutputModel::render_frame skipped: output not ready");
+                dispatcher.dispatch_to(
+                    output_scheduler_id(self.output_id),
+                    OutputSchedulerAction::RenderAttempted { started: false },
+                );
                 return;
             }
-            let output_render_plan = collect_output_render_plan(
+            dispatcher.dispatch_to(
+                output_scheduler_id(self.output_id),
+                OutputSchedulerAction::RenderAttempted { started: true },
+            );
+            let planner_started_at = Instant::now();
+            let watchdog_deadline = flip_watchdog_deadline_for_output(state, self.output_id);
+            let output_render_plan = render_planner::collect_output_render_plan(
                 state,
                 self.drm_id,
                 Some(self.output_id),
                 frame_time_msec,
             );
+            let scene_build_duration = Instant::now().saturating_duration_since(planner_started_at);
             let OutputRenderPlan {
                 output_id,
                 global_bounds: _,
@@ -3506,40 +3395,75 @@ impl DrmOutputModel {
                 mut preserve_contents,
             } = frame;
             let drm = state.drm.get_mut(self.drm_id);
-            drm.output_mut(drm_crtc_id).unwrap().in_flight_releases = deferred_releases;
+            let target_vrr_enabled =
+                matches!(decision.mode, crate::scheduler::frame_clock::FrameClockMode::Variable)
+                    && drm.output_vrr_capable(drm_crtc_id);
+            if let Err(error) = drm.set_output_vrr_enabled(drm_crtc_id, target_vrr_enabled) {
+                log::debug!(
+                    "failed to update VRR state for output {:?}: {:?}",
+                    self.output_id,
+                    error
+                );
+            }
+            if let Some(output) = state.outputs.try_get_mut(self.output_id) {
+                output.vrr_enabled = drm.output_vrr_enabled(drm_crtc_id);
+            }
+            drm.output_mut(drm_crtc_id)
+                .unwrap()
+                .pipeline
+                .set_in_flight_releases(deferred_releases);
             drm.output_mut(drm_crtc_id)
                 .unwrap()
                 .cursor_animation_delay_msec = cursor_animation_delay_msec;
 
             if let Some(candidate) = direct_scanout {
-                if drm
-                    .submit_direct_scanout(
-                        drm_crtc_id,
-                        candidate,
-                        output_id,
-                        scene.clone(),
-                        frame_callback_surfaces.clone(),
-                        presentation_feedbacks.clone(),
-                        cursor_plane.take(),
-                    )
-                    .is_ok()
-                {
-                    drm.output_mut(drm_crtc_id)
-                        .unwrap()
-                        .note_cursor_plane_success();
-                    dispatch_submission_frame_callbacks(
-                        &frame_callback_surfaces,
-                        frame_time_msec,
-                        dispatcher,
-                    );
-                    drm.output_mut(drm_crtc_id).unwrap().force_full_redraw = true;
-                    return;
+                match kms_submit::submit_direct_scanout(
+                    drm,
+                    drm_crtc_id,
+                    candidate,
+                    output_id,
+                    scene.clone(),
+                    frame_callback_surfaces.clone(),
+                    presentation_feedbacks.clone(),
+                    cursor_plane.take(),
+                    scene_build_duration,
+                    Instant::now(),
+                ) {
+                    Ok(registration) => {
+                        state.presentation.register_submission(
+                            self.output_id,
+                            crate::scheduler::presentation::SubmissionRecord {
+                                submission_id: registration.submission_id,
+                                output_id: registration.output_id,
+                                feedbacks: registration.presentation_feedbacks,
+                                zero_copy: registration.zero_copy,
+                            },
+                        );
+                        drm.output_mut(drm_crtc_id)
+                            .unwrap()
+                            .note_cursor_plane_success();
+                        dispatch_submission_frame_callbacks(
+                            &registration.callback_surfaces,
+                            frame_time_msec,
+                            dispatcher,
+                        );
+                        dispatcher.dispatch_to(
+                            output_scheduler_id(self.output_id),
+                            OutputSchedulerAction::PipelineBlocked { watchdog_deadline },
+                        );
+                        drm.output_mut(drm_crtc_id)
+                            .unwrap()
+                            .pipeline
+                            .set_force_full_redraw(true);
+                        return;
+                    }
+                    Err(_) => {}
                 }
                 if !software_cursor_items.is_empty() {
                     items.append(&mut software_cursor_items);
                     // Clone the effect recipe on cursor fallback to keep the retry path simple;
                     // if fallback becomes hot we should switch this to recipe reuse.
-                    let fallback_plan = build_frame_plan(
+                    let fallback_plan = render_planner::build_frame_plan(
                         drm.output(drm_crtc_id).unwrap(),
                         items,
                         Vec::new(),
@@ -3563,24 +3487,32 @@ impl DrmOutputModel {
                 && !drm.output(drm_crtc_id).unwrap().has_displayed_cursor_slot()
             {
                 drm.output_mut(drm_crtc_id).unwrap().mark_frame_idle();
-                let releases =
-                    std::mem::take(&mut drm.output_mut(drm_crtc_id).unwrap().in_flight_releases);
+                let releases = drm
+                    .output_mut(drm_crtc_id)
+                    .unwrap()
+                    .pipeline
+                    .take_in_flight_releases();
                 dispatch_submission_frame_callbacks(
                     &frame_callback_surfaces,
                     frame_time_msec,
                     dispatcher,
                 );
+                dispatcher.dispatch_to(
+                    output_scheduler_id(self.output_id),
+                    OutputSchedulerAction::FrameCompleted(FrameCompletionOutcome::NoPresent),
+                );
                 Some(releases)
             } else {
                 let recipe = build_output_frame_recipe(&items, &frame_elements);
+                let render_started_at = Instant::now();
                 let render_completion =
                     drm.render_output(drm_crtc_id, &recipe, &damage, preserve_contents);
-                let callback_surfaces = frame_callback_surfaces.clone();
                 let submit_had_cursor_plane = cursor_plane.is_some();
                 if submit_had_cursor_plane && crate::logger::ENABLE_NOISY_LOG {
                     log::debug!("Submitting DRM frame with cursor plane enabled");
                 }
-                let submit_result = drm.submit_render_buffer(
+                let submit_result = kms_submit::submit_render_buffer(
+                    drm,
                     drm_crtc_id,
                     &render_completion,
                     &damage,
@@ -3590,6 +3522,8 @@ impl DrmOutputModel {
                     presentation_feedbacks.clone(),
                     cursor_plane,
                     recipe.has_effects(),
+                    scene_build_duration,
+                    render_started_at,
                 );
                 if let Err(error) = submit_result {
                     if submit_had_cursor_plane {
@@ -3599,7 +3533,7 @@ impl DrmOutputModel {
                                 error
                             );
                             items.append(&mut software_cursor_items);
-                            let fallback_plan = build_frame_plan(
+                            let fallback_plan = render_planner::build_frame_plan(
                                 drm.output(drm_crtc_id).unwrap(),
                                 items,
                                 Vec::new(),
@@ -3616,8 +3550,8 @@ impl DrmOutputModel {
                                 &fallback_plan.damage,
                                 fallback_plan.preserve_contents,
                             );
-                            let fallback_callbacks = fallback_plan.frame_callback_surfaces.clone();
-                            match drm.submit_render_buffer(
+                            match kms_submit::submit_render_buffer(
+                                drm,
                                 drm_crtc_id,
                                 &fallback_render_completion,
                                 &fallback_plan.damage,
@@ -3627,15 +3561,32 @@ impl DrmOutputModel {
                                 fallback_plan.presentation_feedbacks.clone(),
                                 None,
                                 fallback_recipe.has_effects(),
+                                scene_build_duration,
+                                render_started_at,
                             ) {
-                                Ok(_) => {
+                                Ok(registration) => {
+                                    state.presentation.register_submission(
+                                        self.output_id,
+                                        crate::scheduler::presentation::SubmissionRecord {
+                                            submission_id: registration.submission_id,
+                                            output_id: registration.output_id,
+                                            feedbacks: registration.presentation_feedbacks,
+                                            zero_copy: registration.zero_copy,
+                                        },
+                                    );
                                     drm.output_mut(drm_crtc_id)
                                         .unwrap()
                                         .note_cursor_plane_failure();
                                     dispatch_submission_frame_callbacks(
-                                        &fallback_callbacks,
+                                        &registration.callback_surfaces,
                                         frame_time_msec,
                                         dispatcher,
+                                    );
+                                    dispatcher.dispatch_to(
+                                        output_scheduler_id(self.output_id),
+                                        OutputSchedulerAction::PipelineBlocked {
+                                            watchdog_deadline,
+                                        },
                                     );
                                     None
                                 }
@@ -3647,15 +3598,24 @@ impl DrmOutputModel {
                                         dispatcher,
                                     );
                                     drm.output_mut(drm_crtc_id).unwrap().mark_render_failed();
-                                    let failed_releases = std::mem::take(
-                                        &mut drm
-                                            .output_mut(drm_crtc_id)
-                                            .unwrap()
-                                            .in_flight_releases,
-                                    );
-                                    dispatch_presentation_feedback_discarded(
+                                    let failed_releases = drm
+                                        .output_mut(drm_crtc_id)
+                                        .unwrap()
+                                        .pipeline
+                                        .take_in_flight_releases();
+                                    discard_frame_for_timeline(
                                         dispatcher,
-                                        &fallback_plan.presentation_feedbacks,
+                                        &[crate::scheduler::presentation::DiscardedFeedback {
+                                            feedbacks: fallback_plan.presentation_feedbacks.clone(),
+                                        }],
+                                        None,
+                                        |_| {},
+                                        |dispatcher, completion| {
+                                            dispatcher.dispatch_to(
+                                                output_scheduler_id(self.output_id),
+                                                OutputSchedulerAction::FrameCompleted(completion),
+                                            );
+                                        },
                                     );
                                     if !fallback_render_completion.used_blocking_fallback {
                                         if let Some(in_fence_fd) =
@@ -3689,12 +3649,24 @@ impl DrmOutputModel {
                                 .unwrap()
                                 .note_cursor_plane_failure();
                             drm.output_mut(drm_crtc_id).unwrap().mark_render_failed();
-                            let failed_releases = std::mem::take(
-                                &mut drm.output_mut(drm_crtc_id).unwrap().in_flight_releases,
-                            );
-                            dispatch_presentation_feedback_discarded(
+                            let failed_releases = drm
+                                .output_mut(drm_crtc_id)
+                                .unwrap()
+                                .pipeline
+                                .take_in_flight_releases();
+                            discard_frame_for_timeline(
                                 dispatcher,
-                                &presentation_feedbacks,
+                                &[crate::scheduler::presentation::DiscardedFeedback {
+                                    feedbacks: presentation_feedbacks.clone(),
+                                }],
+                                None,
+                                |_| {},
+                                |dispatcher, completion| {
+                                    dispatcher.dispatch_to(
+                                        output_scheduler_id(self.output_id),
+                                        OutputSchedulerAction::FrameCompleted(completion),
+                                    );
+                                },
                             );
                             if !render_completion.used_blocking_fallback {
                                 if let Some(in_fence_fd) = render_completion.in_fence_fd {
@@ -3719,12 +3691,24 @@ impl DrmOutputModel {
                             dispatcher,
                         );
                         drm.output_mut(drm_crtc_id).unwrap().mark_render_failed();
-                        let failed_releases = std::mem::take(
-                            &mut drm.output_mut(drm_crtc_id).unwrap().in_flight_releases,
-                        );
-                        dispatch_presentation_feedback_discarded(
+                        let failed_releases = drm
+                            .output_mut(drm_crtc_id)
+                            .unwrap()
+                            .pipeline
+                            .take_in_flight_releases();
+                        discard_frame_for_timeline(
                             dispatcher,
-                            &presentation_feedbacks,
+                            &[crate::scheduler::presentation::DiscardedFeedback {
+                                feedbacks: presentation_feedbacks.clone(),
+                            }],
+                            None,
+                            |_| {},
+                            |dispatcher, completion| {
+                                dispatcher.dispatch_to(
+                                    output_scheduler_id(self.output_id),
+                                    OutputSchedulerAction::FrameCompleted(completion),
+                                );
+                            },
                         );
                         if !render_completion.used_blocking_fallback {
                             if let Some(in_fence_fd) = render_completion.in_fence_fd {
@@ -3742,15 +3726,29 @@ impl DrmOutputModel {
                         Some(failed_releases)
                     }
                 } else {
+                    let registration = submit_result.expect("submit result already checked");
+                    state.presentation.register_submission(
+                        self.output_id,
+                        crate::scheduler::presentation::SubmissionRecord {
+                            submission_id: registration.submission_id,
+                            output_id: registration.output_id,
+                            feedbacks: registration.presentation_feedbacks,
+                            zero_copy: registration.zero_copy,
+                        },
+                    );
                     if submit_had_cursor_plane {
                         drm.output_mut(drm_crtc_id)
                             .unwrap()
                             .note_cursor_plane_success();
                     }
                     dispatch_submission_frame_callbacks(
-                        &callback_surfaces,
+                        &registration.callback_surfaces,
                         frame_time_msec,
                         dispatcher,
+                    );
+                    dispatcher.dispatch_to(
+                        output_scheduler_id(self.output_id),
+                        OutputSchedulerAction::PipelineBlocked { watchdog_deadline },
                     );
                     None
                 }
@@ -3779,42 +3777,162 @@ impl DrmOutputModel {
         if drm_crtc_id != crtc_id {
             return;
         }
-        let (releases, should_render, completed_submission, cursor_animation_delay_msec) = {
+        let (releases, cursor_animation_delay_msec) = {
             let drm = state.drm.get_mut(self.drm_id);
-            let releases =
-                std::mem::take(&mut drm.output_mut(drm_crtc_id).unwrap().in_flight_releases);
-            let (should_render, completed_submission) =
-                drm.output_mut(drm_crtc_id).unwrap().finish_page_flip();
+            let releases = drm
+                .output_mut(drm_crtc_id)
+                .unwrap()
+                .pipeline
+                .take_in_flight_releases();
             let cursor_animation_delay_msec =
                 drm.output(drm_crtc_id).unwrap().cursor_animation_delay_msec;
-            (releases, should_render, completed_submission, cursor_animation_delay_msec)
+            (releases, cursor_animation_delay_msec)
         };
 
         for release in releases {
             release.resolve(state, dispatcher);
         }
-        if let Some(completed_submission) = completed_submission {
-            dispatch_presentation_feedback_presented(
-                state,
-                self.drm_id,
-                dispatcher,
-                completed_submission.submission.output_id,
-                &completed_submission.submission.presentation_feedbacks,
-                completed_submission.submission.zero_copy,
+        let refresh_is_constant = state
+            .outputs
+            .try_get(self.output_id)
+            .map(|output| !output.vrr_enabled)
+            .unwrap_or(true);
+        let nominal_refresh_millihz = state
+            .outputs
+            .try_get(self.output_id)
+            .map(|output| output.current_mode.refresh_millihz)
+            .unwrap_or(0);
+        let drm_fd = state.drm.get(self.drm_id).fd.clone();
+        let mut presentation = std::mem::take(&mut state.presentation);
+        complete_frame_for_timeline(
+            dispatcher,
+            &mut presentation,
+            crate::scheduler::completion::TimelinePresentInfo {
+                timeline: self.output_id,
+                nominal_refresh_millihz,
+                refresh_is_constant,
                 tv_sec,
                 tv_usec,
                 sequence,
-            );
-            if let Some(blob) = completed_submission.damage_blob {
+            },
+            || {
+                let drm = state.drm.get_mut(self.drm_id);
+                drm.output_mut(drm_crtc_id).unwrap().finish_page_flip().map(
+                    |completed_submission| {
+                        crate::scheduler::completion::TimelineCompletedSubmission {
+                            submission_id: completed_submission.submission.id,
+                            output_id: completed_submission.submission.output_id,
+                            zero_copy: completed_submission.submission.zero_copy,
+                            damage_blob: completed_submission.damage_blob,
+                            scene_build_duration: completed_submission
+                                .submission
+                                .scene_build_duration,
+                            render_submit_duration: completed_submission
+                                .submission
+                                .render_submit_duration,
+                            submitted_at: completed_submission.submission.submitted_at,
+                        }
+                    },
+                )
+            },
+            |blob| {
+                let _ = drm_fd.destroy_property_blob(blob);
+            },
+            |dispatcher, completion| {
+                dispatcher.dispatch_to(
+                    output_scheduler_id(self.output_id),
+                    OutputSchedulerAction::FrameCompleted(completion),
+                );
+            },
+        );
+        state.presentation = presentation;
+        sync_output_nodes_for_backend(state, self.drm_id);
+        dispatcher.dispatch_to(
+            output_scheduler_id(self.output_id),
+            OutputSchedulerAction::ScheduleAnimation { delay_msec: cursor_animation_delay_msec },
+        );
+    }
+
+    fn handle_flip_watchdog(&mut self, state: &mut State, dispatcher: &mut Dispatcher) {
+        let Some(drm_crtc_id) = state.output_crtc_id(self.output_id) else {
+            return;
+        };
+        let (releases, damage_blob) = {
+            let drm = state.drm.get_mut(self.drm_id);
+            let output = drm.output_mut(drm_crtc_id).unwrap();
+            let releases = output.pipeline.take_in_flight_releases();
+            let (_, damage_blob) = output.take_in_flight_presentation_feedbacks_for_discard();
+            (releases, damage_blob)
+        };
+        for release in releases {
+            release.resolve(state, dispatcher);
+        }
+        let discarded = state.presentation.discard_timeline(self.output_id);
+        log::warn!(
+            "flip watchdog fired for output {:?}; discarding in-flight submission and retrying",
+            self.output_id
+        );
+        discard_frame_for_timeline(
+            dispatcher,
+            &discarded,
+            damage_blob,
+            |blob| {
                 let drm = state.drm.get(self.drm_id);
                 let _ = drm.fd.destroy_property_blob(blob);
-            }
+            },
+            |dispatcher, completion| {
+                dispatcher.dispatch_to(
+                    output_scheduler_id(self.output_id),
+                    OutputSchedulerAction::FrameCompleted(completion),
+                );
+            },
+        );
+    }
+
+    fn handle_session_changed(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut Dispatcher,
+        active: bool,
+    ) {
+        if !active {
+            return;
         }
-        sync_output_nodes_for_backend(state, self.drm_id);
-        arm_cursor_animation_timer(dispatcher, self.output_id, cursor_animation_delay_msec);
-        if should_render {
-            dispatcher.dispatch_to(self.model_id(), DrmAction::RenderFrame);
+        let Some(drm_crtc_id) = state.output_crtc_id(self.output_id) else {
+            return;
+        };
+        let (releases, feedbacks, damage_blob) = {
+            let drm = state.drm.get_mut(self.drm_id);
+            drm.output_mut(drm_crtc_id)
+                .unwrap()
+                .pipeline
+                .reset_after_session_resume()
+        };
+        for release in releases {
+            release.resolve(state, dispatcher);
         }
+        if feedbacks.is_empty() && damage_blob.is_none() {
+            return;
+        }
+        log::info!(
+            "session resumed for output {:?}; clearing stale in-flight pipeline state",
+            self.output_id
+        );
+        discard_frame_for_timeline(
+            dispatcher,
+            &[crate::scheduler::presentation::DiscardedFeedback { feedbacks }],
+            damage_blob,
+            |blob| {
+                let drm = state.drm.get(self.drm_id);
+                let _ = drm.fd.destroy_property_blob(blob);
+            },
+            |dispatcher, completion| {
+                dispatcher.dispatch_to(
+                    output_scheduler_id(self.output_id),
+                    OutputSchedulerAction::FrameCompleted(completion),
+                );
+            },
+        );
     }
 }
 
@@ -3890,6 +4008,19 @@ fn monotonic_time_msec() -> u32 {
     millis.min(u64::from(u32::MAX)) as u32
 }
 
+fn flip_watchdog_deadline_for_output(state: &State, output_id: OutputId) -> Instant {
+    let refresh_millihz = state
+        .outputs
+        .try_get(output_id)
+        .map(|output| output.current_mode.refresh_millihz.max(0) as u64)
+        .unwrap_or(60_000);
+    let interval_ns =
+        if refresh_millihz == 0 { 16_666_667 } else { 1_000_000_000_000u64 / refresh_millihz };
+    let watchdog =
+        Duration::from_nanos(interval_ns.saturating_mul(4)).max(Duration::from_millis(50));
+    Instant::now() + watchdog
+}
+
 fn classify_cursor_output_visibility(
     bounds: RectI,
     output_bounds: RectI,
@@ -3962,51 +4093,6 @@ fn dispatch_submission_frame_callbacks(
     }
 }
 
-/// `wp_presentation_feedback.presented`: v1 requires `refresh` to be 0 when the refresh rate is not constant.
-const WP_PRESENTATION_FEEDBACK_PRESENTED_REFRESH_RELAXED_SINCE: u32 = 2;
-
-fn presentation_refresh_interval_ns(
-    refresh_millihz: i32,
-    feedback_version: u32,
-    refresh_is_constant: bool,
-) -> u32 {
-    if refresh_millihz <= 0 {
-        return 0;
-    }
-    if feedback_version < WP_PRESENTATION_FEEDBACK_PRESENTED_REFRESH_RELAXED_SINCE
-        && !refresh_is_constant
-    {
-        return 0;
-    }
-    let refresh = u64::try_from(refresh_millihz).unwrap_or(0);
-    let refresh_ns = 1_000_000_000_000u64 / refresh;
-    refresh_ns.min(u64::from(u32::MAX)) as u32
-}
-
-fn refresh_interval_ns_for_output(
-    state: &State,
-    output_id: Option<OutputId>,
-    feedback_version: u32,
-) -> u32 {
-    let Some(output_id) = output_id else {
-        return 0;
-    };
-    let Some(drm_id) = state
-        .backend_for_output(output_id)
-        .map(|backend| backend.drm_id)
-    else {
-        return 0;
-    };
-    let Some(drm_crtc_id) = state.output_crtc_id(output_id) else {
-        return 0;
-    };
-    let Some(mode) = state.drm.get(drm_id).current_output_mode(drm_crtc_id) else {
-        return 0;
-    };
-    let refresh_is_constant = true;
-    presentation_refresh_interval_ns(mode.refresh_millihz, feedback_version, refresh_is_constant)
-}
-
 fn presentation_feedback_flags(zero_copy: bool) -> u32 {
     use crate::protocol_generated::wp_presentation_feedback::Kind;
 
@@ -4015,211 +4101,6 @@ fn presentation_feedback_flags(zero_copy: bool) -> u32 {
         flags |= Kind::ZeroCopy as u32;
     }
     flags
-}
-
-fn sanitize_present_timestamp(tv_sec: u32, tv_usec: u32) -> (u64, u32) {
-    if tv_usec < 1_000_000 && tv_sec > 2 {
-        return (u64::from(tv_sec), tv_usec.saturating_mul(1000));
-    }
-
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
-        return (u64::from(tv_sec), tv_usec.min(999_999).saturating_mul(1000));
-    }
-
-    let tv_sec = u64::try_from(ts.tv_sec.max(0)).unwrap_or(0);
-    let tv_nsec = u32::try_from(ts.tv_nsec.clamp(0, 999_999_999)).unwrap_or(0);
-    (tv_sec, tv_nsec)
-}
-
-fn dispatch_presentation_feedback_discarded(
-    dispatcher: &mut Dispatcher,
-    feedbacks: &[SubmissionPresentationFeedback],
-) {
-    let mut per_client = BTreeMap::<ClientId, Vec<Resolved<WpPresentationFeedbackId>>>::new();
-    for feedback in feedbacks {
-        per_client
-            .entry(feedback.feedback.client_id())
-            .or_default()
-            .push(feedback.feedback);
-    }
-    for (client_id, feedbacks) in per_client {
-        dispatcher
-            .dispatch_to(client_id, ClientAction::PresentationFeedbackDiscarded { feedbacks });
-    }
-}
-
-fn dispatch_presentation_feedback_presented(
-    state: &State,
-    _drm_id: DrmId,
-    dispatcher: &mut Dispatcher,
-    output_id: Option<OutputId>,
-    feedbacks: &[SubmissionPresentationFeedback],
-    zero_copy: bool,
-    tv_sec: u32,
-    tv_usec: u32,
-    sequence: u32,
-) {
-    if feedbacks.is_empty() {
-        return;
-    }
-    let (tv_sec, tv_nsec) = sanitize_present_timestamp(tv_sec, tv_usec);
-    let tv_sec_hi = (tv_sec >> 32) as u32;
-    let tv_sec_lo = tv_sec as u32;
-    let sequence = u64::from(sequence);
-    let seq_hi = (sequence >> 32) as u32;
-    let seq_lo = sequence as u32;
-    let flags = presentation_feedback_flags(zero_copy);
-
-    let mut per_client =
-        BTreeMap::<(ClientId, u32), Vec<Resolved<WpPresentationFeedbackId>>>::new();
-    for feedback in feedbacks {
-        per_client
-            .entry((feedback.feedback.client_id(), feedback.version))
-            .or_default()
-            .push(feedback.feedback);
-    }
-
-    for ((client_id, feedback_version), feedbacks) in per_client {
-        let refresh = refresh_interval_ns_for_output(state, output_id, feedback_version);
-        dispatcher.dispatch_to(
-            client_id,
-            ClientAction::PresentationFeedbackPresented {
-                feedbacks,
-                output_id,
-                tv_sec_hi,
-                tv_sec_lo,
-                tv_nsec,
-                refresh,
-                seq_hi,
-                seq_lo,
-                flags,
-            },
-        );
-    }
-}
-
-fn build_frame_plan(
-    output: &DrmOutput,
-    mut items: Vec<SceneItem>,
-    mut software_cursor_items: Vec<SceneItem>,
-    frame_elements: Vec<RecordedFrameElement>,
-    cursor_plane: Option<CursorPlaneCandidate>,
-) -> FramePlan {
-    let output_bounds = output.output_bounds();
-    let mut base_damage = DamageRegion::new();
-    if cursor_plane.is_none() {
-        items.append(&mut software_cursor_items);
-    }
-    let (scene, frame_callback_surfaces, presentation_feedbacks) =
-        collect_submission_metadata(&items, &software_cursor_items);
-    let last_scene = &output.last_scene;
-    let order_changed = scene_order(last_scene) != scene_order(&scene);
-    let has_effects = frame_elements
-        .iter()
-        .any(|element| matches!(element, RecordedFrameElement::Effect { .. }));
-
-    let had_effects_last_frame = output.last_submission_had_effects;
-    if effect_transition_requires_full_redraw(has_effects, had_effects_last_frame)
-        || !ENABLE_DAMAGE
-        || output.force_full_redraw
-        || order_changed
-        || scene.len() != last_scene.len()
-    {
-        base_damage.add_rect(output_bounds);
-    } else {
-        for (current, previous) in items.iter().zip(last_scene.iter()) {
-            if current.state.key != previous.key {
-                base_damage.add_rect(output_bounds);
-                break;
-            }
-            if current.state.bounds != previous.bounds
-                || current.state.content_key != previous.content_key
-                || current.state.tex_transform != previous.tex_transform
-            {
-                base_damage.add_rect(previous.bounds);
-                base_damage.add_rect(current.state.bounds);
-            } else {
-                base_damage.add_region(&current.damage);
-            }
-        }
-    }
-
-    base_damage = output.accumulate_damage_from_age(&base_damage);
-    base_damage.intersect_rect(output_bounds);
-    if !presentation_feedbacks.is_empty()
-        && cursor_plane.is_none()
-        && !scene.is_empty()
-        && base_damage.is_empty()
-    {
-        base_damage.add_rect(output_bounds);
-    }
-    for item in &items {
-        if item.sample_damage_padding <= 0 {
-            continue;
-        }
-        let mut padded_item_damage = base_damage.clone();
-        padded_item_damage.intersect_rect(item.state.bounds);
-        if padded_item_damage.is_empty() {
-            continue;
-        }
-        padded_item_damage.expand(item.sample_damage_padding);
-        padded_item_damage.intersect_rect(item.state.bounds);
-        base_damage.add_region(&padded_item_damage);
-    }
-
-    if has_effects {
-        // Keep effect damage conservative until each effect element reports full influence bounds;
-        // blur and multi-pass composition are easier to keep correct this way.
-        for item in &mut items {
-            let mut visible_damage = base_damage.clone();
-            visible_damage.intersect_rect(item.state.bounds);
-            item.damage = visible_damage;
-        }
-    } else {
-        let mut occluded = DamageRegion::new();
-        for item in items.iter_mut().rev() {
-            let mut visible_damage = base_damage.clone();
-            visible_damage.intersect_rect(item.state.bounds);
-            visible_damage.subtract_region(&occluded);
-            item.damage = visible_damage;
-            if item.opaque {
-                occluded.add_region(&item.opaque_region);
-            }
-        }
-    }
-
-    let direct_scanout = if !has_effects
-        && items.len() == 1
-        && items[0].state.bounds == output_bounds
-        && !scene_item_requires_compositor_compositing(&items[0])
-        && output.page_flip_pending == false
-    {
-        let bounds = items[0].state.bounds;
-        let sync = items[0].sync.clone();
-        items[0]
-            .direct_scanout
-            .take()
-            .map(|framebuffer| DirectScanoutCandidate { bounds, sync, framebuffer })
-    } else {
-        None
-    };
-
-    FramePlan {
-        items,
-        software_cursor_items,
-        frame_elements,
-        scene,
-        frame_callback_surfaces,
-        presentation_feedbacks,
-        damage: base_damage,
-        direct_scanout,
-        cursor_plane,
-        preserve_contents: ENABLE_DAMAGE
-            && output.preserve_render_buffer_contents()
-            && !output.force_full_redraw
-            && !has_effects,
-    }
 }
 
 fn scene_item_requires_compositor_compositing(item: &SceneItem) -> bool {
@@ -4303,6 +4184,7 @@ fn collect_submission_metadata(
             |feedback| SubmissionPresentationFeedback {
                 feedback: feedback.feedback,
                 version: feedback.version,
+                surface: item.state.surface_key,
             },
         ));
     }
@@ -4936,11 +4818,14 @@ mod drm_event_tests {
 #[cfg(test)]
 mod window_animation_tests {
     use {
-        super::{DrmAction, WindowAnimationManager, WindowAnimationManagerAction},
+        super::{
+            animation_delay_msec_for_output, WindowAnimationManager, WindowAnimationManagerAction,
+        },
         crate::{
             clients::ClientId,
             protocol_generated::WlSurfaceId,
             runner::{Dispatcher, Model},
+            scheduler::{output_scheduler_id, OutputSchedulerAction, RequestFrameReason},
             state::{BackendOutputRef, DrmId, ObjectId},
             test_support::{
                 resolved_wl_surface as root, state_for_tests, test_output_with_crtc_name,
@@ -4950,7 +4835,7 @@ mod window_animation_tests {
     };
 
     #[test]
-    fn window_animation_manager_kick_schedules_outputs_and_rearms_timer() {
+    fn window_animation_manager_kick_schedules_outputs_without_global_timer_rearm() {
         let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(0usize));
         let output_id =
@@ -4977,12 +4862,31 @@ mod window_animation_tests {
             .process(&mut state, WindowAnimationManagerAction::Kick, &mut dispatcher)
             .unwrap();
 
-        assert!(dispatcher.test_has_queued_action(|action: &WindowAnimationManagerAction| {
-            matches!(action, WindowAnimationManagerAction::Arm { delay_msec: Some(16) })
-        }));
-        assert!(dispatcher.test_has_queued_action_for(output_id, |action: &DrmAction| {
-            matches!(action, DrmAction::ScheduleFrame)
-        }));
+        assert!(dispatcher.test_has_queued_action_for::<OutputSchedulerAction, _>(
+            output_scheduler_id(output_id),
+            |action: &OutputSchedulerAction| {
+                matches!(
+                    action,
+                    OutputSchedulerAction::RequestFrame { reason: RequestFrameReason::Animation }
+                )
+            }
+        ));
+    }
+
+    #[test]
+    fn animation_delay_is_computed_per_output() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let left_id = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let right_id =
+            state.insert_output(test_output_with_crtc_name(backend, 2, 1280, 0, 1280, 720));
+        {
+            let right = state.outputs.try_get_mut(right_id).unwrap();
+            right.current_mode.refresh_millihz = 120_000;
+        }
+
+        assert_eq!(animation_delay_msec_for_output(&state, left_id), Some(17));
+        assert_eq!(animation_delay_msec_for_output(&state, right_id), Some(9));
     }
 }
 
@@ -5483,13 +5387,13 @@ mod presentation_timing_tests {
             build_surface_cursor_plane_request, collect_submission_metadata,
             cursor_plane_commit_dimensions, effect_transition_requires_full_redraw,
             find_cursor_slot_index_for_key, presentation_feedback_flags,
-            presentation_refresh_interval_ns, rgba_to_drm_argb8888, sanitize_present_timestamp,
+            render_planner::select_presentation_output_for_scene, rgba_to_drm_argb8888,
             scene_item_requires_compositor_compositing, schedule_output,
             schedule_outputs_for_rects, select_cursor_upload_slot,
-            select_presentation_output_for_scene, submitted_frame_feedbacks_for_discard,
-            surface_allows_direct_scanout, CursorPlaneContentKey, CursorSurfaceContentKey,
-            OutputSubmission, SceneItem, SceneItemContentKey, SceneItemKey, SceneItemMask,
-            SceneItemState, SubmissionPresentationFeedback, SubmittedFrame,
+            submitted_frame_feedbacks_for_discard, surface_allows_direct_scanout,
+            CursorPlaneContentKey, CursorSurfaceContentKey, OutputSubmission, SceneItem,
+            SceneItemContentKey, SceneItemKey, SceneItemMask, SceneItemState,
+            SubmissionPresentationFeedback, SubmittedFrame,
         },
         crate::{
             clients::{ClientId, Resolved},
@@ -5497,6 +5401,7 @@ mod presentation_timing_tests {
             protocol_generated::{WlBufferId, WlSurfaceId, WpPresentationFeedbackId},
             region::{DamageRegion, RectI},
             runner::Dispatcher,
+            scheduler::{output_scheduler_id, OutputSchedulerAction, RequestFrameReason},
             state::{BackendOutputRef, DrmId, ObjectId, OutputId},
             test_support::{state_for_tests, test_output},
             transform,
@@ -5515,6 +5420,7 @@ mod presentation_timing_tests {
                 crate::state::ObjectId::from(id as usize),
             ),
             version,
+            surface: None,
         }
     }
 
@@ -5585,12 +5491,6 @@ mod presentation_timing_tests {
     }
 
     #[test]
-    fn v1_feedback_uses_zero_refresh_when_rate_is_not_constant() {
-        assert_eq!(presentation_refresh_interval_ns(60_000, 1, false), 0);
-        assert_ne!(presentation_refresh_interval_ns(60_000, 2, false), 0);
-    }
-
-    #[test]
     fn submitted_frame_discard_helper_returns_feedbacks() {
         let frame = SubmittedFrame::Composited {
             buffer_index: 0,
@@ -5603,6 +5503,9 @@ mod presentation_timing_tests {
                 presentation_feedbacks: vec![submission_feedback(4, 2)],
                 zero_copy: false,
                 had_effects: false,
+                scene_build_duration: std::time::Duration::ZERO,
+                render_submit_duration: std::time::Duration::ZERO,
+                submitted_at: std::time::Instant::now(),
             },
             damage_blob: None,
             cursor_slot: None,
@@ -5758,7 +5661,22 @@ mod presentation_timing_tests {
                 ObjectId::from(9usize),
             )]
         );
-        assert_eq!(presentation_feedbacks, vec![submission_feedback(7, 2)]);
+        assert_eq!(
+            presentation_feedbacks,
+            vec![SubmissionPresentationFeedback {
+                feedback: crate::clients::Resolved::new(
+                    ClientId::from_raw(1),
+                    WpPresentationFeedbackId::from(7),
+                    crate::state::ObjectId::from(7usize),
+                ),
+                version: 2,
+                surface: Some(Resolved::new(
+                    ClientId::from_raw(1),
+                    WlSurfaceId::from(9),
+                    ObjectId::from(9usize),
+                )),
+            }]
+        );
     }
 
     #[test]
@@ -5840,6 +5758,31 @@ mod presentation_timing_tests {
     }
 
     #[test]
+    fn select_presentation_output_breaks_equal_overlap_by_lowest_output_id() {
+        let mut state = state_for_tests();
+        let drm_id = DrmId::from(0usize);
+        let backend = BackendOutputRef::new(drm_id);
+        let left = state.insert_output(test_output(backend, 1, 0, 0, 100, 100, ""));
+        let right = state.insert_output(test_output(backend, 2, 100, 0, 100, 100, ""));
+        let surface_key =
+            Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(2), ObjectId::from(2usize));
+        let buffer =
+            Resolved::new(ClientId::from_raw(1), WlBufferId::from(2), ObjectId::from(2usize));
+        let scene = vec![SceneItemState {
+            key: SceneItemKey::Surface(surface_key),
+            surface_key: Some(surface_key),
+            content_key: SceneItemContentKey::Buffer(buffer),
+            bounds: RectI::new(50, 0, 100, 100).unwrap(),
+            tex_transform: transform::Mat3::identity(),
+        }];
+
+        let selected = select_presentation_output_for_scene(&state, drm_id, &scene);
+
+        assert_eq!(selected, Some(left));
+        assert_ne!(selected, Some(right));
+    }
+
+    #[test]
     fn schedule_output_targets_logical_output_model_id() {
         let mut state = state_for_tests();
         let drm_id = DrmId::from(0usize);
@@ -5850,13 +5793,19 @@ mod presentation_timing_tests {
 
         schedule_output(&state, right, &mut dispatcher);
 
-        assert!(dispatcher.test_has_queued_action_for::<super::DrmAction, OutputId>(
-            right,
-            |action| matches!(action, super::DrmAction::ScheduleFrame)
+        assert!(dispatcher.test_has_queued_action_for::<OutputSchedulerAction, _>(
+            output_scheduler_id(right),
+            |action| matches!(
+                action,
+                OutputSchedulerAction::RequestFrame { reason: RequestFrameReason::Damage }
+            )
         ));
-        assert!(!dispatcher.test_has_queued_action_for::<super::DrmAction, OutputId>(
-            left,
-            |action| matches!(action, super::DrmAction::ScheduleFrame)
+        assert!(!dispatcher.test_has_queued_action_for::<OutputSchedulerAction, _>(
+            output_scheduler_id(left),
+            |action| matches!(
+                action,
+                OutputSchedulerAction::RequestFrame { reason: RequestFrameReason::Damage }
+            )
         ));
     }
 
@@ -5875,24 +5824,22 @@ mod presentation_timing_tests {
             &mut dispatcher,
         );
 
-        assert!(dispatcher.test_has_queued_action_for::<super::DrmAction, OutputId>(
-            left,
-            |action| matches!(action, super::DrmAction::ScheduleFrame)
+        assert!(dispatcher.test_has_queued_action_for::<OutputSchedulerAction, _>(
+            output_scheduler_id(left),
+            |action| matches!(
+                action,
+                OutputSchedulerAction::RequestFrame { reason: RequestFrameReason::Damage }
+            )
         ));
-        assert!(dispatcher.test_has_queued_action_for::<super::DrmAction, OutputId>(
-            right,
-            |action| matches!(action, super::DrmAction::ScheduleFrame)
+        assert!(dispatcher.test_has_queued_action_for::<OutputSchedulerAction, _>(
+            output_scheduler_id(right),
+            |action| matches!(
+                action,
+                OutputSchedulerAction::RequestFrame { reason: RequestFrameReason::Damage }
+            )
         ));
     }
 
-    #[test]
-    fn sanitize_present_timestamp_falls_back_for_suspicious_values() {
-        let (tv_sec, tv_nsec) = sanitize_present_timestamp(1, 2_000_000);
-        assert!(tv_sec > 0);
-        assert!(tv_nsec < 1_000_000_000);
-    }
-
-    #[test]
     fn direct_scanout_requires_surface_without_compositor_processing() {
         let mut item = make_surface_scene_item(30, RectI::new(0, 0, 100, 100).unwrap(), Vec::new());
         item.alpha = 200;

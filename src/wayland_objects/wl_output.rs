@@ -133,23 +133,7 @@ impl WlOutput {
         let Some(output) = self.output(state) else {
             return;
         };
-        let mode = &output.current_mode;
-        let mut flags = wl_output::Mode::Current as u32;
-        if output
-            .preferred_mode
-            .as_ref()
-            .is_some_and(|preferred| preferred == mode)
-        {
-            flags |= wl_output::Mode::Preferred as u32;
-        }
-
-        let mode = wl_output::Event::Mode {
-            flags,
-            width: mode.width,
-            height: mode.height,
-            refresh: mode.refresh_millihz,
-        };
-        self.send_event(mode, dispatcher);
+        self.send_event(mode_event(output), dispatcher);
     }
 
     pub fn send_scale(&self, state: &State, dispatcher: &mut ClientDispatcher) {
@@ -192,5 +176,58 @@ impl WlOutput {
             return;
         }
         self.send_event(wl_output::Event::Done, dispatcher);
+    }
+}
+
+fn mode_event(output: &Output) -> wl_output::Event {
+    let mode = &output.current_mode;
+    let mut flags = wl_output::Mode::Current as u32;
+    if output
+        .preferred_mode
+        .as_ref()
+        .is_some_and(|preferred| preferred == mode)
+    {
+        flags |= wl_output::Mode::Preferred as u32;
+    }
+
+    wl_output::Event::Mode {
+        flags,
+        width: mode.width,
+        height: mode.height,
+        refresh: mode.refresh_millihz,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::{
+            state::{BackendOutputRef, DrmId},
+            test_support::{state_for_tests, test_output},
+        },
+    };
+
+    #[test]
+    fn mode_event_uses_output_nominal_refresh() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output(
+            BackendOutputRef::new(DrmId::from(0usize)),
+            1,
+            0,
+            0,
+            1920,
+            1080,
+            "test-output",
+        ));
+        let output = state.outputs.try_get_mut(output_id).unwrap();
+        output.current_mode.refresh_millihz = 143_855;
+        output.preferred_mode = Some(output.current_mode.clone());
+
+        let event = mode_event(output);
+        match event {
+            wl_output::Event::Mode { refresh, .. } => assert_eq!(refresh, 143_855),
+            _ => panic!("expected wl_output::Event::Mode"),
+        }
     }
 }
