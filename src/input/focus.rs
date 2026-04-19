@@ -4,11 +4,11 @@ use {
         drm::{kick_window_animation_manager, request_outputs_for_rects},
         protocol_generated::{WlSeatId, WlSurfaceId},
         runner::Dispatcher,
+        scene::{compose_output, CompositionTier},
         seat::{dispatch_client_event, SeatClientEvent},
         state::{DragPhase, DragTargetState, State},
         wayland_objects::zwlr_layer_surface_v1::{
-            layer_surface_keyboard_focus_with_snapshot, lookup_snapshot_surface,
-            ordered_scene_root_surfaces_with_snapshot, LayerKeyboardFocus,
+            layer_surface_keyboard_focus_with_snapshot, LayerKeyboardFocus,
             LayerLayoutObjectSnapshot, LayerShellLayer,
         },
     },
@@ -180,8 +180,10 @@ fn topmost_focus_candidate_for_workspace(
     state: &State,
     workspace_id: crate::state::WorkspaceId,
 ) -> Option<SurfaceFocus> {
-    state
-        .tiling_scene_root_surfaces()
+    let scene = state.build_scene_model();
+    let order = state.build_workspace_focus_order(&scene, workspace_id, None);
+    order
+        .roots_front_to_back
         .into_iter()
         .rev()
         .find(|surface| focus_candidate_matches_workspace(state, *surface, workspace_id))
@@ -208,7 +210,29 @@ fn focus_candidate_matches_workspace(
     root_surface.exists(state)
         && state.root_surface_workspace(root_surface) == Some(workspace_id)
         && state.root_surface_is_mapped(root_surface)
-        && state.root_surface_is_visible(root_surface)
+        && workspace_root_participates_in_input(state, root_surface, workspace_id)
+}
+
+fn workspace_root_participates_in_input(
+    state: &State,
+    root_surface: Resolved<WlSurfaceId>,
+    workspace_id: crate::state::WorkspaceId,
+) -> bool {
+    let scene = state.build_scene_model();
+    for output_id in state.workspace_output_ids(workspace_id) {
+        if state.output_bounds(output_id).is_none() {
+            continue;
+        }
+        let view = compose_output(state, &scene, output_id, None);
+        if view
+            .entries
+            .iter()
+            .any(|entry| entry.root_surface == root_surface && entry.participates_in_input)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 pub(crate) fn refresh_active_drag_focus(state: &mut State, dispatcher: &mut Dispatcher, time: u32) {
@@ -467,25 +491,45 @@ fn topmost_exclusive_layer_focus_with_snapshot(
     state: &State,
     snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
 ) -> Option<SurfaceFocus> {
-    for root_surface in ordered_scene_root_surfaces_with_snapshot(state, snapshot)
-        .into_iter()
-        .rev()
-    {
-        let Some(_surface) = lookup_snapshot_surface(state, snapshot, root_surface) else {
-            continue;
-        };
-        let Some(LayerKeyboardFocus::Exclusive { layer }) =
-            layer_surface_keyboard_focus_with_snapshot(state, root_surface, snapshot)
-        else {
-            continue;
-        };
-        if !matches!(layer, LayerShellLayer::Top | LayerShellLayer::Overlay) {
+    let scene = state.build_scene_model();
+    let mut top = Vec::new();
+    let mut overlay = Vec::new();
+    for output_id in state.outputs.iter().map(|(output_id, _)| output_id) {
+        if state.output_bounds(output_id).is_none() {
             continue;
         }
-        return Some(SurfaceFocus::new(root_surface));
+        let view = compose_output(state, &scene, output_id, snapshot);
+        for entry in view.entries {
+            let expected_layer = match entry.tier {
+                CompositionTier::Top => LayerShellLayer::Top,
+                CompositionTier::Overlay => LayerShellLayer::Overlay,
+                CompositionTier::Background
+                | CompositionTier::Bottom
+                | CompositionTier::Content => {
+                    continue;
+                }
+            };
+            let Some(LayerKeyboardFocus::Exclusive { layer }) =
+                layer_surface_keyboard_focus_with_snapshot(state, entry.root_surface, snapshot)
+            else {
+                continue;
+            };
+            if layer != expected_layer {
+                continue;
+            }
+            match layer {
+                LayerShellLayer::Top => top.push(entry.root_surface),
+                LayerShellLayer::Overlay => overlay.push(entry.root_surface),
+                LayerShellLayer::Background | LayerShellLayer::Bottom => {}
+            }
+        }
     }
 
-    None
+    top.into_iter()
+        .chain(overlay)
+        .rev()
+        .next()
+        .map(SurfaceFocus::new)
 }
 
 fn root_surface_for_focus(state: &State, focus: SurfaceFocus) -> Option<Resolved<WlSurfaceId>> {
@@ -501,6 +545,56 @@ fn monotonic_time_msec() -> u32 {
         .saturating_mul(1000)
         .saturating_add((ts.tv_nsec as u64) / 1_000_000);
     millis.min(u64::from(u32::MAX)) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        clients::ClientId,
+        protocol_generated::WlSurfaceId,
+        state::{BackendOutputRef, DrmId},
+        test_support::{state_for_tests, test_output_with_crtc_name},
+        wayland_objects::wl_surface::WlSurface,
+    };
+
+    use super::topmost_focus_candidate_for_workspace;
+
+    fn insert_root(
+        state: &mut crate::state::State,
+        raw: u32,
+    ) -> crate::clients::Resolved<WlSurfaceId> {
+        let (_, oid) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(raw), ClientId::from_raw(1), 6));
+        let surface =
+            crate::clients::Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(raw), oid);
+        state.register_root_surface(surface);
+        surface
+    }
+
+    #[test]
+    fn topmost_focus_candidate_uses_managed_workspace_order() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let lower = insert_root(&mut state, 81);
+        let upper = insert_root(&mut state, 82);
+        let _ = state.assign_root_surface_to_workspace(lower, workspace_id);
+        let _ = state.assign_root_surface_to_workspace(upper, workspace_id);
+        state
+            .workspaces
+            .try_get_mut(workspace_id)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![lower, upper];
+        state.managed_root_surfaces.get_mut(&lower).unwrap().mapped = true;
+        state.managed_root_surfaces.get_mut(&upper).unwrap().mapped = true;
+
+        let candidate =
+            topmost_focus_candidate_for_workspace(&state, workspace_id).expect("focus candidate");
+        assert_eq!(candidate.surface, upper);
+    }
 }
 
 fn dispatch_modifiers(

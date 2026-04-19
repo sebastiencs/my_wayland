@@ -1712,6 +1712,45 @@ mod surface_tree_hit_test_tests {
         let hit = surface_focus_pick_at(&state, (5.0, 5.0)).unwrap();
         assert_eq!(hit.target.surface_id(), WlSurfaceId::from(1));
     }
+
+    #[test]
+    fn hit_test_prefers_topmost_workspace_root_from_scene_order() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(crate::test_support::test_output_drm1(0, 0, 200, 100));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let lower = insert_surface(&mut state, 11);
+        let upper = insert_surface(&mut state, 12);
+
+        {
+            let surface = state
+                .objects
+                .get_mut(lower)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(230usize), 0, 0, 50, 50);
+        }
+        {
+            let surface = state
+                .objects
+                .get_mut(upper)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(231usize), 0, 0, 50, 50);
+        }
+
+        let _ = state.assign_root_surface_to_workspace(root(&state, lower), workspace_id);
+        let _ = state.assign_root_surface_to_workspace(root(&state, upper), workspace_id);
+        state
+            .workspaces
+            .try_get_mut(workspace_id)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![root(&state, lower), root(&state, upper)];
+
+        let hit = surface_focus_pick_at(&state, (5.0, 5.0)).unwrap();
+        assert_eq!(hit.target.surface_id(), WlSurfaceId::from(12));
+    }
 }
 
 #[cfg(test)]

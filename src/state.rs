@@ -18,6 +18,7 @@ use crate::{
         ShadowVisualStyle, SurfaceEffectStyle, WindowAnimationState, WindowAnimationValues,
     },
     root_geometry::{self, CommittedRootGeometry, DecorationFrameLayout},
+    scene::{self, OutputCompositionView, SceneModel, WorkspaceFocusOrder},
     scheduler::{
         frame_clock::VrrRange, output_scheduler::OutputSchedulerSnapshot,
         presentation::PresentationSubsystem,
@@ -1366,28 +1367,30 @@ impl State {
             .is_some_and(|group| group.active_workspace == Some(workspace_id))
     }
 
-    pub fn root_surface_is_visible(&self, surface: Resolved<WlSurfaceId>) -> bool {
-        self.root_surface_workspace(surface)
-            .map(|workspace_id| {
-                if !self.workspace_is_active(workspace_id) {
-                    return false;
-                }
-                let Some(workspace) = self.workspaces.try_get(workspace_id) else {
-                    return false;
-                };
-                workspace
-                    .layout
-                    .fullscreen
-                    .as_ref()
-                    .filter(|fullscreen| self.root_surface_is_mapped(fullscreen.surface_object_id))
-                    .map(|fullscreen| fullscreen.surface_object_id == surface)
-                    .unwrap_or(true)
-            })
-            .unwrap_or(true)
-    }
-
     pub fn relayout_dirty_workspaces(&mut self) {
         tiling::relayout_dirty_workspaces(self);
+    }
+
+    pub fn build_scene_model(&self) -> SceneModel {
+        scene::build_scene_model(self)
+    }
+
+    pub fn compose_output_view(
+        &self,
+        scene: &SceneModel,
+        output_id: OutputId,
+        snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+    ) -> OutputCompositionView {
+        scene::compose_output(self, scene, output_id, snapshot)
+    }
+
+    pub fn build_workspace_focus_order(
+        &self,
+        scene: &SceneModel,
+        workspace_id: WorkspaceId,
+        snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+    ) -> WorkspaceFocusOrder {
+        scene::build_workspace_focus_order(self, scene, workspace_id, snapshot)
     }
 
     pub fn mark_all_workspaces_dirty(&mut self) {
@@ -1399,10 +1402,6 @@ impl State {
         for workspace_id in workspace_ids {
             tiling::mark_workspace_dirty(self, workspace_id);
         }
-    }
-
-    pub fn tiling_scene_root_surfaces(&self) -> Vec<Resolved<WlSurfaceId>> {
-        tiling::managed_scene_order(self)
     }
 
     pub fn committed_root_geometry(
@@ -3565,9 +3564,15 @@ mod tests {
         state.register_root_surface(root(&state, object_id));
         state.assign_root_surface_to_workspace(root(&state, object_id), second_workspace);
 
-        assert!(!state.root_surface_is_visible(root(&state, object_id)));
+        assert!(!crate::scene::visibility::root_is_globally_visible(
+            &state,
+            root(&state, object_id),
+        ));
         assert!(state.activate_workspace(second_workspace));
-        assert!(state.root_surface_is_visible(root(&state, object_id)));
+        assert!(crate::scene::visibility::root_is_globally_visible(
+            &state,
+            root(&state, object_id),
+        ));
         assert!(!state.workspace_is_active(first_workspace));
     }
 

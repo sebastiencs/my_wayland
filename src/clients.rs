@@ -27,6 +27,7 @@ use crate::{
     },
     region::RectI,
     runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
+    scene::compose_output,
     seat::SeatClientEvent,
     state::{DataOfferRole, DrmId, GrabbedObject, ObjectId, OutputId, State},
     sync::AcquireReadyWaiterId,
@@ -1622,7 +1623,7 @@ impl Client {
                 }
                 continue;
             }
-            if !state.root_surface_is_visible(root_surface) {
+            if !root_has_protocol_visibility_on_active_outputs(state, root_surface) {
                 clear_surface_tree_outputs(self, state, dispatcher, root_surface);
                 continue;
             }
@@ -1650,7 +1651,7 @@ impl Client {
             let Some(root_surface) = state.root_surface_for_surface(wl_surface) else {
                 continue;
             };
-            if !state.root_surface_is_visible(root_surface) {
+            if !root_has_protocol_visibility_on_active_outputs(state, root_surface) {
                 continue;
             }
             let tiled_geometry = state.tiled_root_surface_geometry(root_surface);
@@ -1987,6 +1988,26 @@ fn active_dnd_icon_surface_refresh_params(
     let (pointer_x, pointer_y) = state.seat.pointer_position();
     let (root_x, root_y) = surface.root_position();
     Some((icon_surface, pointer_x.round() as i32 - root_x, pointer_y.round() as i32 - root_y))
+}
+
+fn root_has_protocol_visibility_on_active_outputs(
+    state: &State,
+    root_surface: Resolved<WlSurfaceId>,
+) -> bool {
+    let scene = state.build_scene_model();
+    state
+        .outputs
+        .iter()
+        .filter_map(|(output_id, _)| {
+            state
+                .output_bounds(output_id)
+                .map(|_| compose_output(state, &scene, output_id, None))
+        })
+        .any(|view| {
+            view.entries.iter().any(|entry| {
+                entry.root_surface == root_surface && entry.participates_in_protocol_visibility
+            })
+        })
 }
 
 /// A specialized `Dispatcher`
@@ -2860,7 +2881,7 @@ mod surface_output_refresh_tests {
         clients::{Client, ClientId, Resolved},
         io_uring::model::IoUringAction,
         runner::Dispatcher,
-        state::{FractionalScale, ObjectId},
+        state::{BackendOutputRef, DrmId, FractionalScale, ObjectId},
         test_support::{state_for_tests, test_output_drm1},
         wayland_objects::{wl_surface::WlSurface, wp_fractional_scale_v1::WpFractionalScaleV1},
     };
@@ -2925,5 +2946,32 @@ mod surface_output_refresh_tests {
             action,
             IoUringAction::Sendmsg { .. }
         )));
+    }
+
+    #[test]
+    fn protocol_visibility_skips_disabled_outputs_without_layout_bounds() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let enabled = state.insert_output(crate::test_support::test_output_with_crtc_name(
+            backend, 1, 0, 0, 100, 100,
+        ));
+        let disabled = state.insert_output(crate::test_support::test_output_with_crtc_name(
+            backend, 2, 100, 0, 100, 100,
+        ));
+        state.outputs.try_get_mut(disabled).unwrap().enabled = false;
+
+        let surface_id = crate::protocol_generated::WlSurfaceId::from(12u32);
+        let (surface_resolved, _) = Client::new_for_tests(ClientId::from_raw(9))
+            .insert_object(&mut state, WlSurface::new(surface_id, ClientId::from_raw(9), 6));
+        state.register_root_surface(surface_resolved);
+        state
+            .objects
+            .get_mut(surface_resolved.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(998usize), 10, 10, 20, 20);
+
+        assert_eq!(state.output_bounds(enabled).is_some(), true);
+        assert!(super::root_has_protocol_visibility_on_active_outputs(&state, surface_resolved));
     }
 }

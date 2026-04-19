@@ -1132,41 +1132,6 @@ pub fn mark_workspace_dirty(state: &mut State, workspace_id: WorkspaceId) {
     }
 }
 
-pub fn managed_scene_order(state: &State) -> Vec<Resolved<WlSurfaceId>> {
-    let mut ordered = Vec::new();
-    let mut seen = BTreeSet::new();
-    for output_id in state.outputs.iter().map(|(output_id, _)| output_id) {
-        let Some(workspace_id) = state.active_workspace_for_output(output_id) else {
-            continue;
-        };
-        let Some(workspace) = state.workspaces.try_get(workspace_id) else {
-            continue;
-        };
-        if let Some(fullscreen) = workspace
-            .layout
-            .fullscreen
-            .as_ref()
-            .filter(|fullscreen| state.root_surface_is_mapped(fullscreen.surface_object_id))
-        {
-            if seen.insert(fullscreen.surface_object_id) {
-                ordered.push(fullscreen.surface_object_id);
-            }
-            continue;
-        }
-        for surface_object_id in workspace.layout.tiled_scene_order() {
-            if seen.insert(surface_object_id) {
-                ordered.push(surface_object_id);
-            }
-        }
-        for surface_object_id in workspace.layout.floating_scene_order() {
-            if seen.insert(surface_object_id) {
-                ordered.push(surface_object_id);
-            }
-        }
-    }
-    ordered
-}
-
 pub fn relayout_dirty_workspaces(state: &mut State) {
     let workspace_ids = state
         .workspace_ids()

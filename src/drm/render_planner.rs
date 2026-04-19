@@ -1,10 +1,14 @@
-use crate::state::{DrmId, OutputId, State};
+use crate::{
+    scene::SceneModel,
+    state::{DrmId, OutputId, State},
+};
 
 pub(super) fn collect_output_render_plan(
     state: &mut State,
     drm_id: DrmId,
     logical_output_id: Option<OutputId>,
     frame_time_msec: u32,
+    scene: &SceneModel,
 ) -> super::OutputRenderPlan {
     let logical_output_id = logical_output_id.expect("missing logical output for DRM render plan");
     let drm_crtc_id = state
@@ -18,6 +22,7 @@ pub(super) fn collect_output_render_plan(
             .unwrap()
             .output_bounds()
     });
+    let view = state.compose_output_view(scene, logical_output_id, None);
     let (
         mut items,
         mut software_cursor_items,
@@ -25,7 +30,15 @@ pub(super) fn collect_output_render_plan(
         deferred_releases,
         cursor_plane,
         cursor_animation_delay_msec,
-    ) = super::collect_render_items(state, drm_id, drm_crtc_id, global_bounds, frame_time_msec);
+    ) = super::collect_render_items_for_output_view(
+        state,
+        drm_id,
+        drm_crtc_id,
+        logical_output_id,
+        global_bounds,
+        frame_time_msec,
+        &view,
+    );
     super::translate_scene_items(&mut items, -global_bounds.x, -global_bounds.y);
     super::translate_scene_items(&mut software_cursor_items, -global_bounds.x, -global_bounds.y);
     super::translate_recorded_frame_elements(

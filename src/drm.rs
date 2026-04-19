@@ -37,6 +37,7 @@ use crate::{
         RootSurfaceVisualState, RoundedRing, TextureElement, TextureMask, TextureSource,
     },
     runner::{Dispatcher, Model, ModelInstanceId},
+    scene::OutputCompositionView,
     state::{
         BackendOutputRef, ColorTransformMatrix, DrmId, ObjectId, OutputId, OutputMode,
         RootSurfaceClip, State,
@@ -46,7 +47,6 @@ use crate::{
     wayland_objects::{
         wl_buffer::{CursorShmBuffer, WlBuffer},
         wl_surface::{StackEntry, SurfacePresentationFeedback, WlSurface},
-        zwlr_layer_surface_v1::ordered_scene_root_surfaces,
     },
     ENABLE_DAMAGE,
 };
@@ -3366,11 +3366,13 @@ impl DrmOutputModel {
             );
             let planner_started_at = Instant::now();
             let watchdog_deadline = flip_watchdog_deadline_for_output(state, self.output_id);
+            let scene = state.build_scene_model();
             let output_render_plan = render_planner::collect_output_render_plan(
                 state,
                 self.drm_id,
                 Some(self.output_id),
                 frame_time_msec,
+                &scene,
             );
             let scene_build_duration = Instant::now().saturating_duration_since(planner_started_at);
             let OutputRenderPlan {
@@ -4555,12 +4557,14 @@ fn build_cursor_plane_request(
     }
 }
 
-fn collect_render_items(
+fn collect_render_items_for_output_view(
     state: &mut crate::state::State,
     drm_id: DrmId,
     drm_crtc_id: u32,
+    output_id: OutputId,
     output_bounds: RectI,
     frame_time_msec: u32,
+    view: &OutputCompositionView,
 ) -> (
     Vec<SceneItem>,
     Vec<SceneItem>,
@@ -4574,19 +4578,22 @@ fn collect_render_items(
     let mut deferred_releases = Vec::new();
     let mut retired_candidates = Vec::new();
     let mut cursor_animation_delay_msec = None;
-    let root_surfaces: Vec<_> = ordered_scene_root_surfaces(state)
-        .into_iter()
-        .filter(|root_surface| {
-            let Some(surface) = state
-                .objects
-                .try_ref_object::<WlSurface>(root_surface.object_id())
-            else {
-                return false;
-            };
-            surface.is_root() && !surface.has_cursor_role()
-        })
+    let root_surfaces: Vec<_> = view
+        .entries
+        .iter()
+        .filter(|entry| entry.participates_in_render)
+        .map(|entry| entry.root_surface)
         .collect();
     for root_surface in root_surfaces {
+        let Some(surface) = state
+            .objects
+            .try_ref_object::<WlSurface>(root_surface.object_id())
+        else {
+            continue;
+        };
+        if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
+            continue;
+        }
         let visual_state = state.root_surface_visual_state(root_surface);
         let root_clip = visual_state.and_then(|visual| visual.clip);
         push_root_surface_effect_elements(
@@ -4608,6 +4615,12 @@ fn collect_render_items(
         let drm = drm_map.get(drm_id);
         let drm_fd = drm.fd();
         let item_start_index = items.len();
+        let allow_direct_scanout = view
+            .entries
+            .iter()
+            .find(|entry| entry.root_surface == root_surface)
+            .map(|entry| entry.allow_direct_scanout)
+            .unwrap_or(false);
         push_scene_items_from_snapshots(
             &mut items,
             objects,
@@ -4616,7 +4629,7 @@ fn collect_render_items(
             drm_crtc_id,
             output_bounds,
             snapshots,
-            true,
+            allow_direct_scanout,
             root_clip,
             visual_state
                 .map(|visual| visual.effects.opacity_alpha)
@@ -4630,6 +4643,15 @@ fn collect_render_items(
         );
         push_root_surface_effect_elements(&mut frame_elements, visual_state, FramePhase::Overlay);
     }
+    collect_dnd_render_items(
+        state,
+        drm_id,
+        drm_crtc_id,
+        output_id,
+        output_bounds,
+        &mut items,
+        &mut retired_candidates,
+    );
 
     let cursor_plane = {
         let cursor_request = build_cursor_plane_request(state, frame_time_msec);
@@ -4680,6 +4702,70 @@ fn collect_render_items(
         cursor_plane,
         cursor_animation_delay_msec,
     )
+}
+
+fn collect_dnd_render_items(
+    state: &mut State,
+    drm_id: DrmId,
+    drm_crtc_id: u32,
+    output_id: OutputId,
+    output_bounds: RectI,
+    items: &mut Vec<SceneItem>,
+    retired_candidates: &mut Vec<RetiredBufferCandidate>,
+) {
+    let Some(drag) = state.seat.active_drag() else {
+        return;
+    };
+    let Some(root_surface) = drag.icon_surface else {
+        return;
+    };
+    let Some(surface) = root_surface.try_ref(state) else {
+        return;
+    };
+    let (pointer_x, pointer_y) = state.seat.pointer_position();
+    let (root_x, root_y) = surface.root_position();
+    let base_x = pointer_x.round() as i32 - root_x;
+    let base_y = pointer_y.round() as i32 - root_y;
+    let icon_bounds = surface
+        .render_state_at(base_x, base_y)
+        .and_then(|render_state| {
+            RectI::new(render_state.x, render_state.y, render_state.width, render_state.height)
+        });
+    if let Some(bounds) = icon_bounds {
+        let owns_output = state
+            .primary_output_for_rect(bounds, None)
+            .unwrap_or(output_id);
+        if owns_output != output_id && !bounds.intersects(output_bounds) {
+            return;
+        }
+    } else if state.active_output_id() != Some(output_id) {
+        return;
+    }
+    let mut snapshots = Vec::new();
+    collect_surface_snapshots(
+        state,
+        root_surface,
+        base_x,
+        base_y,
+        true,
+        retired_candidates,
+        &mut snapshots,
+    );
+    let (objects, drm_map) = (&mut state.objects, &state.drm);
+    let drm = drm_map.get(drm_id);
+    let drm_fd = drm.fd();
+    push_scene_items_from_snapshots(
+        items,
+        objects,
+        drm,
+        &drm_fd,
+        drm_crtc_id,
+        output_bounds,
+        snapshots,
+        false,
+        None,
+        u8::MAX,
+    );
 }
 
 fn scene_item_to_texture_element(item: &SceneItem) -> TextureElement {

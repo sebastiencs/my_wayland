@@ -121,6 +121,22 @@ pub struct LayerPlacement {
     pub layer: LayerShellLayer,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SceneLayerPlacement {
+    pub output_id: OutputId,
+    pub rect: RectI,
+    pub layer: LayerShellLayer,
+}
+
+pub(crate) struct SceneLayerLayout {
+    pub background_roots: Vec<Resolved<WlSurfaceId>>,
+    pub bottom_roots: Vec<Resolved<WlSurfaceId>>,
+    pub top_roots: Vec<Resolved<WlSurfaceId>>,
+    pub overlay_roots: Vec<Resolved<WlSurfaceId>>,
+    pub usable_by_output: BTreeMap<OutputId, RectI>,
+    pub placements_by_root: BTreeMap<Resolved<WlSurfaceId>, SceneLayerPlacement>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct LayerSnapshot {
     root_surface: Resolved<WlSurfaceId>,
@@ -1091,49 +1107,32 @@ pub fn output_usable_bounds_with_snapshot(
         .or_else(|| state.output_bounds(output_id))
 }
 
-pub fn ordered_scene_root_surfaces(state: &State) -> Vec<Resolved<WlSurfaceId>> {
-    ordered_scene_root_surfaces_with_snapshot(state, None)
-}
-
-pub fn ordered_scene_root_surfaces_with_snapshot(
+pub(crate) fn scene_layer_layout(
     state: &State,
     snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
-) -> Vec<Resolved<WlSurfaceId>> {
+) -> SceneLayerLayout {
     let layout = compute_layer_layout(state, snapshot);
-    let mut ordered = Vec::new();
-    ordered.extend(layout.background_roots);
-    ordered.extend(layout.bottom_roots);
-    let managed_roots = state
-        .tiling_scene_root_surfaces()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let managed_set = managed_roots
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    for root_surface in managed_roots.into_iter().chain(
-        state
-            .root_surfaces()
+    SceneLayerLayout {
+        background_roots: layout.background_roots,
+        bottom_roots: layout.bottom_roots,
+        top_roots: layout.top_roots,
+        overlay_roots: layout.overlay_roots,
+        usable_by_output: layout.usable_by_output,
+        placements_by_root: layout
+            .placements
             .into_iter()
-            .filter(|surface| !managed_set.contains(surface)),
-    ) {
-        let Some(surface) = lookup_snapshot_surface(state, snapshot, root_surface) else {
-            continue;
-        };
-        if surface.role() == crate::wayland_objects::wl_surface::Role::LayerSurface {
-            continue;
-        }
-        if state.is_popup_root_surface(root_surface) {
-            continue;
-        }
-        if !state.root_surface_is_visible(root_surface) {
-            continue;
-        }
-        ordered.push(root_surface);
+            .map(|(root_surface, placement)| {
+                (
+                    root_surface,
+                    SceneLayerPlacement {
+                        output_id: placement.output_id,
+                        rect: placement.rect,
+                        layer: placement.layer,
+                    },
+                )
+            })
+            .collect(),
     }
-    ordered.extend(layout.top_roots);
-    ordered.extend(layout.overlay_roots);
-    ordered
 }
 
 pub fn layer_surface_keyboard_focus(
@@ -1800,6 +1799,135 @@ mod tests {
         );
 
         assert!(needs_refresh);
+    }
+
+    #[test]
+    fn refresh_keyboard_focus_with_snapshot_prefers_topmost_exclusive_layer_from_composed_views() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_drm1_crtc(1, 0, 0, 1920, 1080));
+        let top_root_object_id = insert_root_surface(&mut state, 51);
+        let overlay_root_object_id = insert_root_surface(&mut state, 52);
+        let top_root = resolved_wl_surface(&state, top_root_object_id);
+        let overlay_root = resolved_wl_surface(&state, overlay_root_object_id);
+
+        state
+            .objects
+            .get_mut(top_root_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(251usize), 0, 0, 200, 40);
+        state
+            .objects
+            .get_mut(overlay_root_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(252usize), 0, 0, 220, 50);
+
+        let mut top_layer_surface = ZwlrLayerSurfaceV1::new(
+            ZwlrLayerSurfaceV1Id::from(61u32),
+            fake_layer_manager(2),
+            5,
+            top_root,
+            Some(output_id),
+            LayerShellLayer::Top,
+            "top".to_string(),
+        );
+        top_layer_surface.assigned_output_id = Some(output_id);
+        top_layer_surface.initial_commit_complete = true;
+        top_layer_surface.mapped = true;
+        top_layer_surface.current.keyboard_interactivity =
+            zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive as u32;
+        let (_, top_layer_oid) = state.insert_object(top_layer_surface);
+        let top_layer_resolved =
+            Resolved::new(ClientId::from_raw(1), ZwlrLayerSurfaceV1Id::from(61u32), top_layer_oid);
+
+        let mut overlay_layer_surface = ZwlrLayerSurfaceV1::new(
+            ZwlrLayerSurfaceV1Id::from(62u32),
+            fake_layer_manager(2),
+            5,
+            overlay_root,
+            Some(output_id),
+            LayerShellLayer::Top,
+            "overlay".to_string(),
+        );
+        overlay_layer_surface.assigned_output_id = Some(output_id);
+        overlay_layer_surface.initial_commit_complete = true;
+        overlay_layer_surface.mapped = true;
+        overlay_layer_surface.current.keyboard_interactivity =
+            zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive as u32;
+        let (_, overlay_layer_oid) = state.insert_object(overlay_layer_surface);
+        let overlay_layer_resolved = Resolved::new(
+            ClientId::from_raw(1),
+            ZwlrLayerSurfaceV1Id::from(62u32),
+            overlay_layer_oid,
+        );
+
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        let mut client = crate::clients::Client::new_for_tests(ClientId::from_raw(1));
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        {
+            let mut surface = state
+                .objects
+                .grab_object::<crate::wayland_objects::wl_surface::WlSurface>(top_root_object_id);
+            assert!(surface
+                .set_role(
+                    crate::wayland_objects::wl_surface::Role::LayerSurface,
+                    &mut client_dispatcher
+                )
+                .is_ok());
+            surface.set_layer_surface_impl(top_layer_resolved);
+        }
+        {
+            let mut surface = state
+                .objects
+                .grab_object::<crate::wayland_objects::wl_surface::WlSurface>(
+                    overlay_root_object_id,
+                );
+            assert!(surface
+                .set_role(
+                    crate::wayland_objects::wl_surface::Role::LayerSurface,
+                    &mut client_dispatcher
+                )
+                .is_ok());
+            surface.set_layer_surface_impl(overlay_layer_resolved);
+        }
+        state.register_layer_surface_object(top_layer_resolved);
+        state.register_layer_surface_object(overlay_layer_resolved);
+
+        let mut overlay_snapshot_surface =
+            WlSurface::new(WlSurfaceId::from(52u32), ClientId::from_raw(1), 6);
+        overlay_snapshot_surface.set_layer_surface_impl(overlay_layer_resolved);
+        overlay_snapshot_surface.test_map(ObjectId::from(253usize), 0, 0, 220, 50);
+
+        let mut overlay_snapshot_layer = ZwlrLayerSurfaceV1::new(
+            ZwlrLayerSurfaceV1Id::from(62u32),
+            fake_layer_manager(2),
+            5,
+            overlay_root,
+            Some(output_id),
+            LayerShellLayer::Overlay,
+            "overlay".to_string(),
+        );
+        overlay_snapshot_layer.assigned_output_id = Some(output_id);
+        overlay_snapshot_layer.initial_commit_complete = true;
+        overlay_snapshot_layer.mapped = true;
+        overlay_snapshot_layer.current.keyboard_interactivity =
+            zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive as u32;
+
+        let snapshot =
+            LayerLayoutObjectSnapshot::for_surface(overlay_root, &overlay_snapshot_surface)
+                .with_layer_surface(overlay_layer_resolved, &overlay_snapshot_layer);
+
+        crate::input::refresh_keyboard_focus_with_snapshot(
+            &mut state,
+            &mut dispatcher,
+            Some(snapshot),
+        );
+
+        assert_eq!(
+            state.seat.keyboard_focus(),
+            Some(crate::input::SurfaceFocus::new(overlay_root))
+        );
     }
 
     #[test]

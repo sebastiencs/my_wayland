@@ -2,11 +2,11 @@ use crate::{
     clients::Resolved,
     protocol_generated::{xdg_toplevel::ResizeEdge, WlSurfaceId, XdgSurfaceId},
     region::RectI,
+    scene::compose_global_root_order,
     state::State,
     wayland_objects::{
         wl_surface::{Role, StackEntry, WlSurface},
         xdg_surface::xdg_toplevel::ToplevelDecorationMode,
-        zwlr_layer_surface_v1::ordered_scene_root_surfaces,
     },
 };
 
@@ -16,10 +16,10 @@ use super::{
 };
 
 pub(crate) fn scene_pick_at(state: &State, pointer_pos: (f64, f64)) -> ScenePick {
-    let mut surface_focus = None;
-    let mut window_target = None;
+    let scene = state.build_scene_model();
+    let ordered_roots = compose_global_root_order(state, &scene, None);
 
-    for root_surface in ordered_scene_root_surfaces(state) {
+    for root_surface in ordered_roots.into_iter().rev() {
         let Some(surface) = root_surface.try_ref(state) else {
             continue;
         };
@@ -35,12 +35,14 @@ pub(crate) fn scene_pick_at(state: &State, pointer_pos: (f64, f64)) -> ScenePick
             .filter(|geometry| rect_contains_point(geometry.window_target_rect(), pointer_pos))
             .and_then(|_| build_window_target(state, root_surface));
         if root_hit.is_some() || window_target_for_root.is_some() {
-            surface_focus = root_hit;
-            window_target = window_target_for_root;
+            return ScenePick {
+                surface_focus: root_hit,
+                window_target: window_target_for_root,
+            };
         }
     }
 
-    ScenePick { surface_focus, window_target }
+    ScenePick { surface_focus: None, window_target: None }
 }
 
 pub(crate) fn scene_pick_for_pointer(state: &State) -> ScenePick {
@@ -526,5 +528,49 @@ mod tests {
                 .map(|focus| focus.target.surface),
             Some(parent_wl)
         );
+    }
+
+    #[test]
+    fn scene_pick_prefers_topmost_managed_root_from_scene_order() {
+        let mut state = state_for_tests();
+        let backend = crate::state::BackendOutputRef::new(crate::state::DrmId::from(0usize));
+        let output_id = state.insert_output(crate::test_support::test_output_with_crtc_name(
+            backend, 1, 0, 0, 200, 100,
+        ));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let lower_object_id = state
+            .insert_object(WlSurface::new(WlSurfaceId::from(71), ClientId::from_raw(1), 6))
+            .1;
+        let upper_object_id = state
+            .insert_object(WlSurface::new(WlSurfaceId::from(72), ClientId::from_raw(1), 6))
+            .1;
+        let lower = Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(71), lower_object_id);
+        let upper = Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(72), upper_object_id);
+        state.register_root_surface(lower);
+        state.register_root_surface(upper);
+        let _ = state.assign_root_surface_to_workspace(lower, workspace_id);
+        let _ = state.assign_root_surface_to_workspace(upper, workspace_id);
+        state
+            .workspaces
+            .try_get_mut(workspace_id)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![lower, upper];
+        state
+            .objects
+            .get_mut(lower.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(501usize), 0, 0, 100, 100);
+        state
+            .objects
+            .get_mut(upper.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(502usize), 0, 0, 100, 100);
+
+        let pick = scene_pick_at(&state, (10.0, 10.0));
+        assert_eq!(pick.surface_focus.map(|focus| focus.target.surface), Some(upper));
     }
 }

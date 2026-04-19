@@ -185,6 +185,7 @@ mod region;
 mod render;
 mod root_geometry;
 pub mod runner;
+mod scene;
 mod scheduler;
 mod seat;
 mod state;

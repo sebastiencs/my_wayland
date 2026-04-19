@@ -14,6 +14,7 @@ use crate::{
         WpPresentationFeedbackId, WpViewportId, XdgSurfaceId, ZwlrLayerSurfaceV1Id,
     },
     region::{DamageRegion, RectI, RegionValue},
+    scene::visibility::root_has_protocol_visibility,
     state::{FractionalScale, GrabbedObject, IndexMapKey, ObjectId, OutputId, State},
     sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
     transform::{self, BufferTransform, SizeI, SurfaceViewport},
@@ -46,7 +47,7 @@ fn should_focus_new_toplevel_on_map(state: &State, root_surface: Resolved<WlSurf
     if !root_surface.exists(state) {
         return false;
     }
-    if !state.root_surface_is_visible(root_surface) {
+    if !root_has_protocol_visibility(state, root_surface) {
         return false;
     }
     if state.seat.popup_grab_client().is_some() {
