@@ -27,7 +27,7 @@ use crate::{
     },
     region::RectI,
     runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
-    scene::compose_output,
+    scene::visibility::root_has_protocol_visibility,
     seat::SeatClientEvent,
     state::{DataOfferRole, DrmId, GrabbedObject, ObjectId, OutputId, State},
     sync::AcquireReadyWaiterId,
@@ -1623,7 +1623,7 @@ impl Client {
                 }
                 continue;
             }
-            if !root_has_protocol_visibility_on_active_outputs(state, root_surface) {
+            if !root_has_protocol_visibility(state, root_surface) {
                 clear_surface_tree_outputs(self, state, dispatcher, root_surface);
                 continue;
             }
@@ -1651,7 +1651,7 @@ impl Client {
             let Some(root_surface) = state.root_surface_for_surface(wl_surface) else {
                 continue;
             };
-            if !root_has_protocol_visibility_on_active_outputs(state, root_surface) {
+            if !root_has_protocol_visibility(state, root_surface) {
                 continue;
             }
             let tiled_geometry = state.tiled_root_surface_geometry(root_surface);
@@ -1988,26 +1988,6 @@ fn active_dnd_icon_surface_refresh_params(
     let (pointer_x, pointer_y) = state.seat.pointer_position();
     let (root_x, root_y) = surface.root_position();
     Some((icon_surface, pointer_x.round() as i32 - root_x, pointer_y.round() as i32 - root_y))
-}
-
-fn root_has_protocol_visibility_on_active_outputs(
-    state: &State,
-    root_surface: Resolved<WlSurfaceId>,
-) -> bool {
-    let scene = state.build_scene_model();
-    state
-        .outputs
-        .iter()
-        .filter_map(|(output_id, _)| {
-            state
-                .output_bounds(output_id)
-                .map(|_| compose_output(state, &scene, output_id, None))
-        })
-        .any(|view| {
-            view.entries.iter().any(|entry| {
-                entry.root_surface == root_surface && entry.participates_in_protocol_visibility
-            })
-        })
 }
 
 /// A specialized `Dispatcher`
@@ -2972,6 +2952,6 @@ mod surface_output_refresh_tests {
             .test_map(ObjectId::from(998usize), 10, 10, 20, 20);
 
         assert_eq!(state.output_bounds(enabled).is_some(), true);
-        assert!(super::root_has_protocol_visibility_on_active_outputs(&state, surface_resolved));
+        assert!(crate::scene::visibility::root_has_protocol_visibility(&state, surface_resolved));
     }
 }

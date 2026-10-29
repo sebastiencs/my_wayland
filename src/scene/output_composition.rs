@@ -15,7 +15,8 @@ use super::{
     visibility::{
         composition_allows_direct_scanout, input_participates, protocol_visible,
         render_participates, root_bounds_for_output_membership, root_is_globally_visible,
-        scene_entry_belongs_to_output, CompositionEvalContext, CompositionSource,
+        scene_entry_belongs_to_output_with_policy, CompositionEvalContext, CompositionSource,
+        WorkspaceParticipationPolicy,
     },
 };
 
@@ -56,6 +57,22 @@ pub fn compose_output(
     output_id: OutputId,
     snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
 ) -> OutputCompositionView {
+    compose_output_with_policy(
+        state,
+        scene,
+        output_id,
+        snapshot,
+        WorkspaceParticipationPolicy::Steady,
+    )
+}
+
+pub fn compose_output_with_policy(
+    state: &State,
+    scene: &SceneModel,
+    output_id: OutputId,
+    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+    policy: WorkspaceParticipationPolicy,
+) -> OutputCompositionView {
     let layer_layout = scene_layer_layout(state, snapshot);
     let usable_bounds = layer_layout
         .usable_by_output
@@ -63,7 +80,7 @@ pub fn compose_output(
         .copied()
         .or_else(|| state.output_bounds(output_id))
         .expect("compose_output requires an existing output");
-    let ctx = CompositionEvalContext { state, output_id, snapshot };
+    let ctx = CompositionEvalContext { state, output_id, snapshot, policy };
     let mut background_entries = Vec::new();
     let mut bottom_entries = Vec::new();
     let mut content_entries = Vec::new();
@@ -100,7 +117,7 @@ pub fn compose_output(
     );
 
     for entry in &scene.entries {
-        if !scene_entry_belongs_to_output(state, entry, output_id) {
+        if !scene_entry_belongs_to_output_with_policy(state, entry, output_id, policy) {
             continue;
         }
         let source = CompositionSource::SceneEntry(entry);
@@ -369,5 +386,143 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.root_surface == other && !entry.participates_in_render));
+    }
+
+    #[test]
+    fn transition_policy_keeps_outgoing_visible_and_incoming_in_front() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let other = state.insert_output(test_output_with_crtc_name(backend, 2, 100, 0, 100, 100));
+        let group_id = state.workspace_group_for_output(output_id).unwrap();
+        let incoming = state.active_workspace_for_output(output_id).unwrap();
+        let outgoing = state.create_workspace(Some(group_id), Some("2".to_string()));
+        let other_workspace = state.active_workspace_for_output(other).unwrap();
+        let outgoing_root = insert_root(&mut state, 91);
+        let incoming_root = insert_root(&mut state, 92);
+        let other_root = insert_root(&mut state, 93);
+        let _ = state.assign_root_surface_to_workspace(outgoing_root, outgoing);
+        let _ = state.assign_root_surface_to_workspace(incoming_root, incoming);
+        let _ = state.assign_root_surface_to_workspace(other_root, other_workspace);
+        for root in [outgoing_root, incoming_root, other_root] {
+            state.managed_root_surfaces.get_mut(&root).unwrap().mapped = true;
+        }
+        state
+            .workspaces
+            .try_get_mut(outgoing)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![outgoing_root];
+        state
+            .workspaces
+            .try_get_mut(incoming)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![incoming_root];
+        state
+            .workspaces
+            .try_get_mut(other_workspace)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![other_root];
+        let policy =
+            crate::scene::WorkspaceParticipationPolicy::Transition { group_id, outgoing, incoming };
+
+        let scene = crate::scene::build_scene_model_with_policy(&state, policy);
+        let view = super::compose_output_with_policy(&state, &scene, output_id, None, policy);
+        let content = view
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.root_surface == outgoing_root || entry.root_surface == incoming_root
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0].root_surface, outgoing_root);
+        assert!(!content[0].participates_in_input);
+        assert!(content[0].participates_in_protocol_visibility);
+        assert!(content[0].participates_in_render);
+        assert_eq!(content[1].root_surface, incoming_root);
+        assert!(content[1].participates_in_input);
+        assert!(content[1].participates_in_protocol_visibility);
+        assert!(content[1].participates_in_render);
+        assert!(view
+            .entries
+            .iter()
+            .all(|entry| entry.root_surface != other_root));
+
+        let other_view = super::compose_output_with_policy(&state, &scene, other, None, policy);
+        let other_entry = other_view
+            .entries
+            .iter()
+            .find(|entry| entry.root_surface == other_root)
+            .expect("unaffected workspace stays composed on its output");
+        assert!(other_entry.participates_in_input);
+        assert!(other_entry.participates_in_protocol_visibility);
+        assert!(other_entry.participates_in_render);
+        assert!(other_view.entries.iter().all(
+            |entry| entry.root_surface != outgoing_root && entry.root_surface != incoming_root
+        ));
+    }
+
+    #[test]
+    fn layer_pointer_participation_ignores_keyboard_none() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let root_surface = insert_root(&mut state, 94);
+        let layer = crate::wayland_objects::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1::new(
+            crate::protocol_generated::ZwlrLayerSurfaceV1Id::from(95u32),
+            crate::clients::Resolved::new(
+                ClientId::from_raw(1),
+                crate::protocol_generated::ZwlrLayerShellV1Id::from(96u32),
+                crate::state::ObjectId::from(96usize),
+            ),
+            4,
+            root_surface,
+            Some(output_id),
+            crate::wayland_objects::zwlr_layer_surface_v1::LayerShellLayer::Top,
+            "panel".to_string(),
+        );
+        let (_, layer_oid) = state.insert_object(layer);
+        let layer_surface = crate::clients::Resolved::new(
+            ClientId::from_raw(1),
+            crate::protocol_generated::ZwlrLayerSurfaceV1Id::from(95u32),
+            layer_oid,
+        );
+        state
+            .objects
+            .get_mut(root_surface.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_layer_surface_impl(layer_surface);
+        state.register_layer_surface_object(layer_surface);
+        state
+            .objects
+            .get_mut(layer_surface.object_id())
+            .downcast_mut::<crate::wayland_objects::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>()
+            .unwrap()
+            .test_set_mapped(true);
+
+        let scene = crate::scene::build_scene_model(&state);
+        let view = compose_output(&state, &scene, output_id, None);
+        let entry = view
+            .entries
+            .iter()
+            .find(|entry| entry.root_surface == root_surface)
+            .expect("layer root is composed on its output");
+        assert!(entry.participates_in_input);
+        assert!(entry.participates_in_protocol_visibility);
+        assert!(entry.participates_in_render);
+        assert_eq!(
+            crate::wayland_objects::zwlr_layer_surface_v1::layer_surface_keyboard_focus(
+                &state,
+                root_surface,
+            ),
+            Some(crate::wayland_objects::zwlr_layer_surface_v1::LayerKeyboardFocus::None)
+        );
     }
 }

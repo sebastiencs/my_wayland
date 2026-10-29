@@ -6,6 +6,8 @@ use crate::{
     state::{State, WorkspaceId},
 };
 
+use super::visibility::{output_workspace_ids, WorkspaceParticipationPolicy};
+
 pub type SceneEntryId = u64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -28,9 +30,16 @@ pub struct SceneModel {
 }
 
 pub fn build_scene_model(state: &State) -> SceneModel {
+    build_scene_model_with_policy(state, WorkspaceParticipationPolicy::Steady)
+}
+
+pub fn build_scene_model_with_policy(
+    state: &State,
+    policy: WorkspaceParticipationPolicy,
+) -> SceneModel {
     let mut entries = Vec::new();
     let mut next_id = 1;
-    collect_workspace_scene_entries(state, &mut entries, &mut next_id);
+    collect_workspace_scene_entries(state, policy, &mut entries, &mut next_id);
     let managed_roots = entries
         .iter()
         .filter(|entry| entry.role == SceneRole::WorkspaceRoot)
@@ -42,57 +51,62 @@ pub fn build_scene_model(state: &State) -> SceneModel {
 
 fn collect_workspace_scene_entries(
     state: &State,
+    policy: WorkspaceParticipationPolicy,
     entries: &mut Vec<SceneEntry>,
     next_id: &mut SceneEntryId,
 ) {
     let mut seen = BTreeSet::new();
     for output_id in state.outputs.iter().map(|(output_id, _)| output_id) {
-        let Some(workspace_id) = state.active_workspace_for_output(output_id) else {
-            continue;
-        };
-        let Some(workspace) = state.workspaces.try_get(workspace_id) else {
-            continue;
-        };
-        if let Some(fullscreen) = workspace
-            .layout
-            .fullscreen
-            .as_ref()
-            .filter(|fullscreen| state.root_surface_is_mapped(fullscreen.surface_object_id))
-        {
-            if seen.insert(fullscreen.surface_object_id) {
-                entries.push(SceneEntry {
-                    id: *next_id,
-                    root_surface: fullscreen.surface_object_id,
-                    role: SceneRole::WorkspaceRoot,
-                    workspace_id: Some(workspace_id),
-                });
-                *next_id += 1;
-            }
-            continue;
-        }
-        for root_surface in workspace.layout.tiled_scene_order() {
-            if seen.insert(root_surface) {
-                entries.push(SceneEntry {
-                    id: *next_id,
-                    root_surface,
-                    role: SceneRole::WorkspaceRoot,
-                    workspace_id: Some(workspace_id),
-                });
-                *next_id += 1;
-            }
-        }
-        for root_surface in workspace.layout.floating_scene_order() {
-            if seen.insert(root_surface) {
-                entries.push(SceneEntry {
-                    id: *next_id,
-                    root_surface,
-                    role: SceneRole::WorkspaceRoot,
-                    workspace_id: Some(workspace_id),
-                });
-                *next_id += 1;
-            }
+        for workspace_id in output_workspace_ids(state, output_id, policy) {
+            append_workspace_scene_entries(state, workspace_id, entries, next_id, &mut seen);
         }
     }
+}
+
+fn append_workspace_scene_entries(
+    state: &State,
+    workspace_id: WorkspaceId,
+    entries: &mut Vec<SceneEntry>,
+    next_id: &mut SceneEntryId,
+    seen: &mut BTreeSet<Resolved<WlSurfaceId>>,
+) {
+    let Some(workspace) = state.workspaces.try_get(workspace_id) else {
+        return;
+    };
+    if let Some(fullscreen) = workspace
+        .layout
+        .fullscreen
+        .as_ref()
+        .filter(|fullscreen| state.root_surface_is_mapped(fullscreen.surface_object_id))
+    {
+        push_workspace_root(entries, next_id, seen, fullscreen.surface_object_id, workspace_id);
+        return;
+    }
+    for root_surface in workspace.layout.tiled_scene_order() {
+        push_workspace_root(entries, next_id, seen, root_surface, workspace_id);
+    }
+    for root_surface in workspace.layout.floating_scene_order() {
+        push_workspace_root(entries, next_id, seen, root_surface, workspace_id);
+    }
+}
+
+fn push_workspace_root(
+    entries: &mut Vec<SceneEntry>,
+    next_id: &mut SceneEntryId,
+    seen: &mut BTreeSet<Resolved<WlSurfaceId>>,
+    root_surface: Resolved<WlSurfaceId>,
+    workspace_id: WorkspaceId,
+) {
+    if !seen.insert(root_surface) {
+        return;
+    }
+    entries.push(SceneEntry {
+        id: *next_id,
+        root_surface,
+        role: SceneRole::WorkspaceRoot,
+        workspace_id: Some(workspace_id),
+    });
+    *next_id += 1;
 }
 
 fn collect_unmanaged_scene_entries(
@@ -324,8 +338,12 @@ mod tests {
     #[test]
     fn popup_roots_are_excluded_as_top_level_scene_entries() {
         let mut state = state_for_tests();
-        let (_parent_wl, parent_xdg) = insert_test_xdg_surface(&mut state, 30, 31);
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let (parent_wl, parent_xdg) = insert_test_xdg_surface(&mut state, 30, 31);
         let (popup_wl, popup_xdg) = insert_test_xdg_surface(&mut state, 32, 33);
+        let _ = state.assign_root_surface_to_workspace(parent_wl, workspace_id);
         let (_, popup_oid) = state.insert_object(XdgPopup::new(
             XdgPopupId::from(34u32),
             popup_xdg,
@@ -350,5 +368,59 @@ mod tests {
             .entries
             .iter()
             .any(|entry| entry.root_surface == popup_wl));
+        assert_eq!(state.root_surface_workspace(popup_wl), Some(workspace_id));
+    }
+
+    #[test]
+    fn transition_policy_collects_outgoing_then_incoming_workspace_roots() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let other = state.insert_output(test_output_with_crtc_name(backend, 2, 100, 0, 100, 100));
+        let group_id = state.workspace_group_for_output(output_id).unwrap();
+        let incoming = state.active_workspace_for_output(output_id).unwrap();
+        let outgoing = state.create_workspace(Some(group_id), Some("2".to_string()));
+        let other_workspace = state.active_workspace_for_output(other).unwrap();
+        let outgoing_root = insert_root(&mut state, 90);
+        let incoming_root = insert_root(&mut state, 91);
+        let other_root = insert_root(&mut state, 92);
+        let _ = state.assign_root_surface_to_workspace(outgoing_root, outgoing);
+        let _ = state.assign_root_surface_to_workspace(incoming_root, incoming);
+        let _ = state.assign_root_surface_to_workspace(other_root, other_workspace);
+        state
+            .workspaces
+            .try_get_mut(outgoing)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![outgoing_root];
+        state
+            .workspaces
+            .try_get_mut(incoming)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![incoming_root];
+        state
+            .workspaces
+            .try_get_mut(other_workspace)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![other_root];
+
+        let policy = crate::scene::visibility::WorkspaceParticipationPolicy::Transition {
+            group_id,
+            outgoing,
+            incoming,
+        };
+        let scene = super::build_scene_model_with_policy(&state, policy);
+        let managed = scene
+            .entries
+            .iter()
+            .filter(|entry| entry.role == SceneRole::WorkspaceRoot)
+            .map(|entry| entry.root_surface)
+            .collect::<Vec<_>>();
+        assert_eq!(managed, vec![outgoing_root, incoming_root, other_root]);
     }
 }

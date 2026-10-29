@@ -4165,6 +4165,8 @@ fn collect_named_cursor_render_item(
     }
 }
 
+// Frame callbacks and presentation feedback follow the items actually submitted for this frame.
+// Interactive participation and logical workspace activity do not create a second pacing path.
 fn collect_submission_metadata(
     items: &[SceneItem],
     software_cursor_items: &[SceneItem],
@@ -5745,6 +5747,32 @@ mod presentation_timing_tests {
                 )),
             }]
         );
+    }
+
+    #[test]
+    fn submission_metadata_includes_only_rendered_items() {
+        let rendered = make_surface_scene_item(
+            3,
+            RectI::new(0, 0, 10, 10).unwrap(),
+            vec![surface_feedback(8, 1)],
+        );
+        let omitted = make_surface_scene_item(
+            4,
+            RectI::new(20, 0, 10, 10).unwrap(),
+            vec![surface_feedback(9, 1)],
+        );
+
+        let (scene, callback_surfaces, presentation_feedbacks) =
+            collect_submission_metadata(&[rendered], &[]);
+
+        assert_eq!(scene.len(), 1);
+        assert_eq!(callback_surfaces.len(), 1);
+        assert_eq!(callback_surfaces[0].wayland_id(), WlSurfaceId::from(3));
+        assert_eq!(presentation_feedbacks.len(), 1);
+        assert_ne!(omitted.state.surface_key, scene[0].surface_key);
+        assert!(presentation_feedbacks
+            .iter()
+            .all(|feedback| feedback.surface == scene[0].surface_key));
     }
 
     #[test]

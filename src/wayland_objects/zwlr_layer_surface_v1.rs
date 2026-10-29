@@ -307,6 +307,11 @@ impl ZwlrLayerSurfaceV1 {
         self.mapped
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_set_mapped(&mut self, mapped: bool) {
+        self.mapped = mapped;
+    }
+
     pub fn namespace(&self) -> &str {
         &self.namespace
     }

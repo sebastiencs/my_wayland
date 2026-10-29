@@ -1747,6 +1747,16 @@ mod surface_tree_hit_test_tests {
             .layout
             .floating
             .stack = vec![root(&state, lower), root(&state, upper)];
+        state
+            .managed_root_surfaces
+            .get_mut(&root(&state, lower))
+            .unwrap()
+            .mapped = true;
+        state
+            .managed_root_surfaces
+            .get_mut(&root(&state, upper))
+            .unwrap()
+            .mapped = true;
 
         let hit = surface_focus_pick_at(&state, (5.0, 5.0)).unwrap();
         assert_eq!(hit.target.surface_id(), WlSurfaceId::from(12));

@@ -14,7 +14,7 @@ use crate::{
         WpPresentationFeedbackId, WpViewportId, XdgSurfaceId, ZwlrLayerSurfaceV1Id,
     },
     region::{DamageRegion, RectI, RegionValue},
-    scene::visibility::root_has_protocol_visibility,
+    scene::visibility::root_participates_in_input,
     state::{FractionalScale, GrabbedObject, IndexMapKey, ObjectId, OutputId, State},
     sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
     transform::{self, BufferTransform, SizeI, SurfaceViewport},
@@ -47,7 +47,7 @@ fn should_focus_new_toplevel_on_map(state: &State, root_surface: Resolved<WlSurf
     if !root_surface.exists(state) {
         return false;
     }
-    if !root_has_protocol_visibility(state, root_surface) {
+    if !root_participates_in_input(state, root_surface) {
         return false;
     }
     if state.seat.popup_grab_client().is_some() {
@@ -4639,5 +4639,34 @@ mod tests {
         }
 
         assert_eq!(surface.blocked_waiter_id, None);
+    }
+
+    #[test]
+    fn focus_on_map_follows_interactive_participation() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let (surface_resolved, _) = Client::new_for_tests(ClientId::from_raw(4)).insert_object(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(44u32), ClientId::from_raw(4), 6),
+        );
+        state.register_root_surface(surface_resolved);
+        let _ = state.assign_root_surface_to_workspace(surface_resolved, workspace_id);
+        state
+            .workspaces
+            .try_get_mut(workspace_id)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![surface_resolved];
+
+        assert!(!super::should_focus_new_toplevel_on_map(&state, surface_resolved));
+        state
+            .managed_root_surfaces
+            .get_mut(&surface_resolved)
+            .unwrap()
+            .mapped = true;
+        assert!(super::should_focus_new_toplevel_on_map(&state, surface_resolved));
     }
 }
