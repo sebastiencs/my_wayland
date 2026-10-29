@@ -176,7 +176,7 @@ impl<T> Queue<T> {
 
     fn set_closed(&self) {
         self.tail
-            .fetch_update(Release, Relaxed, |tail| Some(tail | CLOSED_BIT))
+            .try_update(Release, Relaxed, |tail| Some(tail | CLOSED_BIT))
             .unwrap();
     }
 
