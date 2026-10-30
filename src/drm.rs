@@ -3150,7 +3150,7 @@ fn animation_delay_msec_for_rects(state: &State, rects: &[RectI]) -> Option<u32>
 fn active_animation_output_ids(state: &State) -> BTreeSet<OutputId> {
     let mut output_ids = BTreeSet::new();
     for (&surface, managed) in &state.managed_root_surfaces {
-        if !managed.visual_animation.is_animating() {
+        if !managed.visual_animation.is_active() {
             continue;
         }
         let Some(rect) = state.root_surface_animation_damage_rect(surface) else {
@@ -3211,15 +3211,10 @@ impl Model for WindowAnimationManager {
         match action {
             WindowAnimationManagerAction::Start => {}
             WindowAnimationManagerAction::Kick => {
-                self.advance_and_schedule(state, dispatcher, monotonic_time_msec());
+                self.advance_and_schedule(state, dispatcher, Instant::now());
             }
             WindowAnimationManagerAction::KickOutput { output_id } => {
-                self.advance_and_schedule_output(
-                    state,
-                    dispatcher,
-                    monotonic_time_msec(),
-                    output_id,
-                );
+                self.advance_and_schedule_output(state, dispatcher, Instant::now(), output_id);
             }
             WindowAnimationManagerAction::Stop => {}
         }
@@ -3232,17 +3227,18 @@ impl WindowAnimationManager {
         Self
     }
 
-    // Temporary sole mutable animation phase. Output completion may call
-    // `advance_and_schedule_output` for the same legacy window state, but neither path arms its
-    // own timer: both request `RequestFrameReason::Animation` through the output scheduler.
-    // Visual resolution samples the already-advanced values and must not advance them again.
+    // Sole mutable animation phase. Output completion may call `advance_and_schedule_output`
+    // for the same focus track, but neither path arms its own timer: both request
+    // `RequestFrameReason::Animation` through the output scheduler. Sampling is absolute-time,
+    // so a repeated kick at the same instant does not advance the fade twice. Visual resolution
+    // reads the cached sample and must not advance it again.
     fn advance_and_schedule(
         &mut self,
         state: &mut State,
         dispatcher: &mut Dispatcher,
-        frame_time_msec: u32,
+        now: Instant,
     ) {
-        let result = state.advance_window_visual_animations(frame_time_msec);
+        let result = state.advance_focus_visuals(now);
         let has_no_damage = result.damaged_rects.is_empty();
         if !result.damaged_rects.is_empty() {
             for rect in result.damaged_rects {
@@ -3284,10 +3280,10 @@ impl WindowAnimationManager {
         &mut self,
         state: &mut State,
         dispatcher: &mut Dispatcher,
-        frame_time_msec: u32,
+        now: Instant,
         output_id: OutputId,
     ) {
-        let result = state.advance_window_visual_animations_for_output(output_id, frame_time_msec);
+        let result = state.advance_focus_visuals_for_output(output_id, now);
         if !result.damaged_rects.is_empty() {
             request_output_frame(state, output_id, RequestFrameReason::Animation, dispatcher);
             return;
@@ -4891,16 +4887,16 @@ mod drm_event_tests {
 
 #[cfg(test)]
 mod window_animation_tests {
+    use std::time::{Duration, Instant};
+
     use {
-        super::{
-            animation_delay_msec_for_output, WindowAnimationManager, WindowAnimationManagerAction,
-        },
+        super::{animation_delay_msec_for_output, WindowAnimationManager},
         crate::{
             clients::ClientId,
             protocol_generated::WlSurfaceId,
-            runner::{Dispatcher, Model},
+            runner::Dispatcher,
             scheduler::{output_scheduler_id, OutputSchedulerAction, RequestFrameReason},
-            state::{BackendOutputRef, DrmId, ObjectId},
+            state::{BackendOutputRef, DrmId, ObjectId, OutputId},
             test_support::{
                 resolved_wl_surface as root, state_for_tests, test_output_with_crtc_name,
             },
@@ -4908,9 +4904,9 @@ mod window_animation_tests {
         },
     };
 
-    #[test]
-    fn window_animation_manager_kick_schedules_outputs_without_global_timer_rearm() {
-        let mut state = state_for_tests();
+    fn mapped_focus_target(
+        state: &mut crate::state::State,
+    ) -> (OutputId, crate::clients::Resolved<WlSurfaceId>) {
         let backend = BackendOutputRef::new(DrmId::from(0usize));
         let output_id =
             state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
@@ -4925,26 +4921,129 @@ mod window_animation_tests {
         state.config.effects.opacity.inactive_alpha = 120;
         state.config.effects.opacity.inactive_dim = 44;
         state.config.animations.window.duration_msec = 120;
-        state.register_root_surface(root(&state, object_id));
-        state.assign_root_surface_to_workspace(root(&state, object_id), workspace_id);
-        let surface = root(&state, object_id);
-        state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
+        let surface = root(state, object_id);
+        state.register_root_surface(surface);
+        state.assign_root_surface_to_workspace(surface, workspace_id);
+        (output_id, surface)
+    }
 
-        let mut manager = WindowAnimationManager::new();
-        let mut dispatcher = Dispatcher::default();
-        manager
-            .process(&mut state, WindowAnimationManagerAction::Kick, &mut dispatcher)
-            .unwrap();
-
-        assert!(dispatcher.test_has_queued_action_for::<OutputSchedulerAction, _>(
+    fn queues_animation_frame(dispatcher: &Dispatcher, output_id: OutputId) -> bool {
+        dispatcher.test_has_queued_action_for::<OutputSchedulerAction, _>(
             output_scheduler_id(output_id),
             |action: &OutputSchedulerAction| {
                 matches!(
                     action,
                     OutputSchedulerAction::RequestFrame { reason: RequestFrameReason::Animation }
                 )
-            }
-        ));
+            },
+        )
+    }
+
+    fn queues_animation_wakeup(dispatcher: &Dispatcher, output_id: OutputId) -> bool {
+        dispatcher.test_has_queued_action_for::<OutputSchedulerAction, _>(
+            output_scheduler_id(output_id),
+            |action: &OutputSchedulerAction| {
+                matches!(action, OutputSchedulerAction::ScheduleAnimation { .. })
+            },
+        )
+    }
+
+    fn content_alpha(
+        state: &crate::state::State,
+        surface: crate::clients::Resolved<WlSurfaceId>,
+    ) -> u8 {
+        state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .visual_animation
+            .current()
+            .content_alpha
+    }
+
+    #[test]
+    fn unchanged_focus_start_schedules_a_wakeup_without_damage() {
+        let mut state = state_for_tests();
+        let (output_id, surface) = mapped_focus_target(&mut state);
+        state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
+
+        let mut manager = WindowAnimationManager::new();
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
+
+        assert!(queues_animation_wakeup(&dispatcher, output_id));
+        assert!(!queues_animation_frame(&dispatcher, output_id));
+    }
+
+    #[test]
+    fn changed_focus_sample_damages_the_output() {
+        let mut state = state_for_tests();
+        let (output_id, surface) = mapped_focus_target(&mut state);
+        state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
+        let now = Instant::now();
+        let mut manager = WindowAnimationManager::new();
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now);
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now + Duration::from_millis(60));
+
+        assert!(queues_animation_frame(&dispatcher, output_id));
+        assert_ne!(content_alpha(&state, surface), 120);
+        assert_ne!(content_alpha(&state, surface), 255);
+    }
+
+    #[test]
+    fn settled_focus_track_stops_scheduling() {
+        let mut state = state_for_tests();
+        let (output_id, surface) = mapped_focus_target(&mut state);
+        state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
+        state.config.animations.window.duration_msec = 0;
+        let mut manager = WindowAnimationManager::new();
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
+        assert!(queues_animation_frame(&dispatcher, output_id));
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
+        assert!(!queues_animation_frame(&dispatcher, output_id));
+        assert!(!queues_animation_wakeup(&dispatcher, output_id));
+        assert_eq!(content_alpha(&state, surface), 255);
+    }
+
+    #[test]
+    fn repeated_output_sampling_follows_elapsed_time() {
+        let mut state = state_for_tests();
+        let (output_id, surface) = mapped_focus_target(&mut state);
+        state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
+        let now = Instant::now();
+        let mut manager = WindowAnimationManager::new();
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule_output(&mut state, &mut dispatcher, now, output_id);
+        assert_eq!(content_alpha(&state, surface), 120);
+
+        manager.advance_and_schedule_output(
+            &mut state,
+            &mut dispatcher,
+            now + Duration::from_millis(40),
+            output_id,
+        );
+        let once = content_alpha(&state, surface);
+        manager.advance_and_schedule_output(
+            &mut state,
+            &mut dispatcher,
+            now + Duration::from_millis(40),
+            output_id,
+        );
+        assert_eq!(content_alpha(&state, surface), once);
+
+        manager.advance_and_schedule_output(
+            &mut state,
+            &mut dispatcher,
+            now + Duration::from_millis(80),
+            output_id,
+        );
+        assert_ne!(content_alpha(&state, surface), once);
     }
 
     #[test]

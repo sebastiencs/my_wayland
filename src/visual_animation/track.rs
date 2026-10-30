@@ -105,7 +105,7 @@ struct SettledTrack {
     progress: UnitValue,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct RetargetableTrack {
     mode: TrackMode,
     from: UnitValue,

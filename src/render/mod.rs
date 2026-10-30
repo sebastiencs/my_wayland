@@ -1,9 +1,7 @@
-pub mod animation;
 pub mod recipe;
 pub mod visual;
 
 pub use {
-    animation::{WindowAnimationState, WindowAnimationValues},
     recipe::{
         EffectElement, FrameElement, FramePhase, OutputFrameRecipe, TextureElement, TextureMask,
         TextureSource,
