@@ -196,6 +196,7 @@ mod tiling;
 mod transform;
 mod udev;
 mod utils;
+mod visual_animation;
 mod wayland_objects;
 mod xkb;
 

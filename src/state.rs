@@ -25,6 +25,7 @@ use crate::{
     },
     seat::SeatState,
     tiling::{self, TiledResizeState, WorkspaceLayout},
+    visual_animation::{resolve_window_visual, WindowLifecycleAnim, WindowVisualBase},
     wayland_objects::{
         wl_surface::WlSurface,
         xdg_surface::{
@@ -1827,6 +1828,15 @@ impl State {
             .get(&surface)
             .map(|managed| managed.visual_animation.current_values())
             .unwrap_or_else(|| self.window_animation_target_values(surface));
+        let resolved = resolve_window_visual(
+            WindowVisualBase {
+                content_alpha: animated_values.content_alpha,
+                dim_alpha: animated_values.dim_alpha,
+                shadow_alpha: animated_values.shadow_alpha,
+                border_alpha: animated_values.border_alpha,
+            },
+            WindowLifecycleAnim::Idle,
+        );
         let gradient = if focused {
             BorderGradient {
                 start_color: border_config.active_start_color,
@@ -1858,9 +1868,9 @@ impl State {
             content_rect,
             clip,
             border,
-            border_alpha: animated_values.border_alpha,
+            border_alpha: resolved.border_alpha,
             shadow,
-            shadow_alpha: animated_values.shadow_alpha,
+            shadow_alpha: resolved.shadow_alpha,
             effects: SurfaceEffectStyle {
                 blur: (self.config.effects.blur.enabled && has_visible_decoration_ring).then_some(
                     BlurVisualStyle {
@@ -1868,8 +1878,8 @@ impl State {
                         passes: self.config.effects.blur.passes,
                     },
                 ),
-                opacity_alpha: animated_values.content_alpha,
-                dim_alpha: animated_values.dim_alpha,
+                opacity_alpha: resolved.content_alpha,
+                dim_alpha: resolved.dim_alpha,
             },
         };
         Some(visual_state)
@@ -3030,13 +3040,32 @@ mod tests {
         let advance = state.advance_window_visual_animations(10);
         assert!(advance.has_active_animations);
 
+        let current = state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .visual_animation
+            .current_values();
         let first = state.root_surface_visual_state(surface).unwrap();
         let second = state.root_surface_visual_state(surface).unwrap();
 
+        assert_eq!(first.effects.opacity_alpha, current.content_alpha);
+        assert_eq!(first.effects.dim_alpha, current.dim_alpha);
+        assert_eq!(first.border_alpha, current.border_alpha);
+        assert_eq!(first.shadow_alpha, current.shadow_alpha);
         assert_eq!(first.effects.opacity_alpha, second.effects.opacity_alpha);
         assert_eq!(first.effects.dim_alpha, second.effects.dim_alpha);
         assert_eq!(first.border_alpha, second.border_alpha);
         assert_eq!(first.shadow_alpha, second.shadow_alpha);
+        assert_eq!(
+            state
+                .managed_root_surfaces
+                .get(&surface)
+                .unwrap()
+                .visual_animation
+                .current_values(),
+            current
+        );
     }
 
     #[test]

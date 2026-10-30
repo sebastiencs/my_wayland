@@ -3232,6 +3232,10 @@ impl WindowAnimationManager {
         Self
     }
 
+    // Temporary sole mutable animation phase. Output completion may call
+    // `advance_and_schedule_output` for the same legacy window state, but neither path arms its
+    // own timer: both request `RequestFrameReason::Animation` through the output scheduler.
+    // Visual resolution samples the already-advanced values and must not advance them again.
     fn advance_and_schedule(
         &mut self,
         state: &mut State,
