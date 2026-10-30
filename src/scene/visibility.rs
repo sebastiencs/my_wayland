@@ -238,7 +238,7 @@ fn root_has_participation(
 fn steady_context(state: &State) -> CompositionEvalContext<'_> {
     CompositionEvalContext {
         state,
-        output_id: OutputId::from(0usize),
+        output_id: OutputId::from_parts(0, 0),
         snapshot: None,
         policy: WorkspaceParticipationPolicy::Steady,
     }
