@@ -1192,11 +1192,14 @@ pub mod xdg_toplevel {
             self.requested_fullscreen = fullscreen;
         }
 
+        /// True when the client or compositor requested maximize.
+        ///
+        /// Tiled configures also advertise `Maximized` so clients settle into the
+        /// managed frame. That hint lands in `current_states` after ack and is not
+        /// a maximize request. Hyprland keeps floating and tiled policy on its own
+        /// window flag, separate from the protocol bit it sends on map.
         pub fn is_maximized(&self) -> bool {
             self.requested_maximized
-                || self
-                    .current_states
-                    .contains(&proto_xdg_toplevel::State::Maximized)
         }
 
         pub fn is_fullscreen(&self) -> bool {
@@ -1735,6 +1738,36 @@ pub mod xdg_toplevel {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn acked_tiled_maximized_hint_does_not_count_as_maximized() {
+            let mut toplevel = XdgToplevel::new(
+                XdgToplevelId::from(7),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    super::super::XdgSurfaceId::from(8),
+                    ObjectId::from(8usize),
+                ),
+                7,
+            );
+
+            toplevel.apply_acked_configure(
+                100,
+                80,
+                vec![
+                    proto_xdg_toplevel::State::Maximized as u32,
+                    proto_xdg_toplevel::State::TiledLeft as u32,
+                    proto_xdg_toplevel::State::TiledRight as u32,
+                    proto_xdg_toplevel::State::TiledTop as u32,
+                    proto_xdg_toplevel::State::TiledBottom as u32,
+                ],
+                ToplevelDecorationMode::ServerSide,
+            );
+
+            assert!(!toplevel.is_maximized());
+            toplevel.test_set_maximized(true);
+            assert!(toplevel.is_maximized());
+        }
 
         #[test]
         fn layout_states_strip_maximized_from_tiled_configures() {

@@ -3285,6 +3285,73 @@ mod xdg_seat_tests {
     }
 
     #[test]
+    fn compositor_mouse_move_binding_accepts_tiled_maximized_hint() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(262),
+            XdgSurfaceId::from(272),
+        );
+        let toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(272),
+            XdgToplevelId::from(282),
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(905usize), 15, 25, 100, 80);
+            surface.test_set_input_region(crate::region::RegionValue::empty());
+        }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
+        {
+            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
+            toplevel.apply_acked_configure(
+                100,
+                80,
+                vec![
+                    crate::protocol_generated::xdg_toplevel::State::Maximized as u32,
+                    crate::protocol_generated::xdg_toplevel::State::TiledLeft as u32,
+                    crate::protocol_generated::xdg_toplevel::State::TiledRight as u32,
+                    crate::protocol_generated::xdg_toplevel::State::TiledTop as u32,
+                    crate::protocol_generated::xdg_toplevel::State::TiledBottom as u32,
+                ],
+                ToplevelDecorationMode::ServerSide,
+            );
+            assert!(!toplevel.is_maximized());
+        }
+
+        state.config = RuntimeConfig::parse_for_test(
+            r#"
+            [mouse_bindings]
+            "Super+mouse:left" = { action = "move-window" }
+            "#,
+            &state.xkb,
+        )
+        .unwrap();
+        state.keyboard.update_key(125, true);
+        state.seat.pointer_pos = (60.0, 55.0);
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Move { .. })
+        ));
+    }
+
+    #[test]
     fn compositor_mouse_move_binding_uses_restored_floating_origin_after_tiled_promotion() {
         let mut state = state_for_tests();
         let output_id = state.insert_output(test_output_with_crtc_name(
