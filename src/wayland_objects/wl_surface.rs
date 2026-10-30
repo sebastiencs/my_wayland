@@ -4,7 +4,10 @@ use crate::{
     clients::{
         Client, ClientDispatcher, ClientId, ClientManagerAction, EventWriter, RawRequest, Resolved,
     },
-    drm::{request_active_output, request_outputs, request_outputs_for_rect},
+    drm::{
+        kick_window_animation_manager, request_active_output, request_outputs,
+        request_outputs_for_rect,
+    },
     input::{set_keyboard_focus_from_surface, SurfaceFocus},
     object::{Object, Parser, PostAction, RequestResult},
     protocol_generated::{
@@ -1886,15 +1889,19 @@ impl WlSurface {
                             });
                         state.confirm_root_surface_mapped(resolved_surface);
                         if relayout_first_map {
-                            let (regrabbed, relayout_bounds) =
+                            let (regrabbed, (relayout_bounds, opened)) =
                                 client.with_ungrabbed(this, state, |state| {
-                                    state.relayout_dirty_workspaces();
-                                    resolved_surface
+                                    let opened = state.relayout_dirty_workspaces();
+                                    let bounds = resolved_surface
                                         .try_ref(state)
-                                        .and_then(|surface| surface.global_logical_bounds())
+                                        .and_then(|surface| surface.global_logical_bounds());
+                                    (bounds, opened)
                                 });
                             this = regrabbed;
                             bounds_after_first_map_relayout = relayout_bounds;
+                            if !opened.is_empty() {
+                                kick_window_animation_manager(dispatcher);
+                            }
                         }
                         dispatcher.dispatch_post_action(PostWlSurface::FocusNewToplevel {
                             root_surface: resolved_surface,
@@ -2301,6 +2308,12 @@ impl WlSurface {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_clear_committed_buffer(&mut self) {
+        self.on_screen.buffer_object_id = None;
+        self.on_screen.logical_size = None;
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_set_input_region(&mut self, region: RegionValue) {
         self.on_screen.input_region = region;
     }
@@ -2671,6 +2684,7 @@ mod tests {
         crate::{
             clients::{Client, ClientId, ClientManagerAction, RawEvent, RawRequest, Resolved},
             cursor::CursorSourceRef,
+            drm::WindowAnimationManagerAction,
             io_uring::model::IoUringAction,
             object::{Object, RequestResult},
             protocol_generated::{
@@ -2690,6 +2704,7 @@ mod tests {
                 test_output_with_crtc_name,
             },
             transform::{self, BufferTransform, SizeI, SurfaceViewport},
+            visual_animation::WindowLifecycleAnim,
             wayland_objects::{
                 wl_buffer::WlBuffer,
                 wl_subsurface::WlSubsurface,
@@ -3375,6 +3390,112 @@ mod tests {
         assert!(!state
             .managed_root_surface_state(root(&state, surface_object_id))
             .is_some_and(|managed| managed.awaiting_initial_layout));
+        let managed = state
+            .managed_root_surface_state(root(&state, surface_object_id))
+            .unwrap();
+        assert!(managed.mapped);
+        assert_eq!(
+            managed.lifecycle_animation.sample(),
+            WindowLifecycleAnim::Opening { progress: crate::visual_animation::UnitValue::ZERO }
+        );
+        assert_eq!(
+            state
+                .root_surface_visual_state(root(&state, surface_object_id))
+                .unwrap()
+                .effects
+                .opacity_alpha,
+            0
+        );
+        assert!(dispatcher.test_has_queued_action::<WindowAnimationManagerAction>(|action| {
+            matches!(action, WindowAnimationManagerAction::Kick)
+        }));
+        assert!(state.seat.keyboard_focus.is_none());
+    }
+
+    #[test]
+    fn floating_map_starts_opening_when_reconfigure_consumes_the_edge() {
+        let mut state = state_for_tests();
+        state.config.animations.window.open_duration_msec = 160;
+        let backend = BackendOutputRef::new(DrmId::from(8usize));
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+        let surface_object_id = create_root_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            WlSurfaceId::from(130),
+            XdgSurfaceId::from(131),
+            XdgToplevelId::from(132),
+        );
+        commit_initial_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            surface_object_id,
+            XdgSurfaceId::from(131),
+        );
+        state
+            .managed_root_surfaces
+            .get_mut(&root(&state, surface_object_id))
+            .unwrap()
+            .mode = crate::state::ManagedWindowMode::Floating;
+
+        let buffer_object_id =
+            insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(133), 80, 60);
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.pending.buffer = Some(Some(resolved_buffer(buffer_object_id)));
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
+        }
+
+        let surface = root(&state, surface_object_id);
+        assert!(!state.managed_root_surface_state(surface).unwrap().mapped);
+        assert_eq!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .lifecycle_animation
+                .sample(),
+            WindowLifecycleAnim::Idle
+        );
+        assert!(!dispatcher.test_has_queued_action::<WindowAnimationManagerAction>(|action| {
+            matches!(action, WindowAnimationManagerAction::Kick)
+        }));
+
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            client.test_reconfigure_mapped_toplevels(&mut state, &mut client_dispatcher);
+        }
+        assert!(state.managed_root_surface_state(surface).unwrap().mapped);
+        assert_eq!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .lifecycle_animation
+                .sample(),
+            WindowLifecycleAnim::Opening { progress: crate::visual_animation::UnitValue::ZERO }
+        );
+        assert_eq!(
+            state
+                .root_surface_visual_state(surface)
+                .unwrap()
+                .effects
+                .opacity_alpha,
+            0
+        );
+        assert!(dispatcher.test_has_queued_action::<WindowAnimationManagerAction>(|action| {
+            matches!(action, WindowAnimationManagerAction::Kick)
+        }));
+        assert!(state.seat.keyboard_focus.is_none());
     }
 
     #[test]

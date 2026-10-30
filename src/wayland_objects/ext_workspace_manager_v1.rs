@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     clients::{Client, ClientDispatcher, ClientManagerAction, EventWriter, RawRequest, Resolved},
-    drm::schedule_outputs,
+    drm::{kick_window_animation_manager, schedule_outputs},
     globals::Global,
     object::{Object, Parser, RequestResult},
     protocol_generated::{
@@ -32,7 +32,10 @@ pub fn publish_workspace_state_changed(
     dispatcher: &mut Dispatcher,
     affected_outputs: impl IntoIterator<Item = OutputId>,
 ) {
-    state.relayout_dirty_workspaces();
+    let opened = state.relayout_dirty_workspaces();
+    if !opened.is_empty() {
+        kick_window_animation_manager(dispatcher);
+    }
     let mut affected_outputs = affected_outputs.into_iter().collect::<Vec<_>>();
     affected_outputs.sort_unstable();
     affected_outputs.dedup();

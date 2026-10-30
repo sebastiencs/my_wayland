@@ -3150,7 +3150,7 @@ fn animation_delay_msec_for_rects(state: &State, rects: &[RectI]) -> Option<u32>
 fn active_animation_output_ids(state: &State) -> BTreeSet<OutputId> {
     let mut output_ids = BTreeSet::new();
     for (&surface, managed) in &state.managed_root_surfaces {
-        if !managed.visual_animation.is_active() {
+        if !managed.visual_animation.is_active() && !managed.lifecycle_animation.is_active() {
             continue;
         }
         let Some(rect) = state.root_surface_animation_damage_rect(surface) else {
@@ -3238,7 +3238,7 @@ impl WindowAnimationManager {
         dispatcher: &mut Dispatcher,
         now: Instant,
     ) {
-        let result = state.advance_focus_visuals(now);
+        let result = state.advance_window_visuals(now);
         let has_no_damage = result.damaged_rects.is_empty();
         if !result.damaged_rects.is_empty() {
             for rect in result.damaged_rects {
@@ -3283,7 +3283,7 @@ impl WindowAnimationManager {
         now: Instant,
         output_id: OutputId,
     ) {
-        let result = state.advance_focus_visuals_for_output(output_id, now);
+        let result = state.advance_window_visuals_for_output(output_id, now);
         if !result.damaged_rects.is_empty() {
             request_output_frame(state, output_id, RequestFrameReason::Animation, dispatcher);
             return;
@@ -4961,6 +4961,17 @@ mod window_animation_tests {
             .content_alpha
     }
 
+    fn visual_opacity(
+        state: &crate::state::State,
+        surface: crate::clients::Resolved<WlSurfaceId>,
+    ) -> u8 {
+        state
+            .root_surface_visual_state(surface)
+            .unwrap()
+            .effects
+            .opacity_alpha
+    }
+
     #[test]
     fn unchanged_focus_start_schedules_a_wakeup_without_damage() {
         let mut state = state_for_tests();
@@ -5060,6 +5071,80 @@ mod window_animation_tests {
 
         assert_eq!(animation_delay_msec_for_output(&state, left_id), Some(17));
         assert_eq!(animation_delay_msec_for_output(&state, right_id), Some(9));
+    }
+
+    #[test]
+    fn opening_only_window_schedules_until_it_returns_to_idle() {
+        let mut state = state_for_tests();
+        let (output_id, surface) = mapped_focus_target(&mut state);
+        state.config.animations.window.open_duration_msec = 100;
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .lifecycle_animation
+            .start_opening();
+        let now = Instant::now();
+        let mut manager = WindowAnimationManager::new();
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now);
+
+        assert!(queues_animation_wakeup(&dispatcher, output_id));
+        assert!(!queues_animation_frame(&dispatcher, output_id));
+        assert_eq!(visual_opacity(&state, surface), 0);
+        assert_eq!(content_alpha(&state, surface), 120);
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now + Duration::from_millis(50));
+        assert!(queues_animation_frame(&dispatcher, output_id));
+        let mid = visual_opacity(&state, surface);
+        assert!(mid > 0 && mid < 120);
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now + Duration::from_millis(100));
+        assert!(queues_animation_frame(&dispatcher, output_id));
+        assert_eq!(visual_opacity(&state, surface), 120);
+        assert!(!state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .lifecycle_animation
+            .is_active());
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now + Duration::from_millis(100));
+        assert!(!queues_animation_frame(&dispatcher, output_id));
+        assert!(!queues_animation_wakeup(&dispatcher, output_id));
+    }
+
+    #[test]
+    fn zero_open_duration_settles_on_the_next_pump() {
+        let mut state = state_for_tests();
+        let (output_id, surface) = mapped_focus_target(&mut state);
+        state.config.animations.window.open_duration_msec = 0;
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .lifecycle_animation
+            .start_opening();
+        let mut manager = WindowAnimationManager::new();
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
+
+        assert!(queues_animation_frame(&dispatcher, output_id));
+        assert_eq!(visual_opacity(&state, surface), 120);
+        assert!(!state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .lifecycle_animation
+            .is_active());
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
+        assert!(!queues_animation_frame(&dispatcher, output_id));
+        assert!(!queues_animation_wakeup(&dispatcher, output_id));
     }
 }
 

@@ -1132,7 +1132,7 @@ pub fn mark_workspace_dirty(state: &mut State, workspace_id: WorkspaceId) {
     }
 }
 
-pub fn relayout_dirty_workspaces(state: &mut State) {
+pub fn relayout_dirty_workspaces(state: &mut State) -> Vec<Resolved<WlSurfaceId>> {
     let workspace_ids = state
         .workspace_ids()
         .into_iter()
@@ -1144,8 +1144,9 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
                     .is_some_and(|workspace| workspace.layout.dirty)
         })
         .collect::<Vec<_>>();
+    let mut opened = Vec::new();
     for workspace_id in workspace_ids.iter().copied() {
-        sync_workspace_layout(state, workspace_id);
+        opened.extend(sync_workspace_layout(state, workspace_id));
     }
     for workspace_id in workspace_ids {
         let workspace_surface_ids = state
@@ -1212,6 +1213,7 @@ pub fn relayout_dirty_workspaces(state: &mut State) {
             }
         }
     }
+    opened
 }
 
 fn workspace_usable_bounds(state: &State, workspace_id: WorkspaceId) -> Option<RectI> {
@@ -1260,7 +1262,10 @@ fn workspace_tiling_bounds(
     outer_gapped_bounds(usable_bounds, gap_policy)
 }
 
-fn sync_workspace_layout(state: &mut State, workspace_id: WorkspaceId) {
+fn sync_workspace_layout(
+    state: &mut State,
+    workspace_id: WorkspaceId,
+) -> Vec<Resolved<WlSurfaceId>> {
     let workspace_surface_ids = state
         .managed_root_surfaces
         .iter()
@@ -1280,9 +1285,25 @@ fn sync_workspace_layout(state: &mut State, workspace_id: WorkspaceId) {
                 .map(|managed| (*object_id, managed.mode))
         })
         .collect::<BTreeMap<_, _>>();
+    let open_duration_msec = state.config.animations.window.open_duration_msec;
+    let workspace_active = state.workspace_is_active(workspace_id);
+    let mut opened = Vec::new();
     for surface in &workspace_surface_ids {
-        if let Some(managed) = state.managed_root_surfaces.get_mut(surface) {
-            managed.mapped = candidate_set.contains(surface);
+        let Some(managed) = state.managed_root_surfaces.get_mut(surface) else {
+            continue;
+        };
+        let was_mapped = managed.mapped;
+        let now_mapped = candidate_set.contains(surface);
+        managed.mapped = now_mapped;
+        if !was_mapped && now_mapped {
+            if workspace_active && open_duration_msec > 0 {
+                managed.lifecycle_animation.start_opening();
+                opened.push(*surface);
+            } else {
+                managed.lifecycle_animation.settle_idle();
+            }
+        } else if was_mapped && !now_mapped {
+            managed.lifecycle_animation.settle_idle();
         }
     }
 
@@ -1294,7 +1315,7 @@ fn sync_workspace_layout(state: &mut State, workspace_id: WorkspaceId) {
     });
 
     let Some(workspace) = state.workspaces.try_get_mut(workspace_id) else {
-        return;
+        return opened;
     };
 
     sync_workspace_layout_candidates(
@@ -1304,6 +1325,7 @@ fn sync_workspace_layout(state: &mut State, workspace_id: WorkspaceId) {
         &candidate_modes,
         fullscreen_surface,
     );
+    opened
 }
 
 fn sync_workspace_layout_candidates(
@@ -2047,6 +2069,155 @@ mod tests {
         let toplevel_object_id = toplevel_resolved.object_id();
         state.register_xdg_toplevel_role(xdg_surface_resolved, toplevel_resolved);
         (surface_object_id, xdg_surface_object_id, toplevel_object_id)
+    }
+
+    fn live_toplevel(state: &mut State) -> crate::clients::Resolved<WlSurfaceId> {
+        let backend = crate::state::BackendOutputRef::new(crate::state::DrmId::from(3usize));
+        state.insert_output(crate::test_support::test_output_with_crtc_name(
+            backend, 1, 0, 0, 800, 600,
+        ));
+        let (mut client, mut dispatcher) = crate::test_support::test_client_and_dispatcher(4);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (surface_object_id, _, _) = insert_root_xdg_toplevel(
+            state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(40),
+            XdgSurfaceId::from(41),
+            XdgToplevelId::from(42),
+            (80, 60),
+        );
+        root(state, surface_object_id)
+    }
+
+    #[test]
+    fn managed_map_edge_starts_opening_for_tiled_and_floating_windows() {
+        let mut state = state_for_tests();
+        state.config.animations.window.open_duration_msec = 160;
+        let surface = live_toplevel(&mut state);
+
+        let opened = state.relayout_dirty_workspaces();
+        assert_eq!(opened, vec![surface]);
+        assert!(state.managed_root_surface_state(surface).unwrap().mapped);
+        assert_eq!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .lifecycle_animation
+                .sample(),
+            crate::visual_animation::WindowLifecycleAnim::Opening {
+                progress: crate::visual_animation::UnitValue::ZERO
+            }
+        );
+
+        state.managed_root_surfaces.get_mut(&surface).unwrap().mode =
+            crate::state::ManagedWindowMode::Floating;
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .mapped = false;
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .lifecycle_animation
+            .settle_idle();
+        let reopened = state.relayout_dirty_workspaces();
+        assert_eq!(reopened, vec![surface]);
+        assert_eq!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .lifecycle_animation
+                .sample(),
+            crate::visual_animation::WindowLifecycleAnim::Opening {
+                progress: crate::visual_animation::UnitValue::ZERO
+            }
+        );
+        assert!(state.relayout_dirty_workspaces().is_empty());
+    }
+
+    #[test]
+    fn inactive_workspace_and_zero_duration_do_not_start_opening() {
+        let mut state = state_for_tests();
+        let surface = live_toplevel(&mut state);
+        let active_workspace = state.root_surface_workspace(surface).unwrap();
+        let group_id = state
+            .workspaces
+            .try_get(active_workspace)
+            .unwrap()
+            .group
+            .unwrap();
+        let inactive = state.create_workspace(Some(group_id), Some("inactive".to_string()));
+        state.assign_root_surface_to_workspace(surface, inactive);
+        state.config.animations.window.open_duration_msec = 160;
+
+        assert!(state.relayout_dirty_workspaces().is_empty());
+        assert_eq!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .lifecycle_animation
+                .sample(),
+            crate::visual_animation::WindowLifecycleAnim::Idle
+        );
+
+        state.assign_root_surface_to_workspace(surface, active_workspace);
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .mapped = false;
+        state.config.animations.window.open_duration_msec = 0;
+        assert!(state.relayout_dirty_workspaces().is_empty());
+        assert_eq!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .lifecycle_animation
+                .sample(),
+            crate::visual_animation::WindowLifecycleAnim::Idle
+        );
+    }
+
+    #[test]
+    fn unmap_then_remap_restarts_opening() {
+        let mut state = state_for_tests();
+        state.config.animations.window.open_duration_msec = 120;
+        let surface = live_toplevel(&mut state);
+        assert_eq!(state.relayout_dirty_workspaces(), vec![surface]);
+
+        {
+            let mut wl_surface = state.objects.grab_object::<WlSurface>(surface.object_id());
+            wl_surface.test_clear_committed_buffer();
+        }
+        state.relayout_dirty_workspaces();
+        assert!(!state.managed_root_surface_state(surface).unwrap().mapped);
+        assert_eq!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .lifecycle_animation
+                .sample(),
+            crate::visual_animation::WindowLifecycleAnim::Idle
+        );
+
+        {
+            let mut wl_surface = state.objects.grab_object::<WlSurface>(surface.object_id());
+            wl_surface.test_map(ObjectId::from(901usize), 0, 0, 80, 60);
+        }
+        assert_eq!(state.relayout_dirty_workspaces(), vec![surface]);
+        assert_eq!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .lifecycle_animation
+                .sample(),
+            crate::visual_animation::WindowLifecycleAnim::Opening {
+                progress: crate::visual_animation::UnitValue::ZERO
+            }
+        );
     }
 
     fn test_committed_geometry(

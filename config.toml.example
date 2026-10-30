@@ -62,6 +62,7 @@ inactive_dim = 24
 
 [animations.window]
 duration_msec = 160
+open_duration_msec = 160
 
 [bindings]
 # Key names follow xkb (e.g. Super, Ctrl, Alt, Shift). Last segment is the key.

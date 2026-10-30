@@ -81,6 +81,80 @@ impl FocusVisualAnimation {
     }
 }
 
+/// Opening lifecycle owned separately from the focus style.
+///
+/// `start_opening` exposes progress zero immediately. The first animation-pump tick starts the
+/// absolute-time track, and completion returns to [`WindowLifecycleAnim::Idle`]. Closing stays
+/// dormant until a later phase.
+#[derive(Clone, Copy, Debug)]
+pub struct WindowLifecycleAnimation {
+    track: RetargetableTrack,
+    cached: WindowLifecycleAnim,
+    active: bool,
+    pending: bool,
+}
+
+impl WindowLifecycleAnimation {
+    pub fn idle() -> Self {
+        Self {
+            track: RetargetableTrack::settled(UnitValue::ONE),
+            cached: WindowLifecycleAnim::Idle,
+            active: false,
+            pending: false,
+        }
+    }
+
+    pub fn sample(self) -> WindowLifecycleAnim {
+        self.cached
+    }
+
+    pub fn is_active(self) -> bool {
+        self.active
+    }
+
+    pub fn start_opening(&mut self) {
+        self.cached = WindowLifecycleAnim::Opening { progress: UnitValue::ZERO };
+        self.active = true;
+        self.pending = true;
+    }
+
+    pub fn settle_idle(&mut self) {
+        *self = Self::idle();
+    }
+
+    /// Sample the opening track. A zero duration settles immediately.
+    pub fn advance(&mut self, duration: Duration, now: Instant) -> WindowLifecycleAnim {
+        if !self.active {
+            return self.cached;
+        }
+        if duration.is_zero() {
+            self.settle_idle();
+            return self.cached;
+        }
+        if self.pending {
+            self.pending = false;
+            self.track = RetargetableTrack::start_timed(
+                UnitValue::ZERO,
+                UnitValue::ONE,
+                now,
+                duration,
+                Easing::Linear,
+            );
+        } else if duration != self.track.duration() {
+            self.track
+                .retarget_timed(UnitValue::ONE, now, duration, Easing::Linear);
+        }
+        let sample = self.track.sample_mut(now);
+        if sample.status == TrackStatus::Settled {
+            self.settle_idle();
+        } else {
+            self.cached = WindowLifecycleAnim::Opening { progress: sample.value };
+            self.active = true;
+        }
+        self.cached
+    }
+}
+
 /// Linear blend of every focus channel.
 ///
 /// Progress zero returns `from` and progress one returns `to`.
@@ -99,8 +173,8 @@ pub fn interpolate_window_visual(
 
 /// Lifecycle contribution composed onto [`WindowVisualBase`] at sample time.
 ///
-/// Phase 3 resolves production windows as [`WindowLifecycleAnim::Idle`]. Opening and closing exist
-/// so later phases can scale the same channels without a second visual model.
+/// Production windows stay [`WindowLifecycleAnim::Idle`] until a managed map starts opening.
+/// Closing remains available for a later phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowLifecycleAnim {
     Idle,
@@ -150,7 +224,7 @@ mod tests {
     use {
         super::{
             interpolate_window_visual, resolve_window_visual, FocusVisualAnimation,
-            WindowLifecycleAnim, WindowVisualBase,
+            WindowLifecycleAnim, WindowLifecycleAnimation, WindowVisualBase,
         },
         crate::visual_animation::UnitValue,
     };
@@ -313,5 +387,98 @@ mod tests {
         );
         assert_eq!(later, interpolate_window_visual(mid, active(), half()));
         assert_ne!(later, active());
+    }
+
+    fn opening_progress(animation: WindowLifecycleAnimation) -> UnitValue {
+        match animation.sample() {
+            WindowLifecycleAnim::Opening { progress } => progress,
+            WindowLifecycleAnim::Idle | WindowLifecycleAnim::Closing { .. } => {
+                panic!("expected opening progress")
+            }
+        }
+    }
+
+    #[test]
+    fn opening_starts_pending_at_zero() {
+        let mut lifecycle = WindowLifecycleAnimation::idle();
+        lifecycle.start_opening();
+
+        assert!(lifecycle.is_active());
+        assert_eq!(opening_progress(lifecycle), UnitValue::ZERO);
+        assert_eq!(resolve_window_visual(active(), lifecycle.sample()).content_alpha, 0);
+    }
+
+    #[test]
+    fn opening_midpoint_and_completion_return_to_idle() {
+        let now = Instant::now();
+        let mut lifecycle = WindowLifecycleAnimation::idle();
+        lifecycle.start_opening();
+        assert_eq!(
+            lifecycle.advance(Duration::from_millis(100), now),
+            WindowLifecycleAnim::Opening { progress: UnitValue::ZERO }
+        );
+
+        let mid = lifecycle.advance(Duration::from_millis(100), now + Duration::from_millis(50));
+        assert_eq!(mid, WindowLifecycleAnim::Opening { progress: half() });
+        assert!(lifecycle.is_active());
+
+        assert_eq!(
+            lifecycle.advance(Duration::from_millis(100), now + Duration::from_millis(100)),
+            WindowLifecycleAnim::Idle
+        );
+        assert!(!lifecycle.is_active());
+    }
+
+    #[test]
+    fn zero_duration_opening_snaps_idle() {
+        let mut lifecycle = WindowLifecycleAnimation::idle();
+        lifecycle.start_opening();
+
+        assert_eq!(lifecycle.advance(Duration::ZERO, Instant::now()), WindowLifecycleAnim::Idle);
+        assert!(!lifecycle.is_active());
+    }
+
+    #[test]
+    fn active_opening_duration_change_retargets_from_current_progress() {
+        let now = Instant::now();
+        let mut lifecycle = WindowLifecycleAnimation::idle();
+        lifecycle.start_opening();
+        lifecycle.advance(Duration::from_millis(100), now);
+        let mid_time = now + Duration::from_millis(50);
+        assert_eq!(
+            lifecycle.advance(Duration::from_millis(100), mid_time),
+            WindowLifecycleAnim::Opening { progress: half() }
+        );
+
+        assert_eq!(
+            lifecycle.advance(Duration::from_millis(200), mid_time),
+            WindowLifecycleAnim::Opening { progress: half() }
+        );
+        let later =
+            lifecycle.advance(Duration::from_millis(200), mid_time + Duration::from_millis(100));
+        let expected = half().lerp(half(), UnitValue::ONE);
+        assert_eq!(later, WindowLifecycleAnim::Opening { progress: expected });
+        assert_ne!(later, WindowLifecycleAnim::Idle);
+    }
+
+    #[test]
+    fn remap_restarts_opening_from_zero() {
+        let now = Instant::now();
+        let mut lifecycle = WindowLifecycleAnimation::idle();
+        lifecycle.start_opening();
+        lifecycle.advance(Duration::from_millis(100), now);
+        let mid_time = now + Duration::from_millis(50);
+        lifecycle.advance(Duration::from_millis(100), mid_time);
+
+        lifecycle.start_opening();
+        assert_eq!(opening_progress(lifecycle), UnitValue::ZERO);
+        assert_eq!(
+            lifecycle.advance(Duration::from_millis(100), mid_time),
+            WindowLifecycleAnim::Opening { progress: UnitValue::ZERO }
+        );
+        assert_eq!(
+            lifecycle.advance(Duration::from_millis(100), mid_time + Duration::from_millis(50)),
+            WindowLifecycleAnim::Opening { progress: half() }
+        );
     }
 }

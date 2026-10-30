@@ -26,7 +26,8 @@ use crate::{
     seat::SeatState,
     tiling::{self, TiledResizeState, WorkspaceLayout},
     visual_animation::{
-        resolve_window_visual, FocusVisualAnimation, WindowLifecycleAnim, WindowVisualBase,
+        resolve_window_visual, FocusVisualAnimation, WindowLifecycleAnim, WindowLifecycleAnimation,
+        WindowVisualBase,
     },
     wayland_objects::{
         wl_surface::WlSurface,
@@ -435,6 +436,7 @@ pub struct ManagedRootSurfaceState {
     pub remembered_floating_state: Option<RememberedFloatingState>,
     pub restore_floating_state_on_next_configure: bool,
     pub visual_animation: FocusVisualAnimation,
+    pub lifecycle_animation: WindowLifecycleAnimation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -469,7 +471,7 @@ impl RootGeometryCacheEntry {
 }
 
 #[derive(Debug, Default)]
-pub struct FocusVisualAdvanceResult {
+pub struct WindowVisualAdvanceResult {
     pub damaged_rects: Vec<RectI>,
     pub has_active_animations: bool,
 }
@@ -1269,6 +1271,7 @@ impl State {
                 remembered_floating_state: None,
                 restore_floating_state_on_next_configure: false,
                 visual_animation: initial_animation,
+                lifecycle_animation: WindowLifecycleAnimation::idle(),
             });
         self.mark_root_geometry_dirty(surface);
         true
@@ -1370,8 +1373,8 @@ impl State {
             .is_some_and(|group| group.active_workspace == Some(workspace_id))
     }
 
-    pub fn relayout_dirty_workspaces(&mut self) {
-        tiling::relayout_dirty_workspaces(self);
+    pub fn relayout_dirty_workspaces(&mut self) -> Vec<Resolved<WlSurfaceId>> {
+        tiling::relayout_dirty_workspaces(self)
     }
 
     pub fn build_scene_model(&self) -> SceneModel {
@@ -1727,17 +1730,17 @@ impl State {
             .or_else(|| self.root_surface_content_rect_global(surface))
     }
 
-    pub fn advance_focus_visuals(&mut self, now: Instant) -> FocusVisualAdvanceResult {
-        self.advance_focus_visuals_matching(now, |_| true)
+    pub fn advance_window_visuals(&mut self, now: Instant) -> WindowVisualAdvanceResult {
+        self.advance_window_visuals_matching(now, |_| true)
     }
 
-    pub fn advance_focus_visuals_for_output(
+    pub fn advance_window_visuals_for_output(
         &mut self,
         output_id: OutputId,
         now: Instant,
-    ) -> FocusVisualAdvanceResult {
+    ) -> WindowVisualAdvanceResult {
         let Some(output_bounds) = self.output_bounds(output_id) else {
-            return FocusVisualAdvanceResult {
+            return WindowVisualAdvanceResult {
                 damaged_rects: Vec::new(),
                 has_active_animations: false,
             };
@@ -1751,19 +1754,21 @@ impl State {
                     .is_some_and(|rect| rect.intersects(output_bounds))
             })
             .collect::<BTreeSet<_>>();
-        self.advance_focus_visuals_matching(now, |surface| included_surfaces.contains(&surface))
+        self.advance_window_visuals_matching(now, |surface| included_surfaces.contains(&surface))
     }
 
-    fn advance_focus_visuals_matching<F>(
+    fn advance_window_visuals_matching<F>(
         &mut self,
         now: Instant,
         mut include_surface: F,
-    ) -> FocusVisualAdvanceResult
+    ) -> WindowVisualAdvanceResult
     where
         F: FnMut(Resolved<WlSurfaceId>) -> bool,
     {
-        let animation_duration =
+        let focus_duration =
             Duration::from_millis(u64::from(self.config.animations.window.duration_msec));
+        let open_duration =
+            Duration::from_millis(u64::from(self.config.animations.window.open_duration_msec));
         let surfaces = self
             .managed_root_surfaces
             .keys()
@@ -1780,20 +1785,42 @@ impl State {
             let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
                 continue;
             };
-            let previous_values = managed.visual_animation.current();
-            let next_values = managed
-                .visual_animation
-                .advance(goal, animation_duration, now);
-            if previous_values != next_values {
+            let previous = composed_window_style(
+                managed.visual_animation.current(),
+                managed.lifecycle_animation.sample(),
+            );
+            managed.visual_animation.advance(goal, focus_duration, now);
+            managed.lifecycle_animation.advance(open_duration, now);
+            let next = composed_window_style(
+                managed.visual_animation.current(),
+                managed.lifecycle_animation.sample(),
+            );
+            if previous != next {
                 if let Some(rect) = damage_rect {
                     damaged_rects.push(rect);
                 }
             }
-            has_active_animations |= managed.visual_animation.is_active();
+            has_active_animations |=
+                managed.visual_animation.is_active() || managed.lifecycle_animation.is_active();
         }
-        FocusVisualAdvanceResult { damaged_rects, has_active_animations }
+        WindowVisualAdvanceResult { damaged_rects, has_active_animations }
     }
+}
 
+fn composed_window_style(
+    focus: WindowVisualBase,
+    lifecycle: WindowLifecycleAnim,
+) -> WindowVisualBase {
+    let resolved = resolve_window_visual(focus, lifecycle);
+    WindowVisualBase {
+        content_alpha: resolved.content_alpha,
+        dim_alpha: resolved.dim_alpha,
+        shadow_alpha: resolved.shadow_alpha,
+        border_alpha: resolved.border_alpha,
+    }
+}
+
+impl State {
     pub fn root_surface_visual_state(
         &self,
         surface: Resolved<WlSurfaceId>,
@@ -1821,6 +1848,11 @@ impl State {
             .get(&surface)
             .map(|managed| managed.visual_animation.current())
             .unwrap_or_else(|| self.focus_visual_base(surface));
+        let lifecycle = self
+            .managed_root_surfaces
+            .get(&surface)
+            .map(|managed| managed.lifecycle_animation.sample())
+            .unwrap_or(WindowLifecycleAnim::Idle);
         let resolved = resolve_window_visual(
             WindowVisualBase {
                 content_alpha: animated_values.content_alpha,
@@ -1828,7 +1860,7 @@ impl State {
                 shadow_alpha: animated_values.shadow_alpha,
                 border_alpha: animated_values.border_alpha,
             },
-            WindowLifecycleAnim::Idle,
+            lifecycle,
         );
         let gradient = if focused {
             BorderGradient {
@@ -2170,6 +2202,7 @@ impl State {
                     remembered_floating_state: None,
                     restore_floating_state_on_next_configure: false,
                     visual_animation: initial_animation,
+                    lifecycle_animation: WindowLifecycleAnimation::idle(),
                 });
         } else {
             {
@@ -3031,8 +3064,8 @@ mod tests {
         state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
 
         let now = Instant::now();
-        assert!(state.advance_focus_visuals(now).has_active_animations);
-        let advance = state.advance_focus_visuals(now + Duration::from_millis(60));
+        assert!(state.advance_window_visuals(now).has_active_animations);
+        let advance = state.advance_window_visuals(now + Duration::from_millis(60));
         assert!(advance.has_active_animations);
 
         let current = state
@@ -3123,7 +3156,7 @@ mod tests {
 
         let now = Instant::now();
         state.config.animations.window.duration_msec = 0;
-        state.advance_focus_visuals(now);
+        state.advance_window_visuals(now);
         let focused = state.root_surface_visual_state(surface).unwrap();
         assert_eq!(focused.effects.opacity_alpha, 255);
         assert_eq!(focused.effects.dim_alpha, 0);
@@ -3132,7 +3165,7 @@ mod tests {
         assert_eq!(focused.border.unwrap().gradient.start_color, RgbaColor::new(1, 2, 3, 4));
 
         state.seat.keyboard_focus = None;
-        state.advance_focus_visuals(now);
+        state.advance_window_visuals(now);
         let unfocused = state.root_surface_visual_state(surface).unwrap();
         assert_eq!(unfocused.effects.opacity_alpha, 100);
         assert_eq!(unfocused.effects.dim_alpha, 40);
@@ -3169,6 +3202,96 @@ mod tests {
         assert_eq!(focused.effects.opacity_alpha, 255);
         assert_eq!(focused.effects.dim_alpha, 0);
         assert!(!state.managed_root_surfaces.contains_key(&surface));
+    }
+
+    #[test]
+    fn opening_hides_the_first_sample_and_restores_focus_alpha() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let (_, object_id) = state.insert_object(WlSurface::new(
+            WlSurfaceId::from(96u32),
+            ClientId::from_raw(11),
+            6,
+        ));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(0usize), 30, 40, 160, 120);
+        }
+        state.config.effects.opacity.active_alpha = 200;
+        state.config.effects.opacity.inactive_alpha = 100;
+        state.config.effects.opacity.inactive_dim = 0;
+        state.config.animations.window.duration_msec = 0;
+        state.config.animations.window.open_duration_msec = 100;
+        let surface = root(&state, object_id);
+        state.register_root_surface(surface);
+        state.assign_root_surface_to_workspace(surface, workspace_id);
+        state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .lifecycle_animation
+            .start_opening();
+
+        let hidden = state.root_surface_visual_state(surface).unwrap();
+        let hidden_again = state.root_surface_visual_state(surface).unwrap();
+        assert_eq!(hidden.effects.opacity_alpha, 0);
+        assert_eq!(hidden.effects.dim_alpha, 0);
+        assert_eq!(hidden.border_alpha, 0);
+        assert_eq!(hidden.shadow_alpha, 0);
+        assert_eq!(hidden_again.effects.opacity_alpha, 0);
+        assert!(state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .lifecycle_animation
+            .is_active());
+
+        let now = Instant::now();
+        let started = state.advance_window_visuals(now);
+        assert!(started.has_active_animations);
+        assert_eq!(
+            state
+                .root_surface_visual_state(surface)
+                .unwrap()
+                .effects
+                .opacity_alpha,
+            0
+        );
+
+        let mid = state.advance_window_visuals(now + Duration::from_millis(50));
+        assert!(mid.has_active_animations);
+        assert_eq!(
+            state
+                .root_surface_visual_state(surface)
+                .unwrap()
+                .effects
+                .opacity_alpha,
+            100
+        );
+
+        state.advance_window_visuals(now + Duration::from_millis(100));
+        let restored = state.root_surface_visual_state(surface).unwrap();
+        assert_eq!(restored.effects.opacity_alpha, 200);
+        assert!(!state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .lifecycle_animation
+            .is_active());
+        let settled = state.advance_window_visuals(now + Duration::from_millis(100));
+        assert!(!settled.has_active_animations);
+        assert_eq!(
+            state
+                .root_surface_visual_state(surface)
+                .unwrap()
+                .effects
+                .opacity_alpha,
+            restored.effects.opacity_alpha
+        );
     }
 
     #[test]

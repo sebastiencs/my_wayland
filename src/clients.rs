@@ -13,7 +13,7 @@ use libc::getsockopt;
 
 use crate::{
     dbus::Dbus,
-    drm::{schedule_active_output, schedule_output},
+    drm::{kick_window_animation_manager, schedule_active_output, schedule_output},
     io_uring::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted, RingId},
@@ -1636,7 +1636,10 @@ impl Client {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        state.relayout_dirty_workspaces();
+        let opened = state.relayout_dirty_workspaces();
+        if !opened.is_empty() {
+            kick_window_animation_manager(dispatcher);
+        }
         let tiled_resize_surfaces = crate::seat::tiled_resize_active_root_surfaces(state);
         let toplevels = self
             .iter_resolved_of::<XdgToplevelId>(state)
@@ -1720,6 +1723,15 @@ impl Client {
                 );
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reconfigure_mapped_toplevels(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.reconfigure_mapped_toplevels(state, dispatcher);
     }
 
     fn handle_output_removed(
