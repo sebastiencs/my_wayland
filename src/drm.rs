@@ -37,23 +37,28 @@ use crate::{
         RootSurfaceVisualState, RoundedRing, TextureElement, TextureMask, TextureSource,
     },
     runner::{Dispatcher, Model, ModelInstanceId},
-    scene::OutputCompositionView,
+    scene::{CompositionTier, OutputCompositionView},
     state::{
         BackendOutputRef, ColorTransformMatrix, DrmId, ObjectId, OutputId, OutputMode,
         RootSurfaceClip, State,
     },
     sync::{DeferredRelease, RetiredBufferCandidate},
     transform::{self, OutputPresentationTransform},
+    visual_animation::{FrozenClosingBlur, RetainedClosingSnapshot},
     wayland_objects::{
         wl_buffer::{CursorShmBuffer, WlBuffer},
-        wl_surface::{StackEntry, SurfacePresentationFeedback, WlSurface},
+        wl_surface::{
+            Role, StackEntry, SurfacePresentationFeedback, SurfaceRenderState, WlSurface,
+        },
     },
     ENABLE_DAMAGE,
 };
 
 use crate::{
     clients::{ClientAction, ClientId, ClientManagerAction, Resolved},
-    protocol_generated::{WlBufferId, WlSurfaceId, WpPresentationFeedbackId},
+    protocol_generated::{
+        WlBufferId, WlSurfaceId, WpPresentationFeedbackId, XdgPopupId, XdgSurfaceId,
+    },
     scheduler::{
         complete_frame_for_timeline, discard_frame_for_timeline, frame_clock::ClockDecision,
         output_scheduler_id, FrameCompletionOutcome, OutputScheduler, OutputSchedulerAction,
@@ -207,12 +212,14 @@ type SurfaceKey = Resolved<WlSurfaceId>;
 enum SceneItemKey {
     Surface(SurfaceKey),
     Cursor,
+    ClosingSnapshot(u64),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SceneItemContentKey {
     Buffer(Resolved<WlBufferId>),
     NamedCursor(CursorImageContentKey),
+    ClosingSnapshot { id: u64, alpha: u8 },
 }
 
 #[derive(Clone, Debug)]
@@ -851,6 +858,10 @@ pub struct InFormat {
 }
 
 impl Drm {
+    pub(crate) fn bind_context(&self) {
+        self.egl_context.bind();
+    }
+
     fn output(&self, drm_crtc_id: u32) -> Option<&DrmOutput> {
         self.outputs.get(&drm_crtc_id)
     }
@@ -3147,6 +3158,17 @@ fn animation_delay_msec_for_rects(state: &State, rects: &[RectI]) -> Option<u32>
         .min()
 }
 
+fn remember_animation_outputs(state: &State, rect: RectI, output_ids: &mut BTreeSet<OutputId>) {
+    let rect_outputs = state.outputs_intersecting_rect(rect);
+    if rect_outputs.is_empty() {
+        if let Some(output_id) = state.primary_output_for_rect(rect, None) {
+            output_ids.insert(output_id);
+        }
+        return;
+    }
+    output_ids.extend(rect_outputs);
+}
+
 fn active_animation_output_ids(state: &State) -> BTreeSet<OutputId> {
     let mut output_ids = BTreeSet::new();
     for (&surface, managed) in &state.managed_root_surfaces {
@@ -3156,14 +3178,12 @@ fn active_animation_output_ids(state: &State) -> BTreeSet<OutputId> {
         let Some(rect) = state.root_surface_animation_damage_rect(surface) else {
             continue;
         };
-        let rect_outputs = state.outputs_intersecting_rect(rect);
-        if rect_outputs.is_empty() {
-            if let Some(output_id) = state.primary_output_for_rect(rect, None) {
-                output_ids.insert(output_id);
-            }
-            continue;
+        remember_animation_outputs(state, rect, &mut output_ids);
+    }
+    for snapshot in &state.closing_snapshots {
+        if snapshot.is_active() {
+            remember_animation_outputs(state, snapshot.bounds(), &mut output_ids);
         }
-        output_ids.extend(rect_outputs);
     }
     output_ids
 }
@@ -3285,7 +3305,14 @@ impl WindowAnimationManager {
     ) {
         let result = state.advance_window_visuals_for_output(output_id, now);
         if !result.damaged_rects.is_empty() {
-            request_output_frame(state, output_id, RequestFrameReason::Animation, dispatcher);
+            let mut outputs = BTreeSet::new();
+            outputs.insert(output_id);
+            for rect in result.damaged_rects {
+                outputs.extend(state.outputs_intersecting_rect(rect));
+            }
+            for output_id in outputs {
+                request_output_frame(state, output_id, RequestFrameReason::Animation, dispatcher);
+            }
             return;
         }
         if result.has_active_animations {
@@ -4559,6 +4586,570 @@ fn build_cursor_plane_request(
     }
 }
 
+struct ClosingRootPeek {
+    render: SurfaceRenderState,
+    stack: Vec<StackEntry>,
+    role: Role,
+    xdg_surface: Option<Resolved<XdgSurfaceId>>,
+    has_buffer: bool,
+    active_output: Option<OutputId>,
+}
+
+impl ClosingRootPeek {
+    fn from_surface(surface: &WlSurface) -> Option<Self> {
+        Some(Self {
+            render: surface.render_state_at(0, 0)?,
+            stack: surface.current_stack().to_vec(),
+            role: surface.role(),
+            xdg_surface: surface.xdg_surface(),
+            has_buffer: surface.has_committed_buffer(),
+            active_output: surface.active_output_id(),
+        })
+    }
+}
+
+pub(crate) struct PlannedClosingSurface {
+    pub buffer: Resolved<WlBufferId>,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub tex_transform: transform::Mat3,
+    pub sync: crate::sync::SurfaceSyncState,
+    pub inherit_root_clip: bool,
+}
+
+pub(crate) struct PlannedClosingEffect {
+    pub phase: FramePhase,
+    pub element: EffectElement,
+}
+
+pub(crate) struct ClosingCapturePlan {
+    pub source: Resolved<WlSurfaceId>,
+    pub drm_id: DrmId,
+    pub output_id: OutputId,
+    pub crtc_id: u32,
+    pub bounds: RectI,
+    pub presentation_transform: OutputPresentationTransform,
+    pub surfaces: Vec<PlannedClosingSurface>,
+    pub effects: Vec<PlannedClosingEffect>,
+    pub blur: Option<FrozenClosingBlur>,
+    pub content_alpha: u8,
+    pub root_clip: Option<RootSurfaceClip>,
+}
+
+pub(crate) fn begin_managed_toplevel_close_surface(
+    state: &mut State,
+    surface_id: Resolved<WlSurfaceId>,
+    surface: &WlSurface,
+    dispatcher: &mut Dispatcher,
+) {
+    let Some(peek) = ClosingRootPeek::from_surface(surface) else {
+        return;
+    };
+    if !closing_snapshot_eligible(state, surface_id, &peek) {
+        return;
+    }
+    state.refresh_root_geometry_for_closing(surface_id, surface, None);
+    let Some(peek) = ClosingRootPeek::from_surface(surface) else {
+        return;
+    };
+    begin_closing_from_peek(state, surface_id, peek, dispatcher);
+}
+
+pub(crate) fn begin_managed_toplevel_close_id(
+    state: &mut State,
+    surface_id: Resolved<WlSurfaceId>,
+    decoration_mode: Option<
+        crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode,
+    >,
+    dispatcher: &mut Dispatcher,
+) {
+    let Some(surface) = state
+        .objects
+        .try_grab_object::<WlSurface>(surface_id.object_id())
+    else {
+        return;
+    };
+    let Some(peek) = ClosingRootPeek::from_surface(&surface) else {
+        return;
+    };
+    if !closing_snapshot_eligible(state, surface_id, &peek) {
+        return;
+    }
+    state.refresh_root_geometry_for_closing(surface_id, &surface, decoration_mode);
+    let peek = ClosingRootPeek::from_surface(&surface);
+    drop(surface);
+    let Some(peek) = peek else {
+        return;
+    };
+    begin_closing_from_peek(state, surface_id, peek, dispatcher);
+}
+
+fn closing_snapshot_eligible(
+    state: &State,
+    surface_id: Resolved<WlSurfaceId>,
+    peek: &ClosingRootPeek,
+) -> bool {
+    if state
+        .closing_snapshots
+        .iter()
+        .any(|snapshot| snapshot.source() == surface_id)
+    {
+        return false;
+    }
+    if !state.session_active || state.config.animations.window.close_duration_msec == 0 {
+        return false;
+    }
+    let Some(managed) = state.managed_root_surface_state(surface_id) else {
+        return false;
+    };
+    if !managed.mapped || !peek.has_buffer || peek.role != Role::XdgSurface {
+        return false;
+    }
+    let Some(xdg_surface) = peek.xdg_surface else {
+        return false;
+    };
+    state.xdg_toplevel(xdg_surface).is_some()
+}
+
+fn begin_closing_from_peek(
+    state: &mut State,
+    surface_id: Resolved<WlSurfaceId>,
+    peek: ClosingRootPeek,
+    dispatcher: &mut Dispatcher,
+) {
+    if !closing_snapshot_eligible(state, surface_id, &peek) {
+        return;
+    }
+    let Some(plan) = plan_closing_from_peek(state, surface_id, &peek) else {
+        return;
+    };
+    let Some(snapshot) = realize_closing_capture(state, plan) else {
+        return;
+    };
+    state.closing_snapshots.push(snapshot);
+    kick_window_animation_manager(dispatcher);
+}
+
+pub(crate) fn plan_closing_capture(
+    state: &State,
+    surface_id: Resolved<WlSurfaceId>,
+) -> Option<ClosingCapturePlan> {
+    let peek = {
+        let surface = surface_id.try_ref(state)?;
+        ClosingRootPeek::from_surface(surface)?
+    };
+    plan_closing_from_peek(state, surface_id, &peek)
+}
+
+fn plan_closing_from_peek(
+    state: &State,
+    surface_id: Resolved<WlSurfaceId>,
+    peek: &ClosingRootPeek,
+) -> Option<ClosingCapturePlan> {
+    let mut renders = Vec::new();
+    collect_peeked_root(state, peek, &mut renders);
+    if renders.is_empty() {
+        return None;
+    }
+    let visual = state.root_surface_visual_state(surface_id);
+    let mut rects = Vec::new();
+    if let Some(influence) = visual.as_ref().map(|visual| visual.influence_bounds()) {
+        rects.push(influence);
+    }
+    for render in &renders {
+        rects.push(RectI::new(render.x, render.y, render.width, render.height)?);
+    }
+    let bounds = union_rects(rects)?;
+    if bounds.is_empty() {
+        return None;
+    }
+    let outputs = state.outputs_intersecting_rect(bounds);
+    if outputs.is_empty() {
+        return None;
+    }
+    let mut drm_ids = Vec::new();
+    for output_id in &outputs {
+        let backend = state.backend_for_output(*output_id)?;
+        if !drm_ids.contains(&backend.drm_id) {
+            drm_ids.push(backend.drm_id);
+        }
+    }
+    if drm_ids.len() != 1 {
+        return None;
+    }
+    let drm_id = drm_ids[0];
+    let preferred = peek
+        .active_output
+        .filter(|output_id| outputs.contains(output_id));
+    let output_id = state.primary_output_for_rect(bounds, preferred)?;
+    let backend = state.backend_for_output(output_id)?;
+    if backend.drm_id != drm_id {
+        return None;
+    }
+    let crtc_id = state.output_crtc_id(output_id)?;
+    let presentation_transform = state
+        .drm
+        .try_get(drm_id)
+        .and_then(|drm| drm.output(crtc_id))
+        .map(|output| output.presentation_transform)
+        .unwrap_or(OutputPresentationTransform::FlipY);
+    let (blur, mut effects) = split_closing_effects(visual);
+    let dx = bounds.x.saturating_neg();
+    let dy = bounds.y.saturating_neg();
+    for effect in &mut effects {
+        translate_effect_element(&mut effect.element, dx, dy);
+    }
+    let content_alpha = visual
+        .map(|visual| visual.effects.opacity_alpha)
+        .unwrap_or(u8::MAX);
+    let root_clip = visual.and_then(|visual| visual.clip);
+    let surfaces = renders
+        .into_iter()
+        .map(|render| PlannedClosingSurface {
+            buffer: render.buffer,
+            x: render.x.saturating_add(dx),
+            y: render.y.saturating_add(dy),
+            width: render.width,
+            height: render.height,
+            tex_transform: render.tex_transform,
+            sync: render.sync,
+            inherit_root_clip: render.inherit_root_clip,
+        })
+        .collect();
+    Some(ClosingCapturePlan {
+        source: surface_id,
+        drm_id,
+        output_id,
+        crtc_id,
+        bounds,
+        presentation_transform,
+        surfaces,
+        effects,
+        blur,
+        content_alpha,
+        root_clip,
+    })
+}
+
+fn collect_peeked_root(state: &State, peek: &ClosingRootPeek, out: &mut Vec<SurfaceRenderState>) {
+    let render = &peek.render;
+    for entry in &peek.stack {
+        match *entry {
+            StackEntry::Child(child) => {
+                let offset = child
+                    .try_ref(state)
+                    .map(|surface| surface.current_subsurface_position())
+                    .unwrap_or((0, 0));
+                peek_surface_tree(
+                    state,
+                    child,
+                    render.x.saturating_add(offset.0),
+                    render.y.saturating_add(offset.1),
+                    true,
+                    out,
+                );
+            }
+            StackEntry::Parent => out.push(render.clone()),
+        }
+    }
+    let Some(xdg_surface) = peek.xdg_surface else {
+        return;
+    };
+    for popup in popup_surfaces_for_xdg(state, xdg_surface) {
+        let Some(origin) = popup_origin_from_parent(state, popup, (render.x, render.y)) else {
+            continue;
+        };
+        peek_surface_tree(state, popup, origin.0, origin.1, false, out);
+    }
+}
+
+fn peek_surface_tree(
+    state: &State,
+    surface: Resolved<WlSurfaceId>,
+    base_x: i32,
+    base_y: i32,
+    inherit_root_clip: bool,
+    out: &mut Vec<SurfaceRenderState>,
+) {
+    let Some((render, stack, xdg_surface)) = (|| {
+        let wl_surface = surface.try_ref(state)?;
+        let mut render = wl_surface.render_state_at(base_x, base_y)?;
+        render.inherit_root_clip = inherit_root_clip;
+        Some((render, wl_surface.current_stack().to_vec(), wl_surface.xdg_surface()))
+    })() else {
+        return;
+    };
+    for entry in stack {
+        match entry {
+            StackEntry::Child(child) => {
+                let offset = child
+                    .try_ref(state)
+                    .map(|surface| surface.current_subsurface_position())
+                    .unwrap_or((0, 0));
+                peek_surface_tree(
+                    state,
+                    child,
+                    render.x.saturating_add(offset.0),
+                    render.y.saturating_add(offset.1),
+                    inherit_root_clip,
+                    out,
+                );
+            }
+            StackEntry::Parent => out.push(render.clone()),
+        }
+    }
+    let Some(xdg_surface) = xdg_surface else {
+        return;
+    };
+    for popup in popup_surfaces_for_xdg(state, xdg_surface) {
+        let Some(origin) = popup_origin_from_parent(state, popup, (render.x, render.y)) else {
+            continue;
+        };
+        peek_surface_tree(state, popup, origin.0, origin.1, false, out);
+    }
+}
+
+fn popup_surfaces_for_xdg(
+    state: &State,
+    xdg_surface: Resolved<XdgSurfaceId>,
+) -> Vec<Resolved<WlSurfaceId>> {
+    let Some(xdg_surface) = xdg_surface.try_ref(state) else {
+        return Vec::new();
+    };
+    xdg_surface
+        .popup_children()
+        .iter()
+        .copied()
+        .filter_map(|popup_id: Resolved<XdgPopupId>| {
+            let popup = popup_id.try_ref(state)?;
+            let popup_xdg = popup.xdg_surface().try_ref(state)?;
+            Some(popup_xdg.wl_surface())
+        })
+        .collect()
+}
+
+fn popup_origin_from_parent(
+    state: &State,
+    popup: Resolved<WlSurfaceId>,
+    parent_origin: (i32, i32),
+) -> Option<(i32, i32)> {
+    let wl_surface = popup.try_ref(state)?;
+    let xdg_surface = wl_surface.xdg_surface()?.try_ref(state)?;
+    let popup_role = xdg_surface.popup_role()?.try_ref(state)?;
+    let local_window_geometry = xdg_surface.window_geometry_rect_for_surface(popup, state);
+    let geometry = popup_role.current_geometry();
+    Some((
+        parent_origin.0 + geometry.x - local_window_geometry.x,
+        parent_origin.1 + geometry.y - local_window_geometry.y,
+    ))
+}
+
+fn split_closing_effects(
+    visual: Option<crate::render::RootSurfaceVisualState>,
+) -> (Option<FrozenClosingBlur>, Vec<PlannedClosingEffect>) {
+    let Some(visual) = visual else {
+        return (None, Vec::new());
+    };
+    let mut recorded = Vec::new();
+    push_root_surface_effect_elements(&mut recorded, Some(visual), FramePhase::UnderWindow);
+    push_root_surface_effect_elements(&mut recorded, Some(visual), FramePhase::OverWindow);
+    push_root_surface_effect_elements(&mut recorded, Some(visual), FramePhase::Overlay);
+    let mut blur = None;
+    let mut effects = Vec::new();
+    for element in recorded {
+        let RecordedFrameElement::Effect { phase, element } = element else {
+            continue;
+        };
+        if let EffectElement::WindowBlurBackdrop { ring, style, alpha } = element {
+            blur = Some(FrozenClosingBlur { ring, style, alpha });
+            continue;
+        }
+        effects.push(PlannedClosingEffect { phase, element });
+    }
+    (blur, effects)
+}
+
+fn union_rects(rects: Vec<RectI>) -> Option<RectI> {
+    let mut rects = rects.into_iter();
+    let mut acc = rects.next()?;
+    for rect in rects {
+        acc = RectI::from_extents(
+            acc.x.min(rect.x),
+            acc.y.min(rect.y),
+            acc.x2().max(rect.x2()),
+            acc.y2().max(rect.y2()),
+        )?;
+    }
+    Some(acc)
+}
+
+fn realize_closing_capture(
+    state: &mut State,
+    plan: ClosingCapturePlan,
+) -> Option<RetainedClosingSnapshot> {
+    let texture = realize_closing_texture(state, &plan).or_else(|| {
+        #[cfg(test)]
+        if state.realize_closing_snapshots_in_tests {
+            return Some(GlTexture::test_inert());
+        }
+        #[cfg(not(test))]
+        {
+            return None;
+        }
+        #[cfg(test)]
+        None
+    })?;
+    let id = state.next_closing_snapshot_id;
+    state.next_closing_snapshot_id = state.next_closing_snapshot_id.saturating_add(1);
+    Some(RetainedClosingSnapshot::new(
+        id,
+        plan.source,
+        plan.bounds,
+        plan.blur,
+        plan.drm_id,
+        texture,
+    ))
+}
+
+fn realize_closing_texture(state: &mut State, plan: &ClosingCapturePlan) -> Option<GlTexture> {
+    let (objects, drm_map) = (&mut state.objects, &state.drm);
+    let drm = drm_map.try_get(plan.drm_id)?;
+    drm.bind_context();
+    let mut uploaded = Vec::new();
+    for surface in &plan.surfaces {
+        let mut obj = objects.grab(surface.buffer.object_id());
+        let buffer = obj.downcast_mut::<WlBuffer>()?;
+        let texture = buffer.prepare_texture(&drm.egl_context, &surface.sync)?;
+        let tex_transform = buffer.base_tex_transform().mul(surface.tex_transform);
+        uploaded.push((texture, tex_transform));
+    }
+    let elements = closing_capture_elements(plan, &uploaded);
+    let output = drm.output(plan.crtc_id)?;
+    output.render_buffer().gl_framebuffer.capture_transparent(
+        &elements,
+        plan.bounds.width,
+        plan.bounds.height,
+        plan.presentation_transform,
+    )
+}
+
+fn closing_capture_elements(
+    plan: &ClosingCapturePlan,
+    uploaded: &[(gl::Uint, transform::Mat3)],
+) -> Vec<FrameElement> {
+    let mut elements = Vec::new();
+    for effect in &plan.effects {
+        if effect.phase == FramePhase::UnderWindow {
+            elements.push(FrameElement::Effect { phase: effect.phase, element: effect.element });
+        }
+    }
+    for (surface, (texture, tex_transform)) in plan.surfaces.iter().zip(uploaded.iter()) {
+        let Some(bounds) = RectI::new(surface.x, surface.y, surface.width, surface.height) else {
+            continue;
+        };
+        let mask = if surface.inherit_root_clip {
+            plan.root_clip
+                .map(|clip| TextureMask::RoundedClip {
+                    clip: localize_clip(
+                        RootSurfaceClip::new(
+                            clip.outer_rect.translate(
+                                plan.bounds.x.saturating_neg(),
+                                plan.bounds.y.saturating_neg(),
+                            ),
+                            clip.corner_radius,
+                            clip.rounding_power,
+                        ),
+                        bounds,
+                    ),
+                })
+                .unwrap_or(TextureMask::None)
+        } else {
+            TextureMask::None
+        };
+        elements.push(FrameElement::Texture {
+            phase: FramePhase::Content,
+            element: TextureElement {
+                source: TextureSource::Texture,
+                texture: *texture,
+                x: surface.x,
+                y: surface.y,
+                width: surface.width,
+                height: surface.height,
+                tex_transform: *tex_transform,
+                damage: DamageRegion::from_rect(bounds),
+                blend: true,
+                alpha: plan.content_alpha,
+                mask,
+            },
+        });
+    }
+    for effect in &plan.effects {
+        if effect.phase != FramePhase::UnderWindow {
+            elements.push(FrameElement::Effect { phase: effect.phase, element: effect.element });
+        }
+    }
+    elements
+}
+
+fn closing_snapshots_precede_tier(tier: CompositionTier) -> bool {
+    matches!(tier, CompositionTier::Top | CompositionTier::Overlay)
+}
+
+fn scale_u8(value: u8, factor: u8) -> u8 {
+    u8::try_from((u16::from(value) * u16::from(factor)) / 255u16).unwrap_or(0)
+}
+
+fn append_closing_snapshots(
+    state: &State,
+    output_bounds: RectI,
+    items: &mut Vec<SceneItem>,
+    frame_elements: &mut Vec<RecordedFrameElement>,
+) {
+    for snapshot in &state.closing_snapshots {
+        let bounds = snapshot.bounds();
+        let alpha = snapshot.alpha();
+        if alpha == 0 || bounds.is_empty() || !bounds.intersects(output_bounds) {
+            continue;
+        }
+        if let Some(blur) = snapshot.blur() {
+            frame_elements.push(RecordedFrameElement::Effect {
+                phase: FramePhase::UnderWindow,
+                element: EffectElement::WindowBlurBackdrop {
+                    ring: blur.ring,
+                    style: blur.style,
+                    alpha: scale_u8(blur.alpha, alpha),
+                },
+            });
+        }
+        let item_index = items.len();
+        items.push(SceneItem {
+            state: SceneItemState {
+                key: SceneItemKey::ClosingSnapshot(snapshot.id()),
+                surface_key: None,
+                content_key: SceneItemContentKey::ClosingSnapshot { id: snapshot.id(), alpha },
+                bounds,
+                tex_transform: transform::Mat3::identity(),
+            },
+            mask: SceneItemMask::None,
+            texture: snapshot.texture_id(),
+            owned_texture: None,
+            damage: DamageRegion::from_rect(bounds),
+            sample_damage_padding: 0,
+            state_has_alpha: true,
+            alpha,
+            opaque_region: DamageRegion::new(),
+            opaque: false,
+            sync: crate::sync::SurfaceSyncState::default(),
+            direct_scanout: None,
+            presentation_feedbacks: Vec::new(),
+        });
+        frame_elements
+            .push(RecordedFrameElement::Texture { phase: FramePhase::Content, item_index });
+    }
+}
+
 fn collect_render_items_for_output_view(
     state: &mut crate::state::State,
     drm_id: DrmId,
@@ -4580,13 +5171,16 @@ fn collect_render_items_for_output_view(
     let mut deferred_releases = Vec::new();
     let mut retired_candidates = Vec::new();
     let mut cursor_animation_delay_msec = None;
-    let root_surfaces: Vec<_> = view
-        .entries
-        .iter()
-        .filter(|entry| entry.participates_in_render)
-        .map(|entry| entry.root_surface)
-        .collect();
-    for root_surface in root_surfaces {
+    let mut emitted_closing = false;
+    for entry in &view.entries {
+        if !emitted_closing && closing_snapshots_precede_tier(entry.tier) {
+            append_closing_snapshots(state, output_bounds, &mut items, &mut frame_elements);
+            emitted_closing = true;
+        }
+        if !entry.participates_in_render {
+            continue;
+        }
+        let root_surface = entry.root_surface;
         let Some(surface) = state
             .objects
             .try_ref_object::<WlSurface>(root_surface.object_id())
@@ -4617,12 +5211,7 @@ fn collect_render_items_for_output_view(
         let drm = drm_map.get(drm_id);
         let drm_fd = drm.fd();
         let item_start_index = items.len();
-        let allow_direct_scanout = view
-            .entries
-            .iter()
-            .find(|entry| entry.root_surface == root_surface)
-            .map(|entry| entry.allow_direct_scanout)
-            .unwrap_or(false);
+        let allow_direct_scanout = entry.allow_direct_scanout;
         push_scene_items_from_snapshots(
             &mut items,
             objects,
@@ -4644,6 +5233,9 @@ fn collect_render_items_for_output_view(
             FramePhase::OverWindow,
         );
         push_root_surface_effect_elements(&mut frame_elements, visual_state, FramePhase::Overlay);
+    }
+    if !emitted_closing {
+        append_closing_snapshots(state, output_bounds, &mut items, &mut frame_elements);
     }
     collect_dnd_render_items(
         state,
@@ -4894,6 +5486,7 @@ mod window_animation_tests {
         crate::{
             clients::ClientId,
             protocol_generated::WlSurfaceId,
+            region::RectI,
             runner::Dispatcher,
             scheduler::{output_scheduler_id, OutputSchedulerAction, RequestFrameReason},
             state::{BackendOutputRef, DrmId, ObjectId, OutputId},
@@ -5145,6 +5738,461 @@ mod window_animation_tests {
         manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
         assert!(!queues_animation_frame(&dispatcher, output_id));
         assert!(!queues_animation_wakeup(&dispatcher, output_id));
+    }
+
+    #[test]
+    fn closing_snapshot_schedules_until_it_is_released() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let source = crate::test_support::test_resolved_wl_surface_client1(4);
+        let (snapshot, probe) = crate::visual_animation::RetainedClosingSnapshot::test_pending(
+            1,
+            source,
+            RectI::new(20, 30, 100, 80).unwrap(),
+            DrmId::from(0usize),
+        );
+        state.closing_snapshots.push(snapshot);
+        state.config.animations.window.close_duration_msec = 100;
+        let mut manager = WindowAnimationManager::new();
+        let now = Instant::now();
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now);
+        assert!(queues_animation_wakeup(&dispatcher, output_id));
+        assert!(!queues_animation_frame(&dispatcher, output_id));
+        assert_eq!(state.closing_snapshots[0].alpha(), 255);
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now + Duration::from_millis(50));
+        assert!(queues_animation_frame(&dispatcher, output_id));
+        assert!(state.closing_snapshots[0].alpha() > 0 && state.closing_snapshots[0].alpha() < 255);
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now + Duration::from_millis(100));
+        assert!(queues_animation_frame(&dispatcher, output_id));
+        assert!(state.closing_snapshots.is_empty());
+        assert_eq!(probe.get(), 1);
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now + Duration::from_millis(100));
+        assert!(!queues_animation_frame(&dispatcher, output_id));
+        assert!(!queues_animation_wakeup(&dispatcher, output_id));
+    }
+
+    #[test]
+    fn zero_close_duration_releases_the_snapshot_on_the_next_pump() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 800, 600));
+        let (snapshot, probe) = crate::visual_animation::RetainedClosingSnapshot::test_pending(
+            2,
+            crate::test_support::test_resolved_wl_surface_client1(8),
+            RectI::new(0, 0, 40, 40).unwrap(),
+            DrmId::from(0usize),
+        );
+        state.closing_snapshots.push(snapshot);
+        state.config.animations.window.close_duration_msec = 0;
+        let mut manager = WindowAnimationManager::new();
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
+        assert!(state.closing_snapshots.is_empty());
+        assert_eq!(probe.get(), 1);
+        assert!(queues_animation_frame(&dispatcher, output_id));
+    }
+
+    #[test]
+    fn closing_completion_damages_every_intersecting_output() {
+        let mut state = state_for_tests();
+        let left = state.insert_output(crate::test_support::test_output_drm0_wh(100, 100));
+        let right = state.insert_output(crate::test_support::test_output_drm1(100, 0, 100, 100));
+        let (snapshot, probe) = crate::visual_animation::RetainedClosingSnapshot::test_pending(
+            3,
+            crate::test_support::test_resolved_wl_surface_client1(9),
+            RectI::new(50, 0, 100, 40).unwrap(),
+            DrmId::from(0usize),
+        );
+        state.closing_snapshots.push(snapshot);
+        state.config.animations.window.close_duration_msec = 100;
+        let mut manager = WindowAnimationManager::new();
+        let now = Instant::now();
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule_output(&mut state, &mut dispatcher, now, left);
+        assert!(queues_animation_wakeup(&dispatcher, left));
+        assert!(!queues_animation_frame(&dispatcher, left));
+        assert!(!queues_animation_frame(&dispatcher, right));
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule_output(
+            &mut state,
+            &mut dispatcher,
+            now + Duration::from_millis(100),
+            left,
+        );
+        assert!(queues_animation_frame(&dispatcher, left));
+        assert!(queues_animation_frame(&dispatcher, right));
+        assert!(state.closing_snapshots.is_empty());
+        assert_eq!(probe.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod closing_capture_tests {
+    use crate::{
+        clients::ClientId,
+        protocol_generated::{WlBufferId, WlSurfaceId, XdgPopupId, XdgSurfaceId},
+        region::RectI,
+        render::{BlurVisualStyle, EffectElement, RoundedRing},
+        state::{BackendOutputRef, DrmId, ObjectId, OutputId, RootSurfaceClip},
+        test_support::{
+            insert_test_shm_buffer, state_for_tests, test_output_drm0_wh, test_output_drm1,
+            test_resolved_wl_surface_client1,
+        },
+        wayland_objects::{
+            wl_surface::WlSurface,
+            xdg_popup::XdgPopup,
+            xdg_positioner::PositionerState,
+            xdg_surface::{xdg_toplevel::ToplevelDecorationMode, XdgSurface},
+        },
+    };
+
+    use super::{
+        append_closing_snapshots, closing_snapshots_precede_tier, plan_closing_capture,
+        CompositionTier, FramePhase, RecordedFrameElement, SceneItemKey,
+    };
+
+    fn mapped_root(
+        state: &mut crate::state::State,
+        x: i32,
+        y: i32,
+    ) -> crate::clients::Resolved<WlSurfaceId> {
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(40u32), ClientId::from_raw(1), 6));
+        let buffer =
+            insert_test_shm_buffer(state, ClientId::from_raw(1), WlBufferId::from(41), 20, 10);
+        state
+            .objects
+            .get_mut(object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(buffer, x, y, 80, 60);
+        let surface = crate::test_support::resolved_wl_surface(state, object_id);
+        state.register_root_surface(surface);
+        surface
+    }
+
+    #[test]
+    fn capture_plan_skips_when_no_output_or_backends_differ() {
+        let mut state = state_for_tests();
+        let surface = mapped_root(&mut state, 0, 0);
+        assert!(plan_closing_capture(&state, surface).is_none());
+
+        state.insert_output(test_output_drm0_wh(100, 100));
+        state.insert_output(test_output_drm1(100, 0, 100, 100));
+        let buffer =
+            insert_test_shm_buffer(&mut state, ClientId::from_raw(1), WlBufferId::from(42), 4, 4);
+        state
+            .objects
+            .get_mut(surface.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(buffer, 80, 0, 40, 40);
+        assert!(plan_closing_capture(&state, surface).is_none());
+    }
+
+    #[test]
+    fn flattened_plan_localizes_subsurfaces_and_popups_without_taking_live_state() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_drm0_wh(800, 600));
+        state.config.general.decoration_insets.top = 12;
+        state.config.decorations.border.thickness = 4;
+        state.config.decorations.shadow.radius = 16;
+        state.config.effects.blur.enabled = true;
+        let parent = mapped_root(&mut state, 100, 80);
+        let (_, xdg_object) = state.insert_object(XdgSurface::new(
+            XdgSurfaceId::from(50),
+            crate::clients::Resolved::new(
+                ClientId::from_raw(1),
+                crate::protocol_generated::XdgWmBaseId::from(1),
+                ObjectId::from(1usize),
+            ),
+            parent,
+            7,
+        ));
+        let xdg_resolved = crate::clients::Resolved::new(
+            ClientId::from_raw(1),
+            XdgSurfaceId::from(50),
+            xdg_object,
+        );
+        state
+            .objects
+            .get_mut(parent.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_xdg_surface_impl(xdg_resolved);
+        let (_, toplevel_object) = state.insert_object(
+            crate::wayland_objects::xdg_surface::xdg_toplevel::XdgToplevel::new(
+                crate::protocol_generated::XdgToplevelId::from(51),
+                xdg_resolved,
+                7,
+            ),
+        );
+        let toplevel = crate::clients::Resolved::new(
+            ClientId::from_raw(1),
+            crate::protocol_generated::XdgToplevelId::from(51),
+            toplevel_object,
+        );
+        state.register_xdg_toplevel_role(xdg_resolved, toplevel);
+        state
+            .objects
+            .get_mut(toplevel_object)
+            .downcast_mut::<crate::wayland_objects::xdg_surface::xdg_toplevel::XdgToplevel>()
+            .unwrap()
+            .set_decoration_mode(ToplevelDecorationMode::ServerSide);
+        let workspace = state.active_workspace_for_output(output_id).unwrap();
+        state.assign_root_surface_to_workspace(parent, workspace);
+        state.managed_root_surfaces.get_mut(&parent).unwrap().mapped = true;
+        state.mark_root_geometry_dirty(parent);
+
+        let (_, child_object) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(60), ClientId::from_raw(1), 6));
+        let child_buffer =
+            insert_test_shm_buffer(&mut state, ClientId::from_raw(1), WlBufferId::from(61), 8, 8);
+        let child = crate::test_support::resolved_wl_surface(&state, child_object);
+        state
+            .objects
+            .get_mut(child_object)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(child_buffer, 0, 0, 24, 16);
+        state
+            .objects
+            .get_mut(child_object)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_mark_subsurface_at(parent, (30, 40));
+        state
+            .objects
+            .get_mut(parent.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_push_current_child(child);
+
+        let (popup_wl, _) = {
+            let (_, object_id) = state.insert_object(WlSurface::new(
+                WlSurfaceId::from(70),
+                ClientId::from_raw(1),
+                6,
+            ));
+            let buffer = insert_test_shm_buffer(
+                &mut state,
+                ClientId::from_raw(1),
+                WlBufferId::from(71),
+                8,
+                8,
+            );
+            state
+                .objects
+                .get_mut(object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap()
+                .test_map(buffer, 0, 0, 30, 20);
+            (crate::test_support::resolved_wl_surface(&state, object_id), object_id)
+        };
+        let (_, popup_xdg_object) = state.insert_object(XdgSurface::new(
+            XdgSurfaceId::from(72),
+            crate::clients::Resolved::new(
+                ClientId::from_raw(1),
+                crate::protocol_generated::XdgWmBaseId::from(1),
+                ObjectId::from(1usize),
+            ),
+            popup_wl,
+            7,
+        ));
+        let popup_xdg = crate::clients::Resolved::new(
+            ClientId::from_raw(1),
+            XdgSurfaceId::from(72),
+            popup_xdg_object,
+        );
+        state
+            .objects
+            .get_mut(popup_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_xdg_surface_impl(popup_xdg);
+        let (_, popup_object) = state.insert_object(XdgPopup::new(
+            XdgPopupId::from(73),
+            popup_xdg,
+            Some(xdg_resolved),
+            PositionerState::default(),
+            7,
+        ));
+        let popup = crate::clients::Resolved::new(
+            ClientId::from_raw(1),
+            XdgPopupId::from(73),
+            popup_object,
+        );
+        state
+            .objects
+            .get_mut(popup_object)
+            .downcast_mut::<XdgPopup>()
+            .unwrap()
+            .apply_acked_configure(RectI::new(15, 25, 30, 20).unwrap());
+        state
+            .objects
+            .get_mut(popup_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_current_window_geometry(Some(RectI::new(0, 0, 30, 20).unwrap()));
+        state
+            .objects
+            .get_mut(popup_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_popup_role(popup);
+        state
+            .objects
+            .get_mut(xdg_resolved.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .add_popup_child(popup);
+
+        state
+            .objects
+            .get_mut(parent.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_push_frame_callback_and_feedback();
+        let before = state
+            .objects
+            .try_ref_object::<WlSurface>(parent.object_id())
+            .unwrap()
+            .render_state_at(0, 0)
+            .unwrap();
+
+        let plan = plan_closing_capture(&state, parent).unwrap();
+        let parent_part = plan
+            .surfaces
+            .iter()
+            .find(|surface| surface.width == 80)
+            .unwrap();
+        let child_part = plan
+            .surfaces
+            .iter()
+            .find(|surface| surface.width == 24)
+            .unwrap();
+        let popup_part = plan
+            .surfaces
+            .iter()
+            .find(|surface| surface.width == 30)
+            .unwrap();
+        assert_eq!(child_part.x - parent_part.x, 30);
+        assert_eq!(child_part.y - parent_part.y, 40);
+        assert_eq!(popup_part.x - parent_part.x, 15);
+        assert_eq!(popup_part.y - parent_part.y, 25);
+        assert!(plan.blur.is_some());
+        assert!(plan
+            .effects
+            .iter()
+            .all(|effect| { !matches!(effect.element, EffectElement::WindowBlurBackdrop { .. }) }));
+        assert!(plan
+            .effects
+            .iter()
+            .any(|effect| matches!(effect.element, EffectElement::WindowShadow { .. })));
+        assert!(plan
+            .effects
+            .iter()
+            .any(|effect| matches!(effect.element, EffectElement::WindowBorder { .. })));
+        assert!(plan.effects.iter().any(|effect| {
+            effect.phase == FramePhase::Overlay
+                && matches!(effect.element, EffectElement::DimOverlay { .. })
+        }));
+        let after = state
+            .objects
+            .try_ref_object::<WlSurface>(parent.object_id())
+            .unwrap();
+        assert_eq!(after.test_frame_callback_count(), 1);
+        assert_eq!(after.test_presentation_feedback_count(), 1);
+        let after_render = after.render_state_at(0, 0).unwrap();
+        assert_eq!(after_render.damage.rects().len(), before.damage.rects().len());
+        assert!(!after_render.damage.is_empty());
+        assert!(after_render.presentation_feedbacks.is_empty());
+    }
+
+    #[test]
+    fn closing_snapshots_render_above_content_without_protocol_participation() {
+        assert!(!closing_snapshots_precede_tier(CompositionTier::Background));
+        assert!(!closing_snapshots_precede_tier(CompositionTier::Bottom));
+        assert!(!closing_snapshots_precede_tier(CompositionTier::Content));
+        assert!(closing_snapshots_precede_tier(CompositionTier::Top));
+        assert!(closing_snapshots_precede_tier(CompositionTier::Overlay));
+
+        let mut state = state_for_tests();
+        let clip = RootSurfaceClip::new(
+            RectI::new(0, 0, 40, 20).unwrap(),
+            0,
+            crate::config::RoundingPower::DEFAULT,
+        );
+        let snapshot = crate::visual_animation::RetainedClosingSnapshot::new(
+            11,
+            test_resolved_wl_surface_client1(3),
+            RectI::new(5, 6, 40, 20).unwrap(),
+            Some(crate::visual_animation::FrozenClosingBlur {
+                ring: RoundedRing { outer: clip, inner: clip },
+                style: BlurVisualStyle { radius: 4, passes: 1 },
+                alpha: 220,
+            }),
+            DrmId::from(0usize),
+            crate::egl::GlTexture::test_inert(),
+        );
+        state.closing_snapshots.push(snapshot);
+        let mut items = Vec::new();
+        let mut elements = Vec::new();
+        append_closing_snapshots(
+            &state,
+            RectI::new(0, 0, 200, 200).unwrap(),
+            &mut items,
+            &mut elements,
+        );
+        assert!(matches!(
+            elements[0],
+            RecordedFrameElement::Effect {
+                element: EffectElement::WindowBlurBackdrop { alpha, .. },
+                ..
+            } if alpha == 220
+        ));
+        assert!(matches!(elements[1], RecordedFrameElement::Texture { item_index: 0, .. }));
+        assert!(matches!(items[0].state.key, SceneItemKey::ClosingSnapshot(11)));
+        assert!(items[0].state.surface_key.is_none());
+        assert!(items[0].presentation_feedbacks.is_empty());
+        assert!(items[0].direct_scanout.is_none());
+        assert!(!items[0].opaque);
+        assert!(state.root_surfaces.is_empty());
+    }
+
+    #[test]
+    fn begin_skips_unsupported_windows_and_deduplicates() {
+        let mut state = state_for_tests();
+        state.realize_closing_snapshots_in_tests = true;
+        state.insert_output(test_output_drm0_wh(400, 300));
+        let surface = mapped_root(&mut state, 10, 10);
+        let workspace = state
+            .active_workspace_for_output(state.outputs.iter().next().unwrap().0)
+            .unwrap();
+        state.assign_root_surface_to_workspace(surface, workspace);
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .mapped = true;
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        super::begin_managed_toplevel_close_id(&mut state, surface, None, &mut dispatcher);
+        assert!(state.closing_snapshots.is_empty());
+
+        state.session_active = false;
+        super::begin_managed_toplevel_close_id(&mut state, surface, None, &mut dispatcher);
+        assert!(state.closing_snapshots.is_empty());
     }
 }
 

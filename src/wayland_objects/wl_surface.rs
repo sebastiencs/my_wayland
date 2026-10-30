@@ -5,8 +5,8 @@ use crate::{
         Client, ClientDispatcher, ClientId, ClientManagerAction, EventWriter, RawRequest, Resolved,
     },
     drm::{
-        kick_window_animation_manager, request_active_output, request_outputs,
-        request_outputs_for_rect,
+        begin_managed_toplevel_close_surface, kick_window_animation_manager, request_active_output,
+        request_outputs, request_outputs_for_rect,
     },
     input::{set_keyboard_focus_from_surface, SurfaceFocus},
     object::{Object, Parser, PostAction, RequestResult},
@@ -1503,6 +1503,9 @@ impl WlSurface {
         match payload.buffer {
             None => {}
             Some(None) => {
+                if let Some(resolved) = client.resolve(self.id, state) {
+                    begin_managed_toplevel_close_surface(state, resolved, self, dispatcher);
+                }
                 self.cancel_blocked(client, state, dispatcher);
                 self.retire_current();
                 self.on_screen = OnScreen {
@@ -2276,6 +2279,57 @@ impl WlSurface {
     }
 
     #[cfg(test)]
+    #[cfg(test)]
+    pub(crate) fn test_frame_callback_count(&self) -> usize {
+        self.on_screen.frame_callbacks.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_presentation_feedback_count(&self) -> usize {
+        self.on_screen.presentation_feedbacks.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_push_frame_callback_and_feedback(&mut self) {
+        self.on_screen.frame_callbacks.push(Resolved::new(
+            self.client_id,
+            WlCallbackId::from(1),
+            ObjectId::from(1usize),
+        ));
+        self.on_screen
+            .presentation_feedbacks
+            .push(SurfacePresentationFeedback {
+                feedback: Resolved::new(
+                    self.client_id,
+                    WpPresentationFeedbackId::from(1),
+                    ObjectId::from(2usize),
+                ),
+                version: 1,
+                output_id: None,
+            });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_push_current_child(&mut self, child: Resolved<WlSurfaceId>) {
+        self.tree.current_stack.push(StackEntry::Child(child));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_mark_subsurface_at(
+        &mut self,
+        parent: Resolved<WlSurfaceId>,
+        position: (i32, i32),
+    ) {
+        self.role = Role::Subsurface;
+        self.subsurface = Some(SubsurfaceState {
+            object: Resolved::new(self.client_id, WlSubsurfaceId::from(1), ObjectId::from(1usize)),
+            parent_surface: parent,
+            pending_position: position,
+            current_position: position,
+            sync_mode: SubsurfaceSyncMode::Desync,
+        });
+    }
+
     pub(crate) fn test_map(
         &mut self,
         buffer_object_id: ObjectId,
@@ -2509,6 +2563,7 @@ impl WlSurface {
         dispatcher: &mut ClientDispatcher,
     ) {
         let object = client.resolve(self.id, state).unwrap();
+        begin_managed_toplevel_close_surface(state, object, self, dispatcher);
         let scene_bounds = state.surface_scene_bounds_with_ref(object, self);
         state.seat.clear_cursor_surface(object);
         self.discard_all_presentation_feedbacks(client, state, dispatcher);
@@ -2664,10 +2719,13 @@ impl Object for WlSurface {
 
     fn on_client_disconnect(
         &mut self,
-        _client: &mut Client,
-        _state: &mut State,
+        client: &mut Client,
+        state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
+        if let Some(resolved) = client.resolve(self.id, state) {
+            begin_managed_toplevel_close_surface(state, resolved, self, dispatcher);
+        }
         if let Some(waiter_id) = self.blocked_waiter_id.take() {
             dispatcher.stop_model(waiter_id);
         }
@@ -3410,6 +3468,187 @@ mod tests {
             matches!(action, WindowAnimationManagerAction::Kick)
         }));
         assert!(state.seat.keyboard_focus.is_none());
+    }
+
+    fn map_closing_candidate(
+        state: &mut State,
+        client: &mut Client,
+        dispatcher: &mut crate::runner::Dispatcher,
+        surface_id: u32,
+    ) -> ObjectId {
+        state.realize_closing_snapshots_in_tests = true;
+        let surface_object_id = create_root_xdg_toplevel(
+            state,
+            client,
+            dispatcher,
+            WlSurfaceId::from(surface_id),
+            XdgSurfaceId::from(surface_id + 1),
+            XdgToplevelId::from(surface_id + 2),
+        );
+        commit_initial_xdg_toplevel(
+            state,
+            client,
+            dispatcher,
+            surface_object_id,
+            XdgSurfaceId::from(surface_id + 1),
+        );
+        let buffer_object_id = insert_test_shm_buffer(
+            state,
+            client.client_id(),
+            WlBufferId::from(surface_id + 3),
+            8,
+            8,
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.pending.buffer = Some(Some(resolved_buffer(buffer_object_id)));
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(client, state, &mut client_dispatcher);
+        }
+        surface_object_id
+    }
+
+    #[test]
+    fn null_buffer_unmap_retains_one_snapshot_across_later_destruction() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(5usize));
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+        let surface_object_id =
+            map_closing_candidate(&mut state, &mut client, &mut dispatcher, 210);
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.pending.buffer = Some(None);
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
+        }
+        assert_eq!(state.closing_snapshots.len(), 1);
+        assert_eq!(state.closing_snapshots[0].source(), root(&state, surface_object_id));
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.delete_self(&mut client, &mut state, &mut client_dispatcher);
+        }
+        assert_eq!(state.closing_snapshots.len(), 1);
+        assert!(state
+            .managed_root_surfaces
+            .get(&state.closing_snapshots[0].source())
+            .is_none());
+    }
+
+    #[test]
+    fn direct_surface_destruction_captures_a_mapped_toplevel() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(5usize));
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+        let surface_object_id =
+            map_closing_candidate(&mut state, &mut client, &mut dispatcher, 220);
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.delete_self(&mut client, &mut state, &mut client_dispatcher);
+        }
+        assert_eq!(state.closing_snapshots.len(), 1);
+    }
+
+    #[test]
+    fn client_disconnect_captures_a_mapped_toplevel() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(5usize));
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+        let surface_object_id =
+            map_closing_candidate(&mut state, &mut client, &mut dispatcher, 230);
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_client_disconnect(&mut client, &mut state, &mut client_dispatcher);
+        }
+        assert_eq!(state.closing_snapshots.len(), 1);
+    }
+
+    #[test]
+    fn mapped_role_destruction_captures_once() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(5usize));
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+        let surface_object_id =
+            map_closing_candidate(&mut state, &mut client, &mut dispatcher, 240);
+        let toplevel_id = XdgToplevelId::from(242);
+        let destroy_request: RawRequest<'static> = (&*RawEvent::new(toplevel_id.into(), 0, 0)
+            .into_bytes())
+            .try_into()
+            .unwrap();
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut toplevel = client.grab_object(toplevel_id, &mut state);
+            toplevel.on(&mut client, &mut state, destroy_request, &mut client_dispatcher);
+        }
+        assert_eq!(state.closing_snapshots.len(), 1);
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.delete_self(&mut client, &mut state, &mut client_dispatcher);
+        }
+        assert_eq!(state.closing_snapshots.len(), 1);
+    }
+
+    #[test]
+    fn close_capture_skips_without_duration_session_or_toplevel_role() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(5usize));
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+        state.config.animations.window.close_duration_msec = 0;
+        let surface_object_id =
+            map_closing_candidate(&mut state, &mut client, &mut dispatcher, 250);
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.pending.buffer = Some(None);
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
+        }
+        assert!(state.closing_snapshots.is_empty());
+
+        state.config.animations.window.close_duration_msec = 160;
+        state.session_active = false;
+        state.realize_closing_snapshots_in_tests = true;
+        let surface_object_id =
+            map_closing_candidate(&mut state, &mut client, &mut dispatcher, 260);
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.delete_self(&mut client, &mut state, &mut client_dispatcher);
+        }
+        assert!(state.closing_snapshots.is_empty());
     }
 
     #[test]

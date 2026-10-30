@@ -26,8 +26,8 @@ use crate::{
     seat::SeatState,
     tiling::{self, TiledResizeState, WorkspaceLayout},
     visual_animation::{
-        resolve_window_visual, FocusVisualAnimation, WindowLifecycleAnim, WindowLifecycleAnimation,
-        WindowVisualBase,
+        resolve_window_visual, FocusVisualAnimation, RetainedClosingSnapshot, WindowLifecycleAnim,
+        WindowLifecycleAnimation, WindowVisualBase,
     },
     wayland_objects::{
         wl_surface::WlSurface,
@@ -838,6 +838,8 @@ pub struct State {
     pub output_workspace_groups: BTreeMap<OutputId, WorkspaceGroupId>,
     pub root_surface_workspaces: BTreeMap<Resolved<WlSurfaceId>, WorkspaceId>,
     pub managed_root_surfaces: BTreeMap<Resolved<WlSurfaceId>, ManagedRootSurfaceState>,
+    pub(crate) closing_snapshots: Vec<RetainedClosingSnapshot>,
+    pub(crate) next_closing_snapshot_id: u64,
     pub root_geometry_cache: BTreeMap<Resolved<WlSurfaceId>, Cell<RootGeometryCacheEntry>>,
     pub(crate) client_process_info: BTreeMap<ClientId, Option<Rc<ProcessInfo>>>,
     pub xdg_toplevel_roles: BTreeMap<Resolved<XdgSurfaceId>, Resolved<XdgToplevelId>>,
@@ -849,6 +851,8 @@ pub struct State {
     pub next_workspace_serial: u32,
     pub backend_syncobj_globals: BTreeMap<DrmId, GlobalName>,
     pub session_active: bool,
+    #[cfg(test)]
+    pub realize_closing_snapshots_in_tests: bool,
     pub frame_scheduler: BTreeMap<OutputId, OutputSchedulerSnapshot>,
     pub presentation: PresentationSubsystem,
     pub globals: Globals,
@@ -1436,6 +1440,39 @@ impl State {
         geometry
     }
 
+    pub(crate) fn refresh_root_geometry_for_closing(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+        surface_ref: &WlSurface,
+        decoration_mode: Option<
+            crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode,
+        >,
+    ) {
+        if !self.root_surfaces.contains(&surface) {
+            return;
+        }
+        let Some(entry_cell) = self.root_geometry_cache.get(&surface) else {
+            return;
+        };
+        let entry = entry_cell.get();
+        if entry.is_fresh() {
+            return;
+        }
+        let geometry = self.resolve_committed_root_geometry_with_surface_and_overrides(
+            surface,
+            surface_ref,
+            root_geometry::GeometryBuildOverrides {
+                decoration_mode,
+                explicit_window_geometry: None,
+                decoration_insets: None,
+                root_pos: Some(surface_ref.root_position()),
+            },
+        );
+        let mut refreshed = entry;
+        refreshed.store_geometry(geometry);
+        entry_cell.set(refreshed);
+    }
+
     fn committed_root_geometry_with_surface_ref(
         &self,
         surface: Resolved<WlSurfaceId>,
@@ -1731,7 +1768,7 @@ impl State {
     }
 
     pub fn advance_window_visuals(&mut self, now: Instant) -> WindowVisualAdvanceResult {
-        self.advance_window_visuals_matching(now, |_| true)
+        self.advance_window_visuals_filtered(now, |_| true, |_| true)
     }
 
     pub fn advance_window_visuals_for_output(
@@ -1754,16 +1791,22 @@ impl State {
                     .is_some_and(|rect| rect.intersects(output_bounds))
             })
             .collect::<BTreeSet<_>>();
-        self.advance_window_visuals_matching(now, |surface| included_surfaces.contains(&surface))
+        self.advance_window_visuals_filtered(
+            now,
+            |surface| included_surfaces.contains(&surface),
+            |bounds| bounds.intersects(output_bounds),
+        )
     }
 
-    fn advance_window_visuals_matching<F>(
+    fn advance_window_visuals_filtered<F, G>(
         &mut self,
         now: Instant,
         mut include_surface: F,
+        mut include_snapshot: G,
     ) -> WindowVisualAdvanceResult
     where
         F: FnMut(Resolved<WlSurfaceId>) -> bool,
+        G: FnMut(RectI) -> bool,
     {
         let focus_duration =
             Duration::from_millis(u64::from(self.config.animations.window.duration_msec));
@@ -1803,8 +1846,47 @@ impl State {
             has_active_animations |=
                 managed.visual_animation.is_active() || managed.lifecycle_animation.is_active();
         }
+        let close_duration =
+            Duration::from_millis(u64::from(self.config.animations.window.close_duration_msec));
+        let mut finished_ids = Vec::new();
+        for snapshot in &mut self.closing_snapshots {
+            if !include_snapshot(snapshot.bounds()) {
+                continue;
+            }
+            let before = snapshot.alpha();
+            let finished = snapshot.advance(now, close_duration);
+            if finished || snapshot.alpha() != before {
+                damaged_rects.push(snapshot.bounds());
+            }
+            if snapshot.is_active() {
+                has_active_animations = true;
+            }
+            if finished {
+                finished_ids.push(snapshot.id());
+            }
+        }
+        if !finished_ids.is_empty() {
+            let mut kept = Vec::new();
+            for snapshot in std::mem::take(&mut self.closing_snapshots) {
+                if finished_ids.contains(&snapshot.id()) {
+                    release_closing_snapshot(self, snapshot);
+                } else {
+                    kept.push(snapshot);
+                }
+            }
+            self.closing_snapshots = kept;
+        }
         WindowVisualAdvanceResult { damaged_rects, has_active_animations }
     }
+}
+
+fn release_closing_snapshot(state: &mut State, snapshot: RetainedClosingSnapshot) {
+    if snapshot.texture_id() != 0 {
+        if let Some(drm) = state.drm.try_get(snapshot.drm_id()) {
+            drm.bind_context();
+        }
+    }
+    drop(snapshot);
 }
 
 fn composed_window_style(

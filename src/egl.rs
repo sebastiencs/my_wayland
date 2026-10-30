@@ -534,11 +534,12 @@ impl EglImage {
 pub struct GlTexture {
     image: Option<EglImage>,
     texture: gl::Uint,
+    delete_on_drop: bool,
 }
 
 impl Drop for GlTexture {
     fn drop(&mut self) {
-        if self.texture != 0 {
+        if self.delete_on_drop && self.texture != 0 {
             unsafe {
                 gl::DeleteTextures(1, &self.texture);
             }
@@ -593,7 +594,7 @@ impl GlTexture {
             gl::BindTexture(target, 0);
             texture
         };
-        Ok(GlTexture { image: Some(image), texture })
+        Ok(GlTexture { image: Some(image), texture, delete_on_drop: true })
     }
 
     pub fn import_shm(
@@ -629,7 +630,7 @@ impl GlTexture {
             gl::BindTexture(target, 0);
             texture
         };
-        Ok(Self { image: None, texture })
+        Ok(Self { image: None, texture, delete_on_drop: true })
     }
 
     pub fn from_rgba(pixels: &[u8], width: i32, height: i32) -> Result<GlTexture, ()> {
@@ -673,7 +674,12 @@ impl GlTexture {
             gl::BindTexture(target, 0);
             texture
         };
-        Ok(Self { image: None, texture })
+        Ok(Self { image: None, texture, delete_on_drop: true })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_inert() -> Self {
+        Self { image: None, texture: 0, delete_on_drop: false }
     }
 
     pub fn texture_id(&self) -> gl::Uint {
@@ -819,13 +825,31 @@ impl TextureFrameBuffer {
         }
         Some(Self { width, height, framebuffer_object, texture })
     }
+
+    fn into_texture(mut self) -> GlTexture {
+        let texture = self.texture;
+        let framebuffer_object = self.framebuffer_object;
+        self.texture = 0;
+        self.framebuffer_object = 0;
+        unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER as _, 0);
+            if framebuffer_object != 0 {
+                gl::DeleteFramebuffers(1, &framebuffer_object);
+            }
+        }
+        GlTexture { image: None, texture, delete_on_drop: true }
+    }
 }
 
 impl Drop for TextureFrameBuffer {
     fn drop(&mut self) {
         unsafe {
-            gl::DeleteFramebuffers(1, &self.framebuffer_object);
-            gl::DeleteTextures(1, &self.texture);
+            if self.framebuffer_object != 0 {
+                gl::DeleteFramebuffers(1, &self.framebuffer_object);
+            }
+            if self.texture != 0 {
+                gl::DeleteTextures(1, &self.texture);
+            }
         }
     }
 }
@@ -1392,6 +1416,40 @@ fn blur_pass_draws(
 }
 
 impl EglFrameBuffer {
+    /// Draws `elements` into a new transparent texture. Coordinates are local to that texture.
+    pub(crate) fn capture_transparent(
+        &self,
+        elements: &[FrameElement],
+        width: i32,
+        height: i32,
+        presentation_transform: OutputPresentationTransform,
+    ) -> Option<GlTexture> {
+        let framebuffer = TextureFrameBuffer::new(width, height)?;
+        let damage = DamageRegion::from_rect(RectI::new(0, 0, width, height)?);
+        let projection = crate::transform::output_projection(
+            width as f32,
+            height as f32,
+            presentation_transform,
+        );
+        unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER as _, framebuffer.framebuffer_object);
+            gl::Viewport(0, 0, width, height);
+            gl::Disable(gl::SCISSOR_TEST as _);
+            gl::ClearColor(0.0, 0.0, 0.0, 0.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT as _);
+        }
+        self.render_frame_elements_to_target(
+            framebuffer.framebuffer_object,
+            width,
+            height,
+            elements,
+            projection,
+            &damage,
+            presentation_transform,
+        );
+        Some(framebuffer.into_texture())
+    }
+
     fn render_frame_elements_to_target(
         &self,
         framebuffer_object: gl::GLuint,
@@ -2102,6 +2160,12 @@ pub struct EglContext {
 }
 
 impl EglContext {
+    pub fn bind(&self) {
+        let _ = self
+            .egl
+            .make_current(self.display, None, None, Some(self.context));
+    }
+
     pub fn make(egl: &EGL, gbm: GbmDevice) -> Self {
         let display = egl
             .get_platform_display(EGL_PLATFORM_GBM_KHR, gbm.gbm_device, &[egl::NONE as _])

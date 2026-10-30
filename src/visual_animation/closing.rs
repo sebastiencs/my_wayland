@@ -1,163 +1,262 @@
+use std::time::{Duration, Instant};
+
+use khronos_types::gl;
+
+#[cfg(test)]
+use std::{cell::Cell, rc::Rc};
+
 use crate::{
-    clients::Resolved, protocol_generated::WlSurfaceId, region::RectI, state::RootSurfaceClip,
+    clients::Resolved,
+    egl::GlTexture,
+    protocol_generated::WlSurfaceId,
+    region::RectI,
+    render::{BlurVisualStyle, RoundedRing},
+    state::DrmId,
 };
 
-use super::track::RetargetableTrack;
+use super::track::{Easing, RetargetableTrack, TrackStatus, UnitValue};
 
-/// Immutable geometry captured for a close animation.
+/// Backdrop blur redrawn live behind a closing snapshot. The pixels are not baked into the texture.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ClosingFrame {
-    pub bounds: RectI,
-    pub clip: Option<RootSurfaceClip>,
+pub struct FrozenClosingBlur {
+    pub ring: RoundedRing,
+    pub style: BlurVisualStyle,
+    pub alpha: u8,
 }
 
-/// Live-content close record. Phase 6 creates these at detach; Phase 3 only defines ownership.
+/// Progress for one retained close. `progress == 0` is full alpha until the first pump samples time.
 #[derive(Clone, Debug)]
-pub struct DetachedClosingWindow {
-    surface: Resolved<WlSurfaceId>,
-    frame: ClosingFrame,
-    progress: RetargetableTrack,
+struct ClosingSnapshotAnimation {
+    id: u64,
+    source: Resolved<WlSurfaceId>,
+    bounds: RectI,
+    blur: Option<FrozenClosingBlur>,
+    track: RetargetableTrack,
+    cached_alpha: u8,
+    active: bool,
+    pending: bool,
 }
 
-impl DetachedClosingWindow {
-    pub fn new(
-        surface: Resolved<WlSurfaceId>,
-        frame: ClosingFrame,
-        progress: RetargetableTrack,
+impl ClosingSnapshotAnimation {
+    fn start(
+        id: u64,
+        source: Resolved<WlSurfaceId>,
+        bounds: RectI,
+        blur: Option<FrozenClosingBlur>,
     ) -> Self {
-        Self { surface, frame, progress }
+        Self {
+            id,
+            source,
+            bounds,
+            blur,
+            track: RetargetableTrack::settled(UnitValue::ONE),
+            cached_alpha: u8::MAX,
+            active: true,
+            pending: true,
+        }
     }
 
-    pub fn surface(&self) -> Resolved<WlSurfaceId> {
-        self.surface
+    fn advance(&mut self, now: Instant, duration: Duration) -> bool {
+        if !self.active {
+            return false;
+        }
+        if duration.is_zero() {
+            self.finish();
+            return true;
+        }
+        if self.pending {
+            self.track = RetargetableTrack::start_timed(
+                UnitValue::ONE,
+                UnitValue::ZERO,
+                now,
+                duration,
+                Easing::Linear,
+            );
+            self.pending = false;
+        } else if self.track.duration() != duration {
+            self.track
+                .retarget_timed(UnitValue::ZERO, now, duration, Easing::Linear);
+        }
+        let sample = self.track.sample_mut(now);
+        self.cached_alpha = sample.value.lerp_u8(0, u8::MAX);
+        if sample.status == TrackStatus::Settled {
+            self.finish();
+            return true;
+        }
+        false
     }
 
-    pub fn frame(&self) -> ClosingFrame {
-        self.frame
-    }
-
-    pub fn progress(&self) -> &RetargetableTrack {
-        &self.progress
+    fn finish(&mut self) {
+        self.active = false;
+        self.pending = false;
+        self.cached_alpha = 0;
     }
 }
 
-/// Frozen close record. `T` is the retained image payload and is released with the record.
-///
-/// Phase 3 does not capture GPU contents. Callers can use a test payload or a later snapshot type
-/// without changing this ownership boundary.
-#[derive(Clone, Debug)]
-pub struct RetainedClosingSnapshot<T> {
-    surface: Resolved<WlSurfaceId>,
-    frame: ClosingFrame,
-    progress: RetargetableTrack,
-    payload: T,
+/// Immutable window image retained after the real toplevel has left layout, input, and protocol state.
+pub struct RetainedClosingSnapshot {
+    animation: ClosingSnapshotAnimation,
+    drm_id: DrmId,
+    texture: GlTexture,
+    #[cfg(test)]
+    release_probe: Option<Rc<Cell<u32>>>,
 }
 
-impl<T> RetainedClosingSnapshot<T> {
-    pub fn new(
-        surface: Resolved<WlSurfaceId>,
-        frame: ClosingFrame,
-        progress: RetargetableTrack,
-        payload: T,
+impl Drop for RetainedClosingSnapshot {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(probe) = &self.release_probe {
+            probe.set(probe.get().saturating_add(1));
+        }
+    }
+}
+
+impl RetainedClosingSnapshot {
+    pub(crate) fn new(
+        id: u64,
+        source: Resolved<WlSurfaceId>,
+        bounds: RectI,
+        blur: Option<FrozenClosingBlur>,
+        drm_id: DrmId,
+        texture: GlTexture,
     ) -> Self {
-        Self { surface, frame, progress, payload }
+        Self {
+            animation: ClosingSnapshotAnimation::start(id, source, bounds, blur),
+            drm_id,
+            texture,
+            #[cfg(test)]
+            release_probe: None,
+        }
     }
 
-    pub fn surface(&self) -> Resolved<WlSurfaceId> {
-        self.surface
+    pub(crate) fn id(&self) -> u64 {
+        self.animation.id
     }
 
-    pub fn frame(&self) -> ClosingFrame {
-        self.frame
+    pub(crate) fn source(&self) -> Resolved<WlSurfaceId> {
+        self.animation.source
     }
 
-    pub fn progress(&self) -> &RetargetableTrack {
-        &self.progress
+    pub(crate) fn bounds(&self) -> RectI {
+        self.animation.bounds
     }
 
-    pub fn payload(&self) -> &T {
-        &self.payload
+    pub(crate) fn alpha(&self) -> u8 {
+        self.animation.cached_alpha
     }
 
-    pub fn release(self) -> T {
-        self.payload
+    pub(crate) fn is_active(&self) -> bool {
+        self.animation.active
+    }
+
+    pub(crate) fn blur(&self) -> Option<FrozenClosingBlur> {
+        self.animation.blur
+    }
+
+    pub(crate) fn drm_id(&self) -> DrmId {
+        self.drm_id
+    }
+
+    pub(crate) fn texture_id(&self) -> gl::Uint {
+        self.texture.texture_id()
+    }
+
+    /// Samples absolute time. `true` means the fade finished and the caller must drop this record.
+    pub(crate) fn advance(&mut self, now: Instant, duration: Duration) -> bool {
+        self.animation.advance(now, duration)
+    }
+}
+
+#[cfg(test)]
+impl RetainedClosingSnapshot {
+    pub(crate) fn test_pending(
+        id: u64,
+        source: Resolved<WlSurfaceId>,
+        bounds: RectI,
+        drm_id: DrmId,
+    ) -> (Self, Rc<Cell<u32>>) {
+        let probe = Rc::new(Cell::new(0));
+        let snapshot = Self {
+            animation: ClosingSnapshotAnimation::start(id, source, bounds, None),
+            drm_id,
+            texture: GlTexture::test_inert(),
+            release_probe: Some(Rc::clone(&probe)),
+        };
+        (snapshot, probe)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, rc::Rc, time::Instant};
+    use std::time::{Duration, Instant};
 
-    use {
-        super::{ClosingFrame, DetachedClosingWindow, RetainedClosingSnapshot},
-        crate::{
-            clients::{ClientId, Resolved},
-            config::RoundingPower,
-            protocol_generated::WlSurfaceId,
-            region::RectI,
-            state::{ObjectId, RootSurfaceClip},
-            visual_animation::RetargetableTrack,
-        },
+    use crate::{
+        clients::{ClientId, Resolved},
+        protocol_generated::WlSurfaceId,
+        region::RectI,
+        state::{DrmId, ObjectId},
     };
 
-    struct Payload(Rc<Cell<u32>>);
+    use super::RetainedClosingSnapshot;
 
-    impl Drop for Payload {
-        fn drop(&mut self) {
-            self.0.set(self.0.get().saturating_add(1));
-        }
+    fn source() -> Resolved<WlSurfaceId> {
+        Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(4), ObjectId::from(4usize))
     }
 
-    fn frame() -> ClosingFrame {
-        let bounds = RectI::new(4, 8, 40, 24).unwrap();
-        ClosingFrame {
-            bounds,
-            clip: Some(RootSurfaceClip::new(bounds, 6, RoundingPower::DEFAULT)),
-        }
-    }
-
-    fn surface() -> Resolved<WlSurfaceId> {
-        Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(9u32), ObjectId::from(9usize))
+    fn bounds() -> RectI {
+        RectI::new(10, 20, 100, 80).unwrap()
     }
 
     #[test]
-    fn detached_record_keeps_identity_geometry_and_progress() {
+    fn pending_snapshot_is_fully_opaque_before_the_clock_starts() {
+        let (snapshot, probe) =
+            RetainedClosingSnapshot::test_pending(1, source(), bounds(), DrmId::from(0usize));
+        assert!(snapshot.is_active());
+        assert_eq!(snapshot.alpha(), 255);
+        assert_eq!(snapshot.source(), source());
+        assert_eq!(snapshot.bounds(), bounds());
+        assert_eq!(probe.get(), 0);
+        drop(snapshot);
+        assert_eq!(probe.get(), 1);
+    }
+
+    #[test]
+    fn midpoint_stays_translucent_and_completion_releases_once() {
+        let (mut snapshot, probe) =
+            RetainedClosingSnapshot::test_pending(7, source(), bounds(), DrmId::from(1usize));
         let now = Instant::now();
-        let record = DetachedClosingWindow::new(
-            surface(),
-            frame(),
-            RetargetableTrack::settled(crate::visual_animation::UnitValue::ONE),
-        );
-
-        assert_eq!(record.surface(), surface());
-        assert_eq!(record.frame(), frame());
-        assert!(!record.progress().needs_frames(now));
+        let duration = Duration::from_millis(100);
+        assert!(!snapshot.advance(now, duration));
+        assert_eq!(snapshot.alpha(), 255);
+        assert!(!snapshot.advance(now + Duration::from_millis(50), duration));
+        assert!(snapshot.alpha() > 0 && snapshot.alpha() < 255);
+        assert!(snapshot.advance(now + duration, duration));
+        assert_eq!(snapshot.alpha(), 0);
+        assert!(!snapshot.is_active());
+        drop(snapshot);
+        assert_eq!(probe.get(), 1);
     }
 
     #[test]
-    fn retained_snapshot_owns_and_releases_its_payload() {
-        let drops = Rc::new(Cell::new(0));
-        let snapshot = RetainedClosingSnapshot::new(
-            surface(),
-            frame(),
-            RetargetableTrack::settled(crate::visual_animation::UnitValue::ZERO),
-            Payload(drops.clone()),
-        );
-        assert_eq!(snapshot.payload().0.get(), 0);
+    fn zero_duration_completes_immediately() {
+        let (mut snapshot, probe) =
+            RetainedClosingSnapshot::test_pending(3, source(), bounds(), DrmId::from(0usize));
+        assert!(snapshot.advance(Instant::now(), Duration::ZERO));
+        assert_eq!(snapshot.alpha(), 0);
+        drop(snapshot);
+        assert_eq!(probe.get(), 1);
+    }
 
-        let released = snapshot.release();
-        assert_eq!(drops.get(), 0);
-        drop(released);
-        assert_eq!(drops.get(), 1);
-
-        {
-            let _snapshot = RetainedClosingSnapshot::new(
-                surface(),
-                frame(),
-                RetargetableTrack::settled(crate::visual_animation::UnitValue::ZERO),
-                Payload(drops.clone()),
-            );
-        }
-        assert_eq!(drops.get(), 2);
+    #[test]
+    fn duration_retarget_keeps_the_current_alpha() {
+        let (mut snapshot, _probe) =
+            RetainedClosingSnapshot::test_pending(9, source(), bounds(), DrmId::from(0usize));
+        let now = Instant::now();
+        assert!(!snapshot.advance(now, Duration::from_millis(100)));
+        assert!(!snapshot.advance(now + Duration::from_millis(50), Duration::from_millis(100)));
+        let mid = snapshot.alpha();
+        assert!(!snapshot.advance(now + Duration::from_millis(50), Duration::from_millis(400)));
+        assert_eq!(snapshot.alpha(), mid);
+        assert!(snapshot.is_active());
     }
 }

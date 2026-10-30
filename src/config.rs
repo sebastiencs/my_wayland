@@ -138,6 +138,7 @@ pub struct AnimationsConfig {
 pub struct WindowAnimationConfig {
     pub duration_msec: u32,
     pub open_duration_msec: u32,
+    pub close_duration_msec: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -392,6 +393,7 @@ struct AnimationsConfigFile {
 struct WindowAnimationConfigFile {
     duration_msec: u32,
     open_duration_msec: u32,
+    close_duration_msec: u32,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -545,6 +547,7 @@ impl RuntimeConfig {
             window: WindowAnimationConfig {
                 duration_msec: parsed.animations.window.duration_msec,
                 open_duration_msec: parsed.animations.window.open_duration_msec,
+                close_duration_msec: parsed.animations.window.close_duration_msec,
             },
         };
 
@@ -736,7 +739,11 @@ impl Default for AnimationsConfig {
 
 impl Default for WindowAnimationConfig {
     fn default() -> Self {
-        Self { duration_msec: 160, open_duration_msec: 160 }
+        Self {
+            duration_msec: 160,
+            open_duration_msec: 160,
+            close_duration_msec: 160,
+        }
     }
 }
 
@@ -839,6 +846,7 @@ impl Default for WindowAnimationConfigFile {
         Self {
             duration_msec: WindowAnimationConfig::default().duration_msec,
             open_duration_msec: WindowAnimationConfig::default().open_duration_msec,
+            close_duration_msec: WindowAnimationConfig::default().close_duration_msec,
         }
     }
 }
@@ -1860,17 +1868,20 @@ mod tests {
         let defaults = RuntimeConfig::parse_for_test("", &xkb).unwrap();
         assert_eq!(defaults.animations.window.duration_msec, 160);
         assert_eq!(defaults.animations.window.open_duration_msec, 160);
+        assert_eq!(defaults.animations.window.close_duration_msec, 160);
 
         let configured = RuntimeConfig::parse_for_test(
             r#"
             [animations.window]
             duration_msec = 40
             open_duration_msec = 0
+            close_duration_msec = 0
             "#,
             &xkb,
         )
         .unwrap();
         assert_eq!(configured.animations.window.duration_msec, 40);
         assert_eq!(configured.animations.window.open_duration_msec, 0);
+        assert_eq!(configured.animations.window.close_duration_msec, 0);
     }
 }

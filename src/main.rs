@@ -290,6 +290,8 @@ fn main() {
         output_workspace_groups: Default::default(),
         root_surface_workspaces: Default::default(),
         managed_root_surfaces: Default::default(),
+        closing_snapshots: Vec::new(),
+        next_closing_snapshot_id: 1,
         root_geometry_cache: Default::default(),
         client_process_info: Default::default(),
         xdg_toplevel_roles: Default::default(),
@@ -298,6 +300,8 @@ fn main() {
         next_workspace_serial: 1,
         backend_syncobj_globals: Default::default(),
         session_active: true,
+        #[cfg(test)]
+        realize_closing_snapshots_in_tests: false,
         frame_scheduler: Default::default(),
         presentation: Default::default(),
         globals,

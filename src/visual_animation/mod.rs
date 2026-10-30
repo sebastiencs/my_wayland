@@ -8,8 +8,8 @@
 //! helpers here.
 //!
 //! Visibility stays in the scene participation policy. Input, protocol, and render eligibility are
-//! not derived from these visual modifiers. Workspace transitions and close records defined here
-//! are dormant until later phases attach them to workspace groups and surface teardown.
+//! not derived from these visual modifiers. Workspace transitions defined here stay dormant.
+//! Closing toplevels keep a retained snapshot, sampled by the same animation pump.
 
 mod closing;
 mod track;
@@ -17,7 +17,7 @@ mod window;
 mod workspace;
 
 pub use {
-    closing::{ClosingFrame, DetachedClosingWindow, RetainedClosingSnapshot},
+    closing::{FrozenClosingBlur, RetainedClosingSnapshot},
     track::{
         apply_easing, unit_progress_between, Easing, RetargetableTrack, TrackInterrupt, TrackMode,
         TrackSample, TrackStatus, UnitValue,

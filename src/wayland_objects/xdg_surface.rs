@@ -721,7 +721,7 @@ pub mod xdg_toplevel {
             Client, ClientDispatcher, ClientId, ClientManagerAction, EventWriter, RawRequest,
             Resolved,
         },
-        drm::schedule_outputs,
+        drm::{begin_managed_toplevel_close_id, schedule_outputs},
         object::{Object, Parser, PostAction, RequestResult},
         protocol_generated::{
             xdg_toplevel as proto_xdg_toplevel, zxdg_toplevel_decoration_v1, Array, WaylandId,
@@ -1468,6 +1468,18 @@ pub mod xdg_toplevel {
 
             match client.parse::<Self>(req).unwrap() {
                 Destroy => {
+                    if let Some(surface_id) = self
+                        .xdg_surface
+                        .try_ref(state)
+                        .map(|xdg_surface| xdg_surface.wl_surface())
+                    {
+                        begin_managed_toplevel_close_id(
+                            state,
+                            surface_id,
+                            Some(self.decoration_mode()),
+                            dispatcher,
+                        );
+                    }
                     if let Some(decoration) = self.decoration_object() {
                         let decoration_id =
                             decoration.try_ref(state).map(|decoration| decoration.id());
