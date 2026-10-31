@@ -1252,13 +1252,10 @@ pub fn execute_action(state: &mut State, dispatcher: &mut Dispatcher, action: Co
             }
         }
         CompositorAction::WorkspaceIndex { index } => {
-            let _ = require_workspace_index(state, "workspace-index", index);
+            select_workspace_index(state, dispatcher, index);
         }
         CompositorAction::MoveToWorkspace { index } => {
-            if require_focused_window(state, "move-to-workspace").is_none() {
-                return;
-            }
-            let _ = require_workspace_index(state, "move-to-workspace", index);
+            move_focused_window_to_workspace(state, dispatcher, index);
         }
     }
 }
@@ -1537,10 +1534,71 @@ fn publish_workspace_group(
     group_id: WorkspaceGroupId,
 ) {
     let outputs = state.workspace_group_output_ids(group_id);
+    publish_workspace_outputs(state, dispatcher, outputs);
+}
+
+fn publish_workspace_outputs(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    outputs: impl IntoIterator<Item = crate::state::OutputId>,
+) {
     crate::wayland_objects::ext_workspace_manager_v1::publish_workspace_state_changed(
         state, dispatcher, outputs,
     );
     kick_visual_animation_pump(dispatcher);
+}
+
+fn select_workspace_index(state: &mut State, dispatcher: &mut Dispatcher, index: u32) {
+    let Some(workspace_id) = require_workspace_index(state, "workspace-index", index) else {
+        return;
+    };
+    let Some(group_id) = state
+        .workspaces
+        .try_get(workspace_id)
+        .and_then(|workspace| workspace.group)
+    else {
+        return;
+    };
+    // `activate_workspace` is false when the index is already showing. That skips the slide.
+    if !state.activate_workspace(workspace_id) {
+        return;
+    }
+    log::info!("workspace index {index} on group {group_id:?}");
+    publish_workspace_group(state, dispatcher, group_id);
+}
+
+fn move_focused_window_to_workspace(state: &mut State, dispatcher: &mut Dispatcher, index: u32) {
+    let Some(root) = require_focused_window(state, "move-to-workspace") else {
+        return;
+    };
+    let Some(workspace_id) = require_workspace_index(state, "move-to-workspace", index) else {
+        return;
+    };
+    let source_workspace = state.root_surface_workspace(root);
+    let already_there = source_workspace == Some(workspace_id);
+    if !already_there && !state.assign_root_surface_to_workspace(root, workspace_id) {
+        log::info!("move-to-workspace ignored; could not move the focused window");
+        return;
+    }
+    let activated = state.activate_workspace(workspace_id);
+    if already_there && !activated {
+        return;
+    }
+    // Sway's `move container to workspace` can leave the seat on the source workspace.
+    // This binding follows the window, then puts keyboard focus back after publication.
+    // Publication refreshes focus from the pointer, so the moved window is focused last.
+    log::info!("move window to workspace index {index}");
+    let mut outputs = Vec::new();
+    if let Some(source_workspace) = source_workspace {
+        outputs.extend(state.workspace_output_ids(source_workspace));
+    }
+    outputs.extend(state.workspace_output_ids(workspace_id));
+    publish_workspace_outputs(state, dispatcher, outputs);
+    crate::input::set_keyboard_focus(
+        state,
+        dispatcher,
+        Some(crate::input::SurfaceFocus::new(root)),
+    );
 }
 
 fn activate_adjacent_workspace(
@@ -2682,5 +2740,157 @@ mod tests {
         execute_action(&mut state, &mut dispatcher, CompositorAction::FocusPrevious);
         assert_eq!(scene_orders(&state, first).0, vec![first, second, third]);
         assert_eq!(keyboard_surface(&state), Some(third));
+    }
+
+    fn group_workspaces(state: &State, output: OutputId) -> Vec<crate::state::WorkspaceId> {
+        let group_id = state.workspace_group_for_output(output).unwrap();
+        state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .workspaces
+            .clone()
+    }
+
+    fn group_transition(
+        state: &State,
+        output: OutputId,
+    ) -> Option<crate::visual_animation::WorkspaceGroupTransition> {
+        let group_id = state.workspace_group_for_output(output).unwrap();
+        state.workspace_groups.try_get(group_id).unwrap().transition
+    }
+
+    fn output_frame_requested(dispatcher: &Dispatcher, output: OutputId) -> bool {
+        dispatcher.test_has_queued_action_for(
+            crate::scheduler::output_scheduler::output_scheduler_id(output),
+            |action: &crate::scheduler::output_scheduler::OutputSchedulerAction| {
+                matches!(
+                    action,
+                    crate::scheduler::output_scheduler::OutputSchedulerAction::RequestFrame { .. }
+                )
+            },
+        )
+    }
+
+    #[test]
+    fn workspace_index_slides_within_the_active_output_group() {
+        let mut state = state_for_tests();
+        state.config.animations.workspace.duration_msec = 250;
+        let (left, _surface) = insert_managed_root(&mut state);
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let right = state.insert_output(test_output_with_crtc_name(backend, 2, 100, 0, 100, 100));
+        let workspaces = group_workspaces(&state, left);
+        let mut dispatcher = Dispatcher::default();
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::WorkspaceIndex { index: 1 });
+        assert_eq!(state.active_workspace_for_output(left), Some(workspaces[0]));
+        assert!(group_transition(&state, left).is_none());
+        assert!(!output_frame_requested(&dispatcher, left));
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::WorkspaceIndex { index: 0 });
+        assert_eq!(state.active_workspace_for_output(left), Some(workspaces[0]));
+
+        for index in 2..=4 {
+            execute_action(&mut state, &mut dispatcher, CompositorAction::WorkspaceIndex { index });
+            let slot = (index - 1) as usize;
+            assert_eq!(state.active_workspace_for_output(left), Some(workspaces[slot]));
+            let transition = group_transition(&state, left).unwrap();
+            assert_eq!(
+                transition.direction(),
+                crate::visual_animation::WorkspaceTransitionDirection::Next
+            );
+            assert_eq!(transition.to_workspace(), workspaces[slot]);
+        }
+        let stayed = group_transition(&state, left).unwrap();
+        execute_action(&mut state, &mut dispatcher, CompositorAction::WorkspaceIndex { index: 4 });
+        let still = group_transition(&state, left).unwrap();
+        assert_eq!(still.from_workspace(), stayed.from_workspace());
+        assert_eq!(still.to_workspace(), stayed.to_workspace());
+        assert_eq!(still.direction(), stayed.direction());
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::WorkspaceIndex { index: 1 });
+        let back = group_transition(&state, left).unwrap();
+        assert_eq!(
+            back.direction(),
+            crate::visual_animation::WorkspaceTransitionDirection::Previous
+        );
+        assert_eq!(back.from_workspace(), workspaces[3]);
+        assert_eq!(back.to_workspace(), workspaces[0]);
+        assert!(output_frame_requested(&dispatcher, left));
+        assert!(!output_frame_requested(&dispatcher, right));
+    }
+
+    #[test]
+    fn move_to_workspace_follows_the_window_and_keeps_its_mode() {
+        let mut state = state_for_tests();
+        state.config.animations.workspace.duration_msec = 250;
+        let surface = focus_managed_root(&mut state);
+        assert!(state.set_root_surface_floating(surface, true));
+        assert!(state.set_root_surface_fullscreen(surface, true));
+        let source = state.root_surface_workspace(surface).unwrap();
+        state
+            .workspaces
+            .try_get_mut(source)
+            .unwrap()
+            .layout
+            .set_fullscreen(Some(surface));
+        let output = state.workspace_output_id(source).unwrap();
+        let workspaces = group_workspaces(&state, output);
+        let mut dispatcher = Dispatcher::default();
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::MoveToWorkspace { index: 4 });
+        assert_eq!(state.root_surface_workspace(surface), Some(workspaces[3]));
+        assert_eq!(state.active_workspace_for_output(output), Some(workspaces[3]));
+        assert_eq!(keyboard_surface(&state), Some(surface));
+        let managed = state.managed_root_surface_state(surface).unwrap();
+        assert_eq!(managed.mode, crate::state::ManagedWindowMode::Floating);
+        assert!(managed.fullscreen);
+        assert!(state
+            .workspaces
+            .try_get(source)
+            .unwrap()
+            .layout
+            .fullscreen
+            .is_none());
+        let transition = group_transition(&state, output).unwrap();
+        assert_eq!(
+            transition.direction(),
+            crate::visual_animation::WorkspaceTransitionDirection::Next
+        );
+        assert_eq!(transition.from_workspace(), workspaces[0]);
+        assert_eq!(transition.to_workspace(), workspaces[3]);
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::MoveToWorkspace { index: 4 });
+        assert_eq!(state.root_surface_workspace(surface), Some(workspaces[3]));
+        assert_eq!(state.active_workspace_for_output(output), Some(workspaces[3]));
+        assert_eq!(keyboard_surface(&state), Some(surface));
+        let again = group_transition(&state, output).unwrap();
+        assert_eq!(again.from_workspace(), transition.from_workspace());
+        assert_eq!(again.to_workspace(), transition.to_workspace());
+    }
+
+    #[test]
+    fn move_to_workspace_publishes_the_source_and_destination_outputs() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let left = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let right = state.insert_output(test_output_with_crtc_name(backend, 2, 100, 0, 100, 100));
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(51u32), ClientId::from_raw(1), 6));
+        let surface = Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(51u32), object_id);
+        state.register_root_surface(surface);
+        state.seat.keyboard_focus = Some(SurfaceFocus::new(surface));
+        let source = state.root_surface_workspace(surface).unwrap();
+        state.seat.pointer_pos = (150.0, 10.0);
+        let right_workspaces = group_workspaces(&state, right);
+        let mut dispatcher = Dispatcher::default();
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::MoveToWorkspace { index: 1 });
+        assert_eq!(state.root_surface_workspace(surface), Some(right_workspaces[0]));
+        assert_eq!(state.active_workspace_for_output(left), Some(source));
+        assert_eq!(state.active_workspace_for_output(right), Some(right_workspaces[0]));
+        assert_eq!(keyboard_surface(&state), Some(surface));
+        assert!(output_frame_requested(&dispatcher, left));
+        assert!(output_frame_requested(&dispatcher, right));
     }
 }
