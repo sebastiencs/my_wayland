@@ -273,6 +273,7 @@ pub struct SeatState {
     pub(crate) keyboard_focus: Option<SurfaceFocus>,
     keyboard_focus_history: VecDeque<SurfaceFocus>,
     pub(crate) pointer_button_count: u32,
+    pressed_buttons: BTreeSet<u32>,
     last_pointer_press: Option<PointerPressState>,
     last_keyboard_trigger: Option<KeyboardTriggerState>,
     cursor: CursorState,
@@ -301,6 +302,7 @@ impl Default for SeatState {
             keyboard_focus: None,
             keyboard_focus_history: VecDeque::new(),
             pointer_button_count: 0,
+            pressed_buttons: BTreeSet::new(),
             last_pointer_press: None,
             last_keyboard_trigger: None,
             cursor,
@@ -323,6 +325,7 @@ impl SeatState {
     /// Drop pointer and keyboard device state after input devices are removed.
     pub fn clear_device_state(&mut self) {
         self.pointer_button_count = 0;
+        self.pressed_buttons.clear();
         self.last_pointer_press = None;
         self.last_keyboard_trigger = None;
         self.popup_grab = None;
@@ -1109,6 +1112,11 @@ pub fn handle_pointer_button(
     state
         .seat
         .record_pointer_button(button_state, serial, pointer_focus.map(|focus| focus.target));
+    if button_state == 1 {
+        state.seat.pressed_buttons.insert(button);
+    } else {
+        state.seat.pressed_buttons.remove(&button);
+    }
 
     if button_state != 1 && state.seat.take_intercepted_pointer_button(button) {
         finish_pointer_interactive_grab(state, dispatcher, time);
@@ -1237,15 +1245,10 @@ pub fn handle_pointer_motion_absolute(
     }
 }
 
-/// Release keys this seat still considers pressed and drop grabs before a device pause.
+/// Release stuck keys, buttons, focus, and grabs before a device pause.
 pub fn quiesce_for_session_pause(state: &mut State, dispatcher: &mut Dispatcher) {
     let keys = state.keyboard.pressed_keys().0;
-    let buttons: Vec<u32> = state
-        .seat
-        .intercepted_pointer_buttons
-        .iter()
-        .copied()
-        .collect();
+    let buttons: Vec<u32> = state.seat.pressed_buttons.iter().copied().collect();
     let time = monotonic_time_msec();
     for key in keys {
         handle_keyboard_key(state, dispatcher, key, 0, time);
@@ -1253,13 +1256,35 @@ pub fn quiesce_for_session_pause(state: &mut State, dispatcher: &mut Dispatcher)
     for button in buttons {
         handle_pointer_button(state, dispatcher, button, 0, time);
     }
+    cancel_active_drag(state, dispatcher, None);
+    if let Some((client_id, popups)) = state.seat.dismiss_popup_grab() {
+        dispatcher.dispatch_to(client_id, ClientAction::DismissPopupGrab { popups });
+    }
+    if state.seat.pointer_interactive_grab.is_some() {
+        abort_pointer_interactive_grab(state, dispatcher, time);
+    }
+    set_keyboard_focus(state, dispatcher, None);
+    clear_pointer_focus(state, dispatcher);
     state.seat.pointer_button_count = 0;
+    state.seat.pressed_buttons.clear();
     state.seat.last_pointer_press = None;
-    state.seat.popup_grab = None;
-    state.seat.pointer_interactive_grab = None;
     state.seat.intercepted_keyboard_keys.clear();
     state.seat.intercepted_pointer_buttons.clear();
-    state.seat.active_drag = None;
+}
+
+fn clear_pointer_focus(state: &mut State, dispatcher: &mut Dispatcher) {
+    let Some(old_focus) = state.seat.pointer_focus.take() else {
+        state.seat.clear_pointer_enter();
+        return;
+    };
+    let serial = state.seat.next_serial();
+    dispatch_client_event(
+        dispatcher,
+        old_focus.target.client_id(),
+        SeatClientEvent::PointerLeave { serial, surface: old_focus.target.surface },
+    );
+    dispatch_client_event(dispatcher, old_focus.target.client_id(), SeatClientEvent::PointerFrame);
+    state.seat.clear_pointer_enter();
 }
 
 pub fn handle_keyboard_key(
@@ -4753,6 +4778,46 @@ mod xdg_seat_tests {
             |action| matches!(
                 action,
                 ClientAction::SeatEvent { event: SeatClientEvent::PointerFrame }
+            )
+        ));
+    }
+
+    #[test]
+    fn session_pause_releases_buttons_and_leaves_focus() {
+        let mut state = state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        let client_id = ClientId::from_raw(7);
+        let surface = fake_focus(client_id, WlSurfaceId::from(50));
+        state.keyboard.update_key(30, true);
+        state.seat.pressed_buttons.insert(0x110);
+        state.seat.pointer_button_count = 1;
+        state.seat.keyboard_focus = Some(surface);
+        state.seat.remember_keyboard_focus(surface);
+        state.seat.pointer_focus = Some(super::PointerFocus {
+            target: surface,
+            rect: super::SurfaceRect { x: 0, y: 0, width: 10, height: 10 },
+        });
+
+        super::quiesce_for_session_pause(&mut state, &mut dispatcher);
+
+        assert!(state.keyboard.pressed_keys().0.is_empty());
+        assert!(state.seat.pressed_buttons.is_empty());
+        assert_eq!(state.seat.pointer_button_count, 0);
+        assert!(state.seat.keyboard_focus.is_none());
+        assert!(state.seat.pointer_focus.is_none());
+        assert!(state.seat.keyboard_focus_history().contains(&surface));
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client_id,
+            |action| matches!(
+                action,
+                ClientAction::SeatEvent { event: SeatClientEvent::KeyboardLeave { .. } }
+            )
+        ));
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client_id,
+            |action| matches!(
+                action,
+                ClientAction::SeatEvent { event: SeatClientEvent::PointerLeave { .. } }
             )
         ));
     }

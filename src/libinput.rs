@@ -25,6 +25,7 @@ use crate::{
         self, PointerAxisChange, PointerScrollDirection, PointerScrollFrame, PointerScrollSource,
     },
     state::{InputId, State},
+    udev::UdevAction,
 };
 
 use {input::LibinputInterface, nix::unistd::dup};
@@ -68,6 +69,8 @@ pub struct Libinput {
     /// open the files in another thread or not
     dev_to_fd: Arc<Mutex<BTreeMap<u64, OwnedFd>>>,
     inputs: BTreeSet<InputId>,
+    /// Devnodes whose session fd is held until the session is active.
+    pending_open: BTreeMap<u64, String>,
     poll_op_id: Option<RingId>,
 }
 
@@ -79,7 +82,13 @@ impl Libinput {
         set_logger(&libinput);
         let inputs = Default::default();
 
-        Box::new(Self { libinput, dev_to_fd, inputs, poll_op_id: None })
+        Box::new(Self {
+            libinput,
+            dev_to_fd,
+            inputs,
+            pending_open: BTreeMap::new(),
+            poll_op_id: None,
+        })
     }
 
     pub fn dispatch(&mut self) -> std::io::Result<()> {
@@ -134,7 +143,30 @@ impl Libinput {
             self.libinput.path_remove_device(input.device);
         }
         self.drain_events();
+        self.pending_open.remove(&devnum);
         self.dev_to_fd.lock().unwrap().remove(&devnum);
+    }
+
+    fn add_device(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut Dispatcher,
+        devnode: String,
+        devnum: u64,
+    ) {
+        self.pending_open.remove(&devnum);
+        let device = match self.libinput.path_add_device(&devnode) {
+            Some(device) => device,
+            None => {
+                log::error!("failed to restore input device {devnode}");
+                dispatcher.dispatch(DbusAction::ReleaseDevice { devnum: devnum as libc::dev_t });
+                dispatcher.dispatch(LibinputAction::CloseFailedFd { devnum });
+                dispatcher.dispatch(UdevAction::InputLost { devnum: devnum as libc::dev_t });
+                return;
+            }
+        };
+        let input_id = state.inputs.insert(Input { device, devnum });
+        self.inputs.insert(input_id);
     }
 }
 
@@ -149,6 +181,12 @@ pub enum LibinputAction {
     },
     /// Remove one device from libinput and close its session fd afterwards.
     Quiesce {
+        devnum: u64,
+    },
+    /// Open devices that were held back while the session was inactive.
+    SessionActive,
+    /// Close one session fd after its logind release has been queued.
+    CloseFailedFd {
         devnum: u64,
     },
     CloseSessionFds,
@@ -318,21 +356,30 @@ impl Model for Libinput {
                 if !state.session_active {
                     log::info!("parking input device {devnode} while the session is inactive");
                     self.insert_device_fd(fd, devnum);
+                    self.pending_open.insert(devnum, devnode);
                     return Ok(());
                 }
                 self.insert_device_fd(fd, devnum);
-                let device = match self.libinput.path_add_device(&devnode) {
-                    Some(device) => device,
-                    None => {
-                        log::error!("Failed to get {:?}", devnode);
-                        return Ok(());
-                    }
-                };
-
-                let input_id = state.inputs.insert(Input { device, devnum });
-                self.inputs.insert(input_id);
+                self.add_device(state, dispatcher, devnode, devnum);
             }
             Quiesce { devnum } => self.quiesce_device(state, devnum),
+            SessionActive => {
+                if dispatcher.shutdown_requested() || !state.session_active {
+                    return Ok(());
+                }
+                let pending: Vec<_> = self
+                    .pending_open
+                    .iter()
+                    .map(|(devnum, devnode)| (*devnum, devnode.clone()))
+                    .collect();
+                for (devnum, devnode) in pending {
+                    self.add_device(state, dispatcher, devnode, devnum);
+                }
+            }
+            CloseFailedFd { devnum } => {
+                self.pending_open.remove(&devnum);
+                self.dev_to_fd.lock().unwrap().remove(&devnum);
+            }
             PollFailed { message } => {
                 return Err(ModelFailure::Shutdown(ShutdownReason::Fatal {
                     source: "libinput",
@@ -732,6 +779,23 @@ mod device_stop_tests {
             .unwrap();
         assert!(libinput.inputs.is_empty());
         assert!(libinput.dev_to_fd.lock().unwrap().contains_key(&9));
+        assert!(libinput.pending_open.contains_key(&9));
+
+        state.session_active = true;
+        libinput
+            .process(&mut state, LibinputAction::SessionActive, &mut dispatcher)
+            .unwrap();
+        assert!(libinput.pending_open.is_empty());
+        assert!(!dispatcher.shutdown_requested());
+        assert!(dispatcher.test_has_queued_action(|action: &DbusAction| {
+            matches!(action, DbusAction::ReleaseDevice { devnum: 9 })
+        }));
+        assert!(dispatcher.test_has_queued_action(|action: &LibinputAction| {
+            matches!(action, LibinputAction::CloseFailedFd { devnum: 9 })
+        }));
+        assert!(dispatcher.test_has_queued_action(|action: &UdevAction| {
+            matches!(action, UdevAction::InputLost { devnum: 9 })
+        }));
     }
 }
 

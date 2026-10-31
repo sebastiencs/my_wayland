@@ -130,6 +130,12 @@ pub enum UdevAction {
         devnum: libc::dev_t,
         fd: OwnedFd,
     },
+    /// The session is active, so parked input devices may be opened.
+    SessionActive,
+    /// path_add_device failed. Drop this input device and keep the session.
+    InputLost {
+        devnum: libc::dev_t,
+    },
     Stop,
 }
 
@@ -208,6 +214,28 @@ impl Model for Udev {
             }
             UdevAction::ResumeDevice { devnum, fd } => {
                 self.resumed_fds.insert(devnum, fd);
+                if state.session_active {
+                    self.restore_ready_input(devnum, dispatcher);
+                }
+            }
+            UdevAction::SessionActive => {
+                if state.session_active {
+                    let devnums: Vec<_> = self.retained_inputs.keys().copied().collect();
+                    for devnum in devnums {
+                        self.restore_ready_input(devnum, dispatcher);
+                    }
+                }
+            }
+            UdevAction::InputLost { devnum } => {
+                self.retained_inputs.remove(&devnum);
+                self.resumed_fds.remove(&devnum);
+                if self
+                    .parked
+                    .get(&devnum)
+                    .is_some_and(|parked| matches!(parked.kind, ParkedKind::Input))
+                {
+                    self.parked.remove(&devnum);
+                }
             }
             UdevAction::Stop => self.shutdown_backends(state, dispatcher),
         }
@@ -467,6 +495,36 @@ impl Udev {
             }
         }
         seat::quiesce_for_session_pause(state, dispatcher);
+    }
+
+    /// Open one retained input device with its newest session fd.
+    fn restore_ready_input(&mut self, devnum: libc::dev_t, dispatcher: &mut Dispatcher) {
+        let Some(devnode) = self.retained_inputs.get(&devnum).cloned() else {
+            return;
+        };
+        let Some(fd) = self.take_input_fd(devnum) else {
+            return;
+        };
+        set_non_blocking(fd.as_raw_fd());
+        dispatcher.dispatch(LibinputAction::Quiesce { devnum: devnum as u64 });
+        dispatcher.dispatch(LibinputAction::OpenInput { devnode, fd, devnum: devnum as u64 });
+    }
+
+    /// ResumeDevice replaces a parked TakeDevice fd. The returned fd is consumed once.
+    fn take_input_fd(&mut self, devnum: libc::dev_t) -> Option<OwnedFd> {
+        let resumed = self.resumed_fds.remove(&devnum);
+        let parked = self.parked.get_mut(&devnum).and_then(|parked| {
+            matches!(parked.kind, ParkedKind::Input)
+                .then(|| parked.fd.take())
+                .flatten()
+        });
+        match (resumed, parked) {
+            (Some(resumed), parked) => {
+                drop(parked);
+                Some(resumed)
+            }
+            (None, parked) => parked,
+        }
     }
 
     fn on_drm_taken(
@@ -895,6 +953,118 @@ mod tests {
             matches!(action, DbusAction::DevicePauseQuiesced { devnum } if *devnum == input_devnum)
         }));
         assert!(matches!(udev.parked.get(&drm_devnum).unwrap().kind, super::ParkedKind::Drm(_)));
+    }
+
+    #[test]
+    fn resume_opens_a_retained_input_once_the_session_is_active() {
+        use std::os::fd::AsRawFd;
+
+        use crate::{libinput::LibinputAction, runner::Model};
+
+        let mut udev = Udev::new().expect("udev monitor");
+        let mut state = crate::test_support::state_for_tests();
+        state.session_active = false;
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        let devnum = 42;
+        udev.retained_inputs
+            .insert(devnum, "/dev/input/event0".into());
+
+        let first: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let second: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let second_raw = second.as_raw_fd();
+        udev.process(
+            &mut state,
+            super::UdevAction::ResumeDevice { devnum, fd: first },
+            &mut dispatcher,
+        )
+        .expect("resume before active");
+        udev.process(
+            &mut state,
+            super::UdevAction::ResumeDevice { devnum, fd: second },
+            &mut dispatcher,
+        )
+        .expect("duplicate resume");
+        assert!(!dispatcher.test_has_queued_action(|action: &LibinputAction| {
+            matches!(action, LibinputAction::OpenInput { .. })
+        }));
+        assert_eq!(udev.resumed_fds.get(&devnum).unwrap().as_raw_fd(), second_raw);
+        udev.process(&mut state, super::UdevAction::Stop, &mut dispatcher)
+            .expect("stop while the resume fd is still parked");
+        assert_eq!(udev.resumed_fds.get(&devnum).unwrap().as_raw_fd(), second_raw);
+        assert!(udev.retained_inputs.contains_key(&devnum));
+
+        state.session_active = true;
+        udev.process(&mut state, super::UdevAction::SessionActive, &mut dispatcher)
+            .expect("active after resume");
+        assert!(udev.resumed_fds.get(&devnum).is_none());
+        assert_eq!(
+            dispatcher.test_count_queued_action(|action: &LibinputAction| {
+                matches!(action, LibinputAction::OpenInput { fd, .. } if fd.as_raw_fd() == second_raw)
+            }),
+            1
+        );
+
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        state.session_active = true;
+        udev.process(&mut state, super::UdevAction::SessionActive, &mut dispatcher)
+            .expect("active before the next resume");
+        assert!(!dispatcher.test_has_queued_action(|action: &LibinputAction| {
+            matches!(action, LibinputAction::OpenInput { .. })
+        }));
+        let third: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let third_raw = third.as_raw_fd();
+        udev.process(
+            &mut state,
+            super::UdevAction::ResumeDevice { devnum, fd: third },
+            &mut dispatcher,
+        )
+        .expect("resume after active");
+        assert!(udev.resumed_fds.get(&devnum).is_none());
+        assert!(dispatcher.test_has_queued_action(|action: &LibinputAction| {
+            matches!(
+                action,
+                LibinputAction::OpenInput { fd, .. } if fd.as_raw_fd() == third_raw
+            )
+        }));
+
+        udev.process(
+            &mut state,
+            super::UdevAction::PauseDevice { devnum, kind: super::DevicePauseKind::Pause },
+            &mut dispatcher,
+        )
+        .expect("pause again");
+        assert!(udev.retained_inputs.contains_key(&devnum));
+        let fourth: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let fourth_raw = fourth.as_raw_fd();
+        udev.process(
+            &mut state,
+            super::UdevAction::ResumeDevice { devnum, fd: fourth },
+            &mut dispatcher,
+        )
+        .expect("resume again");
+        assert!(dispatcher.test_has_queued_action(|action: &LibinputAction| {
+            matches!(action, LibinputAction::OpenInput { fd, .. } if fd.as_raw_fd() == fourth_raw)
+        }));
+    }
+
+    #[test]
+    fn a_drm_resume_fd_stays_stored_until_modeset() {
+        use std::os::fd::AsRawFd;
+
+        use crate::{libinput::LibinputAction, runner::Model};
+
+        let mut udev = Udev::new().expect("udev monitor");
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        let devnum = 7;
+        let fd: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let raw = fd.as_raw_fd();
+        udev.process(&mut state, super::UdevAction::ResumeDevice { devnum, fd }, &mut dispatcher)
+            .expect("drm resume");
+        assert_eq!(udev.resumed_fds.get(&devnum).unwrap().as_raw_fd(), raw);
+        assert!(!dispatcher.test_has_queued_action(|action: &LibinputAction| {
+            matches!(action, LibinputAction::OpenInput { .. })
+        }));
     }
 
     fn first_device(subsystem: &str) -> udev::Device {

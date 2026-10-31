@@ -673,6 +673,9 @@ impl Dbus {
         state.session_active = active;
         if !active {
             crate::seat::quiesce_for_session_pause(state, dispatcher);
+        } else {
+            dispatcher.dispatch(UdevAction::SessionActive);
+            dispatcher.dispatch(crate::libinput::LibinputAction::SessionActive);
         }
         crate::drm::kick_visual_animation_pump(dispatcher);
         for (output_id, _) in state.outputs.iter() {
@@ -1415,6 +1418,22 @@ mod session_release_tests {
         let read = peer.read(&mut bytes).unwrap();
         let text = String::from_utf8_lossy(&bytes[..read]);
         assert!(!text.contains("ReleaseDevice"));
+        assert!(text.contains("ReleaseControl"));
+    }
+
+    #[test]
+    fn shutdown_still_releases_a_paused_device() {
+        use std::io::Read;
+
+        let (mut session, mut peer) = dbus_pair();
+        peer.set_nonblocking(true).unwrap();
+        let devnum = hold_device(&mut session);
+        session.devices.get_mut(&devnum).unwrap().phase = super::DevicePhase::Paused;
+        session.release_control();
+        let mut bytes = [0u8; 4096];
+        let read = peer.read(&mut bytes).unwrap();
+        let text = String::from_utf8_lossy(&bytes[..read]);
+        assert!(text.contains("ReleaseDevice"));
         assert!(text.contains("ReleaseControl"));
     }
 
