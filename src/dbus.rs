@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     os::{
         fd::{AsRawFd, OwnedFd, RawFd},
@@ -18,7 +18,7 @@ use crate::{
     runner::{Dispatcher, Model, Redispatcher, ShutdownReason},
     scheduler::{output_scheduler_id, OutputSchedulerAction},
     state::State,
-    udev::UdevAction,
+    udev::{DevicePauseKind, UdevAction},
 };
 
 use {
@@ -88,7 +88,7 @@ pub struct Dbus {
     seat: String,
     current_serial: DbusSerial,
     pending: BTreeMap<DbusSerial, Pending>,
-    held_devices: BTreeSet<libc::dev_t>,
+    devices: BTreeMap<libc::dev_t, DeviceLease>,
     took_control: bool,
     released_control: bool,
 }
@@ -107,6 +107,65 @@ fn session_ownership_lost(error_name: Option<&str>) -> bool {
 
 fn take_device_reply_is_usable(body: &[Value], fd_count: usize) -> bool {
     fd_count > 0 && matches!(body, [Value::UnixFD(_), Value::Boolean(_)])
+}
+
+fn device_number(major: u32, minor: u32) -> libc::dev_t {
+    nix::sys::stat::makedev(u64::from(major), u64::from(minor))
+}
+
+/// Lifecycle of one device logind has handed to this session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DevicePhase {
+    Active,
+    Pausing(DevicePauseKind),
+    Paused,
+    Resuming,
+    Gone,
+}
+
+struct DeviceLease {
+    phase: DevicePhase,
+    /// Resume fd that arrived while a pause was still being confirmed.
+    pending_resume: Option<OwnedFd>,
+}
+
+impl DeviceLease {
+    fn active() -> Self {
+        Self { phase: DevicePhase::Active, pending_resume: None }
+    }
+}
+
+fn pause_device_request(body: &[Value]) -> Option<(libc::dev_t, DevicePauseKind)> {
+    let [Value::Uint32(major), Value::Uint32(minor), Value::String(kind)] = body else {
+        log::warn!("PauseDevice body is malformed");
+        return None;
+    };
+    let kind = match kind.as_str() {
+        "pause" => DevicePauseKind::Pause,
+        "force" => DevicePauseKind::Force,
+        "gone" => DevicePauseKind::Gone,
+        other => {
+            log::warn!("PauseDevice type {other} is not pause, force, or gone");
+            return None;
+        }
+    };
+    Some((device_number(*major, *minor), kind))
+}
+
+fn resume_device_request(body: &[Value], fds: &mut Vec<OwnedFd>) -> Option<(libc::dev_t, OwnedFd)> {
+    let (major, minor) = match body {
+        [Value::Uint32(major), Value::Uint32(minor), Value::UnixFD(_)]
+        | [Value::Uint32(major), Value::Uint32(minor)] => (*major, *minor),
+        _ => {
+            log::warn!("ResumeDevice body is malformed");
+            return None;
+        }
+    };
+    if fds.is_empty() {
+        log::warn!("ResumeDevice for {major}:{minor} has no file descriptor");
+        return None;
+    }
+    Some((device_number(major, minor), fds.remove(0)))
 }
 
 fn session_method(session_path: &str, member: &str) -> Message {
@@ -395,7 +454,7 @@ pub fn init() -> Result<Dbus, DbusError> {
         seat,
         current_serial,
         pending,
-        held_devices: BTreeSet::new(),
+        devices: BTreeMap::new(),
         took_control,
         released_control: false,
     })
@@ -497,7 +556,7 @@ impl Dbus {
                     log::warn!("dbus error pending={pending:?} name={error_name:?}");
                 }
             }
-            Signal => self.handle_signal(state, msg, dispatcher),
+            Signal => self.handle_signal(state, msg, fds, dispatcher),
         }
     }
 
@@ -522,7 +581,7 @@ impl Dbus {
             if !fds.is_empty() {
                 // logind handed us a device fd we will not use. Remember the
                 // devnum so shutdown still sends ReleaseDevice.
-                self.held_devices.insert(devnum);
+                self.devices.insert(devnum, DeviceLease::active());
             }
             fds.clear();
             return;
@@ -531,11 +590,44 @@ impl Dbus {
             return;
         };
         let fd = fds.remove(0);
-        self.held_devices.insert(devnum);
+        self.devices.insert(devnum, DeviceLease::active());
         dispatcher.dispatch(UdevAction::DeviceTaken { fd, inactive, devnum });
     }
 
-    fn handle_signal(&mut self, state: &mut State, msg: Message, dispatcher: &mut Dispatcher) {
+    fn handle_signal(
+        &mut self,
+        state: &mut State,
+        msg: Message,
+        fds: Vec<OwnedFd>,
+        dispatcher: &mut Dispatcher,
+    ) {
+        let member = msg.get_member().map(|member| member.as_ref().to_string());
+        match member.as_deref() {
+            Some("PropertiesChanged") => self.handle_properties_changed(state, msg, dispatcher),
+            Some("PauseDevice") if self.is_login_session_signal(&msg) => {
+                self.handle_pause_device(&msg, dispatcher);
+            }
+            Some("ResumeDevice") if self.is_login_session_signal(&msg) => {
+                self.handle_resume_device(&msg, fds, dispatcher);
+            }
+            _ => {}
+        }
+    }
+
+    fn is_login_session_signal(&self, msg: &Message) -> bool {
+        msg.get_path()
+            .is_some_and(|path| path.as_ref() == self.session_path)
+            && msg
+                .get_interface()
+                .is_some_and(|interface| interface.as_ref() == "org.freedesktop.login1.Session")
+    }
+
+    fn handle_properties_changed(
+        &mut self,
+        state: &mut State,
+        msg: Message,
+        dispatcher: &mut Dispatcher,
+    ) {
         use Value::{Array, Boolean, DictEntry, String, Variant};
 
         let is_session_signal = msg
@@ -588,6 +680,132 @@ impl Dbus {
         }
     }
 
+    fn handle_pause_device(&mut self, msg: &Message, dispatcher: &mut Dispatcher) {
+        let Some((devnum, kind)) = pause_device_request(msg.get_body()) else {
+            return;
+        };
+        let route = {
+            let Some(lease) = self.devices.get_mut(&devnum) else {
+                log::warn!("PauseDevice for an untracked device {devnum}");
+                return;
+            };
+            if kind == DevicePauseKind::Gone {
+                if lease.phase == DevicePhase::Gone {
+                    false
+                } else {
+                    lease.pending_resume = None;
+                    lease.phase = DevicePhase::Gone;
+                    true
+                }
+            } else {
+                match lease.phase {
+                    DevicePhase::Active | DevicePhase::Resuming => {
+                        lease.pending_resume = None;
+                        lease.phase = DevicePhase::Pausing(kind);
+                        true
+                    }
+                    DevicePhase::Pausing(_) | DevicePhase::Paused | DevicePhase::Gone => {
+                        log::debug!("ignoring duplicate PauseDevice for {devnum}");
+                        false
+                    }
+                }
+            }
+        };
+        if route {
+            dispatcher.dispatch(UdevAction::PauseDevice { devnum, kind });
+        }
+    }
+
+    fn handle_resume_device(
+        &mut self,
+        msg: &Message,
+        mut fds: Vec<OwnedFd>,
+        dispatcher: &mut Dispatcher,
+    ) {
+        let Some((devnum, fd)) = resume_device_request(msg.get_body(), &mut fds) else {
+            return;
+        };
+        let mut fd = Some(fd);
+        let forward = {
+            let Some(lease) = self.devices.get_mut(&devnum) else {
+                log::warn!("ResumeDevice for an untracked device {devnum}");
+                return;
+            };
+            match lease.phase {
+                DevicePhase::Pausing(_) => {
+                    lease.pending_resume = fd.take();
+                    false
+                }
+                DevicePhase::Paused | DevicePhase::Resuming => {
+                    lease.phase = DevicePhase::Resuming;
+                    true
+                }
+                DevicePhase::Active | DevicePhase::Gone => {
+                    log::warn!("ResumeDevice ignored for device {devnum}");
+                    false
+                }
+            }
+        };
+        if forward {
+            if let Some(fd) = fd.take() {
+                dispatcher.dispatch(UdevAction::ResumeDevice { devnum, fd });
+            }
+        }
+    }
+
+    fn finish_device_pause(&mut self, devnum: libc::dev_t, dispatcher: &mut Dispatcher) {
+        if self.released_control {
+            return;
+        }
+        let confirmed = {
+            let Some(lease) = self.devices.get_mut(&devnum) else {
+                return;
+            };
+            let DevicePhase::Pausing(kind) = lease.phase else {
+                return;
+            };
+            let resume = lease.pending_resume.take();
+            lease.phase = DevicePhase::Paused;
+            (kind == DevicePauseKind::Pause, resume)
+        };
+        let (acknowledge, pending_resume) = confirmed;
+        if acknowledge {
+            self.queue_pause_device_complete(devnum, dispatcher);
+        }
+        if let Some(fd) = pending_resume {
+            if let Some(lease) = self.devices.get_mut(&devnum) {
+                lease.phase = DevicePhase::Resuming;
+            }
+            dispatcher.dispatch(UdevAction::ResumeDevice { devnum, fd });
+        }
+    }
+
+    fn queue_pause_device_complete(&mut self, devnum: libc::dev_t, dispatcher: &mut Dispatcher) {
+        let major = nix::sys::stat::major(devnum);
+        let minor = nix::sys::stat::minor(devnum);
+        let (Ok(major), Ok(minor)) = (u32::try_from(major), u32::try_from(minor)) else {
+            log::warn!("PauseDeviceComplete for {devnum} does not fit logind's major/minor");
+            return;
+        };
+        let mut message = session_method(self.session_path.as_str(), "PauseDeviceComplete");
+        message.add_value(Value::Uint32(major));
+        message.add_value(Value::Uint32(minor));
+        message.set_serial(self.next_serial().as_u32());
+        let encoded = match message.encode() {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                log::warn!("could not encode PauseDeviceComplete: {error}");
+                return;
+            }
+        };
+        dispatcher.dispatch(IoUringAction::Write {
+            fd: self.socket.as_raw_fd(),
+            offset: 0,
+            buffer: Box::from(&encoded[..]),
+            dispatch_to: Redispatcher::None,
+        });
+    }
+
     fn send_message(&mut self, msg: Message, pending: Pending, dispatcher: &mut Dispatcher) {
         let serial = DbusSerial(msg.get_serial());
         let encoded = msg.encode().unwrap();
@@ -613,6 +831,19 @@ impl Dbus {
             self.session_path
         )));
         self.send_message(msg, Pending::SubscribeSessionSignals, dispatcher);
+
+        let mut devices = make_method_call(MethodCallParams {
+            destination: "org.freedesktop.DBus".into(),
+            object_path: "/org/freedesktop/DBus".into(),
+            interface: "org.freedesktop.DBus".into(),
+            member: "AddMatch".into(),
+        });
+        devices.set_serial(self.next_serial().as_u32());
+        devices.add_value(Value::String(format!(
+            "type='signal',sender='org.freedesktop.login1',path='{}',interface='org.freedesktop.login1.Session'",
+            self.session_path
+        )));
+        self.send_message(devices, Pending::SubscribeSessionSignals, dispatcher);
     }
 
     fn request_session_active(&mut self, dispatcher: &mut Dispatcher) {
@@ -627,7 +858,15 @@ impl Dbus {
     }
 
     fn release_device(&mut self, devnum: libc::dev_t) {
-        if !self.held_devices.contains(&devnum) {
+        if !matches!(
+            self.devices.get(&devnum).map(|lease| lease.phase),
+            Some(
+                DevicePhase::Active
+                    | DevicePhase::Pausing(_)
+                    | DevicePhase::Paused
+                    | DevicePhase::Resuming
+            )
+        ) {
             return;
         }
         let mut message = session_method(self.session_path.as_str(), "ReleaseDevice");
@@ -636,12 +875,18 @@ impl Dbus {
         message.add_value(Value::Uint32(major));
         message.add_value(Value::Uint32(minor));
         if self.write_session_message(message).is_ok() {
-            self.held_devices.remove(&devnum);
+            self.devices.remove(&devnum);
         }
     }
 
     fn release_control(&mut self) {
-        for devnum in self.held_devices.iter().copied().collect::<Vec<_>>() {
+        let held: Vec<_> = self
+            .devices
+            .iter()
+            .filter(|(_, lease)| lease.phase != DevicePhase::Gone)
+            .map(|(devnum, _)| *devnum)
+            .collect();
+        for devnum in held {
             self.release_device(devnum);
         }
         if !self.took_control || self.released_control {
@@ -668,10 +913,21 @@ impl Dbus {
 
 pub enum DbusAction {
     Start,
-    TakeDevice { devnum: libc::dev_t },
-    ReleaseDevice { devnum: libc::dev_t },
+    TakeDevice {
+        devnum: libc::dev_t,
+    },
+    ReleaseDevice {
+        devnum: libc::dev_t,
+    },
     ReleaseControl,
-    MsgReceived { msg: Message, fds: Vec<OwnedFd> },
+    MsgReceived {
+        msg: Message,
+        fds: Vec<OwnedFd>,
+    },
+    /// The backend has stopped using a device that logind asked us to pause.
+    DevicePauseQuiesced {
+        devnum: libc::dev_t,
+    },
 }
 
 impl Model for Dbus {
@@ -704,6 +960,7 @@ impl Model for Dbus {
                 dispatcher.stop_model(DBUS_READER_ID);
             }
             MsgReceived { msg, fds } => self.handle_message(state, msg, fds, dispatcher),
+            DevicePauseQuiesced { devnum } => self.finish_device_pause(devnum, dispatcher),
         };
 
         Ok(())
@@ -912,7 +1169,10 @@ impl DbusReader {
 
 #[cfg(test)]
 mod session_release_tests {
-    use super::{deliver_session_release, session_release_members};
+    use {
+        super::{deliver_session_release, session_release_members},
+        crate::runner::Model,
+    };
 
     #[test]
     fn release_devices_come_before_release_control() {
@@ -965,7 +1225,7 @@ mod session_release_tests {
             "org.freedesktop.login1".try_into().unwrap(),
             "/org/freedesktop/login1/session/self".try_into().unwrap(),
             "org.freedesktop.login1.Session".try_into().unwrap(),
-            "PauseDevice".try_into().unwrap(),
+            "Lock".try_into().unwrap(),
         );
         let reply = call.unknown_member().expect("method call has a member");
         assert_eq!(
@@ -977,20 +1237,275 @@ mod session_release_tests {
         );
     }
 
-    fn dbus_for_tests() -> super::Dbus {
+    fn dbus_pair() -> (super::Dbus, std::os::unix::net::UnixStream) {
         use std::os::unix::net::UnixStream;
 
-        let (socket, _peer) = UnixStream::pair().unwrap();
-        super::Dbus {
-            socket,
-            session_path: "/org/freedesktop/login1/session/self".into(),
-            seat: "seat0".into(),
-            current_serial: super::DbusSerial(1),
-            pending: Default::default(),
-            held_devices: Default::default(),
-            took_control: true,
-            released_control: false,
-        }
+        let (socket, peer) = UnixStream::pair().unwrap();
+        (
+            super::Dbus {
+                socket,
+                session_path: "/org/freedesktop/login1/session/self".into(),
+                seat: "seat0".into(),
+                current_serial: super::DbusSerial(1),
+                pending: Default::default(),
+                devices: Default::default(),
+                took_control: true,
+                released_control: false,
+            },
+            peer,
+        )
+    }
+
+    fn dbus_for_tests() -> super::Dbus {
+        dbus_pair().0
+    }
+
+    fn hold_device(session: &mut super::Dbus) -> libc::dev_t {
+        let devnum = super::device_number(8, 3);
+        session.devices.insert(devnum, super::DeviceLease::active());
+        devnum
+    }
+
+    fn session_signal(member: &str) -> dbus_message_parser::message::Message {
+        dbus_message_parser::message::Message::signal(
+            "/org/freedesktop/login1/session/self".try_into().unwrap(),
+            "org.freedesktop.login1.Session".try_into().unwrap(),
+            member.try_into().unwrap(),
+        )
+    }
+
+    fn pause_signal(kind: &str) -> dbus_message_parser::message::Message {
+        use dbus_message_parser::value::Value;
+
+        let mut message = session_signal("PauseDevice");
+        message.add_value(Value::Uint32(8));
+        message.add_value(Value::Uint32(3));
+        message.add_value(Value::String(kind.to_string()));
+        message
+    }
+
+    fn resume_signal() -> dbus_message_parser::message::Message {
+        use dbus_message_parser::value::Value;
+
+        let mut message = session_signal("ResumeDevice");
+        message.add_value(Value::Uint32(8));
+        message.add_value(Value::Uint32(3));
+        message
+    }
+
+    fn null_fd() -> std::os::fd::OwnedFd {
+        std::fs::File::open("/dev/null").unwrap().into()
+    }
+
+    fn pause_routes(dispatcher: &crate::runner::Dispatcher) -> usize {
+        use crate::udev::UdevAction;
+
+        dispatcher.test_count_queued_action(|action: &UdevAction| {
+            matches!(action, UdevAction::PauseDevice { .. })
+        })
+    }
+
+    fn pause_complete_bytes(serial: u32, major: u32, minor: u32) -> Vec<u8> {
+        use dbus_message_parser::value::Value;
+
+        let mut message =
+            super::session_method("/org/freedesktop/login1/session/self", "PauseDeviceComplete");
+        message.add_value(Value::Uint32(major));
+        message.add_value(Value::Uint32(minor));
+        message.set_serial(serial);
+        message.encode().unwrap().to_vec()
+    }
+
+    fn pause_complete_count(dispatcher: &crate::runner::Dispatcher, serial: u32) -> usize {
+        use crate::io_uring::model::IoUringAction;
+
+        let expected = pause_complete_bytes(serial, 8, 3);
+        dispatcher.test_count_queued_action(|action: &IoUringAction| {
+            let IoUringAction::Write { buffer, .. } = action else {
+                return false;
+            };
+            buffer.as_ref() == expected.as_slice()
+        })
+    }
+
+    fn deliver_pause(
+        session: &mut super::Dbus,
+        kind: &str,
+        dispatcher: &mut crate::runner::Dispatcher,
+    ) {
+        use crate::test_support::state_for_tests;
+
+        let mut state = state_for_tests();
+        session.handle_message(&mut state, pause_signal(kind), Vec::new(), dispatcher);
+    }
+
+    #[test]
+    fn pause_is_acknowledged_only_after_the_backend_confirms() {
+        use crate::udev::UdevAction;
+
+        let mut session = dbus_for_tests();
+        let devnum = hold_device(&mut session);
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        deliver_pause(&mut session, "pause", &mut dispatcher);
+        assert_eq!(pause_routes(&dispatcher), 1);
+        assert_eq!(pause_complete_count(&dispatcher, 1), 0);
+        assert!(dispatcher.test_has_queued_action(|action: &UdevAction| {
+            matches!(
+                action,
+                UdevAction::PauseDevice { kind: crate::udev::DevicePauseKind::Pause, .. }
+            )
+        }));
+
+        session
+            .process(&mut state, super::DbusAction::DevicePauseQuiesced { devnum }, &mut dispatcher)
+            .expect("pause confirmation");
+        assert_eq!(pause_complete_count(&dispatcher, 1), 1);
+        assert_eq!(session.devices.get(&devnum).unwrap().phase, super::DevicePhase::Paused);
+
+        session
+            .process(&mut state, super::DbusAction::DevicePauseQuiesced { devnum }, &mut dispatcher)
+            .expect("duplicate confirmation");
+        assert_eq!(pause_complete_count(&dispatcher, 1), 1);
+    }
+
+    #[test]
+    fn a_duplicate_pause_signal_is_not_routed_again() {
+        let mut session = dbus_for_tests();
+        hold_device(&mut session);
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        deliver_pause(&mut session, "pause", &mut dispatcher);
+        deliver_pause(&mut session, "pause", &mut dispatcher);
+        assert_eq!(pause_routes(&dispatcher), 1);
+        assert_eq!(pause_complete_count(&dispatcher, 1), 0);
+    }
+
+    #[test]
+    fn force_and_gone_do_not_send_pause_device_complete() {
+        use {crate::udev::UdevAction, std::io::Read};
+
+        let mut session = dbus_for_tests();
+        let devnum = hold_device(&mut session);
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        deliver_pause(&mut session, "force", &mut dispatcher);
+        session
+            .process(&mut state, super::DbusAction::DevicePauseQuiesced { devnum }, &mut dispatcher)
+            .expect("force confirmation");
+        assert_eq!(pause_complete_count(&dispatcher, 1), 0);
+        assert_eq!(session.devices.get(&devnum).unwrap().phase, super::DevicePhase::Paused);
+
+        let (mut session, mut peer) = dbus_pair();
+        peer.set_nonblocking(true).unwrap();
+        hold_device(&mut session);
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        deliver_pause(&mut session, "gone", &mut dispatcher);
+        assert!(dispatcher.test_has_queued_action(|action: &UdevAction| {
+            matches!(
+                action,
+                UdevAction::PauseDevice { kind: crate::udev::DevicePauseKind::Gone, .. }
+            )
+        }));
+        assert_eq!(pause_complete_count(&dispatcher, 1), 0);
+        session.release_control();
+        let mut bytes = [0u8; 4096];
+        let read = peer.read(&mut bytes).unwrap();
+        let text = String::from_utf8_lossy(&bytes[..read]);
+        assert!(!text.contains("ReleaseDevice"));
+        assert!(text.contains("ReleaseControl"));
+    }
+
+    #[test]
+    fn malformed_and_untracked_pause_signals_do_not_change_the_session() {
+        let mut session = dbus_for_tests();
+        let devnum = hold_device(&mut session);
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        session.handle_message(
+            &mut state,
+            session_signal("PauseDevice"),
+            Vec::new(),
+            &mut dispatcher,
+        );
+        session.handle_message(&mut state, pause_signal("sleep"), Vec::new(), &mut dispatcher);
+        let foreign = dbus_message_parser::message::Message::signal(
+            "/org/freedesktop/login1/session/other".try_into().unwrap(),
+            "org.freedesktop.login1.Session".try_into().unwrap(),
+            "PauseDevice".try_into().unwrap(),
+        );
+        session.handle_message(&mut state, foreign, Vec::new(), &mut dispatcher);
+        assert_eq!(pause_routes(&dispatcher), 0);
+        assert!(!dispatcher.shutdown_requested());
+        assert_eq!(session.devices.get(&devnum).unwrap().phase, super::DevicePhase::Active);
+
+        let mut untracked = dbus_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        deliver_pause(&mut untracked, "pause", &mut dispatcher);
+        assert_eq!(pause_routes(&dispatcher), 0);
+        assert!(untracked.devices.is_empty());
+    }
+
+    #[test]
+    fn resume_owns_one_fd_and_waits_for_an_outstanding_pause() {
+        use {crate::udev::UdevAction, std::os::fd::AsRawFd};
+
+        let mut session = dbus_for_tests();
+        let devnum = hold_device(&mut session);
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        session.handle_message(&mut state, resume_signal(), Vec::new(), &mut dispatcher);
+        session.handle_message(&mut state, resume_signal(), vec![null_fd()], &mut dispatcher);
+        assert!(!dispatcher.test_has_queued_action(|action: &UdevAction| {
+            matches!(action, UdevAction::ResumeDevice { .. })
+        }));
+        assert_eq!(session.devices.get(&devnum).unwrap().phase, super::DevicePhase::Active);
+
+        deliver_pause(&mut session, "pause", &mut dispatcher);
+        let first = null_fd();
+        let second = null_fd();
+        let second_raw = second.as_raw_fd();
+        session.handle_message(&mut state, resume_signal(), vec![first], &mut dispatcher);
+        session.handle_message(&mut state, resume_signal(), vec![second], &mut dispatcher);
+        assert!(!dispatcher.test_has_queued_action(|action: &UdevAction| {
+            matches!(action, UdevAction::ResumeDevice { .. })
+        }));
+
+        session
+            .process(&mut state, super::DbusAction::DevicePauseQuiesced { devnum }, &mut dispatcher)
+            .expect("pause confirmation");
+        assert_eq!(pause_complete_count(&dispatcher, 1), 1);
+        assert!(dispatcher.test_has_queued_action(|action: &UdevAction| {
+            matches!(action, UdevAction::ResumeDevice { fd, .. } if fd.as_raw_fd() == second_raw)
+        }));
+        assert_eq!(
+            dispatcher.test_count_queued_action(|action: &UdevAction| {
+                matches!(action, UdevAction::ResumeDevice { .. })
+            }),
+            1
+        );
+        assert_eq!(session.devices.get(&devnum).unwrap().phase, super::DevicePhase::Resuming);
+    }
+
+    #[test]
+    fn startup_subscribes_to_session_device_signals() {
+        use crate::io_uring::model::IoUringAction;
+
+        let mut session = dbus_for_tests();
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        session
+            .process(&mut state, super::DbusAction::Start, &mut dispatcher)
+            .expect("subscribe");
+        let contains = |needle: &[u8]| {
+            dispatcher.test_count_queued_action(|action: &IoUringAction| {
+                let IoUringAction::Write { buffer, .. } = action else {
+                    return false;
+                };
+                buffer.windows(needle.len()).any(|window| window == needle)
+            })
+        };
+        assert_eq!(contains(b"member='PropertiesChanged'"), 1);
+        assert_eq!(contains(b"interface='org.freedesktop.login1.Session'"), 1);
     }
 
     fn error_reply(serial: u32, name: &str) -> dbus_message_parser::message::Message {

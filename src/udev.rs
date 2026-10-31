@@ -70,16 +70,48 @@ pub struct Udev {
     pending: BTreeMap<libc::dev_t, PendingControl>,
     /// DRM devices from the initial scan that have not finished TakeDevice.
     initial_drm: BTreeSet<libc::dev_t>,
+    /// Resume fds kept until a later phase opens the device again.
+    resumed_fds: BTreeMap<libc::dev_t, OwnedFd>,
     poll_op_id: Option<RingId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevicePauseKind {
+    /// Stop using the device, then call PauseDeviceComplete.
+    Pause,
+    /// Stop using the device immediately. Logind does not wait for an ack.
+    Force,
+    /// The device was removed. Logind does not wait for an ack.
+    Gone,
 }
 
 pub enum UdevAction {
     Start,
     Event,
-    DeviceTaken { fd: OwnedFd, inactive: bool, devnum: libc::dev_t },
-    DeviceTakeFailed { devnum: libc::dev_t },
-    PollFailed { message: String },
-    FinalizeBackendRemoval { drm_id: DrmId },
+    DeviceTaken {
+        fd: OwnedFd,
+        inactive: bool,
+        devnum: libc::dev_t,
+    },
+    DeviceTakeFailed {
+        devnum: libc::dev_t,
+    },
+    PollFailed {
+        message: String,
+    },
+    FinalizeBackendRemoval {
+        drm_id: DrmId,
+    },
+    /// Logind asked this session to stop using `devnum`.
+    PauseDevice {
+        devnum: libc::dev_t,
+        kind: DevicePauseKind,
+    },
+    /// Logind handed back a device fd. The fd is owned by this action exactly once.
+    ResumeDevice {
+        devnum: libc::dev_t,
+        fd: OwnedFd,
+    },
     Stop,
 }
 
@@ -137,6 +169,26 @@ impl Model for Udev {
             UdevAction::FinalizeBackendRemoval { drm_id } => {
                 let _ = state.drm.remove(drm_id);
             }
+            UdevAction::PauseDevice { devnum, kind } => {
+                self.resumed_fds.remove(&devnum);
+                match kind {
+                    DevicePauseKind::Gone => {
+                        self.pending.remove(&devnum);
+                        if let Some(drm_id) = Self::find_drm_id_for_devnum(state, devnum) {
+                            self.remove_drm_backend(drm_id, state, dispatcher);
+                            self.fatal_if_no_output(state)?;
+                        }
+                    }
+                    DevicePauseKind::Pause | DevicePauseKind::Force => {
+                        // Input and KMS suspension is inserted in this arm, before the
+                        // confirmation, so PauseDeviceComplete follows it.
+                        dispatcher.dispatch(DbusAction::DevicePauseQuiesced { devnum });
+                    }
+                }
+            }
+            UdevAction::ResumeDevice { devnum, fd } => {
+                self.resumed_fds.insert(devnum, fd);
+            }
             UdevAction::Stop => self.shutdown_backends(state, dispatcher),
         }
         Ok(())
@@ -155,6 +207,7 @@ impl Udev {
             udev_monitor,
             pending,
             initial_drm: BTreeSet::new(),
+            resumed_fds: BTreeMap::new(),
             poll_op_id: None,
         }))
     }
@@ -649,5 +702,54 @@ mod tests {
             error,
             ModelFailure::Shutdown(ShutdownReason::Fatal { source: "drm", .. })
         ));
+    }
+
+    #[test]
+    fn pause_confirms_once_per_request_and_resume_keeps_the_latest_fd() {
+        use std::os::fd::AsRawFd;
+
+        use crate::{dbus::DbusAction, runner::Model, test_support::state_for_tests};
+
+        let mut udev = Udev::new().expect("udev monitor");
+        let mut state = state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        udev.process(
+            &mut state,
+            super::UdevAction::PauseDevice { devnum: 4, kind: super::DevicePauseKind::Pause },
+            &mut dispatcher,
+        )
+        .expect("pause");
+        assert_eq!(
+            dispatcher.test_count_queued_action(|action: &DbusAction| {
+                matches!(action, DbusAction::DevicePauseQuiesced { devnum: 4 })
+            }),
+            1
+        );
+
+        let first = std::fs::File::open("/dev/null").unwrap().into();
+        let second = std::fs::File::open("/dev/null").unwrap().into();
+        let second_raw = AsRawFd::as_raw_fd(&second);
+        udev.process(
+            &mut state,
+            super::UdevAction::ResumeDevice { devnum: 4, fd: first },
+            &mut dispatcher,
+        )
+        .expect("first resume");
+        udev.process(
+            &mut state,
+            super::UdevAction::ResumeDevice { devnum: 4, fd: second },
+            &mut dispatcher,
+        )
+        .expect("second resume");
+        assert_eq!(udev.resumed_fds.get(&4).unwrap().as_raw_fd(), second_raw);
+
+        udev.process(
+            &mut state,
+            super::UdevAction::PauseDevice { devnum: 9, kind: super::DevicePauseKind::Gone },
+            &mut dispatcher,
+        )
+        .expect("gone without a backend");
+        assert!(!dispatcher.shutdown_requested());
+        assert!(udev.resumed_fds.get(&4).is_some());
     }
 }
