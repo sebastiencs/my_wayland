@@ -320,6 +320,22 @@ impl Default for SeatState {
 }
 
 impl SeatState {
+    /// Drop pointer and keyboard device state after input devices are removed.
+    pub fn clear_device_state(&mut self) {
+        self.pointer_button_count = 0;
+        self.last_pointer_press = None;
+        self.last_keyboard_trigger = None;
+        self.popup_grab = None;
+        self.pointer_interactive_grab = None;
+        self.intercepted_keyboard_keys.clear();
+        self.intercepted_pointer_buttons.clear();
+        self.pointer_focus = None;
+        self.keyboard_focus = None;
+        self.keyboard_focus_history.clear();
+        self.last_pointer_enter = None;
+        self.active_drag = None;
+    }
+
     pub fn register_pointer(&mut self, pointer: Resolved<WlPointerId>) {
         let resources = self
             .pointer_resources

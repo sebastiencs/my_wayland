@@ -477,6 +477,8 @@ impl Runner {
 
     pub fn run(&mut self, mut dispatcher: Dispatcher) -> ExitOutcome {
         let mut ingress_stopped = false;
+        let mut devices_released = false;
+        let mut session_released = false;
         loop {
             while let Some(action) = dispatcher.queue.pop_front() {
                 self.process_action(action, &mut dispatcher)
@@ -488,14 +490,44 @@ impl Runner {
                     ingress_stopped = true;
                     self.stop_loaded_singleton::<crate::clients::ClientManager>(&mut dispatcher);
                     self.stop_loaded_singleton::<crate::config::ConfigWatcher>(&mut dispatcher);
-                    self.stop_loaded_singleton::<crate::libinput::Libinput>(&mut dispatcher);
                     self.stop_loaded_singleton::<crate::drm::VisualAnimationPump>(&mut dispatcher);
                     self.maybe_remove_models(&mut dispatcher);
+                    continue;
+                }
+                if !devices_released {
+                    // Keep these models loaded: their follow-up actions release
+                    // devices before the backends and session fds are dropped.
+                    devices_released = true;
+                    self.dispatch_loaded::<crate::udev::Udev>(
+                        &mut dispatcher,
+                        crate::udev::UdevAction::Stop,
+                    );
+                    self.dispatch_loaded::<crate::libinput::Libinput>(
+                        &mut dispatcher,
+                        crate::libinput::LibinputAction::Stop,
+                    );
+                    continue;
+                }
+                if !session_released {
+                    session_released = true;
+                    self.dispatch_loaded::<crate::dbus::Dbus>(
+                        &mut dispatcher,
+                        crate::dbus::DbusAction::ReleaseControl,
+                    );
                     continue;
                 }
                 return dispatcher.take_exit().expect("shutdown was requested");
             }
             dispatcher.dispatch(IoUringAction::WaitForCompletion);
+        }
+    }
+
+    fn dispatch_loaded<M>(&self, dispatcher: &mut Dispatcher, action: M::Action)
+    where
+        M: Model,
+    {
+        if self.models.contains_key(&ActionId::of::<M::Action>()) {
+            dispatcher.dispatch(action);
         }
     }
 

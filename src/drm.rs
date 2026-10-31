@@ -658,6 +658,34 @@ fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
 impl drm::Device for DrmFd {}
 impl drm::control::Device for DrmFd {}
 
+fn output_disable_request(in_use: &ConnectorInUse) -> control::atomic::AtomicModeReq {
+    let mut changes = control::atomic::AtomicModeReq::new();
+    if let Some(active_prop) = in_use.crtc.active_prop {
+        changes.add_property(
+            in_use.crtc.handle,
+            active_prop,
+            control::property::Value::UnsignedRange(0),
+        );
+    } else {
+        log::warn!("CRTC {:?} has no ACTIVE property", in_use.crtc.handle);
+    }
+    if let Some(mode_id_prop) = in_use.crtc.mode_id_prop {
+        changes.add_property(in_use.crtc.handle, mode_id_prop, control::property::Value::Blob(0));
+    }
+    if let Some(crtc_id_prop) = in_use.connector.crtc_id_prop {
+        changes.add_property(
+            in_use.connector.handler,
+            crtc_id_prop,
+            control::property::Value::CRTC(None),
+        );
+    }
+    for plane in &in_use.planes {
+        changes.add_property(plane.handle, plane.fb_id, control::property::Value::Object(None));
+        changes.add_property(plane.handle, plane.crtc_id, control::property::Value::CRTC(None));
+    }
+    changes
+}
+
 fn get_props<T: control::ResourceHandle>(
     drm: &DrmFd,
     plane: T,
@@ -756,7 +784,9 @@ struct Crtc {
     index: usize,
     possible_planes: HashSet<plane::Handle>,
     active: bool,
+    active_prop: Option<control::property::Handle>,
     mode_id: u32,
+    mode_id_prop: Option<control::property::Handle>,
     color: CrtcColorProperties,
     vrr_enabled_prop: Option<control::property::Handle>,
     vrr_enabled: bool,
@@ -781,6 +811,7 @@ pub struct Connector {
     pub manufacturer_id: String,
     pub interface_name: String,
     pub vrr_capable: bool,
+    pub crtc_id_prop: Option<control::property::Handle>,
 }
 
 #[derive(Debug)]
@@ -1271,6 +1302,30 @@ impl Drm {
 
     pub fn devnum(&self) -> Option<libc::dev_t> {
         self.device.devnum()
+    }
+
+    /// Best-effort atomic disable of every active output. A failed commit does
+    /// not stop the remaining outputs. This does not restore the mode that was
+    /// active before the compositor started.
+    pub fn disable_outputs(&mut self) {
+        let crtc_ids: Vec<u32> = self.outputs.keys().copied().collect();
+        for crtc_id in crtc_ids {
+            if let Err(error) = self.disable_output(crtc_id) {
+                log::warn!("failed to disable CRTC {crtc_id}: {error}");
+            }
+        }
+    }
+
+    fn disable_output(&mut self, crtc_id: u32) -> Result<(), String> {
+        let changes = {
+            let Some(output) = self.outputs.get(&crtc_id) else {
+                return Ok(());
+            };
+            output_disable_request(&output.in_use)
+        };
+        self.fd
+            .atomic_commit(control::AtomicCommitFlags::ALLOW_MODESET, changes)
+            .map_err(|error| format!("{error:?}"))
     }
 
     pub fn supports_syncobj_timeline(&self) -> bool {
@@ -2376,7 +2431,9 @@ impl Drm {
             index,
             possible_planes,
             active: props.get("ACTIVE").map(|(v, _)| *v != 0).unwrap_or(false),
+            active_prop: props.get("ACTIVE").map(|(_, info)| info.handle()),
             mode_id: props.get("MODE_ID").map(|(v, _)| *v as u32).unwrap(),
+            mode_id_prop: props.get("MODE_ID").map(|(_, info)| info.handle()),
             color: CrtcColorProperties {
                 gamma_lut: props.get("GAMMA_LUT").map(|(_, info)| info.handle()),
                 gamma_lut_size: props
@@ -2582,6 +2639,7 @@ impl Drm {
                 .get("vrr_capable")
                 .map(|(value, _)| *value != 0)
                 .unwrap_or(false),
+            crtc_id_prop: props.get("CRTC_ID").map(|(_, info)| info.handle()),
         };
 
         (connector_handle, connector)

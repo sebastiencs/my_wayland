@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader, Read, Write},
     os::{
         fd::{AsRawFd, OwnedFd, RawFd},
@@ -88,6 +88,43 @@ pub struct Dbus {
     seat: String,
     current_serial: DbusSerial,
     pending: BTreeMap<DbusSerial, Pending>,
+    held_devices: BTreeSet<libc::dev_t>,
+    took_control: bool,
+    released_control: bool,
+}
+
+fn session_method(session_path: &str, member: &str) -> Message {
+    make_method_call(MethodCallParams {
+        destination: "org.freedesktop.login1".into(),
+        object_path: session_path.into(),
+        interface: "org.freedesktop.login1.Session".into(),
+        member: member.into(),
+    })
+}
+
+#[cfg(test)]
+fn session_release_members(held: &[libc::dev_t], release_control: bool) -> Vec<&'static str> {
+    let mut members = Vec::with_capacity(held.len() + usize::from(release_control));
+    members.extend(std::iter::repeat_n("ReleaseDevice", held.len()));
+    if release_control {
+        members.push("ReleaseControl");
+    }
+    members
+}
+
+#[cfg(test)]
+fn deliver_session_release(
+    members: &[&str],
+    mut send: impl FnMut(&str) -> Result<(), ()>,
+) -> usize {
+    let mut attempts = 0;
+    for member in members {
+        attempts += 1;
+        if let Err(()) = send(member) {
+            log::warn!("session call {member} failed");
+        }
+    }
+    attempts
 }
 
 fn auth(buffered_socket: &mut BufReader<UnixStream>) -> Result<(), InitializationError> {
@@ -291,10 +328,10 @@ fn get_seat(
 fn take_session_control(
     buffered_socket: &mut BufReader<UnixStream>,
     session_path: &str,
-) -> Result<DbusSerial, DbusError> {
+) -> Result<(DbusSerial, bool), DbusError> {
     if crate::utils::is_x11() {
         // Don't take control on X11
-        return Ok(DbusSerial(4));
+        return Ok((DbusSerial(4), false));
     }
 
     log::info!("Taking session control: {}", session_path);
@@ -317,7 +354,7 @@ fn take_session_control(
         return Err(DbusError::TakeSession(error_name.as_ref().to_string()));
     }
 
-    Ok(DbusSerial(5))
+    Ok((DbusSerial(5), true))
 }
 
 pub fn init() -> Result<Dbus, DbusError> {
@@ -332,11 +369,20 @@ pub fn init() -> Result<Dbus, DbusError> {
 
     let session_path = get_session_path(&mut socket)?;
     let seat = get_seat(&mut socket, &session_path)?;
-    let current_serial = take_session_control(&mut socket, &session_path)?;
+    let (current_serial, took_control) = take_session_control(&mut socket, &session_path)?;
 
     let socket = socket.into_inner();
     let pending = BTreeMap::default();
-    Ok(Dbus { socket, session_path, seat, current_serial, pending })
+    Ok(Dbus {
+        socket,
+        session_path,
+        seat,
+        current_serial,
+        pending,
+        held_devices: BTreeSet::new(),
+        took_control,
+        released_control: false,
+    })
 }
 
 impl Dbus {
@@ -405,6 +451,7 @@ impl Dbus {
                             panic!("TakeDevice reply missing owned fd payload");
                         };
                         debug_assert_eq!(fd.as_raw_fd(), *raw_fd);
+                        self.held_devices.insert(devnum);
                         dispatcher.dispatch(UdevAction::DeviceTaken { fd, inactive, devnum });
                     }
                     Pending::SubscribeSessionSignals => {}
@@ -518,17 +565,59 @@ impl Dbus {
         msg.set_serial(self.next_serial().as_u32());
         self.send_message(msg, Pending::GetSessionActive, dispatcher);
     }
+
+    fn release_device(&mut self, devnum: libc::dev_t) {
+        if !self.held_devices.contains(&devnum) {
+            return;
+        }
+        let mut message = session_method(self.session_path.as_str(), "ReleaseDevice");
+        let major: u32 = nix::sys::stat::major(devnum).try_into().unwrap_or(0);
+        let minor: u32 = nix::sys::stat::minor(devnum).try_into().unwrap_or(0);
+        message.add_value(Value::Uint32(major));
+        message.add_value(Value::Uint32(minor));
+        if self.write_session_message(message).is_ok() {
+            self.held_devices.remove(&devnum);
+        }
+    }
+
+    fn release_control(&mut self) {
+        for devnum in self.held_devices.iter().copied().collect::<Vec<_>>() {
+            self.release_device(devnum);
+        }
+        if !self.took_control || self.released_control {
+            return;
+        }
+        let message = session_method(self.session_path.as_str(), "ReleaseControl");
+        if self.write_session_message(message).is_ok() {
+            self.released_control = true;
+        }
+    }
+
+    fn write_session_message(&mut self, mut message: Message) -> std::io::Result<()> {
+        message.set_serial(self.next_serial().as_u32());
+        let bytes = message.encode().map_err(|error| {
+            std::io::Error::other(format!("could not encode session release: {error}"))
+        })?;
+        if let Err(error) = self.socket.write_all(&bytes) {
+            log::warn!("session release write failed: {error}");
+            return Err(error);
+        }
+        Ok(())
+    }
 }
 
 pub enum DbusAction {
     Start,
     TakeDevice { devnum: libc::dev_t },
+    ReleaseDevice { devnum: libc::dev_t },
+    ReleaseControl,
     MsgReceived { msg: Message, fds: Vec<OwnedFd> },
 }
 
 impl Model for Dbus {
     type Action = DbusAction;
     const START: Option<Self::Action> = Some(Self::Action::Start);
+    const STOP: Option<Self::Action> = Some(Self::Action::ReleaseControl);
 
     fn process(
         &mut self,
@@ -548,6 +637,11 @@ impl Model for Dbus {
             TakeDevice { devnum } => {
                 let serial = self.take_device(devnum, dispatcher);
                 self.pending.insert(serial, Pending::TakeDevice { devnum });
+            }
+            ReleaseDevice { devnum } => self.release_device(devnum),
+            ReleaseControl => {
+                self.release_control();
+                dispatcher.stop_model(DBUS_READER_ID);
             }
             MsgReceived { msg, fds } => self.handle_message(state, msg, fds, dispatcher),
         };
@@ -739,5 +833,32 @@ impl DbusReader {
 
     fn dispatch_close(&self, dispatcher: &mut Dispatcher) {
         dispatcher.stop_model(DBUS_READER_ID);
+    }
+}
+
+#[cfg(test)]
+mod session_release_tests {
+    use super::{deliver_session_release, session_release_members};
+
+    #[test]
+    fn release_devices_come_before_release_control() {
+        assert_eq!(
+            session_release_members(&[1, 2], true),
+            ["ReleaseDevice", "ReleaseDevice", "ReleaseControl"]
+        );
+        assert_eq!(session_release_members(&[], false), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_failed_release_does_not_stop_the_remaining_calls() {
+        let members = session_release_members(&[1, 2], true);
+        let attempts = deliver_session_release(&members, |member| {
+            if member == "ReleaseDevice" {
+                Err(())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(attempts, 3);
     }
 }

@@ -112,11 +112,7 @@ impl Model for Udev {
             UdevAction::FinalizeBackendRemoval { drm_id } => {
                 let _ = state.drm.remove(drm_id);
             }
-            UdevAction::Stop => {
-                if let Some(poll_op_id) = self.poll_op_id.take() {
-                    dispatcher.dispatch(IoUringAction::PollRemove { target: poll_op_id });
-                }
-            }
+            UdevAction::Stop => self.shutdown_backends(state, dispatcher),
         }
         Ok(())
     }
@@ -211,6 +207,30 @@ impl Udev {
             log::trace!("Ignored remove event for unmanaged DRM device {:?}", device.devnode());
             return;
         };
+        self.remove_drm_backend(drm_id, state, dispatcher);
+    }
+
+    fn shutdown_backends(&mut self, state: &mut State, dispatcher: &mut Dispatcher) {
+        if let Some(poll_op_id) = self.poll_op_id.take() {
+            dispatcher.dispatch(IoUringAction::PollRemove { target: poll_op_id });
+        }
+        let drm_ids: Vec<_> = state.drm.iter().map(|(drm_id, _)| drm_id).collect();
+        for drm_id in drm_ids {
+            self.remove_drm_backend(drm_id, state, dispatcher);
+        }
+    }
+
+    /// Disable the backend, then follow the hot-remove order: stop schedulers,
+    /// discard presentation feedback, remove globals, stop output and reader
+    /// models, release the logind device, and drop the backend.
+    fn remove_drm_backend(&self, drm_id: DrmId, state: &mut State, dispatcher: &mut Dispatcher) {
+        if state.drm.try_get(drm_id).is_none() {
+            return;
+        }
+        let devnum = state.drm.try_get(drm_id).and_then(|drm| drm.devnum());
+        if let Some(drm) = state.drm.try_get_mut(drm_id) {
+            drm.disable_outputs();
+        }
 
         let backend = BackendOutputRef::new(drm_id);
         for output_id in state.output_ids_for_backend(backend) {
@@ -230,6 +250,9 @@ impl Udev {
         });
         discard_backend_presentation_feedbacks(state, drm_id, dispatcher);
         dispatcher.stop_model(drm_id);
+        if let Some(devnum) = devnum {
+            dispatcher.dispatch(DbusAction::ReleaseDevice { devnum });
+        }
         dispatcher.dispatch(UdevAction::FinalizeBackendRemoval { drm_id });
     }
 

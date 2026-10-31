@@ -15,6 +15,7 @@ use input::{
 };
 
 use crate::{
+    dbus::DbusAction,
     io_uring::{
         model::IoUringAction,
         ring::{PollCompleted, RingId},
@@ -113,6 +114,7 @@ pub enum LibinputAction {
     Start,
     Event,
     OpenInput { devnode: String, fd: OwnedFd, devnum: u64 },
+    CloseSessionFds,
     Stop,
 }
 
@@ -273,13 +275,29 @@ impl Model for Libinput {
                     }
                 };
 
-                let input_id = state.inputs.insert(Input { device });
+                let input_id = state.inputs.insert(Input { device, devnum });
                 self.inputs.insert(input_id);
             }
             Stop => {
                 if let Some(poll_op_id) = self.poll_op_id.take() {
                     dispatcher.dispatch(IoUringAction::PollRemove { target: poll_op_id });
                 }
+                let input_ids: Vec<_> = self.inputs.iter().copied().collect();
+                for input_id in input_ids {
+                    self.inputs.remove(&input_id);
+                    let Some(input) = state.inputs.remove(input_id) else {
+                        continue;
+                    };
+                    self.libinput.path_remove_device(input.device);
+                    dispatcher.dispatch(DbusAction::ReleaseDevice { devnum: input.devnum });
+                }
+                // Close the cached session fds only after ReleaseDevice is queued,
+                // so logind still sees an open fd when the release is written.
+                dispatcher.dispatch(LibinputAction::CloseSessionFds);
+                state.seat.clear_device_state();
+            }
+            CloseSessionFds => {
+                self.dev_to_fd.lock().unwrap().clear();
             }
         }
         Ok(())
@@ -288,6 +306,7 @@ impl Model for Libinput {
 
 pub struct Input {
     device: input::Device,
+    devnum: u64,
 }
 
 fn current_output_layout_bounds(state: &State) -> Option<crate::region::RectI> {
@@ -597,5 +616,35 @@ mod tests {
     #[test]
     fn an_event_with_no_reported_axis_is_dropped() {
         assert!(frame(PointerScrollSource::Wheel, false, None, None).is_none());
+    }
+}
+
+#[cfg(test)]
+mod device_stop_tests {
+    use super::*;
+
+    #[test]
+    fn stop_queues_session_fd_close_and_clears_seat_device_state() {
+        let mut libinput = Libinput::new();
+        let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        libinput.dev_to_fd.lock().unwrap().insert(7, fd);
+        let mut state = crate::test_support::state_for_tests();
+        state.seat.pointer_button_count = 2;
+        let mut dispatcher = Dispatcher::default();
+
+        libinput
+            .process(&mut state, LibinputAction::Stop, &mut dispatcher)
+            .unwrap();
+
+        assert!(dispatcher.test_has_queued_action(|action: &LibinputAction| {
+            matches!(action, LibinputAction::CloseSessionFds)
+        }));
+        assert_eq!(state.seat.pointer_button_count, 0);
+        assert_eq!(libinput.dev_to_fd.lock().unwrap().len(), 1);
+
+        libinput
+            .process(&mut state, LibinputAction::CloseSessionFds, &mut dispatcher)
+            .unwrap();
+        assert!(libinput.dev_to_fd.lock().unwrap().is_empty());
     }
 }
