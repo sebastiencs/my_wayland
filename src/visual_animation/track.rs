@@ -49,6 +49,29 @@ impl UnitValue {
         let applied = delta * self.0 as i32 / Self::ONE.0 as i32;
         (from + applied).clamp(0, i32::from(u8::MAX)) as u8
     }
+
+    pub fn scale_i32(self, value: i32) -> i32 {
+        if self.0 == 0 || value == 0 {
+            return 0;
+        }
+        if self.0 >= Self::ONE.0 {
+            return value;
+        }
+        let scaled = i64::from(value) * i64::from(self.0) / i64::from(Self::ONE.0);
+        i32::try_from(scaled).unwrap_or(if value.is_negative() { i32::MIN } else { i32::MAX })
+    }
+
+    pub fn scale_duration(self, duration: Duration) -> Duration {
+        if self.0 == 0 {
+            return Duration::ZERO;
+        }
+        if self.0 >= Self::ONE.0 {
+            return duration;
+        }
+        let nanos =
+            duration.as_nanos().saturating_mul(u128::from(self.0)) / u128::from(Self::ONE.0);
+        Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+    }
 }
 
 /// Absolute progress of a timed segment. Time before the start stays at zero.

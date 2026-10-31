@@ -37,14 +37,14 @@ use crate::{
         RootSurfaceVisualState, RoundedRing, TextureElement, TextureMask, TextureSource,
     },
     runner::{Dispatcher, Model, ModelInstanceId},
-    scene::{CompositionTier, OutputCompositionView},
+    scene::{ComposedEntry, CompositionTier, OutputCompositionView},
     state::{
         BackendOutputRef, ColorTransformMatrix, DrmId, ObjectId, OutputId, OutputMode,
-        RootSurfaceClip, State,
+        RootSurfaceClip, State, WorkspaceId,
     },
     sync::{DeferredRelease, RetiredBufferCandidate},
     transform::{self, OutputPresentationTransform},
-    visual_animation::{FrozenClosingBlur, RetainedClosingSnapshot},
+    visual_animation::{FrozenClosingBlur, RetainedClosingSnapshot, WorkspaceMotion},
     wayland_objects::{
         wl_buffer::{CursorShmBuffer, WlBuffer},
         wl_surface::{
@@ -3185,6 +3185,14 @@ fn active_animation_output_ids(state: &State) -> BTreeSet<OutputId> {
             remember_animation_outputs(state, snapshot.bounds(), &mut output_ids);
         }
     }
+    for (_, group) in state.workspace_groups.iter() {
+        if group
+            .transition
+            .is_some_and(|transition| transition.needs_frames())
+        {
+            output_ids.extend(group.outputs.iter().copied());
+        }
+    }
     output_ids
 }
 
@@ -3294,6 +3302,11 @@ impl WindowAnimationManager {
                 );
             }
         }
+        publish_completed_workspace_transitions(
+            state,
+            dispatcher,
+            &result.completed_transition_outputs,
+        );
     }
 
     fn advance_and_schedule_output(
@@ -3304,6 +3317,7 @@ impl WindowAnimationManager {
         output_id: OutputId,
     ) {
         let result = state.advance_window_visuals_for_output(output_id, now);
+        let completed_outputs = result.completed_transition_outputs.clone();
         if !result.damaged_rects.is_empty() {
             let mut outputs = BTreeSet::new();
             outputs.insert(output_id);
@@ -3313,16 +3327,30 @@ impl WindowAnimationManager {
             for output_id in outputs {
                 request_output_frame(state, output_id, RequestFrameReason::Animation, dispatcher);
             }
-            return;
-        }
-        if result.has_active_animations {
+        } else if result.has_active_animations {
             let delay_msec = animation_delay_msec_for_output(state, output_id);
             dispatcher.dispatch_to(
                 output_scheduler_id(output_id),
                 OutputSchedulerAction::ScheduleAnimation { delay_msec },
             );
         }
+        publish_completed_workspace_transitions(state, dispatcher, &completed_outputs);
     }
+}
+
+fn publish_completed_workspace_transitions(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    outputs: &[OutputId],
+) {
+    if outputs.is_empty() {
+        return;
+    }
+    crate::wayland_objects::ext_workspace_manager_v1::publish_workspace_state_changed(
+        state,
+        dispatcher,
+        outputs.iter().copied(),
+    );
 }
 
 impl Model for DrmOutputModel {
@@ -5003,9 +5031,13 @@ fn realize_closing_capture(
     })?;
     let id = state.next_closing_snapshot_id;
     state.next_closing_snapshot_id = state.next_closing_snapshot_id.saturating_add(1);
+    let workspace_id = state
+        .managed_root_surface_state(plan.source)
+        .map(|managed| managed.workspace_id);
     Some(RetainedClosingSnapshot::new(
         id,
         plan.source,
+        workspace_id,
         plan.bounds,
         plan.blur,
         plan.drm_id,
@@ -5104,12 +5136,17 @@ fn scale_u8(value: u8, factor: u8) -> u8 {
 fn append_closing_snapshots(
     state: &State,
     output_bounds: RectI,
+    workspace_id: Option<WorkspaceId>,
+    motion: WorkspaceMotion,
     items: &mut Vec<SceneItem>,
     frame_elements: &mut Vec<RecordedFrameElement>,
 ) {
     for snapshot in &state.closing_snapshots {
-        let bounds = snapshot.bounds();
-        let alpha = snapshot.alpha();
+        if snapshot.workspace_id() != workspace_id {
+            continue;
+        }
+        let alpha = scale_u8(snapshot.alpha(), motion.alpha);
+        let bounds = snapshot.bounds().translate(motion.translation_x, 0);
         if alpha == 0 || bounds.is_empty() || !bounds.intersects(output_bounds) {
             continue;
         }
@@ -5171,71 +5208,54 @@ fn collect_render_items_for_output_view(
     let mut deferred_releases = Vec::new();
     let mut retired_candidates = Vec::new();
     let mut cursor_animation_delay_msec = None;
-    let mut emitted_closing = false;
+    let mut content_entries = Vec::new();
+    let mut rendered_content = false;
     for entry in &view.entries {
-        if !emitted_closing && closing_snapshots_precede_tier(entry.tier) {
-            append_closing_snapshots(state, output_bounds, &mut items, &mut frame_elements);
-            emitted_closing = true;
-        }
-        if !entry.participates_in_render {
+        if entry.tier == CompositionTier::Content && !rendered_content {
+            content_entries.push(entry);
             continue;
         }
-        let root_surface = entry.root_surface;
-        let Some(surface) = state
-            .objects
-            .try_ref_object::<WlSurface>(root_surface.object_id())
-        else {
-            continue;
-        };
-        if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
-            continue;
+        if !rendered_content
+            && (closing_snapshots_precede_tier(entry.tier) || !content_entries.is_empty())
+        {
+            render_workspace_content(
+                state,
+                drm_id,
+                drm_crtc_id,
+                output_id,
+                output_bounds,
+                &content_entries,
+                &mut items,
+                &mut frame_elements,
+                &mut retired_candidates,
+            );
+            rendered_content = true;
+            content_entries.clear();
         }
-        let visual_state = state.root_surface_visual_state(root_surface);
-        let root_clip = visual_state.and_then(|visual| visual.clip);
-        push_root_surface_effect_elements(
-            &mut frame_elements,
-            visual_state,
-            FramePhase::UnderWindow,
-        );
-        let mut snapshots = Vec::new();
-        collect_surface_snapshots(
+        render_composed_entry(
             state,
-            root_surface,
-            0,
-            0,
-            true,
-            &mut retired_candidates,
-            &mut snapshots,
-        );
-        let (objects, drm_map) = (&mut state.objects, &state.drm);
-        let drm = drm_map.get(drm_id);
-        let drm_fd = drm.fd();
-        let item_start_index = items.len();
-        let allow_direct_scanout = entry.allow_direct_scanout;
-        push_scene_items_from_snapshots(
-            &mut items,
-            objects,
-            drm,
-            &drm_fd,
+            drm_id,
             drm_crtc_id,
             output_bounds,
-            snapshots,
-            allow_direct_scanout,
-            root_clip,
-            visual_state
-                .map(|visual| visual.effects.opacity_alpha)
-                .unwrap_or(u8::MAX),
-        );
-        push_scene_item_frame_elements(&mut frame_elements, item_start_index..items.len());
-        push_root_surface_effect_elements(
+            entry,
+            WorkspaceMotion::IDENTITY,
+            &mut items,
             &mut frame_elements,
-            visual_state,
-            FramePhase::OverWindow,
+            &mut retired_candidates,
         );
-        push_root_surface_effect_elements(&mut frame_elements, visual_state, FramePhase::Overlay);
     }
-    if !emitted_closing {
-        append_closing_snapshots(state, output_bounds, &mut items, &mut frame_elements);
+    if !rendered_content {
+        render_workspace_content(
+            state,
+            drm_id,
+            drm_crtc_id,
+            output_id,
+            output_bounds,
+            &content_entries,
+            &mut items,
+            &mut frame_elements,
+            &mut retired_candidates,
+        );
     }
     collect_dnd_render_items(
         state,
@@ -5413,7 +5433,220 @@ fn translate_scene_items(items: &mut [SceneItem], dx: i32, dy: i32) {
         item.state.bounds = item.state.bounds.translate(dx, dy);
         item.damage.translate(dx, dy);
         item.opaque_region.translate(dx, dy);
+        translate_scene_item_mask(&mut item.mask, dx, dy);
     }
+}
+
+fn translate_scene_item_mask(mask: &mut SceneItemMask, dx: i32, dy: i32) {
+    match mask {
+        SceneItemMask::None => {}
+        SceneItemMask::RoundedClip { clip } => {
+            clip.outer_rect = clip.outer_rect.translate(dx, dy);
+        }
+        SceneItemMask::FrameRing { ring } => {
+            ring.outer.outer_rect = ring.outer.outer_rect.translate(dx, dy);
+            ring.inner.outer_rect = ring.inner.outer_rect.translate(dx, dy);
+        }
+    }
+}
+
+fn scale_effect_alpha(element: &mut EffectElement, factor: u8) {
+    let alpha = match element {
+        EffectElement::WindowBorder { alpha, .. }
+        | EffectElement::WindowShadow { alpha, .. }
+        | EffectElement::WindowBlurBackdrop { alpha, .. }
+        | EffectElement::DimOverlay { alpha, .. } => alpha,
+    };
+    *alpha = scale_u8(*alpha, factor);
+}
+
+fn workspace_transition_blocks_scanout(
+    state: &State,
+    root_surface: crate::clients::Resolved<crate::protocol_generated::WlSurfaceId>,
+) -> bool {
+    let Some(workspace_id) = state.root_surface_workspace(root_surface) else {
+        return false;
+    };
+    let Some(group_id) = state
+        .workspaces
+        .try_get(workspace_id)
+        .and_then(|workspace| workspace.group)
+    else {
+        return false;
+    };
+    state
+        .workspace_groups
+        .try_get(group_id)
+        .and_then(|group| group.transition)
+        .is_some_and(|transition| transition.involves(workspace_id))
+}
+
+fn apply_workspace_motion(
+    items: &mut [SceneItem],
+    frame_elements: &mut [RecordedFrameElement],
+    motion: WorkspaceMotion,
+) {
+    if motion.is_identity() {
+        return;
+    }
+    for item in items {
+        if motion.translation_x != 0 {
+            item.state.bounds = item.state.bounds.translate(motion.translation_x, 0);
+            item.damage.translate(motion.translation_x, 0);
+            item.opaque_region.translate(motion.translation_x, 0);
+            translate_scene_item_mask(&mut item.mask, motion.translation_x, 0);
+        }
+        item.alpha = scale_u8(item.alpha, motion.alpha);
+        if motion.alpha < u8::MAX {
+            item.opaque = false;
+            item.opaque_region.clear();
+            item.direct_scanout = None;
+            item.state_has_alpha = true;
+        }
+    }
+    for frame_element in frame_elements {
+        let RecordedFrameElement::Effect { element, .. } = frame_element else {
+            continue;
+        };
+        if motion.translation_x != 0 {
+            translate_effect_element(element, motion.translation_x, 0);
+        }
+        scale_effect_alpha(element, motion.alpha);
+    }
+}
+
+fn render_workspace_content(
+    state: &mut State,
+    drm_id: DrmId,
+    drm_crtc_id: u32,
+    output_id: OutputId,
+    output_bounds: RectI,
+    entries: &[&ComposedEntry],
+    items: &mut Vec<SceneItem>,
+    frame_elements: &mut Vec<RecordedFrameElement>,
+    retired_candidates: &mut Vec<RetiredBufferCandidate>,
+) {
+    let workspace_order = crate::scene::visibility::output_workspace_ids(
+        state,
+        output_id,
+        crate::scene::visibility::WorkspaceParticipationPolicy::Steady,
+    );
+    let mut rendered = BTreeSet::new();
+    for workspace_id in workspace_order {
+        let motion = state.workspace_motion_for_output(output_id, Some(workspace_id));
+        let matching = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                state.root_surface_workspace(entry.root_surface) == Some(workspace_id)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        for index in matching {
+            render_composed_entry(
+                state,
+                drm_id,
+                drm_crtc_id,
+                output_bounds,
+                entries[index],
+                motion,
+                items,
+                frame_elements,
+                retired_candidates,
+            );
+        }
+        append_closing_snapshots(
+            state,
+            output_bounds,
+            Some(workspace_id),
+            motion,
+            items,
+            frame_elements,
+        );
+        rendered.insert(workspace_id);
+    }
+    for entry in entries {
+        let workspace_id = state.root_surface_workspace(entry.root_surface);
+        if workspace_id.is_some_and(|workspace_id| rendered.contains(&workspace_id)) {
+            continue;
+        }
+        render_composed_entry(
+            state,
+            drm_id,
+            drm_crtc_id,
+            output_bounds,
+            entry,
+            WorkspaceMotion::IDENTITY,
+            items,
+            frame_elements,
+            retired_candidates,
+        );
+    }
+    append_closing_snapshots(
+        state,
+        output_bounds,
+        None,
+        WorkspaceMotion::IDENTITY,
+        items,
+        frame_elements,
+    );
+}
+
+fn render_composed_entry(
+    state: &mut State,
+    drm_id: DrmId,
+    drm_crtc_id: u32,
+    output_bounds: RectI,
+    entry: &ComposedEntry,
+    motion: WorkspaceMotion,
+    items: &mut Vec<SceneItem>,
+    frame_elements: &mut Vec<RecordedFrameElement>,
+    retired_candidates: &mut Vec<RetiredBufferCandidate>,
+) {
+    if !entry.participates_in_render || motion.alpha == 0 {
+        return;
+    }
+    let root_surface = entry.root_surface;
+    let Some(surface) = state
+        .objects
+        .try_ref_object::<WlSurface>(root_surface.object_id())
+    else {
+        return;
+    };
+    if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
+        return;
+    }
+    let visual_state = state.root_surface_visual_state(root_surface);
+    let allow_direct_scanout = entry.allow_direct_scanout
+        && motion.is_identity()
+        && !workspace_transition_blocks_scanout(state, root_surface);
+    let root_clip = visual_state.and_then(|visual| visual.clip);
+    let effect_start = frame_elements.len();
+    push_root_surface_effect_elements(frame_elements, visual_state, FramePhase::UnderWindow);
+    let mut snapshots = Vec::new();
+    collect_surface_snapshots(state, root_surface, 0, 0, true, retired_candidates, &mut snapshots);
+    let (objects, drm_map) = (&mut state.objects, &state.drm);
+    let drm = drm_map.get(drm_id);
+    let drm_fd = drm.fd();
+    let item_start = items.len();
+    push_scene_items_from_snapshots(
+        items,
+        objects,
+        drm,
+        &drm_fd,
+        drm_crtc_id,
+        output_bounds,
+        snapshots,
+        allow_direct_scanout,
+        root_clip,
+        visual_state
+            .map(|visual| visual.effects.opacity_alpha)
+            .unwrap_or(u8::MAX),
+    );
+    push_scene_item_frame_elements(frame_elements, item_start..items.len());
+    push_root_surface_effect_elements(frame_elements, visual_state, FramePhase::OverWindow);
+    push_root_surface_effect_elements(frame_elements, visual_state, FramePhase::Overlay);
+    apply_workspace_motion(&mut items[item_start..], &mut frame_elements[effect_start..], motion);
 }
 
 fn translate_recorded_frame_elements(
@@ -5835,6 +6068,428 @@ mod window_animation_tests {
         assert!(state.closing_snapshots.is_empty());
         assert_eq!(probe.get(), 1);
     }
+
+    fn live_group(
+        state: &mut crate::state::State,
+        width: i32,
+        height: i32,
+        crtc: u32,
+    ) -> (
+        OutputId,
+        crate::state::WorkspaceGroupId,
+        crate::state::WorkspaceId,
+        crate::state::WorkspaceId,
+    ) {
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id =
+            state.insert_output(test_output_with_crtc_name(backend, crtc, 0, 0, width, height));
+        let group_id = state.workspace_group_for_output(output_id).unwrap();
+        let from = state.active_workspace_for_output(output_id).unwrap();
+        let to = state.create_workspace(Some(group_id), Some(format!("ws-{crtc}")));
+        (output_id, group_id, from, to)
+    }
+
+    #[test]
+    fn workspace_switch_reverses_restarts_and_settles_on_zero_duration() {
+        let mut state = state_for_tests();
+        state.config.animations.workspace.duration_msec = 200;
+        let (output_id, group_id, first, second) = live_group(&mut state, 800, 600, 1);
+        let third = state.create_workspace(Some(group_id), Some("3".to_string()));
+        assert!(state.activate_workspace(second));
+        let now = Instant::now();
+        assert!(state.advance_window_visuals(now).damaged_rects.is_empty());
+        state.advance_window_visuals(now + Duration::from_millis(80));
+        let progress = state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .transition
+            .unwrap()
+            .progress();
+        assert!(progress > crate::visual_animation::UnitValue::ZERO);
+        assert!(state.activate_workspace(first));
+        let reversed = state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .transition
+            .unwrap();
+        assert_eq!(reversed.from_workspace(), first);
+        assert_eq!(reversed.to_workspace(), second);
+        assert_eq!(reversed.progress(), progress);
+        assert!(state.activate_workspace(second));
+        assert!(state.activate_workspace(third));
+        let restarted = state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .transition
+            .unwrap();
+        assert_eq!(restarted.from_workspace(), second);
+        assert_eq!(restarted.to_workspace(), third);
+        assert_eq!(restarted.progress(), crate::visual_animation::UnitValue::ZERO);
+
+        state.config.animations.workspace.duration_msec = 0;
+        let result = state.advance_window_visuals(now + Duration::from_millis(90));
+        assert!(state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .transition
+            .is_none());
+        assert_eq!(result.completed_transition_outputs, vec![output_id]);
+        assert!(state.workspace_is_active(third));
+    }
+
+    #[test]
+    fn next_and_previous_actions_share_the_activation_path() {
+        let mut state = state_for_tests();
+        state.config.animations.workspace.duration_msec = 0;
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 200, 100));
+        let group_id = state.workspace_group_for_output(output_id).unwrap();
+        let workspaces = state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .workspaces
+            .clone();
+        assert_eq!(workspaces.len(), 4);
+
+        let mut dispatcher = Dispatcher::default();
+        crate::config::execute_action(
+            &mut state,
+            &mut dispatcher,
+            crate::config::CompositorAction::WorkspaceNext,
+        );
+        assert!(state.workspace_is_active(workspaces[1]));
+        assert!(dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(
+            |action| {
+                matches!(action, crate::clients::ClientManagerAction::WorkspaceStateChanged)
+            }
+        ));
+
+        let mut dispatcher = Dispatcher::default();
+        crate::config::execute_action(
+            &mut state,
+            &mut dispatcher,
+            crate::config::CompositorAction::WorkspacePrevious,
+        );
+        assert!(state.workspace_is_active(workspaces[0]));
+
+        assert!(state.activate_workspace(workspaces[3]));
+        assert_eq!(
+            state.activate_adjacent_workspace(
+                crate::visual_animation::WorkspaceTransitionDirection::Next
+            ),
+            Some(group_id)
+        );
+        assert!(state.workspace_is_active(workspaces[0]));
+        assert_eq!(
+            state.activate_adjacent_workspace(
+                crate::visual_animation::WorkspaceTransitionDirection::Previous
+            ),
+            Some(group_id)
+        );
+        assert!(state.workspace_is_active(workspaces[3]));
+        assert_eq!(
+            state
+                .workspace_groups
+                .try_get(group_id)
+                .unwrap()
+                .workspaces
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn shared_progress_uses_each_output_width_and_pauses_without_presentation() {
+        let mut state = state_for_tests();
+        state.config.animations.workspace.duration_msec = 200;
+        let (wide, group_id, from, to) = live_group(&mut state, 800, 600, 1);
+        let narrow = state.insert_output(test_output_with_crtc_name(
+            BackendOutputRef::new(DrmId::from(0usize)),
+            2,
+            800,
+            0,
+            400,
+            600,
+        ));
+        let narrow_group = state.workspace_group_for_output(narrow).unwrap();
+        state
+            .workspace_groups
+            .try_get_mut(narrow_group)
+            .unwrap()
+            .outputs
+            .remove(&narrow);
+        state
+            .workspace_groups
+            .try_get_mut(group_id)
+            .unwrap()
+            .outputs
+            .insert(narrow);
+        state.output_workspace_groups.insert(narrow, group_id);
+        assert!(state.activate_workspace(to));
+        let now = Instant::now();
+        state.advance_window_visuals(now);
+        let progressed = state.advance_window_visuals(now + Duration::from_millis(100));
+        assert!(progressed
+            .damaged_rects
+            .contains(&state.output_bounds(wide).unwrap()));
+        assert!(progressed
+            .damaged_rects
+            .contains(&state.output_bounds(narrow).unwrap()));
+        let wide_motion = state.workspace_motion_for_output(wide, Some(from));
+        let narrow_motion = state.workspace_motion_for_output(narrow, Some(from));
+        assert_eq!(wide_motion.alpha, narrow_motion.alpha);
+        assert!(wide_motion.translation_x < narrow_motion.translation_x);
+        assert!(wide_motion.translation_x < 0);
+        assert!(narrow_motion.translation_x < 0);
+        let incoming = state.workspace_motion_for_output(wide, Some(to));
+        assert!(incoming.translation_x > 0);
+        assert!(incoming.alpha > 0 && incoming.alpha < 255);
+
+        let held = state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .transition
+            .unwrap()
+            .progress();
+        state.outputs.try_get_mut(narrow).unwrap().enabled = false;
+        state.advance_window_visuals(now + Duration::from_millis(150));
+        assert!(
+            state
+                .workspace_groups
+                .try_get(group_id)
+                .unwrap()
+                .transition
+                .unwrap()
+                .progress()
+                > held
+        );
+
+        state.session_active = false;
+        let paused = state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .transition
+            .unwrap()
+            .progress();
+        state.advance_window_visuals(now + Duration::from_millis(400));
+        assert_eq!(
+            state
+                .workspace_groups
+                .try_get(group_id)
+                .unwrap()
+                .transition
+                .unwrap()
+                .progress(),
+            paused
+        );
+        assert!(!state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .transition
+            .unwrap()
+            .needs_frames());
+    }
+
+    #[test]
+    fn workspace_fade_can_be_disabled_without_stopping_the_slide() {
+        let mut state = state_for_tests();
+        state.config.animations.workspace.duration_msec = 200;
+        state.config.animations.workspace.fade = false;
+        let (output_id, _, from, to) = live_group(&mut state, 800, 600, 1);
+        assert!(state.activate_workspace(to));
+        let now = Instant::now();
+        state.advance_window_visuals(now);
+        state.advance_window_visuals(now + Duration::from_millis(100));
+        let outgoing = state.workspace_motion_for_output(output_id, Some(from));
+        let incoming = state.workspace_motion_for_output(output_id, Some(to));
+        assert_eq!(outgoing.alpha, 255);
+        assert_eq!(incoming.alpha, 255);
+        assert!(outgoing.translation_x < 0);
+        assert!(incoming.translation_x > 0);
+    }
+
+    #[test]
+    fn completion_publishes_once_and_output_local_kicks_do_not_double_advance() {
+        let mut state = state_for_tests();
+        state.config.animations.workspace.duration_msec = 100;
+        let (output_id, group_id, _, second) = live_group(&mut state, 320, 200, 1);
+        assert!(state.activate_workspace(second));
+        let mut manager = WindowAnimationManager::new();
+        let now = Instant::now();
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now);
+        assert!(queues_animation_wakeup(&dispatcher, output_id));
+        assert!(!dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(
+            |action| {
+                matches!(action, crate::clients::ClientManagerAction::WorkspaceStateChanged)
+            }
+        ));
+        assert_eq!(
+            state
+                .workspace_groups
+                .try_get(group_id)
+                .unwrap()
+                .transition
+                .unwrap()
+                .progress(),
+            crate::visual_animation::UnitValue::ZERO
+        );
+        assert!(state.output_has_live_workspace_transition(output_id));
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule_output(&mut state, &mut dispatcher, now, output_id);
+        assert_eq!(
+            state
+                .workspace_groups
+                .try_get(group_id)
+                .unwrap()
+                .transition
+                .unwrap()
+                .progress(),
+            crate::visual_animation::UnitValue::ZERO
+        );
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now + Duration::from_millis(100));
+        assert!(state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .transition
+            .is_none());
+        assert!(!state.output_has_live_workspace_transition(output_id));
+        assert!(queues_animation_frame(&dispatcher, output_id));
+        assert!(dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(
+            |action| {
+                matches!(action, crate::clients::ClientManagerAction::WorkspaceStateChanged)
+            }
+        ));
+        assert_eq!(
+            crate::scene::visibility::output_workspace_ids(
+                &state,
+                output_id,
+                crate::scene::visibility::WorkspaceParticipationPolicy::Steady,
+            ),
+            vec![second]
+        );
+
+        let mut dispatcher = Dispatcher::default();
+        manager.advance_and_schedule(&mut state, &mut dispatcher, now + Duration::from_millis(100));
+        assert!(!dispatcher.test_has_queued_action::<crate::clients::ClientManagerAction>(
+            |action| {
+                matches!(action, crate::clients::ClientManagerAction::WorkspaceStateChanged)
+            }
+        ));
+    }
+
+    #[test]
+    fn removing_an_endpoint_drops_the_transition() {
+        let mut state = state_for_tests();
+        state.config.animations.workspace.duration_msec = 200;
+        let (_, group_id, first, second) = live_group(&mut state, 100, 100, 1);
+        assert!(state.activate_workspace(second));
+        assert!(state.remove_workspace(first));
+        assert!(state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .transition
+            .is_none());
+    }
+
+    #[test]
+    fn workspace_motion_moves_the_whole_root_recipe() {
+        let bounds = RectI::new(10, 20, 40, 30).unwrap();
+        let clip =
+            crate::state::RootSurfaceClip::new(bounds, 0, crate::config::RoundingPower::DEFAULT);
+        let surface_key = crate::clients::Resolved::new(
+            ClientId::from_raw(1),
+            WlSurfaceId::from(1u32),
+            ObjectId::from(1usize),
+        );
+        let mut items = vec![super::SceneItem {
+            state: super::SceneItemState {
+                key: super::SceneItemKey::Surface(surface_key),
+                surface_key: Some(surface_key),
+                content_key: super::SceneItemContentKey::Buffer(crate::clients::Resolved::new(
+                    ClientId::from_raw(1),
+                    crate::protocol_generated::WlBufferId::from(2u32),
+                    ObjectId::from(2usize),
+                )),
+                bounds,
+                tex_transform: crate::transform::Mat3::identity(),
+            },
+            mask: super::SceneItemMask::RoundedClip { clip },
+            texture: 0,
+            owned_texture: None,
+            damage: crate::region::DamageRegion::from_rect(bounds),
+            sample_damage_padding: 0,
+            state_has_alpha: false,
+            alpha: 200,
+            opaque_region: crate::region::DamageRegion::from_rect(bounds),
+            opaque: true,
+            sync: crate::sync::SurfaceSyncState::default(),
+            direct_scanout: None,
+            presentation_feedbacks: Vec::new(),
+        }];
+        let mut elements = vec![super::RecordedFrameElement::Effect {
+            phase: super::FramePhase::Overlay,
+            element: super::EffectElement::DimOverlay { clip, alpha: 180 },
+        }];
+        super::apply_workspace_motion(
+            &mut items,
+            &mut elements,
+            crate::visual_animation::WorkspaceMotion { translation_x: 25, alpha: 128 },
+        );
+
+        assert_eq!(items[0].state.bounds.x, 35);
+        assert_eq!(items[0].alpha, super::scale_u8(200, 128));
+        assert!(!items[0].opaque);
+        assert!(items[0].opaque_region.is_empty());
+        assert!(items[0].direct_scanout.is_none());
+        assert!(items[0].state_has_alpha);
+        match items[0].mask {
+            super::SceneItemMask::RoundedClip { clip } => assert_eq!(clip.outer_rect.x, 35),
+            _ => panic!("rounded clip should move with the workspace"),
+        }
+        match &elements[0] {
+            super::RecordedFrameElement::Effect {
+                element: super::EffectElement::DimOverlay { clip, alpha },
+                ..
+            } => {
+                assert_eq!(clip.outer_rect.x, 35);
+                assert_eq!(*alpha, super::scale_u8(180, 128));
+            }
+            _ => panic!("overlay should move and fade with the workspace"),
+        }
+    }
+
+    #[test]
+    fn a_live_workspace_transition_blocks_direct_scanout_for_its_roots() {
+        let mut state = state_for_tests();
+        state.config.animations.workspace.duration_msec = 200;
+        let (_, _, from, to) = live_group(&mut state, 200, 100, 1);
+        assert!(state.activate_workspace(to));
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(70u32), ClientId::from_raw(1), 6));
+        let surface = root(&mut state, object_id);
+        state.register_root_surface(surface);
+        state.assign_root_surface_to_workspace(surface, from);
+        let (_, other_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(71u32), ClientId::from_raw(1), 6));
+        let other = root(&mut state, other_id);
+
+        assert!(super::workspace_transition_blocks_scanout(&state, surface));
+        assert!(!super::workspace_transition_blocks_scanout(&state, other));
+    }
 }
 
 #[cfg(test)]
@@ -5844,7 +6499,7 @@ mod closing_capture_tests {
         protocol_generated::{WlBufferId, WlSurfaceId, XdgPopupId, XdgSurfaceId},
         region::RectI,
         render::{BlurVisualStyle, EffectElement, RoundedRing},
-        state::{BackendOutputRef, DrmId, ObjectId, OutputId, RootSurfaceClip},
+        state::{DrmId, ObjectId, RootSurfaceClip},
         test_support::{
             insert_test_shm_buffer, state_for_tests, test_output_drm0_wh, test_output_drm1,
             test_resolved_wl_surface_client1,
@@ -6137,6 +6792,7 @@ mod closing_capture_tests {
         let snapshot = crate::visual_animation::RetainedClosingSnapshot::new(
             11,
             test_resolved_wl_surface_client1(3),
+            None,
             RectI::new(5, 6, 40, 20).unwrap(),
             Some(crate::visual_animation::FrozenClosingBlur {
                 ring: RoundedRing { outer: clip, inner: clip },
@@ -6152,6 +6808,8 @@ mod closing_capture_tests {
         append_closing_snapshots(
             &state,
             RectI::new(0, 0, 200, 200).unwrap(),
+            None,
+            crate::visual_animation::WorkspaceMotion::IDENTITY,
             &mut items,
             &mut elements,
         );
@@ -6169,6 +6827,73 @@ mod closing_capture_tests {
         assert!(items[0].direct_scanout.is_none());
         assert!(!items[0].opaque);
         assert!(state.root_surfaces.is_empty());
+    }
+
+    #[test]
+    fn closing_snapshots_follow_their_workspace_under_incoming_content() {
+        let mut state = state_for_tests();
+        state.config.animations.workspace.duration_msec = 200;
+        let output_id = state.insert_output(test_output_drm0_wh(800, 600));
+        let group_id = state.workspace_group_for_output(output_id).unwrap();
+        let outgoing = state.active_workspace_for_output(output_id).unwrap();
+        let incoming = state.create_workspace(Some(group_id), Some("2".to_string()));
+        assert!(state.activate_workspace(incoming));
+        let now = std::time::Instant::now();
+        state.advance_window_visuals(now);
+        state.advance_window_visuals(now + std::time::Duration::from_millis(100));
+        let outgoing_motion = state.workspace_motion_for_output(output_id, Some(outgoing));
+        let incoming_motion = state.workspace_motion_for_output(output_id, Some(incoming));
+        for (id, workspace_id) in [(21u64, Some(outgoing)), (22, Some(incoming)), (23, None)] {
+            state
+                .closing_snapshots
+                .push(crate::visual_animation::RetainedClosingSnapshot::new(
+                    id,
+                    test_resolved_wl_surface_client1(id as usize),
+                    workspace_id,
+                    RectI::new(200, 8, 400, 16).unwrap(),
+                    None,
+                    DrmId::from(0usize),
+                    crate::egl::GlTexture::test_inert(),
+                ));
+        }
+        let mut items = Vec::new();
+        let mut elements = Vec::new();
+        super::render_workspace_content(
+            &mut state,
+            DrmId::from(0usize),
+            0,
+            output_id,
+            RectI::new(0, 0, 800, 600).unwrap(),
+            &[],
+            &mut items,
+            &mut elements,
+            &mut Vec::new(),
+        );
+
+        assert!(
+            state
+                .workspace_groups
+                .try_get(group_id)
+                .unwrap()
+                .transition
+                .unwrap()
+                .progress()
+                > crate::visual_animation::UnitValue::ZERO,
+            "outgoing {outgoing_motion:?} incoming {incoming_motion:?}"
+        );
+        assert_eq!(items.len(), 3);
+        assert!(matches!(items[0].state.key, SceneItemKey::ClosingSnapshot(21)));
+        assert!(matches!(items[1].state.key, SceneItemKey::ClosingSnapshot(22)));
+        assert!(matches!(items[2].state.key, SceneItemKey::ClosingSnapshot(23)));
+        assert_eq!(items[0].state.bounds.x, 200 + outgoing_motion.translation_x);
+        assert_eq!(items[1].state.bounds.x, 200 + incoming_motion.translation_x);
+        assert_eq!(items[2].state.bounds.x, 200);
+        assert_eq!(items[0].alpha, super::scale_u8(255, outgoing_motion.alpha));
+        assert_eq!(items[1].alpha, super::scale_u8(255, incoming_motion.alpha));
+        assert!(items[0].alpha > 0 && items[0].alpha < 255);
+        assert!(items[1].alpha > 0 && items[1].alpha < 255);
+        assert!(outgoing_motion.translation_x < 0);
+        assert!(incoming_motion.translation_x > 0);
     }
 
     #[test]

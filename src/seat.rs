@@ -3464,6 +3464,7 @@ mod xdg_seat_tests {
             outputs: Default::default(),
             workspaces: vec![workspace_id],
             active_workspace: Some(workspace_id),
+            transition: None,
         });
         state.workspaces.try_get_mut(workspace_id).unwrap().group = Some(group_id);
         assert!(state
@@ -3555,6 +3556,7 @@ mod xdg_seat_tests {
             outputs: Default::default(),
             workspaces: vec![workspace_id],
             active_workspace: Some(workspace_id),
+            transition: None,
         });
         state.workspaces.try_get_mut(workspace_id).unwrap().group = Some(group_id);
         assert!(state

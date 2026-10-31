@@ -27,7 +27,8 @@ use crate::{
     tiling::{self, TiledResizeState, WorkspaceLayout},
     visual_animation::{
         resolve_window_visual, FocusVisualAnimation, RetainedClosingSnapshot, WindowLifecycleAnim,
-        WindowLifecycleAnimation, WindowVisualBase,
+        WindowLifecycleAnimation, WindowVisualBase, WorkspaceGroupTransition, WorkspaceMotion,
+        WorkspaceTransitionAdvance, WorkspaceTransitionDirection,
     },
     wayland_objects::{
         wl_surface::WlSurface,
@@ -407,6 +408,7 @@ pub struct WorkspaceGroup {
     pub outputs: BTreeSet<OutputId>,
     pub workspaces: Vec<WorkspaceId>,
     pub active_workspace: Option<WorkspaceId>,
+    pub transition: Option<WorkspaceGroupTransition>,
 }
 
 #[derive(Debug)]
@@ -474,6 +476,7 @@ impl RootGeometryCacheEntry {
 pub struct WindowVisualAdvanceResult {
     pub damaged_rects: Vec<RectI>,
     pub has_active_animations: bool,
+    pub completed_transition_outputs: Vec<OutputId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -864,6 +867,29 @@ pub struct State {
     pub xkb: Xkb,
 }
 
+const INITIAL_WORKSPACES_PER_OUTPUT: usize = 4;
+
+fn workspace_transition_direction(
+    group: &WorkspaceGroup,
+    from: WorkspaceId,
+    to: WorkspaceId,
+) -> WorkspaceTransitionDirection {
+    let from_index = group
+        .workspaces
+        .iter()
+        .position(|workspace_id| *workspace_id == from);
+    let to_index = group
+        .workspaces
+        .iter()
+        .position(|workspace_id| *workspace_id == to);
+    match (from_index, to_index) {
+        (Some(from_index), Some(to_index)) if to_index < from_index => {
+            WorkspaceTransitionDirection::Previous
+        }
+        _ => WorkspaceTransitionDirection::Next,
+    }
+}
+
 impl State {
     fn next_workspace_stable_id(&mut self) -> String {
         let serial = self.next_workspace_serial;
@@ -1054,11 +1080,18 @@ impl State {
             outputs: BTreeSet::from([output_id]),
             workspaces: Vec::new(),
             active_workspace: None,
+            transition: None,
         });
         self.output_workspace_groups.insert(output_id, group_id);
-        let workspace_id = self.create_workspace(Some(group_id), None);
-        if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
-            group.active_workspace = Some(workspace_id);
+        let mut first_workspace = None;
+        for _ in 0..INITIAL_WORKSPACES_PER_OUTPUT {
+            let workspace_id = self.create_workspace(Some(group_id), None);
+            first_workspace.get_or_insert(workspace_id);
+        }
+        if let Some(workspace_id) = first_workspace {
+            if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
+                group.active_workspace = Some(workspace_id);
+            }
         }
         group_id
     }
@@ -1197,8 +1230,10 @@ impl State {
         }
         self.refresh_workspace_coordinates_for_group(old_group_id);
         self.ensure_group_has_active_workspace(old_group_id);
+        self.clear_invalid_workspace_transition(old_group_id);
         if let Some(group_id) = new_group_id {
             self.refresh_workspace_coordinates_for_group(group_id);
+            self.clear_invalid_workspace_transition(group_id);
         } else {
             self.clear_workspace_coordinates(workspace_id);
         }
@@ -1225,11 +1260,146 @@ impl State {
             return false;
         }
         group.active_workspace = Some(workspace_id);
+        self.sync_workspace_transition(group_id, previous_workspace, workspace_id);
         if let Some(previous_workspace) = previous_workspace {
             tiling::mark_workspace_dirty(self, previous_workspace);
         }
         tiling::mark_workspace_dirty(self, workspace_id);
         true
+    }
+
+    pub fn activate_adjacent_workspace(
+        &mut self,
+        direction: WorkspaceTransitionDirection,
+    ) -> Option<WorkspaceGroupId> {
+        let output_id = self
+            .active_output_id()
+            .or_else(|| self.fallback_output_id())?;
+        let group_id = self.workspace_group_for_output(output_id)?;
+        let (index, len) = {
+            let group = self.workspace_groups.try_get(group_id)?;
+            let current = group.active_workspace?;
+            let index = group
+                .workspaces
+                .iter()
+                .position(|workspace_id| *workspace_id == current)?;
+            (index, group.workspaces.len())
+        };
+        if len <= 1 {
+            return None;
+        }
+        let target = {
+            let group = self.workspace_groups.try_get(group_id)?;
+            let next_index = match direction {
+                WorkspaceTransitionDirection::Next => (index + 1) % len,
+                WorkspaceTransitionDirection::Previous => (index + len - 1) % len,
+            };
+            group.workspaces[next_index]
+        };
+        self.activate_workspace(target).then_some(group_id)
+    }
+
+    pub fn workspace_group_output_ids(&self, group_id: WorkspaceGroupId) -> Vec<OutputId> {
+        self.workspace_groups
+            .try_get(group_id)
+            .map(|group| group.outputs.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn workspace_motion_for_output(
+        &self,
+        output_id: OutputId,
+        workspace_id: Option<WorkspaceId>,
+    ) -> WorkspaceMotion {
+        let Some(workspace_id) = workspace_id else {
+            return WorkspaceMotion::IDENTITY;
+        };
+        let Some(group_id) = self
+            .workspaces
+            .try_get(workspace_id)
+            .and_then(|workspace| workspace.group)
+        else {
+            return WorkspaceMotion::IDENTITY;
+        };
+        let Some(transition) = self
+            .workspace_groups
+            .try_get(group_id)
+            .and_then(|group| group.transition)
+        else {
+            return WorkspaceMotion::IDENTITY;
+        };
+        let width = self
+            .output_bounds(output_id)
+            .map(|bounds| bounds.width)
+            .unwrap_or(0);
+        let mut motion = transition.motion_for(workspace_id, width);
+        if !self.config.animations.workspace.fade {
+            motion.alpha = u8::MAX;
+        }
+        motion
+    }
+
+    pub(crate) fn output_has_live_workspace_transition(&self, output_id: OutputId) -> bool {
+        self.workspace_group_for_output(output_id)
+            .and_then(|group_id| self.workspace_groups.try_get(group_id))
+            .is_some_and(|group| group.transition.is_some())
+    }
+
+    fn sync_workspace_transition(
+        &mut self,
+        group_id: WorkspaceGroupId,
+        previous: Option<WorkspaceId>,
+        next: WorkspaceId,
+    ) {
+        let Some(previous) = previous.filter(|previous| *previous != next) else {
+            return;
+        };
+        let duration =
+            Duration::from_millis(u64::from(self.config.animations.workspace.duration_msec));
+        let Some(group) = self.workspace_groups.try_get_mut(group_id) else {
+            return;
+        };
+        if duration.is_zero() {
+            group.transition = None;
+            return;
+        }
+        if let Some(transition) = group.transition.as_mut() {
+            if transition.involves(previous) && transition.involves(next) {
+                let goal = if next == transition.to_workspace() {
+                    crate::visual_animation::UnitValue::ONE
+                } else {
+                    crate::visual_animation::UnitValue::ZERO
+                };
+                if transition.request_goal(goal, duration) {
+                    group.transition = None;
+                }
+                return;
+            }
+        }
+        let direction = workspace_transition_direction(group, previous, next);
+        group.transition =
+            Some(WorkspaceGroupTransition::pending(previous, next, direction, duration));
+    }
+
+    fn clear_invalid_workspace_transition(&mut self, group_id: WorkspaceGroupId) {
+        let should_clear = self
+            .workspace_groups
+            .try_get(group_id)
+            .is_some_and(|group| {
+                group.transition.is_some_and(|transition| {
+                    let members_remain = group.workspaces.contains(&transition.from_workspace())
+                        && group.workspaces.contains(&transition.to_workspace());
+                    let active_is_endpoint = group.active_workspace.is_some_and(|active| {
+                        active == transition.from_workspace() || active == transition.to_workspace()
+                    });
+                    !members_remain || !active_is_endpoint
+                })
+            });
+        if should_clear {
+            if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
+                group.transition = None;
+            }
+        }
     }
 
     pub fn assign_root_surface_to_workspace(
@@ -1768,7 +1938,7 @@ impl State {
     }
 
     pub fn advance_window_visuals(&mut self, now: Instant) -> WindowVisualAdvanceResult {
-        self.advance_window_visuals_filtered(now, |_| true, |_| true)
+        self.advance_window_visuals_filtered(now, |_| true, |_| true, |_| true)
     }
 
     pub fn advance_window_visuals_for_output(
@@ -1777,10 +1947,7 @@ impl State {
         now: Instant,
     ) -> WindowVisualAdvanceResult {
         let Some(output_bounds) = self.output_bounds(output_id) else {
-            return WindowVisualAdvanceResult {
-                damaged_rects: Vec::new(),
-                has_active_animations: false,
-            };
+            return WindowVisualAdvanceResult::default();
         };
         let included_surfaces = self
             .managed_root_surfaces
@@ -1791,22 +1958,34 @@ impl State {
                     .is_some_and(|rect| rect.intersects(output_bounds))
             })
             .collect::<BTreeSet<_>>();
+        let included_groups = self
+            .workspace_group_ids()
+            .into_iter()
+            .filter(|group_id| {
+                self.workspace_groups
+                    .try_get(*group_id)
+                    .is_some_and(|group| group.outputs.contains(&output_id))
+            })
+            .collect::<BTreeSet<_>>();
         self.advance_window_visuals_filtered(
             now,
             |surface| included_surfaces.contains(&surface),
             |bounds| bounds.intersects(output_bounds),
+            |group_id| included_groups.contains(&group_id),
         )
     }
 
-    fn advance_window_visuals_filtered<F, G>(
+    fn advance_window_visuals_filtered<F, G, H>(
         &mut self,
         now: Instant,
         mut include_surface: F,
         mut include_snapshot: G,
+        mut include_group: H,
     ) -> WindowVisualAdvanceResult
     where
         F: FnMut(Resolved<WlSurfaceId>) -> bool,
         G: FnMut(RectI) -> bool,
+        H: FnMut(WorkspaceGroupId) -> bool,
     {
         let focus_duration =
             Duration::from_millis(u64::from(self.config.animations.window.duration_msec));
@@ -1876,7 +2055,84 @@ impl State {
             }
             self.closing_snapshots = kept;
         }
-        WindowVisualAdvanceResult { damaged_rects, has_active_animations }
+        let workspace_duration =
+            Duration::from_millis(u64::from(self.config.animations.workspace.duration_msec));
+        let mut completed_transition_outputs = Vec::new();
+        let group_ids = self.workspace_group_ids();
+        for group_id in group_ids {
+            if !include_group(group_id) {
+                continue;
+            }
+            let can_present = self.workspace_group_can_present(group_id);
+            let Some(transition) = self
+                .workspace_groups
+                .try_get_mut(group_id)
+                .and_then(|group| group.transition.as_mut())
+            else {
+                continue;
+            };
+            if !can_present {
+                transition.pause();
+                continue;
+            }
+            transition.resume();
+            let outcome = transition.advance(now, workspace_duration);
+            let active = self
+                .workspace_groups
+                .try_get(group_id)
+                .and_then(|group| group.transition)
+                .is_some_and(|transition| transition.needs_frames());
+            if active {
+                has_active_animations = true;
+            }
+            if matches!(
+                outcome,
+                WorkspaceTransitionAdvance::Progressed | WorkspaceTransitionAdvance::Finished
+            ) {
+                self.push_workspace_group_damage(group_id, &mut damaged_rects);
+            }
+            if outcome == WorkspaceTransitionAdvance::Finished {
+                if let Some(group) = self.workspace_groups.try_get_mut(group_id) {
+                    group.transition = None;
+                }
+                completed_transition_outputs.extend(self.workspace_group_output_ids(group_id));
+            }
+        }
+        WindowVisualAdvanceResult {
+            damaged_rects,
+            has_active_animations,
+            completed_transition_outputs,
+        }
+    }
+
+    fn workspace_group_can_present(&self, group_id: WorkspaceGroupId) -> bool {
+        if !self.session_active {
+            return false;
+        }
+        self.workspace_groups
+            .try_get(group_id)
+            .is_some_and(|group| {
+                group.outputs.iter().any(|output_id| {
+                    self.outputs
+                        .try_get(*output_id)
+                        .is_some_and(|output| output.enabled)
+                })
+            })
+    }
+
+    fn push_workspace_group_damage(
+        &self,
+        group_id: WorkspaceGroupId,
+        damaged_rects: &mut Vec<RectI>,
+    ) {
+        let Some(group) = self.workspace_groups.try_get(group_id) else {
+            return;
+        };
+        for output_id in &group.outputs {
+            if let Some(bounds) = self.output_bounds(*output_id) {
+                damaged_rects.push(bounds);
+            }
+        }
     }
 }
 
@@ -2505,6 +2761,7 @@ impl State {
             }
             self.refresh_workspace_coordinates_for_group(group_id);
             self.ensure_group_has_active_workspace(group_id);
+            self.clear_invalid_workspace_transition(group_id);
         }
         self.workspaces.remove(workspace_id).is_some()
     }
@@ -3881,9 +4138,17 @@ mod tests {
         let workspace = state.workspaces.try_get(workspace_id).unwrap();
 
         assert_eq!(group.active_workspace, Some(workspace_id));
-        assert_eq!(group.workspaces, vec![workspace_id]);
+        assert_eq!(group.workspaces.len(), super::INITIAL_WORKSPACES_PER_OUTPUT);
+        assert_eq!(group.workspaces[0], workspace_id);
         assert_eq!(workspace.group, Some(group_id));
+        assert_eq!(workspace.name, "1");
         assert_eq!(workspace.coordinates, vec![1]);
+        let last = state
+            .workspaces
+            .try_get(*group.workspaces.last().unwrap())
+            .unwrap();
+        assert_eq!(last.name, "4");
+        assert_eq!(last.coordinates, vec![4]);
     }
 
     #[test]

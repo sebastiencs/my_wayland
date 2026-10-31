@@ -46,7 +46,7 @@ pub(super) fn collect_output_render_plan(
         -global_bounds.x,
         -global_bounds.y,
     );
-    let frame = {
+    let mut frame = {
         let drm = state.drm.get(drm_id);
         build_frame_plan(
             drm.output(drm_crtc_id)
@@ -57,6 +57,12 @@ pub(super) fn collect_output_render_plan(
             cursor_plane,
         )
     };
+    if state.output_has_live_workspace_transition(logical_output_id) {
+        let drm = state.drm.get(drm_id);
+        if let Some(bounds) = drm.output(drm_crtc_id).map(|output| output.output_bounds()) {
+            frame.damage.add_rect(bounds);
+        }
+    }
     let output_id = Some(logical_output_id)
         .or_else(|| select_presentation_output_for_scene(state, drm_id, &frame.scene));
     super::OutputRenderPlan {

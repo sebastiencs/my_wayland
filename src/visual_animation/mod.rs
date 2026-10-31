@@ -8,8 +8,8 @@
 //! helpers here.
 //!
 //! Visibility stays in the scene participation policy. Input, protocol, and render eligibility are
-//! not derived from these visual modifiers. Workspace transitions defined here stay dormant.
-//! Closing toplevels keep a retained snapshot, sampled by the same animation pump.
+//! not derived from these visual modifiers. A workspace group owns one live slide-and-fade, and
+//! the same animation pump samples it. Closing toplevels keep a retained snapshot.
 
 mod closing;
 mod track;
@@ -27,6 +27,7 @@ pub use {
         WindowLifecycleAnimation, WindowVisualBase,
     },
     workspace::{
-        WorkspaceGroupTransition, WorkspaceTransitionDirection, WorkspaceTransitionSample,
+        WorkspaceGroupTransition, WorkspaceMotion, WorkspaceTransitionAdvance,
+        WorkspaceTransitionDirection,
     },
 };

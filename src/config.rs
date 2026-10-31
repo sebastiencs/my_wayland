@@ -132,6 +132,7 @@ pub struct OpacityConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnimationsConfig {
     pub window: WindowAnimationConfig,
+    pub workspace: WorkspaceAnimationConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +140,12 @@ pub struct WindowAnimationConfig {
     pub duration_msec: u32,
     pub open_duration_msec: u32,
     pub close_duration_msec: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkspaceAnimationConfig {
+    pub duration_msec: u32,
+    pub fade: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -272,6 +279,8 @@ pub enum CompositorAction {
     Spawn { command: String },
     Quit,
     ReloadConfig,
+    WorkspaceNext,
+    WorkspacePrevious,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -386,6 +395,7 @@ struct OpacityConfigFile {
 #[serde(default, deny_unknown_fields)]
 struct AnimationsConfigFile {
     window: WindowAnimationConfigFile,
+    workspace: WorkspaceAnimationConfigFile,
 }
 
 #[derive(Debug, Deserialize)]
@@ -394,6 +404,13 @@ struct WindowAnimationConfigFile {
     duration_msec: u32,
     open_duration_msec: u32,
     close_duration_msec: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct WorkspaceAnimationConfigFile {
+    duration_msec: u32,
+    fade: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -548,6 +565,10 @@ impl RuntimeConfig {
                 duration_msec: parsed.animations.window.duration_msec,
                 open_duration_msec: parsed.animations.window.open_duration_msec,
                 close_duration_msec: parsed.animations.window.close_duration_msec,
+            },
+            workspace: WorkspaceAnimationConfig {
+                duration_msec: parsed.animations.workspace.duration_msec,
+                fade: parsed.animations.workspace.fade,
             },
         };
 
@@ -733,7 +754,10 @@ impl Default for OpacityConfig {
 
 impl Default for AnimationsConfig {
     fn default() -> Self {
-        Self { window: WindowAnimationConfig::default() }
+        Self {
+            window: WindowAnimationConfig::default(),
+            workspace: WorkspaceAnimationConfig::default(),
+        }
     }
 }
 
@@ -744,6 +768,12 @@ impl Default for WindowAnimationConfig {
             open_duration_msec: 160,
             close_duration_msec: 160,
         }
+    }
+}
+
+impl Default for WorkspaceAnimationConfig {
+    fn default() -> Self {
+        Self { duration_msec: 250, fade: true }
     }
 }
 
@@ -847,6 +877,15 @@ impl Default for WindowAnimationConfigFile {
             duration_msec: WindowAnimationConfig::default().duration_msec,
             open_duration_msec: WindowAnimationConfig::default().open_duration_msec,
             close_duration_msec: WindowAnimationConfig::default().close_duration_msec,
+        }
+    }
+}
+
+impl Default for WorkspaceAnimationConfigFile {
+    fn default() -> Self {
+        Self {
+            duration_msec: WorkspaceAnimationConfig::default().duration_msec,
+            fade: WorkspaceAnimationConfig::default().fade,
         }
     }
 }
@@ -1132,7 +1171,38 @@ pub fn execute_action(state: &mut State, dispatcher: &mut Dispatcher, action: Co
                 log::warn!("failed to reload config: {:#}", error);
             }
         }
+        CompositorAction::WorkspaceNext => {
+            activate_adjacent_workspace(
+                state,
+                dispatcher,
+                crate::visual_animation::WorkspaceTransitionDirection::Next,
+            );
+        }
+        CompositorAction::WorkspacePrevious => {
+            activate_adjacent_workspace(
+                state,
+                dispatcher,
+                crate::visual_animation::WorkspaceTransitionDirection::Previous,
+            );
+        }
     }
+}
+
+fn activate_adjacent_workspace(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    direction: crate::visual_animation::WorkspaceTransitionDirection,
+) {
+    let Some(group_id) = state.activate_adjacent_workspace(direction) else {
+        log::info!("workspace {direction:?} ignored; this output has only one workspace");
+        return;
+    };
+    log::info!("workspace {direction:?} on group {group_id:?}");
+    let outputs = state.workspace_group_output_ids(group_id);
+    crate::wayland_objects::ext_workspace_manager_v1::publish_workspace_state_changed(
+        state, dispatcher, outputs,
+    );
+    kick_window_animation_manager(dispatcher);
 }
 
 pub fn default_config_path() -> PathBuf {
@@ -1869,6 +1939,8 @@ mod tests {
         assert_eq!(defaults.animations.window.duration_msec, 160);
         assert_eq!(defaults.animations.window.open_duration_msec, 160);
         assert_eq!(defaults.animations.window.close_duration_msec, 160);
+        assert_eq!(defaults.animations.workspace.duration_msec, 250);
+        assert!(defaults.animations.workspace.fade);
 
         let configured = RuntimeConfig::parse_for_test(
             r#"
@@ -1876,6 +1948,10 @@ mod tests {
             duration_msec = 40
             open_duration_msec = 0
             close_duration_msec = 0
+
+            [animations.workspace]
+            duration_msec = 0
+            fade = false
             "#,
             &xkb,
         )
@@ -1883,5 +1959,7 @@ mod tests {
         assert_eq!(configured.animations.window.duration_msec, 40);
         assert_eq!(configured.animations.window.open_duration_msec, 0);
         assert_eq!(configured.animations.window.close_duration_msec, 0);
+        assert_eq!(configured.animations.workspace.duration_msec, 0);
+        assert!(!configured.animations.workspace.fade);
     }
 }

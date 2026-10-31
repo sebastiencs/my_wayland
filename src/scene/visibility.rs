@@ -1,10 +1,10 @@
 //! Workspace participation for scene composition.
 //!
 //! `ComposedEntry` keeps three consumer-facing axes: input, protocol visibility, and render
-//! participation. `WorkspaceParticipationPolicy::Steady` preserves today's active-workspace
-//! behavior. `WorkspaceParticipationPolicy::Transition` is dormant until a later phase supplies a
-//! real workspace transition: incoming roots participate on every axis, while outgoing roots stay
-//! protocol-visible and renderable but are not interactive.
+//! participation. `WorkspaceParticipationPolicy::Steady` follows the active workspace, and also
+//! follows a live group transition stored on `WorkspaceGroup`: both workspaces render and stay
+//! protocol-visible, while input follows the logical active workspace. The explicit `Transition`
+//! policy remains available for tests that inject one pair without storing it.
 //!
 //! # Child surfaces and layer-shell
 //!
@@ -164,14 +164,29 @@ pub fn output_workspace_ids(
     let Some(active_workspace_id) = state.active_workspace_for_output(output_id) else {
         return Vec::new();
     };
-    let WorkspaceParticipationPolicy::Transition { group_id, outgoing, incoming } =
+    if let WorkspaceParticipationPolicy::Transition { group_id, outgoing, incoming } =
         normalize_participation_policy(state, policy)
-    else {
-        return vec![active_workspace_id];
-    };
-    if state.workspace_group_for_output(output_id) != Some(group_id) {
-        return vec![active_workspace_id];
+    {
+        if state.workspace_group_for_output(output_id) == Some(group_id) {
+            return transition_workspace_ids(outgoing, incoming);
+        }
     }
+    if let Some(group_id) = state.workspace_group_for_output(output_id) {
+        if let Some(transition) = state
+            .workspace_groups
+            .try_get(group_id)
+            .and_then(|group| group.transition)
+        {
+            return transition_workspace_ids(
+                transition.from_workspace(),
+                transition.to_workspace(),
+            );
+        }
+    }
+    vec![active_workspace_id]
+}
+
+fn transition_workspace_ids(outgoing: WorkspaceId, incoming: WorkspaceId) -> Vec<WorkspaceId> {
     let mut workspace_ids = Vec::new();
     if outgoing != incoming {
         workspace_ids.push(outgoing);
@@ -264,18 +279,33 @@ fn workspace_eligible_for_axis(
     policy: WorkspaceParticipationPolicy,
     axis: ParticipationAxis,
 ) -> bool {
-    let WorkspaceParticipationPolicy::Transition { outgoing, incoming, .. } =
+    if let WorkspaceParticipationPolicy::Transition { outgoing, incoming, .. } =
         normalize_participation_policy(state, policy)
-    else {
-        return state.workspace_is_active(workspace_id);
-    };
-    if workspace_id == incoming {
-        return true;
+    {
+        if workspace_id == incoming {
+            return true;
+        }
+        if workspace_id == outgoing {
+            return axis != ParticipationAxis::Input;
+        }
     }
-    if workspace_id == outgoing {
-        return axis != ParticipationAxis::Input;
+    if stored_transition_contains(state, workspace_id) {
+        return match axis {
+            ParticipationAxis::Input => state.workspace_is_active(workspace_id),
+            ParticipationAxis::Protocol | ParticipationAxis::Render => true,
+        };
     }
     state.workspace_is_active(workspace_id)
+}
+
+fn stored_transition_contains(state: &State, workspace_id: WorkspaceId) -> bool {
+    state
+        .workspaces
+        .try_get(workspace_id)
+        .and_then(|workspace| workspace.group)
+        .and_then(|group_id| state.workspace_groups.try_get(group_id))
+        .and_then(|group| group.transition)
+        .is_some_and(|transition| transition.involves(workspace_id))
 }
 
 fn fullscreen_allows_root(
@@ -544,5 +574,171 @@ mod tests {
         assert!(protocol_visible(&ctx, source));
         assert!(render_participates(&ctx, source));
         assert!(!scene_entry_belongs_to_output_with_policy(&state, &entry, transitioning, policy));
+    }
+
+    fn stored_pair(
+        state: &mut crate::state::State,
+    ) -> (crate::state::OutputId, crate::state::WorkspaceId, crate::state::WorkspaceId) {
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 800, 600));
+        let group_id = state.workspace_group_for_output(output_id).unwrap();
+        let outgoing = state.active_workspace_for_output(output_id).unwrap();
+        let incoming = state.create_workspace(Some(group_id), Some("2".to_string()));
+        state.config.animations.workspace.duration_msec = 200;
+        assert!(state.activate_workspace(incoming));
+        (output_id, outgoing, incoming)
+    }
+
+    #[test]
+    fn stored_transition_keeps_outgoing_protocol_visible_and_input_on_the_active_workspace() {
+        let mut state = state_for_tests();
+        let (output_id, outgoing, incoming) = stored_pair(&mut state);
+        let outgoing_root = insert_root(&mut state, 91);
+        let incoming_root = insert_root(&mut state, 92);
+        assert!(state.assign_root_surface_to_workspace(outgoing_root, outgoing));
+        assert_eq!(state.root_surface_workspace(incoming_root), Some(incoming));
+        state
+            .managed_root_surfaces
+            .get_mut(&outgoing_root)
+            .unwrap()
+            .mapped = true;
+        state
+            .managed_root_surfaces
+            .get_mut(&incoming_root)
+            .unwrap()
+            .mapped = true;
+        let ctx = CompositionEvalContext {
+            state: &state,
+            output_id,
+            snapshot: None,
+            policy: WorkspaceParticipationPolicy::Steady,
+        };
+        let outgoing_entry = workspace_entry(outgoing_root, outgoing);
+        let incoming_entry = workspace_entry(incoming_root, incoming);
+
+        assert!(!input_participates(&ctx, CompositionSource::SceneEntry(&outgoing_entry)));
+        assert!(protocol_visible(&ctx, CompositionSource::SceneEntry(&outgoing_entry)));
+        assert!(render_participates(&ctx, CompositionSource::SceneEntry(&outgoing_entry)));
+        assert!(input_participates(&ctx, CompositionSource::SceneEntry(&incoming_entry)));
+        assert!(protocol_visible(&ctx, CompositionSource::SceneEntry(&incoming_entry)));
+        assert!(render_participates(&ctx, CompositionSource::SceneEntry(&incoming_entry)));
+        assert_eq!(
+            super::output_workspace_ids(&state, output_id, WorkspaceParticipationPolicy::Steady),
+            vec![outgoing, incoming]
+        );
+    }
+
+    #[test]
+    fn stored_transition_fullscreen_stays_inside_the_outgoing_workspace() {
+        let mut state = state_for_tests();
+        let (output_id, outgoing, incoming) = stored_pair(&mut state);
+        let fullscreen = insert_root(&mut state, 93);
+        let covered = insert_root(&mut state, 94);
+        let incoming_root = insert_root(&mut state, 95);
+        assert!(state.assign_root_surface_to_workspace(fullscreen, outgoing));
+        assert!(state.assign_root_surface_to_workspace(covered, outgoing));
+        assert_eq!(state.root_surface_workspace(incoming_root), Some(incoming));
+        state
+            .managed_root_surfaces
+            .get_mut(&fullscreen)
+            .unwrap()
+            .mapped = true;
+        state
+            .workspaces
+            .try_get_mut(outgoing)
+            .unwrap()
+            .layout
+            .fullscreen = Some(crate::tiling::FullscreenState { surface_object_id: fullscreen });
+        let ctx = CompositionEvalContext {
+            state: &state,
+            output_id,
+            snapshot: None,
+            policy: WorkspaceParticipationPolicy::Steady,
+        };
+
+        assert!(protocol_visible(
+            &ctx,
+            CompositionSource::SceneEntry(&workspace_entry(fullscreen, outgoing))
+        ));
+        assert!(!protocol_visible(
+            &ctx,
+            CompositionSource::SceneEntry(&workspace_entry(covered, outgoing))
+        ));
+        assert!(protocol_visible(
+            &ctx,
+            CompositionSource::SceneEntry(&workspace_entry(incoming_root, incoming))
+        ));
+        assert!(!input_participates(
+            &ctx,
+            CompositionSource::SceneEntry(&workspace_entry(incoming_root, incoming))
+        ));
+        state
+            .managed_root_surfaces
+            .get_mut(&incoming_root)
+            .unwrap()
+            .mapped = true;
+        let ctx = CompositionEvalContext {
+            state: &state,
+            output_id,
+            snapshot: None,
+            policy: WorkspaceParticipationPolicy::Steady,
+        };
+        assert!(input_participates(
+            &ctx,
+            CompositionSource::SceneEntry(&workspace_entry(incoming_root, incoming))
+        ));
+    }
+
+    #[test]
+    fn stored_transitions_are_independent_per_group() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let left = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let right = state.insert_output(test_output_with_crtc_name(backend, 2, 100, 0, 100, 100));
+        let left_group = state.workspace_group_for_output(left).unwrap();
+        let right_group = state.workspace_group_for_output(right).unwrap();
+        let left_from = state.active_workspace_for_output(left).unwrap();
+        let right_from = state.active_workspace_for_output(right).unwrap();
+        let left_to = state.create_workspace(Some(left_group), Some("L".to_string()));
+        let right_to = state.create_workspace(Some(right_group), Some("R".to_string()));
+        state.config.animations.workspace.duration_msec = 200;
+        assert!(state.activate_workspace(left_to));
+        assert!(state.activate_workspace(right_to));
+
+        assert_eq!(
+            super::output_workspace_ids(&state, left, WorkspaceParticipationPolicy::Steady),
+            vec![left_from, left_to]
+        );
+        assert_eq!(
+            super::output_workspace_ids(&state, right, WorkspaceParticipationPolicy::Steady),
+            vec![right_from, right_to]
+        );
+    }
+
+    #[test]
+    fn layer_shell_participation_ignores_a_stored_workspace_transition() {
+        let mut state = state_for_tests();
+        let (output_id, _, _) = stored_pair(&mut state);
+        let layer_root = insert_root(&mut state, 96);
+        let placement = crate::wayland_objects::zwlr_layer_surface_v1::SceneLayerPlacement {
+            output_id,
+            rect: crate::region::RectI::new(0, 0, 800, 24).unwrap(),
+            layer: crate::wayland_objects::zwlr_layer_surface_v1::LayerShellLayer::Top,
+        };
+        let ctx = CompositionEvalContext {
+            state: &state,
+            output_id,
+            snapshot: None,
+            policy: WorkspaceParticipationPolicy::Steady,
+        };
+        let source =
+            CompositionSource::LayerRoot { root_surface: layer_root, placement: &placement };
+
+        assert!(input_participates(&ctx, source));
+        assert!(protocol_visible(&ctx, source));
+        assert!(render_participates(&ctx, source));
+        assert!(state
+            .workspace_motion_for_output(output_id, None)
+            .is_identity());
     }
 }

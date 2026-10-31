@@ -472,6 +472,7 @@ impl Dbus {
         dispatcher: &mut Dispatcher,
     ) {
         state.session_active = active;
+        crate::drm::kick_window_animation_manager(dispatcher);
         for (output_id, _) in state.outputs.iter() {
             dispatcher.dispatch_to(
                 output_scheduler_id(output_id),

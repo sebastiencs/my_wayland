@@ -65,11 +65,19 @@ duration_msec = 160
 open_duration_msec = 160
 close_duration_msec = 160
 
+[animations.workspace]
+duration_msec = 250
+# The slide stays either way. false keeps both workspaces opaque during workspace-next and workspace-previous.
+fade = false
+
 [bindings]
 # Key names follow xkb (e.g. Super, Ctrl, Alt, Shift). Last segment is the key.
 "Super+Escape" = { action = "quit" }
 "Super+Shift+C" = { action = "reload-config" }
 "Super+Return" = { action = "spawn", command = "alacritty" }
+# Each output starts with four workspaces. These bindings wrap through that list.
+"Super+Page_Up" = { action = "workspace-next" }
+"Super+Page_Down" = { action = "workspace-previous" }
 
 [mouse_bindings]
 # Mouse bindings use modifier names plus `mouse:<button>`.

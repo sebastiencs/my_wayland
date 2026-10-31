@@ -11,7 +11,7 @@ use crate::{
     protocol_generated::WlSurfaceId,
     region::RectI,
     render::{BlurVisualStyle, RoundedRing},
-    state::DrmId,
+    state::{DrmId, WorkspaceId},
 };
 
 use super::track::{Easing, RetargetableTrack, TrackStatus, UnitValue};
@@ -29,6 +29,7 @@ pub struct FrozenClosingBlur {
 struct ClosingSnapshotAnimation {
     id: u64,
     source: Resolved<WlSurfaceId>,
+    workspace_id: Option<WorkspaceId>,
     bounds: RectI,
     blur: Option<FrozenClosingBlur>,
     track: RetargetableTrack,
@@ -41,12 +42,14 @@ impl ClosingSnapshotAnimation {
     fn start(
         id: u64,
         source: Resolved<WlSurfaceId>,
+        workspace_id: Option<WorkspaceId>,
         bounds: RectI,
         blur: Option<FrozenClosingBlur>,
     ) -> Self {
         Self {
             id,
             source,
+            workspace_id,
             bounds,
             blur,
             track: RetargetableTrack::settled(UnitValue::ONE),
@@ -115,13 +118,14 @@ impl RetainedClosingSnapshot {
     pub(crate) fn new(
         id: u64,
         source: Resolved<WlSurfaceId>,
+        workspace_id: Option<WorkspaceId>,
         bounds: RectI,
         blur: Option<FrozenClosingBlur>,
         drm_id: DrmId,
         texture: GlTexture,
     ) -> Self {
         Self {
-            animation: ClosingSnapshotAnimation::start(id, source, bounds, blur),
+            animation: ClosingSnapshotAnimation::start(id, source, workspace_id, bounds, blur),
             drm_id,
             texture,
             #[cfg(test)]
@@ -135,6 +139,10 @@ impl RetainedClosingSnapshot {
 
     pub(crate) fn source(&self) -> Resolved<WlSurfaceId> {
         self.animation.source
+    }
+
+    pub(crate) fn workspace_id(&self) -> Option<WorkspaceId> {
+        self.animation.workspace_id
     }
 
     pub(crate) fn bounds(&self) -> RectI {
@@ -177,7 +185,7 @@ impl RetainedClosingSnapshot {
     ) -> (Self, Rc<Cell<u32>>) {
         let probe = Rc::new(Cell::new(0));
         let snapshot = Self {
-            animation: ClosingSnapshotAnimation::start(id, source, bounds, None),
+            animation: ClosingSnapshotAnimation::start(id, source, None, bounds, None),
             drm_id,
             texture: GlTexture::test_inert(),
             release_probe: Some(Rc::clone(&probe)),
