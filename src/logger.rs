@@ -93,7 +93,13 @@ impl log::Log for MyLogger {
         );
     }
 
-    fn flush(&self) {}
+    fn flush(&self) {
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+        if let Some(file) = &self.file {
+            let _ = file.sync_all();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -126,4 +132,14 @@ pub fn install() {
     //     .format_target(false)
     //     .filter(None, log::LevelFilter::Trace)
     //     .init();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn flush_does_not_fail_when_logging_stays_on_stderr() {
+        super::install();
+        log::info!("flush");
+        log::logger().flush();
+    }
 }

@@ -479,6 +479,7 @@ impl Runner {
         let mut ingress_stopped = false;
         let mut devices_released = false;
         let mut session_released = false;
+        let mut ring_drained = false;
         loop {
             while let Some(action) = dispatcher.queue.pop_front() {
                 self.process_action(action, &mut dispatcher)
@@ -513,6 +514,17 @@ impl Runner {
                     self.dispatch_loaded::<crate::dbus::Dbus>(
                         &mut dispatcher,
                         crate::dbus::DbusAction::ReleaseControl,
+                    );
+                    continue;
+                }
+                if !ring_drained {
+                    // Cancel outstanding io_uring work and consume the
+                    // completions before returning. Drop then unmaps the rings
+                    // and closes the descriptor.
+                    ring_drained = true;
+                    self.dispatch_loaded::<crate::io_uring::model::IoUringState>(
+                        &mut dispatcher,
+                        crate::io_uring::model::IoUringAction::Drain,
                     );
                     continue;
                 }
@@ -908,5 +920,42 @@ mod shutdown_tests {
         let (outcome, steps, _) = run_probe(ProbeAction::First);
         assert_eq!(outcome.code, 0);
         assert_eq!(steps.borrow().as_slice(), ["first", "second"]);
+    }
+
+    #[test]
+    fn shutdown_drains_a_blocked_ring_before_returning() {
+        use std::{
+            cell::Cell,
+            os::fd::{AsRawFd, FromRawFd, OwnedFd},
+        };
+
+        use crate::io_uring::model::{IoUringAction, IoUringState};
+
+        let Ok(ring) = IoUringState::try_new() else {
+            return;
+        };
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let _write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let hit = Rc::new(Cell::new(false));
+        let hit2 = hit.clone();
+
+        let mut runner = Runner::with_state(state_for_tests());
+        runner.add_model(Box::new(ring));
+        runner.add_model(Box::new(Probe { steps: Rc::new(RefCell::new(Vec::new())) }));
+        let mut dispatcher = Dispatcher::default();
+        dispatcher.dispatch(IoUringAction::Poll {
+            id: None,
+            fd: read.as_raw_fd(),
+            dispatch_to: Redispatcher::to_any(move |_| {
+                hit2.set(true);
+                AnyAction::from(IoUringAction::Completion)
+            }),
+        });
+        dispatcher.dispatch(ProbeAction::QuitThenFatal);
+        let outcome = runner.run(dispatcher);
+        assert_eq!(outcome.code, 0);
+        assert!(!hit.get());
     }
 }

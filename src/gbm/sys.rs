@@ -125,6 +125,7 @@ extern "C" {
     pub fn gbm_bo_write(bo: *mut gbm_bo, buf: *mut libc::c_void, count: libc::size_t) -> i32;
     pub fn gbm_bo_unmap(bo: *mut gbm_bo, map_data: *mut u8);
     pub fn gbm_surface_release_buffer(gbm_surface: *mut gbm_surface, gbm_bo: *mut gbm_bo);
+    pub fn gbm_surface_destroy(surface: *mut gbm_surface);
     pub fn gbm_bo_map(
         bo: *mut gbm_bo,
         x: u32,

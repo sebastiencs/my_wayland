@@ -242,6 +242,15 @@ impl GbmSurface {
     }
 }
 
+impl Drop for GbmSurface {
+    fn drop(&mut self) {
+        if !self.surface.is_null() {
+            unsafe { sys::gbm_surface_destroy(self.surface) };
+            self.surface = std::ptr::null_mut();
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct BufferObject {
     bo: *mut gbm_bo,
@@ -336,6 +345,15 @@ impl drm::buffer::PlanarBuffer for BufferObject {
             offsets[index as usize] = unsafe { sys::gbm_bo_get_offset(self.bo, index) };
         }
         offsets
+    }
+}
+
+impl Drop for GbmDevice {
+    fn drop(&mut self) {
+        if !self.gbm_device.is_null() {
+            unsafe { sys::gbm_device_destroy(self.gbm_device) };
+            self.gbm_device = std::ptr::null_mut();
+        }
     }
 }
 

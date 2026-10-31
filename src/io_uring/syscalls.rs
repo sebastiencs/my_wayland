@@ -24,7 +24,7 @@ pub(super) fn io_uring_setup(
 }
 
 pub(super) fn io_uring_enter(
-    fd: IoUringFd,
+    fd: &IoUringFd,
     to_submit: u32,
     min_complete: u32,
     flags: EnterFlags,
@@ -56,7 +56,7 @@ pub(super) fn io_uring_enter(
 }
 
 pub(super) fn io_uring_register(
-    fd: IoUringFd,
+    fd: &IoUringFd,
     opcode: u32,
     arg: *const (),
     nr_args: u32,

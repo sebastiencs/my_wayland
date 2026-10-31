@@ -218,8 +218,18 @@ pub(super) struct io_uring_probe {
     pub(super) ops: [io_uring_probe_op; 0],
 }
 
-#[derive(Debug, Copy, Clone)]
+/// Owned `io_uring` file descriptor. Closed after the rings are unmapped.
+#[derive(Debug)]
 pub(super) struct IoUringFd(pub(super) RawFd);
+
+impl Drop for IoUringFd {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            unsafe { libc::close(self.0) };
+            self.0 = -1;
+        }
+    }
+}
 
 pub(super) type SubmissionFlags = u32;
 

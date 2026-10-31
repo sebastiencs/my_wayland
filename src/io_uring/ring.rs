@@ -312,6 +312,10 @@ impl Operation {
             Operation::PollRemove { id, .. } => Some(*id),
         }
     }
+
+    pub(super) fn is_cancellation(&self) -> bool {
+        matches!(self, Operation::Cancel { .. } | Operation::PollRemove { .. })
+    }
 }
 
 impl SubmissionQueueEntry {
@@ -506,7 +510,7 @@ impl IoUring {
 
         display_io_uring_features(params.features);
 
-        if !Self::is_ops_supported(io_ring_fd)? {
+        if !Self::is_ops_supported(&io_ring_fd)? {
             warn!("Kernel doesn't support our io_uring operations");
             return Err(std::io::ErrorKind::Other.into());
         }
@@ -611,7 +615,7 @@ impl IoUring {
         })
     }
 
-    fn is_ops_supported(fd: IoUringFd) -> std::io::Result<bool> {
+    fn is_ops_supported(fd: &IoUringFd) -> std::io::Result<bool> {
         let mut probe = io_uring_probe::default();
         io_uring_register(
             fd,
@@ -629,7 +633,7 @@ impl IoUring {
 
     pub(super) fn register_files(&self, files: &[i32]) -> std::io::Result<()> {
         io_uring_register(
-            self.fd,
+            &self.fd,
             IORING_REGISTER_FILES,
             files.as_ptr() as *mut _,
             files.len() as u32,
@@ -641,7 +645,7 @@ impl IoUring {
         let update =
             io_uring_files_update { offset: offset as u32, resv: 0, fds: files.as_ptr() as u64 };
         io_uring_register(
-            self.fd,
+            &self.fd,
             IORING_REGISTER_FILES_UPDATE,
             &update as *const _ as *mut _,
             files.len() as u32,
@@ -651,7 +655,7 @@ impl IoUring {
     pub(super) fn register_files_update(&self, files: &[i32]) -> std::io::Result<()> {
         let update = io_uring_files_update { offset: 0, resv: 0, fds: files.as_ptr() as u64 };
         io_uring_register(
-            self.fd,
+            &self.fd,
             IORING_REGISTER_FILES_UPDATE,
             &update as *const _ as *mut _,
             files.len() as u32,
@@ -659,7 +663,7 @@ impl IoUring {
     }
 
     pub(super) fn unregister_files(&self) -> std::io::Result<()> {
-        io_uring_register(self.fd, IORING_UNREGISTER_FILES, std::ptr::null_mut(), 0)
+        io_uring_register(&self.fd, IORING_UNREGISTER_FILES, std::ptr::null_mut(), 0)
     }
 
     fn sq_refs(&self) -> (&AtomicU32, &AtomicU32) {
@@ -768,7 +772,7 @@ impl IoUring {
 
         if to_submit > 0 {
             tail_ref.store(tail, Release);
-            io_uring_enter(self.fd, to_submit, 0, EnterFlags::empty())?;
+            io_uring_enter(&self.fd, to_submit, 0, EnterFlags::empty())?;
         }
 
         Ok(())
@@ -821,7 +825,7 @@ impl IoUring {
                 tail_ref.store(self.sq_tail_local, Release);
             }
 
-            io_uring_enter(self.fd, nto_submit, min_complete, enter_flags)?;
+            io_uring_enter(&self.fd, nto_submit, min_complete, enter_flags)?;
 
             if let Some(completed) = completed {
                 return Ok(completed);
@@ -838,16 +842,26 @@ impl IoUring {
 
         tail.wrapping_sub(head)
     }
+
+    #[cfg(test)]
+    pub(super) fn raw_fd(&self) -> RawFd {
+        self.fd.0
+    }
 }
 
 impl Drop for IoUring {
     fn drop(&mut self) {
-        // TODO: Make sure the completion queue is empty before unmapping
-        // Or the kernel will work on unmapped memory
-        munmap(self.sqes_ptr, self.sqes_size).unwrap();
-        munmap(self.sq_ptr, self.sq_size).unwrap();
+        // Harvest completions that are already queued, then unmap, then close.
+        // liburing's io_uring_queue_exit uses the same unmap-then-close order.
+        // In-flight operations must already have been cancelled: waiting here
+        // could block on a poll that will never fire.
+        let _ = io_uring_enter(&self.fd, self.sq_pending(), 0, EnterFlags::empty());
+        while self.pop().is_some() {}
+
+        let _ = munmap(self.sqes_ptr, self.sqes_size);
+        let _ = munmap(self.sq_ptr, self.sq_size);
         if self.sq_ptr != self.cq_ptr {
-            munmap(self.cq_ptr, self.cq_size).unwrap();
+            let _ = munmap(self.cq_ptr, self.cq_size);
         }
     }
 }

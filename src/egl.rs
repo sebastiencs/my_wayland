@@ -2421,6 +2421,25 @@ impl EglContext {
     }
 }
 
+impl Drop for EglContext {
+    fn drop(&mut self) {
+        // Context and display go away after the caller has dropped textures,
+        // images, and framebuffers. The GBM device is destroyed by its own
+        // field drop, which runs after this body.
+        if self.display != egl::NO_DISPLAY {
+            let _ = self.egl.make_current(self.display, None, None, None);
+        }
+        if self.context != egl::NO_CONTEXT && self.display != egl::NO_DISPLAY {
+            unsafe { egl::DestroyContext(self.display, self.context) };
+            self.context = egl::NO_CONTEXT;
+        }
+        if self.display != egl::NO_DISPLAY {
+            unsafe { egl::Terminate(self.display) };
+            self.display = egl::NO_DISPLAY;
+        }
+    }
+}
+
 #[allow(unused)]
 pub fn make_display(
     drm_fd: &DrmFd,

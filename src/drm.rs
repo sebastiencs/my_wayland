@@ -169,6 +169,16 @@ pub struct Drm {
     supports_syncobj_eventfd: bool,
 }
 
+impl Drop for Drm {
+    fn drop(&mut self) {
+        // Framebuffers, textures, and buffer objects drop while the EGL
+        // context and GBM device are still alive. The context field then
+        // terminates the display, and the GBM device drops after that.
+        self.egl_context.bind();
+        self.outputs.clear();
+    }
+}
+
 #[derive(Debug)]
 pub struct DrmOutput {
     pub in_use: ConnectorInUse,

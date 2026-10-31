@@ -218,7 +218,7 @@ fn make_timer(duration: Duration) -> TimerFd {
     timer
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     // use std::any::Any;
 
     // dbus2::init().unwrap();
@@ -329,7 +329,8 @@ fn main() {
         Ok(manager) => manager,
         Err(error) => {
             log::error!("{error}");
-            std::process::exit(1);
+            log::logger().flush();
+            return std::process::ExitCode::from(1);
         }
     };
     let config_watcher = Box::new(config::ConfigWatcher::new(&state.config));
@@ -346,7 +347,8 @@ fn main() {
         Ok(handler) => Box::new(handler),
         Err(error) => {
             log::error!("failed to install signal handler: {error}");
-            std::process::exit(1);
+            log::logger().flush();
+            return std::process::ExitCode::from(1);
         }
     };
     runner.add_model(signals);
@@ -395,11 +397,6 @@ fn main() {
 
     let outcome = runner.run(dispatcher);
     log::info!("compositor stopped: {outcome}");
-    // Completions may still be queued on the ring. Unmapping it from `Drop`
-    // is unsafe until that queue is drained, so the process exits with the
-    // recorded code and the kernel reclaims the remaining descriptors.
-    std::process::exit(outcome.code);
-
-    // println!("Hello, world! {:?}", std::mem::size_of::<Box<dyn Any>>());
-    // println!("Hello, world! {:?}", std::mem::size_of::<Box<()>>());
+    log::logger().flush();
+    std::process::ExitCode::from(u8::try_from(outcome.code).unwrap_or(1))
 }

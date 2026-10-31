@@ -16,7 +16,7 @@ use crate::{
 use super::{
     ring::{
         AcceptCompleted, Completed, IoUring, ReadOrWrite, ReadWriteCompleted, RecvmsgCompleted,
-        RecvmsgData, RingId, SendmsgCompleted,
+        RecvmsgData, RingId, SendmsgCompleted, Submit,
     },
     types::empty_msghdr,
 };
@@ -71,6 +71,9 @@ pub enum IoUringAction {
         fd: RawFd,
         dispatch_to: Redispatcher<std::io::Result<AcceptCompleted>>,
     },
+    /// Cancel outstanding operations and consume their completions.
+    /// Callbacks are not run, so a late completion cannot reach a removed model.
+    Drain,
 }
 
 impl std::fmt::Debug for IoUringAction {
@@ -131,6 +134,7 @@ impl std::fmt::Debug for IoUringAction {
                 .field("fd", fd)
                 .field("dispatch_to", dispatch_to)
                 .finish(),
+            Self::Drain => write!(f, "Drain"),
         }
     }
 }
@@ -144,18 +148,29 @@ pub struct IoUringState {
     completed: VecDeque<Completed>,
     /// Operations that needs to be pushed to the sqe
     to_push: VecDeque<Operation>,
+    /// New submissions are refused and completions are not redispatched.
+    draining: bool,
+    drained: bool,
 }
 
-impl Default for IoUringState {
-    fn default() -> Self {
-        IoUringState {
-            ring: IoUring::new(256).unwrap(),
+impl IoUringState {
+    pub fn try_new() -> std::io::Result<Self> {
+        Ok(IoUringState {
+            ring: IoUring::new(256)?,
             need_submit: false,
             pending: BTreeMap::default(),
             ignored_completions: BTreeSet::default(),
             completed: VecDeque::with_capacity(128),
             to_push: VecDeque::with_capacity(32),
-        }
+            draining: false,
+            drained: false,
+        })
+    }
+}
+
+impl Default for IoUringState {
+    fn default() -> Self {
+        Self::try_new().expect("failed to create io_uring")
     }
 }
 
@@ -169,6 +184,9 @@ impl Model for IoUringState {
         dispatcher: &mut Dispatcher,
     ) -> std::result::Result<(), crate::runner::ModelFailure> {
         // log::trace!("action={:?}", action);
+        if self.draining && !matches!(action, IoUringAction::Drain) {
+            return Ok(());
+        }
         match action {
             IoUringAction::Completion => {
                 while let Some(completed) = self.completed.pop_front() {
@@ -280,6 +298,7 @@ impl Model for IoUringState {
                 let id = self.next_id();
                 self.push_op(Operation::PollRemove { id, target });
             }
+            IoUringAction::Drain => self.drain(dispatcher),
         }
 
         Ok(())
@@ -301,6 +320,85 @@ impl IoUringState {
             .push_entries(|| self.to_push.pop_front(), &mut self.pending);
     }
 
+    /// Stop accepting work, cancel what is already submitted, and consume every
+    /// completion. Callbacks are not run.
+    fn drain(&mut self, dispatcher: &mut Dispatcher) {
+        if self.drained {
+            return;
+        }
+        self.draining = true;
+        self.to_push.clear();
+        if let Err(error) = self.ring.submit(Submit::All) {
+            log::warn!("io_uring submit before cancel failed: {error}");
+        }
+        self.harvest(dispatcher);
+
+        let targets: Vec<RingId> = self
+            .pending
+            .iter()
+            .filter(|(_, op)| !op.is_cancellation())
+            .map(|(id, _)| *id)
+            .collect();
+        for target in targets {
+            self.ignored_completions.insert(target);
+            let id = RingId::fresh();
+            self.push_op(Operation::Cancel { id, target });
+        }
+
+        let mut spins = 0;
+        loop {
+            self.ring
+                .push_entries(|| self.to_push.pop_front(), &mut self.pending);
+            if let Err(error) = self.ring.submit(Submit::All) {
+                log::warn!("io_uring drain submit failed: {error}");
+                break;
+            }
+            self.harvest(dispatcher);
+            if self.pending.is_empty()
+                && self.to_push.is_empty()
+                && self.ring.sq_pending() == 0
+                && self.ring.cq_pending() == 0
+            {
+                break;
+            }
+            spins += 1;
+            if spins > 10_000 {
+                log::warn!(
+                    "io_uring drain stopped with {} operations still pending",
+                    self.pending.len()
+                );
+                break;
+            }
+            match self.ring.wait_pop() {
+                Ok(completed) => {
+                    self.completed.push_back(completed);
+                    while let Some(extra) = self.ring.pop() {
+                        self.completed.push_back(extra);
+                    }
+                }
+                Err(error) => {
+                    log::warn!("io_uring drain wait failed: {error}");
+                    break;
+                }
+            }
+        }
+        self.drained = true;
+    }
+
+    fn harvest(&mut self, dispatcher: &mut Dispatcher) {
+        while let Some(completed) = self.ring.pop() {
+            self.completed.push_back(completed);
+        }
+        while let Some(completed) = self.completed.pop_front() {
+            self.process_completed(completed, dispatcher);
+        }
+    }
+
+    #[cfg(test)]
+    fn raw_fd(&self) -> RawFd {
+        self.ring.raw_fd()
+    }
+
     fn is_eof(nbytes: usize, neof: &mut u8) -> bool {
         // Try twice
         // https://github.com/facebook/rocksdb/pull/6441#issuecomment-589843435
@@ -314,9 +412,14 @@ impl IoUringState {
 
     fn process_completed(&mut self, completed: Completed, dispatcher: &mut Dispatcher) {
         let Completed { user_data: _, id, result } = completed;
-        let op = self.pending.remove(&id).unwrap();
+        let Some(op) = self.pending.remove(&id) else {
+            self.ignored_completions.remove(&id);
+            return;
+        };
 
-        if self.ignored_completions.remove(&id) {
+        // A cancelled or late completion must not call back into a model that
+        // shutdown has already stopped.
+        if self.draining || self.ignored_completions.remove(&id) {
             return;
         }
 
@@ -457,6 +560,15 @@ impl IoUringState {
     }
 }
 
+impl Drop for IoUringState {
+    fn drop(&mut self) {
+        if !self.drained {
+            let mut dispatcher = Dispatcher::default();
+            self.drain(&mut dispatcher);
+        }
+    }
+}
+
 const CMSG_HEADER_LENGTH: usize = 16;
 
 fn align(size: usize) -> usize {
@@ -537,4 +649,82 @@ fn read_cmsg(data: &[u8]) -> std::io::Result<(cmsghdr, &[u8])> {
     let msg = read_n(CMSG_HEADER_LENGTH..header.cmsg_len)?;
 
     Ok((header, msg))
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use std::{
+        cell::Cell,
+        os::fd::{AsRawFd, FromRawFd, OwnedFd},
+        rc::Rc,
+    };
+
+    use crate::runner::{AnyAction, Model, Redispatcher};
+
+    use super::*;
+
+    fn pipe() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        (read, write)
+    }
+
+    fn poll_action(fd: RawFd, hit: Rc<Cell<bool>>) -> IoUringAction {
+        IoUringAction::Poll {
+            id: None,
+            fd,
+            dispatch_to: Redispatcher::to_any(move |_| {
+                hit.set(true);
+                AnyAction::from(IoUringAction::Completion)
+            }),
+        }
+    }
+
+    #[test]
+    fn drain_cancels_a_blocked_poll_without_running_its_callback() {
+        let Ok(mut ring) = IoUringState::try_new() else {
+            return;
+        };
+        let (read, _write) = pipe();
+        let hit = Rc::new(Cell::new(false));
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        ring.process(&mut state, poll_action(read.as_raw_fd(), hit.clone()), &mut dispatcher)
+            .unwrap();
+        ring.process(&mut state, IoUringAction::Drain, &mut dispatcher)
+            .unwrap();
+        assert!(!hit.get());
+        assert!(ring.pending.is_empty());
+    }
+
+    #[test]
+    fn a_ready_poll_completion_is_not_redispatched_during_drain() {
+        let Ok(mut ring) = IoUringState::try_new() else {
+            return;
+        };
+        let (read, write) = pipe();
+        let hit = Rc::new(Cell::new(false));
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        ring.process(&mut state, poll_action(read.as_raw_fd(), hit.clone()), &mut dispatcher)
+            .unwrap();
+        let byte = [1u8];
+        assert_eq!(unsafe { libc::write(write.as_raw_fd(), byte.as_ptr().cast(), 1) }, 1);
+        ring.process(&mut state, IoUringAction::Drain, &mut dispatcher)
+            .unwrap();
+        assert!(!hit.get());
+        assert!(ring.pending.is_empty());
+    }
+
+    #[test]
+    fn drop_closes_the_ring_fd_after_unmap() {
+        let Ok(ring) = IoUringState::try_new() else {
+            return;
+        };
+        let fd = ring.raw_fd();
+        drop(ring);
+        assert!(std::fs::metadata(format!("/proc/self/fd/{fd}")).is_err());
+    }
 }
