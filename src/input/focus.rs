@@ -26,6 +26,11 @@ pub(crate) fn set_keyboard_focus(
     if state.seat.keyboard_focus == new_focus {
         return;
     }
+    crate::input::pointer_lock::release_pointer_lock_unless_surface(
+        state,
+        dispatcher,
+        new_focus.map(|focus| focus.surface),
+    );
 
     log::debug!(
         "seat keyboard focus change old={:?} new={:?}",
@@ -72,6 +77,7 @@ pub(crate) fn set_keyboard_focus(
     request_outputs_for_rects(state, affected_rects, dispatcher);
     kick_visual_animation_pump(dispatcher);
     refresh_selection_focus_clients(dispatcher, old_focus, new_focus);
+    crate::input::pointer_lock::maybe_activate_pointer_lock(state, dispatcher);
 }
 
 pub(crate) fn set_keyboard_focus_from_surface(
@@ -282,6 +288,13 @@ pub(crate) fn refresh_pointer_focus(
         }
     }
 
+    crate::input::pointer_lock::release_pointer_lock_unless_surface(
+        state,
+        dispatcher,
+        new_focus.map(|focus| focus.target.surface),
+    );
+    let send_motion = send_motion && state.seat.active_pointer_lock.is_none();
+
     if old_focus.map(|focus| focus.target) != new_focus.map(|focus| focus.target) {
         log::debug!(
             "seat pointer focus change pos=({:.1}, {:.1}) old={:?} new={:?}",
@@ -350,6 +363,7 @@ pub(crate) fn refresh_pointer_focus(
     }
 
     state.seat.pointer_focus = new_focus;
+    crate::input::pointer_lock::maybe_activate_pointer_lock(state, dispatcher);
 }
 
 pub(crate) fn refresh_drag_focus(

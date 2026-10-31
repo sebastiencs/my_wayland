@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest, Resolved},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
     protocol_generated::{
         zwp_locked_pointer_v1, WlPointerId, WlRegionId, WlSurfaceId, ZwpLockedPointerV1Id,
@@ -36,6 +36,14 @@ impl ZwpLockedPointerV1 {
         &mut self.core
     }
 
+    pub(crate) fn surface(&self) -> Resolved<WlSurfaceId> {
+        self.core.surface
+    }
+
+    pub(crate) fn pointer(&self) -> Resolved<WlPointerId> {
+        self.core.pointer
+    }
+
     pub(crate) fn region(&self) -> Option<&RegionValue> {
         self.core.region.as_ref()
     }
@@ -50,6 +58,21 @@ impl ZwpLockedPointerV1 {
 
     pub(crate) fn status(&self) -> crate::wayland_objects::pointer_constraint::ConstraintStatus {
         self.core.status
+    }
+
+    pub(crate) fn set_status(
+        &mut self,
+        status: crate::wayland_objects::pointer_constraint::ConstraintStatus,
+    ) {
+        self.core.set_status(status);
+    }
+
+    pub(crate) fn send_locked(&self, dispatcher: &mut ClientDispatcher) {
+        self.send_event(zwp_locked_pointer_v1::Event::Locked, dispatcher);
+    }
+
+    pub(crate) fn send_unlocked(&self, dispatcher: &mut ClientDispatcher) {
+        self.send_event(zwp_locked_pointer_v1::Event::Unlocked, dispatcher);
     }
 
     fn snapshot_region(
@@ -84,6 +107,19 @@ impl Object for ZwpLockedPointerV1 {
         match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 if let Some(resolved) = client.resolve(self.id, state) {
+                    // The client destroyed the lock. Release the freeze and warp to a valid
+                    // hint, but do not send `unlocked`: the object is going away.
+                    crate::input::pointer_lock::release_grabbed_pointer_lock(
+                        &self,
+                        resolved,
+                        state,
+                        dispatcher,
+                        crate::input::pointer_lock::PointerLockRelease {
+                            send_unlocked: false,
+                            apply_lifetime: false,
+                            warp: true,
+                        },
+                    );
                     if let Some(mut surface) = self.core.surface.try_ref_mut(state) {
                         surface.clear_pointer_constraint(SurfacePointerConstraint::Lock(resolved));
                     }
@@ -122,6 +158,17 @@ impl Object for ZwpLockedPointerV1 {
         _dispatcher: &mut ClientDispatcher,
     ) {
         if let Some(resolved) = client.resolve(self.id, state) {
+            crate::input::pointer_lock::release_grabbed_pointer_lock(
+                self,
+                resolved,
+                state,
+                _dispatcher,
+                crate::input::pointer_lock::PointerLockRelease {
+                    send_unlocked: false,
+                    apply_lifetime: false,
+                    warp: false,
+                },
+            );
             if let Some(mut surface) = self.core.surface.try_ref_mut(state) {
                 surface.clear_pointer_constraint(SurfacePointerConstraint::Lock(resolved));
             }

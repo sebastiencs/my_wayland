@@ -12,7 +12,7 @@ use crate::{
     },
     protocol_generated::{
         Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlKeyboardId, WlPointerId, WlSeatId,
-        WlSurfaceId, XdgPopupId, XdgToplevelId, ZwpRelativePointerV1Id,
+        WlSurfaceId, XdgPopupId, XdgToplevelId, ZwpLockedPointerV1Id, ZwpRelativePointerV1Id,
     },
     root_geometry::WindowTargetGeometry,
     runner::Dispatcher,
@@ -69,6 +69,12 @@ pub enum SeatClientEvent {
     /// One hardware scroll, expanded per pointer version into a single logical frame.
     PointerScroll(PointerScrollFrame),
     PointerFrame,
+    PointerLockLocked {
+        lock: Resolved<ZwpLockedPointerV1Id>,
+    },
+    PointerLockUnlocked {
+        lock: Resolved<ZwpLockedPointerV1Id>,
+    },
     /// Unclipped relative motion for `zwp_relative_pointer_v1` resources of the focused client.
     RelativePointerMotion {
         utime_hi: u32,
@@ -295,6 +301,7 @@ pub struct SeatState {
     active_drag: Option<DragState>,
     pointer_resources: BTreeMap<ClientId, Vec<Resolved<WlPointerId>>>,
     relative_pointers: BTreeMap<Resolved<WlPointerId>, Vec<Resolved<ZwpRelativePointerV1Id>>>,
+    pub(crate) active_pointer_lock: Option<Resolved<ZwpLockedPointerV1Id>>,
     keyboard_resources: BTreeMap<ClientId, Vec<Resolved<WlKeyboardId>>>,
     intercepted_keyboard_keys: BTreeSet<u32>,
     intercepted_pointer_buttons: BTreeSet<u32>,
@@ -325,6 +332,7 @@ impl Default for SeatState {
             active_drag: None,
             pointer_resources: BTreeMap::default(),
             relative_pointers: BTreeMap::default(),
+            active_pointer_lock: None,
             keyboard_resources: BTreeMap::default(),
             intercepted_keyboard_keys: BTreeSet::default(),
             intercepted_pointer_buttons: BTreeSet::default(),
@@ -345,6 +353,7 @@ impl SeatState {
         self.intercepted_pointer_buttons.clear();
         self.pointer_focus = None;
         self.keyboard_focus = None;
+        self.active_pointer_lock = None;
         self.keyboard_focus_history.clear();
         self.last_pointer_enter = None;
         self.active_drag = None;
@@ -738,6 +747,12 @@ impl SeatState {
         self.pointer_resources.remove(&client_id);
         self.relative_pointers
             .retain(|pointer, _| pointer.client_id() != client_id);
+        if self
+            .active_pointer_lock
+            .is_some_and(|lock| lock.client_id() == client_id)
+        {
+            self.active_pointer_lock = None;
+        }
         self.keyboard_resources.remove(&client_id);
         if self
             .selection_source
@@ -1119,6 +1134,9 @@ pub fn handle_pointer_motion(
 ) {
     // The focused client receives the device delta before the pointer is clipped to an output.
     send_relative_pointer_motion(state, dispatcher, dx, dy, dx_unaccel, dy_unaccel, time_usec);
+    if state.seat.active_pointer_lock.is_some() {
+        return;
+    }
     let old_pointer_pos = state.seat.pointer_position();
     let seat = &mut state.seat;
     seat.pointer_pos.0 += dx;
@@ -1281,6 +1299,9 @@ pub fn handle_pointer_motion_absolute(
     y: f64,
     time: u32,
 ) {
+    if state.seat.active_pointer_lock.is_some() {
+        return;
+    }
     let old_pointer_pos = state.seat.pointer_position();
     state.seat.pointer_pos = (x, y);
     clamp_pointer_to_outputs(state);
@@ -1338,6 +1359,7 @@ pub fn quiesce_for_session_pause(state: &mut State, dispatcher: &mut Dispatcher)
 }
 
 fn clear_pointer_focus(state: &mut State, dispatcher: &mut Dispatcher) {
+    crate::input::pointer_lock::release_pointer_lock_unless_surface(state, dispatcher, None);
     let Some(old_focus) = state.seat.pointer_focus.take() else {
         state.seat.clear_pointer_enter();
         return;
@@ -1647,7 +1669,7 @@ fn send_relative_pointer_motion(
     );
 }
 
-fn clamp_pointer_to_outputs(state: &mut State) {
+pub(crate) fn clamp_pointer_to_outputs(state: &mut State) {
     let x = state.seat.pointer_pos.0.round() as i32;
     let y = state.seat.pointer_pos.1.round() as i32;
     let Some((clamped_x, clamped_y)) = state.clamp_point_to_outputs(x, y) else {

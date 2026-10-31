@@ -4,7 +4,7 @@ pub mod ext_workspace_group_handle_v1;
 pub mod ext_workspace_handle_v1;
 pub mod ext_workspace_manager_v1;
 pub mod hyprland_ctm_control_manager_v1;
-mod pointer_constraint;
+pub(crate) mod pointer_constraint;
 pub mod wl_buffer;
 pub mod wl_callback;
 pub mod wl_compositor;

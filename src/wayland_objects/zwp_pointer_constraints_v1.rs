@@ -150,6 +150,9 @@ impl Object for ZwpPointerConstraintsV1 {
             }
         };
         surface.ref_mut(state).set_pointer_constraint(slot);
+        if matches!(slot, SurfacePointerConstraint::Lock(_)) {
+            crate::input::pointer_lock::maybe_activate_pointer_lock(state, dispatcher);
+        }
         Ok(())
     }
 }
@@ -189,9 +192,26 @@ pub(crate) fn apply_pointer_constraint_commit(
 pub(crate) fn defunct_pointer_constraint(
     constraint: Option<SurfacePointerConstraint>,
     state: &mut State,
+    dispatcher: &mut crate::runner::Dispatcher,
+    notify_client: bool,
+    geometry: Option<crate::input::pointer_lock::PointerLockWarpGeometry>,
 ) {
     match constraint {
         Some(SurfacePointerConstraint::Lock(id)) => {
+            let Some(surface) = id.try_ref(state).map(|lock| lock.surface()) else {
+                return;
+            };
+            crate::input::pointer_lock::release_pointer_lock_for_surface(
+                state,
+                dispatcher,
+                surface,
+                geometry,
+                crate::input::pointer_lock::PointerLockRelease {
+                    send_unlocked: notify_client,
+                    apply_lifetime: false,
+                    warp: notify_client,
+                },
+            );
             if let Some(mut lock) = id.try_ref_mut(state) {
                 lock.core_mut().mark_terminal();
             }

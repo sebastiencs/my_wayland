@@ -1536,7 +1536,9 @@ impl WlSurface {
         match payload.buffer {
             None => {}
             Some(None) => {
-                if let Some(resolved) = client.resolve(self.id, state) {
+                let warp = self.pointer_lock_warp_geometry();
+                let resolved = client.resolve(self.id, state);
+                if let Some(resolved) = resolved {
                     begin_managed_toplevel_close_surface(state, resolved, self, dispatcher);
                 }
                 self.cancel_blocked(client, state, dispatcher);
@@ -1558,6 +1560,19 @@ impl WlSurface {
                     input_region: payload.input_region.clone(),
                     opaque_region: payload.opaque_region.clone(),
                 };
+                if let Some(resolved) = resolved {
+                    crate::input::pointer_lock::release_pointer_lock_for_surface(
+                        state,
+                        dispatcher,
+                        resolved,
+                        Some(warp),
+                        crate::input::pointer_lock::PointerLockRelease {
+                            send_unlocked: true,
+                            apply_lifetime: true,
+                            warp: true,
+                        },
+                    );
+                }
             }
             Some(Some(buffer_object_id)) => {
                 let Some(next) = self.mapped_state_for_buffer(
@@ -1654,6 +1669,10 @@ impl WlSurface {
         }
 
         self.discard_presentation_feedbacks(client, state, dispatcher, previous_feedbacks);
+
+        if self.pointer_constraint().is_some() {
+            dispatcher.dispatch_post_action(crate::input::pointer_lock::RecheckPointerLock);
+        }
 
         changes.buffer_changed || changes.mapping_changed || !committed_damage.is_empty()
     }
@@ -1836,6 +1855,9 @@ impl WlSurface {
         let constraint_hint = this.pending.pointer_constraint_hint.take();
         let payload = this.build_commit_payload();
         apply_pointer_constraint_commit(&this, state, constraint_region, constraint_hint);
+        if this.pointer_constraint().is_some() {
+            dispatcher.dispatch_post_action(crate::input::pointer_lock::RecheckPointerLock);
+        }
         let frame_callbacks = std::mem::take(&mut this.pending_frame_callbacks);
         let presentation_feedbacks = std::mem::take(&mut this.pending_presentation_feedbacks);
 
@@ -2289,6 +2311,19 @@ impl WlSurface {
         self.on_screen.logical_size
     }
 
+    pub(crate) fn committed_input_region(&self) -> &RegionValue {
+        &self.on_screen.input_region
+    }
+
+    pub(crate) fn pointer_lock_warp_geometry(
+        &self,
+    ) -> crate::input::pointer_lock::PointerLockWarpGeometry {
+        crate::input::pointer_lock::PointerLockWarpGeometry {
+            origin: self.root_position(),
+            input_region: self.on_screen.input_region.clone(),
+        }
+    }
+
     pub fn global_logical_bounds(&self) -> Option<RectI> {
         let logical_size = self.logical_size()?;
         let (x, y) = self.root_position();
@@ -2301,11 +2336,26 @@ impl WlSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
+        let warp = self.pointer_lock_warp_geometry();
+        let resolved = client.resolve(self.id, state);
         self.discard_all_presentation_feedbacks(client, state, dispatcher);
         self.cancel_blocked(client, state, dispatcher);
         self.retire_current();
         self.on_screen.logical_size = None;
         self.on_screen.damage.clear();
+        if let Some(resolved) = resolved {
+            crate::input::pointer_lock::release_pointer_lock_for_surface(
+                state,
+                dispatcher,
+                resolved,
+                Some(warp),
+                crate::input::pointer_lock::PointerLockRelease {
+                    send_unlocked: true,
+                    apply_lifetime: true,
+                    warp: true,
+                },
+            );
+        }
         dispatcher
             .dispatch_to(client.client_id(), crate::clients::ClientAction::RefreshSurfaceOutputs);
     }
@@ -2602,8 +2652,9 @@ impl WlSurface {
         begin_managed_toplevel_close_surface(state, object, self, dispatcher);
         let scene_bounds = state.surface_scene_bounds_with_ref(object, self);
         state.seat.clear_cursor_surface(object);
+        let geometry = self.pointer_lock_warp_geometry();
         let constraint = self.pointer_constraint.take();
-        defunct_pointer_constraint(constraint, state);
+        defunct_pointer_constraint(constraint, state, dispatcher, true, Some(geometry));
         self.discard_all_presentation_feedbacks(client, state, dispatcher);
         for child_surface in self.child_surface_ids() {
             Self::detach_subsurface_tree(child_surface, client, state, dispatcher);
@@ -2765,7 +2816,7 @@ impl Object for WlSurface {
             begin_managed_toplevel_close_surface(state, resolved, self, dispatcher);
         }
         let constraint = self.pointer_constraint.take();
-        defunct_pointer_constraint(constraint, state);
+        defunct_pointer_constraint(constraint, state, dispatcher, false, None);
         if let Some(waiter_id) = self.blocked_waiter_id.take() {
             dispatcher.stop_model(waiter_id);
         }

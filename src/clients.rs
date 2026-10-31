@@ -962,6 +962,16 @@ impl Client {
                     );
                 }
             }
+            SeatClientEvent::PointerLockLocked { lock } => {
+                if let Some(lock) = lock.try_ref(state) {
+                    lock.send_locked(dispatcher);
+                }
+            }
+            SeatClientEvent::PointerLockUnlocked { lock } => {
+                if let Some(lock) = lock.try_ref(state) {
+                    lock.send_unlocked(dispatcher);
+                }
+            }
             SeatClientEvent::PointerFrame => {
                 for pointer in state.seat.pointer_resources(self.id) {
                     if !pointer.exists(state) {

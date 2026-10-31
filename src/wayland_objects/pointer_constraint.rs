@@ -4,7 +4,7 @@ use crate::{
         zwp_pointer_constraints_v1, WlPointerId, WlSurfaceId, ZwpConfinedPointerV1Id,
         ZwpLockedPointerV1Id,
     },
-    region::RegionValue,
+    region::{RegionOp, RegionValue},
 };
 
 /// One pointer constraint for a surface. This compositor has one seat, so one slot per surface
@@ -67,6 +67,49 @@ impl PointerConstraintCore {
 
     pub(crate) fn mark_terminal(&mut self) {
         self.status = ConstraintStatus::Terminal;
+    }
+
+    pub(crate) fn set_status(&mut self, status: ConstraintStatus) {
+        self.status = status;
+    }
+}
+
+/// A point is in the effective region when it lies in the constraint region and the surface
+/// input region. A null constraint region means the input region alone.
+pub(crate) fn point_in_effective_region(
+    constraint_region: Option<&RegionValue>,
+    input_region: &RegionValue,
+    x: i32,
+    y: i32,
+) -> bool {
+    let in_constraint = constraint_region.is_none_or(|region| region.contains(x, y));
+    in_constraint && input_region.contains(x, y)
+}
+
+/// One integer point inside the effective region, used to warp a fullscreen pointer in.
+pub(crate) fn sample_effective_point(
+    constraint_region: Option<&RegionValue>,
+    input_region: &RegionValue,
+) -> Option<(i32, i32)> {
+    let region = constraint_region.unwrap_or(input_region);
+    match region {
+        RegionValue::Empty => None,
+        RegionValue::Infinite => {
+            point_in_effective_region(constraint_region, input_region, 0, 0).then_some((0, 0))
+        }
+        RegionValue::Spec(spec) => {
+            for op in spec.ops() {
+                let RegionOp::Add(rect) = op else {
+                    continue;
+                };
+                let x = rect.x.saturating_add(rect.width / 2);
+                let y = rect.y.saturating_add(rect.height / 2);
+                if point_in_effective_region(constraint_region, input_region, x, y) {
+                    return Some((x, y));
+                }
+            }
+            None
+        }
     }
 }
 
