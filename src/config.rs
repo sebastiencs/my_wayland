@@ -16,14 +16,15 @@ use {
 };
 
 use crate::{
-    clients::ClientManagerAction,
+    clients::{ClientManagerAction, Resolved},
     drm::{kick_visual_animation_pump, request_outputs, request_outputs_for_points},
     io_uring::{
         model::IoUringAction,
         ring::{PollCompleted, RingId},
     },
+    protocol_generated::WlSurfaceId,
     runner::{Dispatcher, Model, Redispatcher},
-    state::{FractionalScale, State},
+    state::{FractionalScale, State, WorkspaceGroupId, WorkspaceId},
     xkb::{KeyboardState, Xkb},
 };
 
@@ -273,14 +274,41 @@ pub struct MouseBindingTrigger {
     pub modifiers: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(tag = "action", rename_all = "kebab-case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompositorAction {
-    Spawn { command: String },
+    Spawn {
+        command: String,
+    },
     Quit,
     ReloadConfig,
     WorkspaceNext,
     WorkspacePrevious,
+    Close,
+    FocusNext,
+    FocusPrevious,
+    ToggleFloating,
+    ToggleFullscreen,
+    /// One-based workspace on the active output's group.
+    WorkspaceIndex {
+        index: u32,
+    },
+    /// One-based destination workspace on the active output's group.
+    MoveToWorkspace {
+        index: u32,
+    },
+}
+
+/// Tagged binding table. The TOML shape stays `{ action = "...", ... }`. A struct is stricter
+/// than serde's internally tagged enums, which ignore fields the selected variant does not
+/// declare.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionFile {
+    action: String,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    index: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -322,7 +350,7 @@ struct ConfigFile {
     decorations: DecorationsConfigFile,
     effects: EffectsConfigFile,
     animations: AnimationsConfigFile,
-    bindings: BTreeMap<String, CompositorAction>,
+    bindings: BTreeMap<String, ActionFile>,
     mouse_bindings: BTreeMap<String, MouseBindingAction>,
     output: OutputConfigFile,
 }
@@ -505,6 +533,7 @@ impl RuntimeConfig {
             if !seen.insert((trigger.keysym, trigger.modifiers)) {
                 bail!("duplicate binding for `{description}`");
             }
+            let action = compositor_action_from_file(&description, action)?;
             bindings.push(Binding { trigger, action });
         }
 
@@ -1185,7 +1214,194 @@ pub fn execute_action(state: &mut State, dispatcher: &mut Dispatcher, action: Co
                 crate::visual_animation::WorkspaceTransitionDirection::Previous,
             );
         }
+        CompositorAction::Close => {
+            let _ = require_focused_window(state, "close");
+        }
+        CompositorAction::FocusNext => {
+            let _ = require_focused_window(state, "focus-next");
+        }
+        CompositorAction::FocusPrevious => {
+            let _ = require_focused_window(state, "focus-previous");
+        }
+        CompositorAction::ToggleFloating => {
+            let _ = require_focused_window(state, "toggle-floating");
+        }
+        CompositorAction::ToggleFullscreen => {
+            let _ = require_focused_window(state, "toggle-fullscreen");
+        }
+        CompositorAction::WorkspaceIndex { index } => {
+            let _ = require_workspace_index(state, "workspace-index", index);
+        }
+        CompositorAction::MoveToWorkspace { index } => {
+            if require_focused_window(state, "move-to-workspace").is_none() {
+                return;
+            }
+            let _ = require_workspace_index(state, "move-to-workspace", index);
+        }
     }
+}
+
+fn compositor_action_from_file(
+    description: &str,
+    file: ActionFile,
+) -> anyhow::Result<CompositorAction> {
+    let ActionFile { action, command, index } = file;
+    match action.as_str() {
+        "spawn" => {
+            reject_index(description, &action, index)?;
+            let Some(command) = command.filter(|command| !command.is_empty()) else {
+                bail!("binding `{description}` action `spawn` requires `command`");
+            };
+            Ok(CompositorAction::Spawn { command })
+        }
+        "quit" => unit_action(description, &action, command, index, CompositorAction::Quit),
+        "reload-config" => {
+            unit_action(description, &action, command, index, CompositorAction::ReloadConfig)
+        }
+        "workspace-next" => {
+            unit_action(description, &action, command, index, CompositorAction::WorkspaceNext)
+        }
+        "workspace-previous" => {
+            unit_action(description, &action, command, index, CompositorAction::WorkspacePrevious)
+        }
+        "close" => unit_action(description, &action, command, index, CompositorAction::Close),
+        "focus-next" => {
+            unit_action(description, &action, command, index, CompositorAction::FocusNext)
+        }
+        "focus-previous" => {
+            unit_action(description, &action, command, index, CompositorAction::FocusPrevious)
+        }
+        "toggle-floating" => {
+            unit_action(description, &action, command, index, CompositorAction::ToggleFloating)
+        }
+        "toggle-fullscreen" => {
+            unit_action(description, &action, command, index, CompositorAction::ToggleFullscreen)
+        }
+        "workspace-index" => indexed_action(description, &action, command, index, |index| {
+            CompositorAction::WorkspaceIndex { index }
+        }),
+        "move-to-workspace" => indexed_action(description, &action, command, index, |index| {
+            CompositorAction::MoveToWorkspace { index }
+        }),
+        other => bail!("binding `{description}` has unknown action `{other}`"),
+    }
+}
+
+fn unit_action(
+    description: &str,
+    action: &str,
+    command: Option<String>,
+    index: Option<u32>,
+    value: CompositorAction,
+) -> anyhow::Result<CompositorAction> {
+    reject_command(description, action, command)?;
+    reject_index(description, action, index)?;
+    Ok(value)
+}
+
+fn indexed_action(
+    description: &str,
+    action: &str,
+    command: Option<String>,
+    index: Option<u32>,
+    build: impl FnOnce(u32) -> CompositorAction,
+) -> anyhow::Result<CompositorAction> {
+    reject_command(description, action, command)?;
+    let Some(index) = index else {
+        bail!("binding `{description}` action `{action}` requires `index`");
+    };
+    if index == 0 {
+        bail!("binding `{description}` uses workspace index 0; indices are one-based");
+    }
+    Ok(build(index))
+}
+
+fn reject_command(description: &str, action: &str, command: Option<String>) -> anyhow::Result<()> {
+    if command.is_some() {
+        bail!("binding `{description}` action `{action}` does not take `command`");
+    }
+    Ok(())
+}
+
+fn reject_index(description: &str, action: &str, index: Option<u32>) -> anyhow::Result<()> {
+    if index.is_some() {
+        bail!("binding `{description}` action `{action}` does not take `index`");
+    }
+    Ok(())
+}
+
+/// The active output's workspace group. Output choice follows [`State::active_output_id`]:
+/// the pointer output, then the keyboard focus, then the fallback output.
+pub(crate) struct ActiveWorkspaceGroup {
+    pub group_id: WorkspaceGroupId,
+    pub workspace_id: WorkspaceId,
+}
+
+pub(crate) fn active_workspace_group(state: &State) -> Option<ActiveWorkspaceGroup> {
+    let output_id = state.active_output_id()?;
+    let group_id = state.workspace_group_for_output(output_id)?;
+    let workspace_id = state.active_workspace_for_group(group_id)?;
+    Some(ActiveWorkspaceGroup { group_id, workspace_id })
+}
+
+/// Keyboard focus walked up to a workspace-managed root.
+///
+/// Sway commands use the seat's focused container. A popup or subsurface here resolves to
+/// its managed toplevel. Layer-shell focus and a missing focus have no workspace root.
+pub(crate) fn focused_managed_root(state: &State) -> Option<Resolved<WlSurfaceId>> {
+    let focus = state.seat.keyboard_focus()?;
+    let root = state.root_surface_for_surface(focus.surface)?;
+    state
+        .managed_root_surface_state(root)
+        .is_some()
+        .then_some(root)
+}
+
+/// One-based index into the active output's workspace list.
+///
+/// Sway creates a workspace when a binding names one that does not exist. This compositor
+/// keeps the output's existing list, so index 0 and an index past that list are absent.
+pub(crate) fn workspace_at_index(state: &State, index: u32) -> Option<WorkspaceId> {
+    let active = active_workspace_group(state)?;
+    let zero_based = usize::try_from(index.checked_sub(1)?).ok()?;
+    state
+        .workspace_groups
+        .try_get(active.group_id)?
+        .workspaces
+        .get(zero_based)
+        .copied()
+}
+
+pub(crate) fn require_focused_window(state: &State, action: &str) -> Option<Resolved<WlSurfaceId>> {
+    let root = focused_managed_root(state);
+    if root.is_none() {
+        log::info!("{action} ignored; no focused window");
+    }
+    root
+}
+
+pub(crate) fn require_workspace_index(
+    state: &State,
+    action: &str,
+    index: u32,
+) -> Option<WorkspaceId> {
+    let workspace_id = workspace_at_index(state, index);
+    if workspace_id.is_none() {
+        log::info!("{action} ignored; workspace index {index} is unavailable");
+    }
+    workspace_id
+}
+
+fn publish_workspace_group(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    group_id: WorkspaceGroupId,
+) {
+    let outputs = state.workspace_group_output_ids(group_id);
+    crate::wayland_objects::ext_workspace_manager_v1::publish_workspace_state_changed(
+        state, dispatcher, outputs,
+    );
+    kick_visual_animation_pump(dispatcher);
 }
 
 fn activate_adjacent_workspace(
@@ -1198,11 +1414,7 @@ fn activate_adjacent_workspace(
         return;
     };
     log::info!("workspace {direction:?} on group {group_id:?}");
-    let outputs = state.workspace_group_output_ids(group_id);
-    crate::wayland_objects::ext_workspace_manager_v1::publish_workspace_state_changed(
-        state, dispatcher, outputs,
-    );
-    kick_visual_animation_pump(dispatcher);
+    publish_workspace_group(state, dispatcher, group_id);
 }
 
 pub fn default_config_path() -> PathBuf {
@@ -1443,7 +1655,17 @@ fn nearest_existing_directory(path: &Path) -> PathBuf {
 mod tests {
     use {
         super::*,
-        crate::{runner::Dispatcher, test_support::state_for_tests_with_config},
+        crate::{
+            clients::ClientId,
+            input::SurfaceFocus,
+            protocol_generated::WlSurfaceId,
+            runner::Dispatcher,
+            state::{BackendOutputRef, DrmId, OutputId},
+            test_support::{
+                state_for_tests, state_for_tests_with_config, test_output_with_crtc_name,
+            },
+            wayland_objects::wl_surface::WlSurface,
+        },
     };
 
     #[test]
@@ -1961,5 +2183,141 @@ mod tests {
         assert_eq!(configured.animations.window.close_duration_msec, 0);
         assert_eq!(configured.animations.workspace.duration_msec, 0);
         assert!(!configured.animations.workspace.fade);
+    }
+
+    #[test]
+    fn parses_window_and_indexed_workspace_actions() {
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::parse_for_test(
+            r#"
+            [bindings]
+            "Super+Q" = { action = "close" }
+            "Super+Left" = { action = "focus-previous" }
+            "Super+Right" = { action = "focus-next" }
+            "Super+Space" = { action = "toggle-floating" }
+            "Super+F" = { action = "toggle-fullscreen" }
+            "Super+1" = { action = "workspace-index", index = 1 }
+            "Super+Shift+1" = { action = "move-to-workspace", index = 4 }
+            "#,
+            &xkb,
+        )
+        .unwrap();
+
+        let actions: Vec<_> = config
+            .bindings
+            .into_iter()
+            .map(|binding| binding.action)
+            .collect();
+        assert_eq!(
+            actions,
+            vec![
+                CompositorAction::WorkspaceIndex { index: 1 },
+                CompositorAction::ToggleFullscreen,
+                CompositorAction::FocusPrevious,
+                CompositorAction::Close,
+                CompositorAction::FocusNext,
+                CompositorAction::MoveToWorkspace { index: 4 },
+                CompositorAction::ToggleFloating,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_a_zero_workspace_index_at_load() {
+        let xkb = Xkb::new();
+        for action in ["workspace-index", "move-to-workspace"] {
+            let error = RuntimeConfig::parse_for_test(
+                &format!(
+                    r#"
+                    [bindings]
+                    "Super+1" = {{ action = "{action}", index = 0 }}
+                    "#
+                ),
+                &xkb,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("one-based"),
+                "{action} accepted index 0: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_fields_that_do_not_belong_to_the_action() {
+        let xkb = Xkb::new();
+        let wrong_index = RuntimeConfig::parse_for_test(
+            r#"
+            [bindings]
+            "Super+Q" = { action = "close", index = 1 }
+            "#,
+            &xkb,
+        )
+        .unwrap_err();
+        assert!(wrong_index.to_string().contains("does not take `index`"));
+
+        let unknown = RuntimeConfig::parse_for_test(
+            r#"
+            [bindings]
+            "Super+Q" = { action = "close", extra = 1 }
+            "#,
+            &xkb,
+        )
+        .unwrap_err();
+        assert!(unknown.to_string().contains("unknown field"));
+    }
+
+    fn insert_managed_root(state: &mut State) -> (OutputId, Resolved<WlSurfaceId>) {
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(41u32), ClientId::from_raw(1), 6));
+        let surface = Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(41u32), object_id);
+        state.register_root_surface(surface);
+        assert!(state.managed_root_surface_state(surface).is_some());
+        (output, surface)
+    }
+
+    #[test]
+    fn focused_window_actions_need_a_managed_root() {
+        let mut state = state_for_tests();
+        assert!(focused_managed_root(&state).is_none());
+
+        let (_output, surface) = insert_managed_root(&mut state);
+        assert!(focused_managed_root(&state).is_none());
+
+        state.seat.keyboard_focus = Some(SurfaceFocus::new(surface));
+        assert_eq!(focused_managed_root(&state), Some(surface));
+
+        state.managed_root_surfaces.remove(&surface);
+        assert!(focused_managed_root(&state).is_none());
+    }
+
+    #[test]
+    fn workspace_index_uses_the_active_output_and_ignores_invalid_slots() {
+        let mut state = state_for_tests();
+        assert!(workspace_at_index(&state, 1).is_none());
+
+        let (output, _surface) = insert_managed_root(&mut state);
+        let group_id = state.workspace_group_for_output(output).unwrap();
+        let workspaces = state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .workspaces
+            .clone();
+        assert_eq!(workspaces.len(), 4);
+        assert_eq!(workspace_at_index(&state, 1), Some(workspaces[0]));
+        assert_eq!(workspace_at_index(&state, 4), Some(workspaces[3]));
+        assert!(workspace_at_index(&state, 0).is_none());
+        assert!(workspace_at_index(&state, 5).is_none());
+
+        let before = state.active_workspace_for_output(output);
+        execute_action(
+            &mut state,
+            &mut Dispatcher::default(),
+            CompositorAction::WorkspaceIndex { index: 5 },
+        );
+        assert_eq!(state.active_workspace_for_output(output), before);
     }
 }
