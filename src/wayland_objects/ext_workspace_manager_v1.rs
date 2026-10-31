@@ -307,7 +307,7 @@ impl Object for ExtWorkspaceManagerV1 {
     ) -> RequestResult {
         use ext_workspace_manager_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Commit => {
                 let (affected_outputs, had_requests) = self.apply_pending_requests(state);
                 if !had_requests {

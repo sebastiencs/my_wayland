@@ -161,7 +161,7 @@ impl Object for ZxdgToplevelDecorationV1 {
     ) -> RequestResult {
         use zxdg_toplevel_decoration_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 if let Some(mut toplevel) = self.toplevel.try_grab(state) {
                     let this = client.resolve(self.id, state).unwrap();

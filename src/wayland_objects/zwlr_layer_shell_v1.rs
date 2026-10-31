@@ -1,7 +1,7 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
     globals::Global,
-    object::{Object, Parser, ParserError, RequestResult},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_display, zwlr_layer_shell_v1, Constants, NewId, WaylandId, WlOutputId,
         ZwlrLayerShellV1Id,
@@ -78,35 +78,6 @@ impl ZwlrLayerShellV1 {
         let wl_output = output.rref(state);
         Ok(Some(wl_output.output_id().ok_or(())?))
     }
-
-    fn parse_request(
-        &self,
-        client: &mut Client,
-        req: RawRequest,
-        dispatcher: &mut ClientDispatcher,
-    ) -> Option<<Self as Parser>::Request> {
-        match client.parse::<Self>(req) {
-            Ok(request) => Some(request),
-            Err(err) => {
-                self.send_parse_error(client, dispatcher, err);
-                None
-            }
-        }
-    }
-
-    fn send_parse_error(
-        &self,
-        client: &mut Client,
-        dispatcher: &mut ClientDispatcher,
-        err: ParserError,
-    ) {
-        client.protocol_violation_disconnect(
-            dispatcher,
-            self.id.into(),
-            wl_display::Error::InvalidMethod as u32,
-            format!("malformed zwlr_layer_shell_v1 request: {err:?}"),
-        );
-    }
 }
 
 impl Object for ZwlrLayerShellV1 {
@@ -123,11 +94,7 @@ impl Object for ZwlrLayerShellV1 {
     ) -> RequestResult {
         use zwlr_layer_shell_v1::Request::*;
 
-        let Some(request) = self.parse_request(client, req, dispatcher) else {
-            return Ok(());
-        };
-
-        match request {
+        match client.parse::<Self>(req, dispatcher)? {
             GetLayerSurface { id, surface, output, layer, namespace } => {
                 let surface = client.resolve_or_disconnect(surface, state, dispatcher)?;
 

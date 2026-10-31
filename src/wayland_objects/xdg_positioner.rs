@@ -380,7 +380,7 @@ impl Object for XdgPositioner {
     ) -> RequestResult {
         use xdg_positioner::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => self.delete_self(client, state, dispatcher),
             SetSize { width, height } => {
                 if width <= 0 || height <= 0 {

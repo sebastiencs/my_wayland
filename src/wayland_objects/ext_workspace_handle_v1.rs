@@ -141,7 +141,7 @@ impl Object for ExtWorkspaceHandleV1 {
     ) -> RequestResult {
         use ext_workspace_handle_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 if let Some(mut manager) = self.manager.try_ref_mut(state) {
                     manager.release_workspace_handle(self.workspace_id);

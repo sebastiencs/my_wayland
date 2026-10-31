@@ -66,7 +66,7 @@ impl Object for WlShm {
     ) -> RequestResult {
         use crate::protocol_generated::wl_shm::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             CreatePool { id, fd, size } => {
                 let pool = WlShmPool::new(id, fd, size as usize);
                 client.insert_object(state, pool);

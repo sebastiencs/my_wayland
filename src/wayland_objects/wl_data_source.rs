@@ -123,7 +123,7 @@ impl Object for WlDataSource {
     ) -> RequestResult {
         use wl_data_source::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Offer { mime_type } => {
                 if !self.mime_types.contains(&mime_type) {
                     self.mime_types.push(mime_type);

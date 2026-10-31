@@ -69,7 +69,7 @@ impl Object for WlSubsurface {
     ) -> RequestResult {
         use wl_subsurface::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 let old_root_surface = state.root_surface_for_surface(self.parent);
                 if let Some(mut surface) = self.surface.try_grab(state) {

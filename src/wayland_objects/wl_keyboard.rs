@@ -33,7 +33,7 @@ impl Object for WlKeyboard {
     ) -> RequestResult {
         use wl_keyboard::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Release => {
                 if let Some(keyboard) = client.resolve(self.id, state) {
                     state.seat.unregister_keyboard(keyboard);

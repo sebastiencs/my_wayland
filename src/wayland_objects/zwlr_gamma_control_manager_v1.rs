@@ -93,7 +93,7 @@ impl Object for ZwlrGammaControlManagerV1 {
     ) -> RequestResult {
         use zwlr_gamma_control_manager_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into()),
             GetGammaControl { id, output } => {
                 let _ = self.version;

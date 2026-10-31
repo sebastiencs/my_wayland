@@ -57,7 +57,7 @@ impl Object for WpFractionalScaleManagerV1 {
     ) -> RequestResult {
         use wp_fractional_scale_manager_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::{
     clients::{Client, ClientDispatcher, ClientId, EventWriter, RawRequest, Resolved},
-    object::{Object, Parser, ParserError, RequestResult},
+    object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_display, zwlr_layer_shell_v1, zwlr_layer_surface_v1, Constants, WaylandId, WlSurfaceId,
         XdgPopupId, ZwlrLayerShellV1Id, ZwlrLayerSurfaceV1Id,
@@ -406,35 +406,6 @@ impl ZwlrLayerSurfaceV1 {
         message: impl AsRef<str>,
     ) {
         client.send_protocol_error(dispatcher, self.id.into(), code as u32, message);
-    }
-
-    fn parse_request(
-        &self,
-        client: &mut Client,
-        req: RawRequest,
-        dispatcher: &mut ClientDispatcher,
-    ) -> Option<<Self as Parser>::Request> {
-        match client.parse::<Self>(req) {
-            Ok(request) => Some(request),
-            Err(err) => {
-                self.send_parse_error(client, dispatcher, err);
-                None
-            }
-        }
-    }
-
-    fn send_parse_error(
-        &self,
-        client: &mut Client,
-        dispatcher: &mut ClientDispatcher,
-        err: ParserError,
-    ) {
-        client.protocol_violation_disconnect(
-            dispatcher,
-            self.id.into(),
-            wl_display::Error::InvalidMethod as u32,
-            format!("malformed zwlr_layer_surface_v1 request: {err:?}"),
-        );
     }
 
     fn unregister_from_manager(&self, state: &mut State) {
@@ -1209,18 +1180,12 @@ impl Object for ZwlrLayerSurfaceV1 {
     ) -> RequestResult {
         use zwlr_layer_surface_v1::Request::*;
 
-        let Some(request) = self.parse_request(client, req, dispatcher) else {
-            return Ok(());
-        };
-
-        if self.closed {
-            if matches!(request, Destroy) {
-                self.destroy_impl(client, state, dispatcher);
+        match client.parse::<Self>(req, dispatcher)? {
+            request if self.closed => {
+                if matches!(request, Destroy) {
+                    self.destroy_impl(client, state, dispatcher);
+                }
             }
-            return Ok(());
-        }
-
-        match request {
             SetSize { width, height } => {
                 self.pending.desired_width = Some(width.min(i32::MAX as u32) as i32);
                 self.pending.desired_height = Some(height.min(i32::MAX as u32) as i32);

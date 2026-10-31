@@ -2621,7 +2621,7 @@ impl Object for WlSurface {
     ) -> RequestResult {
         use wl_surface::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => self.delete_self(client, state, dispatcher),
             Attach { buffer, x, y } => {
                 self.on_attach(client, state, buffer, x, y, dispatcher);

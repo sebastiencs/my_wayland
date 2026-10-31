@@ -77,7 +77,7 @@ impl Object for WlShmPool {
     ) -> RequestResult {
         use wl_shm_pool::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             CreateBuffer { id, offset, width, height, stride, format } => {
                 let Some(format) = SHM_FORMATS.iter().find(|f| f.wayland_id == format).copied()
                 else {

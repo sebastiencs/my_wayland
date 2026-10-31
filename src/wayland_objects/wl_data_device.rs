@@ -125,7 +125,7 @@ impl Object for WlDataDevice {
     ) -> RequestResult {
         use wl_data_device::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             StartDrag { source, origin, icon, serial } => {
                 start_drag(&mut self, client, state, dispatcher, source, origin, icon, serial)?;
             }

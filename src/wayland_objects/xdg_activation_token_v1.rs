@@ -59,7 +59,7 @@ impl Object for XdgActivationTokenV1 {
     ) -> RequestResult {
         use xdg_activation_token_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             SetSerial { serial, seat } => {
                 if self.committed {
                     self.already_used(dispatcher);

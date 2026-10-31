@@ -316,11 +316,11 @@ impl Object for WlBuffer {
         client: &mut Client,
         _state: &mut State,
         req: RawRequest,
-        _: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) -> RequestResult {
         use wl_buffer::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 self.destroyed = true;
                 client.remove_wayland_object(self.id);

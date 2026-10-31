@@ -40,7 +40,7 @@ impl Object for WpLinuxDrmSyncobjTimelineV1 {
     ) -> RequestResult {
         use wp_linux_drm_syncobj_timeline_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 use crate::wayland_objects::wl_display::WlDisplay;
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());

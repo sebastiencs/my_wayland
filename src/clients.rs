@@ -1503,7 +1503,7 @@ impl Client {
     }
 
     /// Helper that just log the request
-    pub fn parse<R: Parser>(&self, req: RawRequest) -> Result<R::Request, ParserError>
+    pub fn parse_and_log<R: Parser>(&self, req: RawRequest) -> Result<R::Request, ParserError>
     where
         R::Request: std::fmt::Debug,
     {
@@ -1513,6 +1513,34 @@ impl Client {
             self.log_request::<R>(object_id, result.as_ref());
         }
         result
+    }
+
+    /// Decode a request. On failure, post `wl_display.invalid_method` and disconnect this client.
+    pub fn parse<R: Parser>(
+        &mut self,
+        req: RawRequest,
+        dispatcher: &mut ClientDispatcher,
+    ) -> Result<R::Request, AbortRequest>
+    where
+        R::Request: std::fmt::Debug,
+    {
+        let object_id = req.object_id();
+        match self.parse_and_log::<R>(req) {
+            Ok(request) => Ok(request),
+            Err(error) => {
+                log::warn!(
+                    "malformed {} request on object {object_id:?}: {error:?}",
+                    R::INTERFACE_NAME
+                );
+                self.protocol_violation_disconnect(
+                    dispatcher,
+                    object_id,
+                    wl_display::Error::InvalidMethod as u32,
+                    format!("malformed request: {error:?}"),
+                );
+                Err(AbortRequest::Malformed)
+            }
+        }
     }
 
     fn handle_registry_global_added(
@@ -2859,6 +2887,13 @@ pub struct Arguments {
     args: VecDeque<u32>,
 }
 
+#[cfg(test)]
+impl Arguments {
+    pub(crate) fn from_words(args: VecDeque<u32>) -> Self {
+        Self { args }
+    }
+}
+
 impl Arguments {
     fn pop(&mut self) -> Result<u32, ParserError> {
         self.args.pop_front().ok_or(ParserError::Malformed)
@@ -2945,6 +2980,52 @@ mod clients_wire_tests {
     #[test]
     fn raw_request_try_from_rejects_short_buffer() {
         assert!(RawRequest::try_from([1u8, 0, 0, 0].as_slice()).is_err());
+    }
+
+    #[test]
+    fn malformed_opcodes_fail_for_core_shell_buffer_and_extension() {
+        use crate::{
+            object::Parser,
+            wayland_objects::{
+                wl_buffer::WlBuffer, wl_registry::WlRegistry, wp_viewporter::WpViewporter,
+                xdg_surface::XdgSurface,
+            },
+        };
+
+        let request = |opcode| RawRequest {
+            object_id: 1,
+            request_id: opcode,
+            arguments: Arguments { args: VecDeque::new() },
+            fds: None,
+        };
+        assert!(WlRegistry::parse_request(request(50)).is_err());
+        assert!(XdgSurface::parse_request(request(50)).is_err());
+        assert!(WlBuffer::parse_request(request(50)).is_err());
+        assert!(WpViewporter::parse_request(request(50)).is_err());
+    }
+
+    #[test]
+    fn a_malformed_request_disconnects_only_that_client() {
+        use crate::{runner::Dispatcher, wayland_objects::wl_display::WlDisplay};
+
+        use super::{Client, ClientId, ClientManagerAction};
+
+        let mut client = Client::new_for_tests(ClientId::from_raw(7));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let request = RawRequest {
+            object_id: 5,
+            request_id: 50,
+            arguments: Arguments { args: VecDeque::new() },
+            fds: None,
+        };
+        assert!(matches!(
+            client.parse::<WlDisplay>(request, &mut client_dispatcher),
+            Err(crate::object::AbortRequest::Malformed)
+        ));
+        assert!(dispatcher.test_has_queued_action(|action: &ClientManagerAction| {
+            matches!(action, ClientManagerAction::Close { id } if *id == ClientId::from_raw(7))
+        }));
     }
 
     #[test]

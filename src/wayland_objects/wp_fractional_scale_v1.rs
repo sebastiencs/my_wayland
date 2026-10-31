@@ -36,7 +36,7 @@ impl Object for WpFractionalScaleV1 {
     ) -> RequestResult {
         use wp_fractional_scale_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 let object = client.resolve(self.id, state).unwrap();
                 if let Some(mut surface) = self.surface.try_grab(state) {

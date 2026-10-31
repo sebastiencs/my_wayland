@@ -37,7 +37,7 @@ impl Object for WpLinuxDrmSyncobjSurfaceV1 {
     ) -> RequestResult {
         use wp_linux_drm_syncobj_surface_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 if let Some(mut surface) = self.surface.try_grab(state) {
                     surface.clear_syncobj_surface_object(Resolved::new(

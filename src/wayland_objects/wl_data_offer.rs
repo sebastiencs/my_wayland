@@ -163,7 +163,7 @@ impl Object for WlDataOffer {
     ) -> RequestResult {
         use wl_data_offer::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Accept { serial: _, mime_type } => {
                 if self.finished {
                     client.protocol_violation_disconnect(

@@ -42,7 +42,7 @@ impl Object for WlDisplay {
     ) -> RequestResult {
         use wl_display::Request::*;
 
-        match client.parse::<Self>(request).unwrap() {
+        match client.parse::<Self>(request, dispatcher)? {
             Sync { callback } => {
                 let (resolved, callback) = client.insert_object(state, WlCallback::new(callback));
                 callback.done(monotonic_time_msec(), dispatcher);

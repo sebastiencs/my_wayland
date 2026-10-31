@@ -23,6 +23,7 @@ pub mod wl_shm_pool;
 pub mod wl_subcompositor;
 pub mod wl_subsurface;
 pub mod wl_surface;
+pub mod wl_touch;
 pub mod wp_cursor_shape_device_v1;
 pub mod wp_cursor_shape_manager_v1;
 pub mod wp_fractional_scale_manager_v1;
@@ -89,7 +90,6 @@ fake_obj! {
     // { wl_surface, WlSurface },
     // { wl_seat, WlSeat },
     // { wl_keyboard, WlKeyboard },
-    { wl_touch, WlTouch },
     // { wl_output, WlOutput },
     // { wl_subcompositor, WlSubcompositor },
     { wl_fixes, WlFixes },

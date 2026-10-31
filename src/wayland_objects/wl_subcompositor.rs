@@ -68,7 +68,7 @@ impl Object for WlSubcompositor {
     ) -> RequestResult {
         use wl_subcompositor::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => self.delete_self(client, state, dispatcher),
             GetSubsurface { id, surface, parent } => {
                 let surface = client.resolve_or_disconnect(surface, state, dispatcher)?;

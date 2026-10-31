@@ -176,7 +176,7 @@ impl Object for ZwlrGammaControlV1 {
     ) -> RequestResult {
         use zwlr_gamma_control_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 self.release_gamma_and_schedule(state, dispatcher);
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());

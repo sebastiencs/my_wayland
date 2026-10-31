@@ -56,7 +56,7 @@ impl Object for WlDataDeviceManager {
     ) -> RequestResult {
         use wl_data_device_manager::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             CreateDataSource { id } => {
                 client
                     .insert_object(state, WlDataSource::new(id, client.client_id(), self.version));

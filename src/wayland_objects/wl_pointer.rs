@@ -148,7 +148,7 @@ impl Object for WlPointer {
     ) -> RequestResult {
         use wl_pointer::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             SetCursor { serial, surface, hotspot_x, hotspot_y } => {
                 let surface = match surface.to_opt() {
                     Some(surface) => {

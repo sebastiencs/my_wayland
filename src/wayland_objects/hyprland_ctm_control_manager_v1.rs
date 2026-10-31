@@ -204,7 +204,7 @@ impl Object for HyprlandCtmControlManagerV1 {
     ) -> RequestResult {
         use hyprland_ctm_control_manager_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 self.reset_applied_outputs(state, dispatcher);
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());

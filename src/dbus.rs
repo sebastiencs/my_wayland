@@ -15,7 +15,7 @@ use crate::{
         model::IoUringAction,
         ring::{RecvmsgCompleted, RingId},
     },
-    runner::{Dispatcher, Model, Redispatcher},
+    runner::{Dispatcher, Model, Redispatcher, ShutdownReason},
     scheduler::{output_scheduler_id, OutputSchedulerAction},
     state::State,
     udev::UdevAction,
@@ -91,6 +91,22 @@ pub struct Dbus {
     held_devices: BTreeSet<libc::dev_t>,
     took_control: bool,
     released_control: bool,
+}
+
+fn session_ownership_lost(error_name: Option<&str>) -> bool {
+    matches!(
+        error_name,
+        Some(
+            "org.freedesktop.login1.NoSession"
+                | "org.freedesktop.DBus.Error.Disconnected"
+                | "org.freedesktop.DBus.Error.NameHasNoOwner"
+                | "org.freedesktop.DBus.Error.ServiceUnknown"
+        )
+    )
+}
+
+fn take_device_reply_is_usable(body: &[Value], fd_count: usize) -> bool {
+    fd_count > 0 && matches!(body, [Value::UnixFD(_), Value::Boolean(_)])
 }
 
 fn session_method(session_path: &str, member: &str) -> Message {
@@ -433,9 +449,10 @@ impl Dbus {
         use {dbus_message_parser::message::MessageType::*, Value::*};
 
         match msg.get_type() {
-            MethodCall => todo!(),
+            MethodCall => self.reply_unknown_method(msg),
             MethodReturn => {
                 let Some(reply_serial) = msg.get_reply_serial().map(DbusSerial) else {
+                    log::warn!("dbus method return has no reply serial");
                     return;
                 };
                 let Some(pending) = self.pending.remove(&reply_serial) else {
@@ -443,36 +460,78 @@ impl Dbus {
                 };
                 match pending {
                     Pending::TakeDevice { devnum } => {
-                        let [UnixFD(raw_fd), Boolean(inactive)] = msg.get_body() else {
-                            panic!();
-                        };
-                        let inactive = *inactive;
-                        let Some(fd) = (!fds.is_empty()).then(|| fds.remove(0)) else {
-                            panic!("TakeDevice reply missing owned fd payload");
-                        };
-                        debug_assert_eq!(fd.as_raw_fd(), *raw_fd);
-                        self.held_devices.insert(devnum);
-                        dispatcher.dispatch(UdevAction::DeviceTaken { fd, inactive, devnum });
+                        self.accept_take_device(devnum, &msg, &mut fds, dispatcher);
                     }
                     Pending::SubscribeSessionSignals => {}
                     Pending::GetSessionActive => {
                         if let [Variant(value)] = msg.get_body() {
                             if let Boolean(active) = value.as_ref() {
                                 self.dispatch_session_active(state, *active, dispatcher);
+                            } else {
+                                log::warn!("session Active property is not a boolean");
                             }
+                        } else {
+                            log::warn!("session Active reply is missing its value");
                         }
                     }
                 }
             }
             Error => {
+                let error_name = msg.get_error_name().map(|name| name.as_ref().to_string());
                 let pending = msg
                     .get_reply_serial()
                     .map(DbusSerial)
                     .and_then(|serial| self.pending.remove(&serial));
-                log::error!("pending={:?} error={:?}", pending, msg);
+                if session_ownership_lost(error_name.as_deref()) {
+                    dispatcher.request_shutdown(ShutdownReason::Fatal {
+                        source: "dbus",
+                        message: format!(
+                            "logind session is gone: {}",
+                            error_name.as_deref().unwrap_or("unknown error")
+                        ),
+                    });
+                } else if let Some(Pending::TakeDevice { devnum }) = pending {
+                    log::warn!("TakeDevice failed for {devnum}: {error_name:?}");
+                } else {
+                    log::warn!("dbus error pending={pending:?} name={error_name:?}");
+                }
             }
             Signal => self.handle_signal(state, msg, dispatcher),
         }
+    }
+
+    fn reply_unknown_method(&mut self, msg: Message) {
+        let member = msg.get_member().map(|member| member.as_ref().to_string());
+        log::warn!("unexpected dbus method call: {member:?}");
+        let Some(reply) = msg.unknown_member() else {
+            return;
+        };
+        let _ = self.write_session_message(reply);
+    }
+
+    fn accept_take_device(
+        &mut self,
+        devnum: libc::dev_t,
+        msg: &Message,
+        fds: &mut Vec<OwnedFd>,
+        dispatcher: &mut Dispatcher,
+    ) {
+        if !take_device_reply_is_usable(msg.get_body(), fds.len()) {
+            log::error!("TakeDevice reply for {devnum} is unusable");
+            if !fds.is_empty() {
+                // logind handed us a device fd we will not use. Remember the
+                // devnum so shutdown still sends ReleaseDevice.
+                self.held_devices.insert(devnum);
+            }
+            fds.clear();
+            return;
+        }
+        let Value::Boolean(inactive) = msg.get_body()[1] else {
+            return;
+        };
+        let fd = fds.remove(0);
+        self.held_devices.insert(devnum);
+        dispatcher.dispatch(UdevAction::DeviceTaken { fd, inactive, devnum });
     }
 
     fn handle_signal(&mut self, state: &mut State, msg: Message, dispatcher: &mut Dispatcher) {
@@ -688,6 +747,10 @@ impl Model for DbusReader {
             ReadMsg { buffer, fds } => {
                 self.recvmsg_op_id = None;
                 if self.is_eof(&buffer) {
+                    dispatcher.request_shutdown(ShutdownReason::Fatal {
+                        source: "dbus",
+                        message: "system bus closed".into(),
+                    });
                     self.dispatch_close(dispatcher);
                     return Ok(());
                 }
@@ -705,7 +768,17 @@ impl Model for DbusReader {
                     let (msg, _offset) =
                         match Message::decode_with_fds(msg.to_vec().into(), &raw_fds) {
                             Ok((msg, offset, _)) => (msg, offset),
-                            Err(e) => panic!("{:?}", e),
+                            Err(error) => {
+                                log::error!("dbus message decode failed: {error:?}");
+                                dispatcher.request_shutdown(ShutdownReason::Fatal {
+                                    source: "dbus",
+                                    message: format!(
+                                        "system bus message could not be decoded: {error}"
+                                    ),
+                                });
+                                self.dispatch_close(dispatcher);
+                                return Ok(());
+                            }
                         };
                     let message_fds = if let Some(nfds) = msg.get_unix_fds() {
                         self.fds.drain(0..nfds as usize).collect()
@@ -860,5 +933,46 @@ mod session_release_tests {
             }
         });
         assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn session_loss_errors_are_fatal_and_device_errors_are_not() {
+        use super::session_ownership_lost;
+
+        assert!(session_ownership_lost(Some("org.freedesktop.login1.NoSession")));
+        assert!(session_ownership_lost(Some("org.freedesktop.DBus.Error.Disconnected")));
+        assert!(session_ownership_lost(Some("org.freedesktop.DBus.Error.NameHasNoOwner")));
+        assert!(session_ownership_lost(Some("org.freedesktop.DBus.Error.ServiceUnknown")));
+        assert!(!session_ownership_lost(Some("org.freedesktop.DBus.Error.AccessDenied")));
+        assert!(!session_ownership_lost(None));
+    }
+
+    #[test]
+    fn take_device_reply_requires_a_file_descriptor_and_a_boolean() {
+        use {super::take_device_reply_is_usable, dbus_message_parser::value::Value};
+
+        assert!(take_device_reply_is_usable(&[Value::UnixFD(7), Value::Boolean(false)], 1));
+        assert!(!take_device_reply_is_usable(&[Value::UnixFD(7), Value::Boolean(false)], 0));
+        assert!(!take_device_reply_is_usable(&[Value::Boolean(false)], 1));
+    }
+
+    #[test]
+    fn an_unexpected_method_call_gets_an_unknown_member_reply() {
+        use dbus_message_parser::message::Message;
+
+        let call = Message::method_call(
+            "org.freedesktop.login1".try_into().unwrap(),
+            "/org/freedesktop/login1/session/self".try_into().unwrap(),
+            "org.freedesktop.login1.Session".try_into().unwrap(),
+            "PauseDevice".try_into().unwrap(),
+        );
+        let reply = call.unknown_member().expect("method call has a member");
+        assert_eq!(
+            reply
+                .get_error_name()
+                .map(|name| name.as_ref().to_string())
+                .as_deref(),
+            Some("org.freedesktop.DBus.Error.UnknownMember")
+        );
     }
 }

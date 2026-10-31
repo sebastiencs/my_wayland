@@ -33,7 +33,7 @@ impl Object for WpViewport {
     ) -> RequestResult {
         use wp_viewport::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 let this = client.resolve(self.id, state).unwrap();
                 if let Some(mut surface) = self.surface.try_grab(state) {

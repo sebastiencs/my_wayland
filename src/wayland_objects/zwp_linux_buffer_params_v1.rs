@@ -117,7 +117,7 @@ impl Object for ZwpLinuxBufferParamsV1 {
     ) -> RequestResult {
         use zwp_linux_buffer_params_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 use crate::wayland_objects::wl_display::WlDisplay;
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());

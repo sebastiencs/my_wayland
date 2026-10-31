@@ -4,10 +4,12 @@ use crate::{
     object::{Object, Parser, RequestResult},
     protocol_generated::{
         wl_keyboard, wl_seat, Constants as ProtocolConstants, NewId, WaylandId, WlPointerId,
-        WlSeatId,
+        WlSeatId, WlTouchId,
     },
     state::{GrabbedObject, State},
-    wayland_objects::{wl_display::WlDisplay, wl_keyboard::WlKeyboard, wl_pointer::WlPointer},
+    wayland_objects::{
+        wl_display::WlDisplay, wl_keyboard::WlKeyboard, wl_pointer::WlPointer, wl_touch::WlTouch,
+    },
 };
 
 #[derive(Debug)]
@@ -72,7 +74,7 @@ impl Object for WlSeat {
     ) -> RequestResult {
         use wl_seat::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             GetPointer { id } => {
                 let id = WlPointerId::from(id);
                 let wl_pointer = WlPointer::new(id, self.version);
@@ -92,7 +94,14 @@ impl Object for WlSeat {
                 let (keyboard, _) = client.insert_object(state, wl_keyboard);
                 state.seat.register_keyboard(keyboard);
             }
-            GetTouch { id } => todo!(),
+            GetTouch { id } => {
+                // Touch is not advertised. The object stays inert so a client
+                // that asks anyway still has a valid id to release.
+                let version = self
+                    .version
+                    .min(<WlTouch as ProtocolConstants>::INTERFACE_VERSION);
+                client.insert_object(state, WlTouch::new(id, version));
+            }
             Release => {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
@@ -102,16 +111,81 @@ impl Object for WlSeat {
 }
 
 impl WlSeat {
-    pub fn send_capabilities(&self, dispatcher: &mut ClientDispatcher) {
+    fn advertised_capabilities() -> u32 {
         use wl_seat::Capability::{Keyboard, Pointer};
+        Keyboard as u32 | Pointer as u32
+    }
 
+    pub fn send_capabilities(&self, dispatcher: &mut ClientDispatcher) {
         let capabilites =
-            wl_seat::Event::Capabilities { capabilities: Keyboard as u32 | Pointer as u32 };
+            wl_seat::Event::Capabilities { capabilities: Self::advertised_capabilities() };
         self.send_event(capabilites, dispatcher);
     }
 
     pub fn send_name(&self, dispatcher: &mut ClientDispatcher) {
         let name = wl_seat::Event::Name { name: "my_seat".to_string() };
         self.send_event(name, dispatcher);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use crate::{
+        clients::{Arguments, Client, ClientId, RawRequest},
+        protocol_generated::{wl_seat, WlSeatId, WlTouchId},
+        runner::Dispatcher,
+        test_support::state_for_tests,
+        wayland_objects::wl_touch::WlTouch,
+    };
+
+    use super::WlSeat;
+
+    #[test]
+    fn advertised_capabilities_omit_touch() {
+        let caps = WlSeat::advertised_capabilities();
+        assert_eq!(caps & wl_seat::Capability::Touch as u32, 0);
+        assert_ne!(caps & wl_seat::Capability::Pointer as u32, 0);
+        assert_ne!(caps & wl_seat::Capability::Keyboard as u32, 0);
+    }
+
+    #[test]
+    fn get_touch_creates_an_object_the_client_can_release() {
+        let mut state = state_for_tests();
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        let (seat, _) = client.insert_object(&mut state, WlSeat::new(WlSeatId::from(3)));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let request = RawRequest {
+            object_id: 3,
+            request_id: 2,
+            arguments: Arguments::from_words(VecDeque::from([8])),
+            fds: None,
+        };
+        state
+            .objects
+            .grab(seat.object_id())
+            .on(&mut client, &mut state, request, &mut client_dispatcher)
+            .unwrap();
+        assert!(client.contains_object(WlTouchId::from(8), &state));
+
+        let touch = state
+            .objects
+            .iter()
+            .find_map(|(id, object)| object.downcast_ref::<WlTouch>().map(|_| id));
+        let touch = touch.expect("inert touch object");
+        let release = RawRequest {
+            object_id: 8,
+            request_id: 0,
+            arguments: Arguments::from_words(VecDeque::new()),
+            fds: None,
+        };
+        state
+            .objects
+            .grab(touch)
+            .on(&mut client, &mut state, release, &mut client_dispatcher)
+            .unwrap();
+        assert!(!client.contains_object(WlTouchId::from(8), &state));
     }
 }

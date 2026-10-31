@@ -77,7 +77,7 @@ impl Object for XdgWmBase {
     ) -> RequestResult {
         use xdg_wm_base::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 if !self.surfaces.is_empty() {
                     client.send_protocol_error(

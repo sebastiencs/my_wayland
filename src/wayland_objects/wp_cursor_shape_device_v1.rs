@@ -52,7 +52,7 @@ impl Object for WpCursorShapeDeviceV1 {
     ) -> RequestResult {
         use wp_cursor_shape_device_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }

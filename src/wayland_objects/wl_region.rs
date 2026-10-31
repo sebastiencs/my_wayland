@@ -54,7 +54,7 @@ impl Object for WlRegion {
     ) -> RequestResult {
         use wl_region::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => self.delete_self(client, state, dispatcher),
             Add { x, y, width, height } => {
                 let Some(rect) = RectI::new(x, y, width, height) else {

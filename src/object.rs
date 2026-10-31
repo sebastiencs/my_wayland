@@ -100,6 +100,9 @@ impl dyn Object {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AbortRequest {
     InvalidObject,
+    /// The request opcode or arguments could not be decoded. The client has
+    /// already been sent `wl_display.error` and disconnected.
+    Malformed,
 }
 
 pub type RequestResult = Result<(), AbortRequest>;

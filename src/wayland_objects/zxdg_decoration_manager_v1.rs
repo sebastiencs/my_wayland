@@ -61,7 +61,7 @@ impl Object for ZxdgDecorationManagerV1 {
     ) -> RequestResult {
         use zxdg_decoration_manager_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }

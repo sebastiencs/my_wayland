@@ -254,7 +254,7 @@ impl Object for XdgPopup {
     ) -> RequestResult {
         use xdg_popup::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 let mut xdg_surface = self.xdg_surface.grab(state);
                 let mut fallback_focus = None;

@@ -572,7 +572,7 @@ impl Object for XdgSurface {
     ) -> RequestResult {
         use xdg_surface::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 if self.has_live_role_object() {
                     self.send_surface_error(
@@ -1498,7 +1498,7 @@ pub mod xdg_toplevel {
         ) -> RequestResult {
             use proto_xdg_toplevel::Request::*;
 
-            match client.parse::<Self>(req).unwrap() {
+            match client.parse::<Self>(req, dispatcher)? {
                 Destroy => {
                     if let Some(surface_id) = self
                         .xdg_surface

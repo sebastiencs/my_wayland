@@ -54,7 +54,7 @@ impl Object for WlRegistry {
         req: RawRequest,
         dispatcher: &mut ClientDispatcher,
     ) -> RequestResult {
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             wl_registry::Request::Bind { name, id, requested_version } => {
                 let Some(mut global) = state.globals.try_grab_global(name) else {
                     client.protocol_violation_disconnect(

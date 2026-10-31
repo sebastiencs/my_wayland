@@ -67,7 +67,7 @@ impl Object for WpPresentation {
     ) -> RequestResult {
         use wp_presentation::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }

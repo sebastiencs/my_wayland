@@ -161,7 +161,7 @@ impl Object for ExtWorkspaceGroupHandleV1 {
     ) -> RequestResult {
         use ext_workspace_group_handle_v1::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             CreateWorkspace { workspace } => {
                 if self.removed {
                     return Ok(());

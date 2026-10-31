@@ -49,11 +49,11 @@ impl Object for WlCompositor {
         client: &mut Client,
         state: &mut State,
         req: RawRequest,
-        _: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) -> RequestResult {
         use crate::protocol_generated::wl_compositor::Request::*;
 
-        match client.parse::<Self>(req).unwrap() {
+        match client.parse::<Self>(req, dispatcher)? {
             CreateSurface { id } => {
                 let (resolved, _) = client
                     .insert_object(state, WlSurface::new(id, client.client_id(), self.version));
