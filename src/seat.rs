@@ -66,6 +66,8 @@ pub enum SeatClientEvent {
         button: u32,
         state: u32,
     },
+    /// One hardware scroll, expanded per pointer version into a single logical frame.
+    PointerScroll(PointerScrollFrame),
     PointerFrame,
     KeyboardEnter {
         serial: u32,
@@ -89,6 +91,138 @@ pub enum SeatClientEvent {
         mods_locked: u32,
         group: u32,
     },
+}
+
+/// Physical source of one scroll frame. Device configuration such as natural scrolling stays in
+/// libinput; this only names the source reported to the client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PointerScrollSource {
+    Wheel,
+    Finger,
+    Continuous,
+    WheelTilt,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PointerScrollAxis {
+    Vertical,
+    Horizontal,
+}
+
+/// Physical motion compared with the logical axis value. Version 9 pointers receive this beside
+/// the matching `wl_pointer.axis` event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PointerScrollDirection {
+    Identical,
+    Inverted,
+}
+
+/// One axis inside a scroll frame. A stop carries no distance: `axis_value120` must not be zero,
+/// and a stop is not coupled to an axis event.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PointerAxisChange {
+    Scroll {
+        value: f32,
+        /// Wheel steps for `wl_pointer` versions 5 through 7. Versions 8 and newer use `value120`.
+        discrete: Option<i32>,
+        /// High-resolution wheel distance in multiples of 120. Zero is omitted.
+        value120: Option<i32>,
+        relative_direction: Option<PointerScrollDirection>,
+    },
+    Stop,
+}
+
+/// Scroll data shared by every pointer resource of the focused client.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointerScrollFrame {
+    pub time: u32,
+    pub source: PointerScrollSource,
+    pub vertical: Option<PointerAxisChange>,
+    pub horizontal: Option<PointerAxisChange>,
+}
+
+/// Version-independent scroll events. [`pointer_scroll_protocol_events`] drops the ones a pointer
+/// version cannot receive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PointerScrollWireEvent {
+    Source(PointerScrollSource),
+    Discrete { axis: PointerScrollAxis, discrete: i32 },
+    Value120 { axis: PointerScrollAxis, value120: i32 },
+    RelativeDirection { axis: PointerScrollAxis, direction: PointerScrollDirection },
+    Axis { time: u32, axis: PointerScrollAxis, value_bits: u32 },
+    Stop { time: u32, axis: PointerScrollAxis },
+    Frame,
+}
+
+pub(crate) fn pointer_scroll_protocol_events(
+    version: u32,
+    frame: &PointerScrollFrame,
+) -> Vec<PointerScrollWireEvent> {
+    use crate::protocol_generated::wl_pointer::{
+        AXIS_RELATIVE_DIRECTION_SINCE, AXIS_SOURCE_SINCE, AXIS_STOP_SINCE, AXIS_VALUE120_SINCE,
+        FRAME_SINCE,
+    };
+
+    let present = [
+        frame
+            .vertical
+            .map(|change| (PointerScrollAxis::Vertical, change)),
+        frame
+            .horizontal
+            .map(|change| (PointerScrollAxis::Horizontal, change)),
+    ];
+    if present.iter().all(Option::is_none) {
+        return Vec::new();
+    }
+
+    let mut events = Vec::new();
+    if version >= AXIS_SOURCE_SINCE {
+        events.push(PointerScrollWireEvent::Source(frame.source));
+    }
+    for change in present.into_iter().flatten() {
+        let (axis, PointerAxisChange::Scroll { value, discrete, value120, relative_direction }) =
+            change
+        else {
+            continue;
+        };
+        if (AXIS_SOURCE_SINCE..AXIS_VALUE120_SINCE).contains(&version) {
+            if let Some(discrete) = discrete.filter(|discrete| *discrete != 0) {
+                events.push(PointerScrollWireEvent::Discrete { axis, discrete });
+            }
+        }
+        if version >= AXIS_VALUE120_SINCE {
+            if let Some(value120) = value120.filter(|value120| *value120 != 0) {
+                events.push(PointerScrollWireEvent::Value120 { axis, value120 });
+            }
+        }
+        if version >= AXIS_RELATIVE_DIRECTION_SINCE {
+            if let Some(direction) = relative_direction {
+                events.push(PointerScrollWireEvent::RelativeDirection { axis, direction });
+            }
+        }
+        events.push(PointerScrollWireEvent::Axis {
+            time: frame.time,
+            axis,
+            value_bits: value.to_bits(),
+        });
+    }
+    if version >= AXIS_STOP_SINCE {
+        for (axis, change) in present.into_iter().flatten() {
+            if matches!(change, PointerAxisChange::Stop) {
+                events.push(PointerScrollWireEvent::Stop { time: frame.time, axis });
+            }
+        }
+    }
+    if version >= FRAME_SINCE
+        && events
+            .iter()
+            .any(|event| !matches!(event, PointerScrollWireEvent::Source(_)))
+    {
+        events.push(PointerScrollWireEvent::Frame);
+    } else if version < FRAME_SINCE {
+        events.retain(|event| matches!(event, PointerScrollWireEvent::Axis { .. }));
+    }
+    events
 }
 
 #[derive(Clone, Debug)]
@@ -1030,6 +1164,27 @@ pub fn handle_pointer_button(
     }
 }
 
+/// Deliver one scroll frame to the pointer-focused client. Pointer resources expand it according
+/// to the `wl_pointer` version they were bound with. A compositor grab that clears pointer focus
+/// therefore drops the scroll.
+pub fn handle_pointer_scroll(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    frame: PointerScrollFrame,
+) {
+    if frame.vertical.is_none() && frame.horizontal.is_none() {
+        return;
+    }
+    let Some(pointer_focus) = state.seat.pointer_focus else {
+        return;
+    };
+    dispatch_client_event(
+        dispatcher,
+        pointer_focus.target.client_id(),
+        SeatClientEvent::PointerScroll(frame),
+    );
+}
+
 pub fn handle_pointer_motion_absolute(
     state: &mut State,
     dispatcher: &mut Dispatcher,
@@ -1769,8 +1924,11 @@ mod xdg_seat_tests {
         super::{
             begin_popup_grab, cancel_active_drag, complete_drag_drop, handle_keyboard_key,
             handle_pointer_button, handle_pointer_motion, handle_pointer_motion_absolute,
+            handle_pointer_scroll, pointer_scroll_protocol_events,
             recover_pointer_after_interactive_grab_loss, remove_popup_grab, scene_pick_at,
-            window_hit_at, HitSemantics, SeatClientEvent, SeatState,
+            window_hit_at, HitSemantics, PointerAxisChange, PointerScrollAxis,
+            PointerScrollDirection, PointerScrollFrame, PointerScrollSource,
+            PointerScrollWireEvent, SeatClientEvent, SeatState,
         },
         crate::{
             clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent, Resolved},
@@ -4391,5 +4549,170 @@ mod xdg_seat_tests {
             .test_has_queued_action_for::<ClientAction, ClientId>(source_client_id, |action| {
                 matches!(action, ClientAction::RefreshSurfaceOutputs)
             }));
+    }
+
+    fn axis_bits(axis: PointerScrollAxis, value: f32) -> PointerScrollWireEvent {
+        PointerScrollWireEvent::Axis { time: 40, axis, value_bits: value.to_bits() }
+    }
+
+    fn wheel_scroll() -> PointerScrollFrame {
+        PointerScrollFrame {
+            time: 40,
+            source: PointerScrollSource::Wheel,
+            vertical: Some(PointerAxisChange::Scroll {
+                value: -15.0,
+                discrete: Some(-1),
+                value120: Some(-120),
+                relative_direction: Some(PointerScrollDirection::Inverted),
+            }),
+            horizontal: Some(PointerAxisChange::Scroll {
+                value: 15.0,
+                discrete: Some(1),
+                value120: Some(120),
+                relative_direction: Some(PointerScrollDirection::Identical),
+            }),
+        }
+    }
+
+    #[test]
+    fn scroll_versions_keep_one_ordered_frame() {
+        use PointerScrollWireEvent::*;
+
+        let frame = wheel_scroll();
+        assert_eq!(
+            pointer_scroll_protocol_events(4, &frame),
+            vec![
+                axis_bits(PointerScrollAxis::Vertical, -15.0),
+                axis_bits(PointerScrollAxis::Horizontal, 15.0),
+            ]
+        );
+        assert_eq!(
+            pointer_scroll_protocol_events(5, &frame),
+            vec![
+                Source(PointerScrollSource::Wheel),
+                Discrete { axis: PointerScrollAxis::Vertical, discrete: -1 },
+                axis_bits(PointerScrollAxis::Vertical, -15.0),
+                Discrete { axis: PointerScrollAxis::Horizontal, discrete: 1 },
+                axis_bits(PointerScrollAxis::Horizontal, 15.0),
+                Frame,
+            ]
+        );
+        assert_eq!(
+            pointer_scroll_protocol_events(8, &frame),
+            vec![
+                Source(PointerScrollSource::Wheel),
+                Value120 { axis: PointerScrollAxis::Vertical, value120: -120 },
+                axis_bits(PointerScrollAxis::Vertical, -15.0),
+                Value120 { axis: PointerScrollAxis::Horizontal, value120: 120 },
+                axis_bits(PointerScrollAxis::Horizontal, 15.0),
+                Frame,
+            ]
+        );
+        assert_eq!(
+            pointer_scroll_protocol_events(9, &frame),
+            vec![
+                Source(PointerScrollSource::Wheel),
+                Value120 { axis: PointerScrollAxis::Vertical, value120: -120 },
+                RelativeDirection {
+                    axis: PointerScrollAxis::Vertical,
+                    direction: PointerScrollDirection::Inverted,
+                },
+                axis_bits(PointerScrollAxis::Vertical, -15.0),
+                Value120 { axis: PointerScrollAxis::Horizontal, value120: 120 },
+                RelativeDirection {
+                    axis: PointerScrollAxis::Horizontal,
+                    direction: PointerScrollDirection::Identical,
+                },
+                axis_bits(PointerScrollAxis::Horizontal, 15.0),
+                Frame,
+            ]
+        );
+    }
+
+    #[test]
+    fn scroll_stop_frame_has_no_axis_distance() {
+        use PointerScrollWireEvent::*;
+
+        let frame = PointerScrollFrame {
+            time: 40,
+            source: PointerScrollSource::Finger,
+            vertical: Some(PointerAxisChange::Stop),
+            horizontal: Some(PointerAxisChange::Scroll {
+                value: 2.0,
+                discrete: None,
+                value120: Some(0),
+                relative_direction: None,
+            }),
+        };
+        assert!(pointer_scroll_protocol_events(4, &frame)
+            .iter()
+            .all(|event| matches!(event, Axis { .. })));
+        assert_eq!(
+            pointer_scroll_protocol_events(5, &frame),
+            vec![
+                Source(PointerScrollSource::Finger),
+                axis_bits(PointerScrollAxis::Horizontal, 2.0),
+                Stop { time: 40, axis: PointerScrollAxis::Vertical },
+                Frame,
+            ]
+        );
+        let stopped = PointerScrollFrame {
+            time: 40,
+            source: PointerScrollSource::Finger,
+            vertical: Some(PointerAxisChange::Stop),
+            horizontal: Some(PointerAxisChange::Stop),
+        };
+        assert!(pointer_scroll_protocol_events(4, &stopped).is_empty());
+        assert_eq!(
+            pointer_scroll_protocol_events(8, &stopped),
+            vec![
+                Source(PointerScrollSource::Finger),
+                Stop { time: 40, axis: PointerScrollAxis::Vertical },
+                Stop { time: 40, axis: PointerScrollAxis::Horizontal },
+                Frame,
+            ]
+        );
+        assert!(pointer_scroll_protocol_events(
+            9,
+            &PointerScrollFrame { vertical: None, horizontal: None, ..stopped }
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn scroll_is_delivered_only_to_the_pointer_focus() {
+        let mut state = state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        let client_id = ClientId::from_raw(7);
+        let frame = wheel_scroll();
+
+        handle_pointer_scroll(&mut state, &mut dispatcher, frame);
+        assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client_id,
+            |action| matches!(action, ClientAction::SeatEvent { .. })
+        ));
+
+        state.seat.pointer_focus = Some(super::PointerFocus {
+            target: fake_focus(client_id, WlSurfaceId::from(50)),
+            rect: super::SurfaceRect { x: 0, y: 0, width: 10, height: 10 },
+        });
+        handle_pointer_scroll(&mut state, &mut dispatcher, frame);
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client_id,
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::SeatEvent { event: SeatClientEvent::PointerScroll(scroll) }
+                        if *scroll == frame
+                )
+            }
+        ));
+        assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client_id,
+            |action| matches!(
+                action,
+                ClientAction::SeatEvent { event: SeatClientEvent::PointerFrame }
+            )
+        ));
     }
 }

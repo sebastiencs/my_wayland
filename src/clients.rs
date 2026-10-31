@@ -885,6 +885,14 @@ impl Client {
                     pointer.ref_mut(state).send_frame(dispatcher);
                 }
             }
+            SeatClientEvent::PointerScroll(frame) => {
+                for pointer in state.seat.pointer_resources(self.id) {
+                    if !pointer.exists(state) {
+                        continue;
+                    }
+                    pointer.ref_mut(state).send_scroll(&frame, dispatcher);
+                }
+            }
             SeatClientEvent::KeyboardEnter { serial, surface, keys } => {
                 for keyboard in state.seat.keyboard_resources(self.id) {
                     if !keyboard.exists(state) {

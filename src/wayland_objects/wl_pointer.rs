@@ -2,6 +2,10 @@ use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
     protocol_generated::{wl_pointer, WaylandId, WlPointerId, WlSurfaceId},
+    seat::{
+        pointer_scroll_protocol_events, PointerScrollAxis, PointerScrollDirection,
+        PointerScrollFrame, PointerScrollSource, PointerScrollWireEvent,
+    },
     state::{GrabbedObject, State},
     wayland_objects::wl_display::WlDisplay,
 };
@@ -69,6 +73,64 @@ impl WlPointer {
             return;
         }
         self.send_event(wl_pointer::Event::Frame, dispatcher);
+    }
+
+    pub fn send_scroll(&self, frame: &PointerScrollFrame, dispatcher: &mut ClientDispatcher) {
+        for event in pointer_scroll_protocol_events(self.version, frame) {
+            self.send_event(scroll_wire_event(event), dispatcher);
+        }
+    }
+}
+
+fn scroll_wire_event(event: PointerScrollWireEvent) -> wl_pointer::Event {
+    use wl_pointer::Event::*;
+
+    match event {
+        PointerScrollWireEvent::Source(source) => {
+            AxisSource { axis_source: scroll_source_code(source) }
+        }
+        PointerScrollWireEvent::Discrete { axis, discrete } => {
+            AxisDiscrete { axis: scroll_axis_code(axis), discrete }
+        }
+        PointerScrollWireEvent::Value120 { axis, value120 } => {
+            AxisValue120 { axis: scroll_axis_code(axis), value120 }
+        }
+        PointerScrollWireEvent::RelativeDirection { axis, direction } => AxisRelativeDirection {
+            axis: scroll_axis_code(axis),
+            direction: scroll_direction_code(direction),
+        },
+        PointerScrollWireEvent::Axis { time, axis, value_bits } => Axis {
+            time,
+            axis: scroll_axis_code(axis),
+            value: f32::from_bits(value_bits),
+        },
+        PointerScrollWireEvent::Stop { time, axis } => {
+            AxisStop { time, axis: scroll_axis_code(axis) }
+        }
+        PointerScrollWireEvent::Frame => Frame,
+    }
+}
+
+fn scroll_axis_code(axis: PointerScrollAxis) -> u32 {
+    match axis {
+        PointerScrollAxis::Vertical => wl_pointer::Axis::VerticalScroll as u32,
+        PointerScrollAxis::Horizontal => wl_pointer::Axis::HorizontalScroll as u32,
+    }
+}
+
+fn scroll_source_code(source: PointerScrollSource) -> u32 {
+    match source {
+        PointerScrollSource::Wheel => wl_pointer::AxisSource::Wheel as u32,
+        PointerScrollSource::Finger => wl_pointer::AxisSource::Finger as u32,
+        PointerScrollSource::Continuous => wl_pointer::AxisSource::Continuous as u32,
+        PointerScrollSource::WheelTilt => wl_pointer::AxisSource::WheelTilt as u32,
+    }
+}
+
+fn scroll_direction_code(direction: PointerScrollDirection) -> u32 {
+    match direction {
+        PointerScrollDirection::Identical => wl_pointer::AxisRelativeDirection::Identical as u32,
+        PointerScrollDirection::Inverted => wl_pointer::AxisRelativeDirection::Inverted as u32,
     }
 }
 
