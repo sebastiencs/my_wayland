@@ -921,8 +921,8 @@ impl Default for WorkspaceAnimationConfigFile {
 }
 
 impl ConfigWatcher {
-    pub fn new(initial_state: &RuntimeConfig) -> Self {
-        let inotify = Inotify::init().expect("failed to initialize config inotify watcher");
+    pub fn try_new(initial_state: &RuntimeConfig) -> std::io::Result<Self> {
+        let inotify = Inotify::init()?;
         let mut watcher = Self {
             inotify,
             event_buffer: vec![0; INOTIFY_BUFFER_SIZE].into_boxed_slice(),
@@ -930,10 +930,12 @@ impl ConfigWatcher {
             watches: HashMap::new(),
             stopped: false,
         };
-        watcher
-            .sync_watches(initial_state.path())
-            .expect("failed to install config watcher");
-        watcher
+        watcher.sync_watches(initial_state.path())?;
+        Ok(watcher)
+    }
+
+    pub fn new(initial_state: &RuntimeConfig) -> Self {
+        Self::try_new(initial_state).expect("failed to initialize config inotify watcher")
     }
 
     fn dispatch_poll(&mut self, dispatcher: &mut Dispatcher) {

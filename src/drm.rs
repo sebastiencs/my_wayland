@@ -1236,9 +1236,9 @@ impl Drm {
         }
     }
 
-    pub fn create_drm(fd: OwnedFd, device: udev::Device, egl: &EGL) -> Self {
+    pub fn create_drm(fd: OwnedFd, device: udev::Device, egl: &EGL) -> Result<Self, String> {
         let drm = DrmFd { fd: Rc::new(fd) };
-        set_nonblocking(drm.as_raw_fd()).unwrap();
+        set_nonblocking(drm.as_raw_fd()).map_err(|error| format!("set nonblocking: {error}"))?;
         match drm.set_client_capability(drm::ClientCapability::UniversalPlanes, true) {
             Ok(()) => log::info!("Enabled DRM client capability: UniversalPlanes"),
             Err(error) => {
@@ -1247,7 +1247,7 @@ impl Drm {
         }
         drm.set_client_capability(drm::ClientCapability::Atomic, true)
             .map(|()| log::info!("Enabled DRM client capability: Atomic"))
-            .unwrap();
+            .map_err(|error| format!("atomic capability: {error}"))?;
         match drm.set_client_capability(drm::ClientCapability::CursorPlaneHotspot, true) {
             Ok(()) => log::info!("Enabled DRM client capability: CursorPlaneHotspot"),
             Err(error) => {
@@ -1255,14 +1255,17 @@ impl Drm {
             }
         }
 
-        let driver: Driver = drm.get_driver().unwrap().into();
+        let driver: Driver = drm
+            .get_driver()
+            .map_err(|error| format!("driver: {error}"))?
+            .into();
         log::info!(
             "Initializing DRM backend: devnode={:?} driver={} desc={}",
             device.devnode(),
             driver.name,
             driver.desc
         );
-        let resources = Self::list_resources(&drm);
+        let resources = Self::list_resources(&drm)?;
         log::info!(
             "Discovered DRM resources: connectors={} crtcs={} planes={}",
             resources.connectors.len(),
@@ -1270,9 +1273,12 @@ impl Drm {
             resources.planes.len()
         );
 
-        let gbm = crate::gbm::GbmDevice::new(&drm).unwrap();
-        let egl_context = EglContext::make(egl, gbm);
+        let gbm = crate::gbm::GbmDevice::new(&drm).map_err(|error| format!("gbm: {error}"))?;
+        let egl_context = EglContext::make(egl, gbm)?;
         let outputs = Self::init_drm_outputs(&drm, &egl_context, &resources);
+        if outputs.is_empty() {
+            return Err("no usable connector".into());
+        }
 
         let supports_syncobj_timeline = drm
             .get_driver_capability(drm::DriverCapability::TimelineSyncObj)
@@ -1295,7 +1301,7 @@ impl Drm {
         for drm_output_id in drm_output_ids {
             drm_backend.initialize_cursor_plane_slots(drm_output_id);
         }
-        drm_backend
+        Ok(drm_backend)
     }
 
     pub fn make_output_model(&self, drm_id: DrmId, output_id: OutputId) -> DrmOutputModel {
@@ -2021,8 +2027,10 @@ impl Drm {
         Some(CursorPlaneBuffer { bo, framebuffer })
     }
 
-    fn list_resources(drm: &DrmFd) -> DrmResources {
-        let resources = drm.resource_handles().unwrap();
+    fn list_resources(drm: &DrmFd) -> Result<DrmResources, String> {
+        let resources = drm
+            .resource_handles()
+            .map_err(|error| format!("resource handles: {error}"))?;
 
         let (cursor_height, cursor_width) = {
             use drm::DriverCapability::{CursorHeight, CursorWidth};
@@ -2032,12 +2040,18 @@ impl Drm {
             (height, width)
         };
 
-        let plane_handles = drm.plane_handles().unwrap().to_vec();
+        let plane_handles = drm
+            .plane_handles()
+            .map_err(|error| format!("plane handles: {error}"))?
+            .to_vec();
         log::info!("DRM plane handles reported by kernel: count={}", plane_handles.len());
 
         let make_plane = |plane: plane::Handle| Self::make_plane(drm, plane);
-        let planes: BTreeMap<plane::Handle, Plane> =
-            plane_handles.iter().copied().map(make_plane).collect();
+        let planes: BTreeMap<plane::Handle, Plane> = plane_handles
+            .iter()
+            .copied()
+            .filter_map(make_plane)
+            .collect();
         for plane in planes.values() {
             let kind = match plane.kind {
                 PlaneType::Primary => "Primary",
@@ -2070,7 +2084,7 @@ impl Drm {
             .encoders()
             .iter()
             .copied()
-            .map(make_encoder)
+            .filter_map(make_encoder)
             .collect();
 
         let make_connector = |connector| Self::make_connector(drm, connector, &encoders);
@@ -2078,10 +2092,10 @@ impl Drm {
             .connectors()
             .iter()
             .copied()
-            .map(make_connector)
+            .filter_map(make_connector)
             .collect();
 
-        DrmResources {
+        Ok(DrmResources {
             planes,
             crtcs,
             encoders,
@@ -2089,7 +2103,7 @@ impl Drm {
             cursor_height,
             cursor_width,
             resources,
-        }
+        })
     }
 
     fn init_drm_outputs(
@@ -2098,20 +2112,28 @@ impl Drm {
         drm_resources: &DrmResources,
     ) -> BTreeMap<u32, DrmOutput> {
         let DrmResources { planes, crtcs, connectors, .. } = drm_resources;
-        let outputs = Self::find_valid_connectors(connectors, crtcs, planes)
-            .into_iter()
-            .map(|in_use| {
-                let drm_crtc_id = in_use.crtc_id();
-                let output = Self::init_drm_output(drm, egl, in_use);
-                (drm_crtc_id, output)
-            })
-            .collect::<BTreeMap<_, _>>();
-        assert!(!outputs.is_empty(), "Failed to find connector");
+        let mut outputs = BTreeMap::new();
+        for in_use in Self::find_valid_connectors(connectors, crtcs, planes) {
+            let drm_crtc_id = in_use.crtc_id();
+            let name = in_use.connector.interface_name.clone();
+            match Self::init_drm_output(drm, egl, in_use) {
+                Ok(output) => {
+                    outputs.insert(drm_crtc_id, output);
+                }
+                Err(error) => log::error!("skipping connector {name}: {error}"),
+            }
+        }
         outputs
     }
 
-    fn init_drm_output(drm: &DrmFd, egl: &EglContext, in_use: ConnectorInUse) -> DrmOutput {
-        let mode = in_use.connector.preferred_mode.as_ref().unwrap();
+    fn init_drm_output(
+        drm: &DrmFd,
+        egl: &EglContext,
+        in_use: ConnectorInUse,
+    ) -> Result<DrmOutput, String> {
+        let Some(mode) = in_use.connector.preferred_mode.as_ref() else {
+            return Err("connector has no mode".into());
+        };
         let (hdisplay, vdisplay) = mode.size();
         let (primary_plane, plane_modifiers) = in_use.primary_plane();
         let render_sync_mode = if egl.supports_native_render_fence()
@@ -2146,14 +2168,12 @@ impl Drm {
 
         let mut changes = control::atomic::AtomicModeReq::new();
 
-        let buffers: [_; 2] =
-            std::array::from_fn(|index| match Self::make_render_buffer(drm, egl, &in_use, false) {
-                Ok(buffer) => buffer,
-                Err(error) => {
-                    log::error!("Failed to create DRM render buffer #{index}: {:?}", error);
-                    panic!("Failed to create DRM render buffer #{index}: {:?}", error);
-                }
-            });
+        let buffers: [_; 2] = [
+            Self::make_render_buffer(drm, egl, &in_use, false)
+                .map_err(|error| format!("render buffer #0: {error}"))?,
+            Self::make_render_buffer(drm, egl, &in_use, false)
+                .map_err(|error| format!("render buffer #1: {error}"))?,
+        ];
 
         changes.add_property(
             primary_plane.handle,
@@ -2207,20 +2227,13 @@ impl Drm {
         );
 
         if let Err(error) = drm.atomic_commit(control::AtomicCommitFlags::ALLOW_MODESET, changes) {
-            log::error!(
-                "Initial atomic modeset failed: connector={} crtc={:?} plane={:?} fb={:?} mode={}x{} error={:?}",
-                in_use.connector.interface_name,
-                in_use.crtc.handle,
-                primary_plane.handle,
-                buffers[0].drm_fb.id(),
-                hdisplay,
-                vdisplay,
-                error
-            );
-            panic!("Failed to set mode: {:?}", error);
+            return Err(format!(
+                "initial modeset connector={} crtc={:?} mode={}x{}: {error}",
+                in_use.connector.interface_name, in_use.crtc.handle, hdisplay, vdisplay
+            ));
         }
 
-        DrmOutput {
+        Ok(DrmOutput {
             in_use,
             color_state: OutputColorState::default(),
             presentation_transform: OutputPresentationTransform::FlipY,
@@ -2231,7 +2244,7 @@ impl Drm {
             cursor_animation_delay_msec: None,
             allow_in_fence_fd: true,
             allow_fb_damage_clips: true,
-        }
+        })
     }
 
     fn make_render_buffer(
@@ -2241,15 +2254,21 @@ impl Drm {
         is_cursor: bool,
     ) -> std::io::Result<RenderBuffer> {
         let (_, plane_modifiers) = in_use.primary_plane();
-        let mode = in_use.connector.preferred_mode.as_ref().unwrap();
+        let Some(mode) = in_use.connector.preferred_mode.as_ref() else {
+            return Err(std::io::Error::other("connector has no mode"));
+        };
 
-        let opengl_format = egl.opengl_formats.get(&DrmFourcc::Xrgb8888).unwrap();
+        let Some(opengl_format) = egl.opengl_formats.get(&DrmFourcc::Xrgb8888) else {
+            return Err(std::io::Error::other("EGL has no XRGB8888 format"));
+        };
         let modifiers: Vec<_> = opengl_format
             .write_modifiers
             .intersection(plane_modifiers)
             .copied()
             .collect();
-        assert!(!modifiers.is_empty());
+        if modifiers.is_empty() {
+            return Err(std::io::Error::other("no modifiers shared by EGL and the plane"));
+        }
 
         let mut flags = UseFlags::RENDERING | UseFlags::SCANOUT;
         if is_cursor {
@@ -2257,9 +2276,9 @@ impl Drm {
         }
 
         let bo = egl.gbm.create_bo(&mode, flags, &modifiers);
-        let dmabuf = bo
-            .dmabuf()
-            .expect("render buffer GBM BO must export dmabuf");
+        let Some(dmabuf) = bo.dmabuf() else {
+            return Err(std::io::Error::other("GBM buffer did not export a dmabuf"));
+        };
         let drm_fb = match Self::add_framebuffer(drm, dmabuf) {
             Ok(framebuffer) => framebuffer,
             Err(error) => {
@@ -2466,8 +2485,8 @@ impl Drm {
         drm: &DrmFd,
         encoder: encoder::Handle,
         crtcs: &BTreeMap<crtc::Handle, Crtc>,
-    ) -> (encoder::Handle, Encoder) {
-        let info = drm.get_encoder(encoder).unwrap();
+    ) -> Option<(encoder::Handle, Encoder)> {
+        let info = drm.get_encoder(encoder).ok()?;
         let possible_crtcs: HashSet<_> = crtcs
             .iter()
             .filter(|(_, crtc)| info.possible_crtcs().0 & (1 << crtc.index) != 0)
@@ -2476,12 +2495,14 @@ impl Drm {
 
         let handle = encoder;
         let encoder = Encoder { handle, possible_crtcs };
-        (handle, encoder)
+        Some((handle, encoder))
     }
 
-    fn make_plane(drm: &DrmFd, plane: plane::Handle) -> (plane::Handle, Plane) {
+    fn make_plane(drm: &DrmFd, plane: plane::Handle) -> Option<(plane::Handle, Plane)> {
         let get_kind = |props: &BTreeMap<String, (u64, property::Info)>| {
-            let (value, prop) = props.get("type").expect("plane missing `type`");
+            let Some((value, prop)) = props.get("type") else {
+                return None;
+            };
 
             let ValueType::Enum(values) = prop.value_type() else {
                 return None;
@@ -2500,21 +2521,34 @@ impl Drm {
                 })
         };
 
-        let info = drm.get_plane(plane).unwrap();
+        let info = match drm.get_plane(plane) {
+            Ok(info) => info,
+            Err(error) => {
+                log::warn!("skipping DRM plane {plane:?}: {error}");
+                return None;
+            }
+        };
         let props = get_props(drm, plane);
 
         let formats = match props.get("IN_FORMATS") {
-            Some((prop, _)) => get_in_formats(drm, *prop)
-                .unwrap()
-                .into_iter()
-                .filter(|format| !format.modifiers.is_empty())
-                .filter_map(|format| FORMATS_MAP.get(&format.format).map(|our| (format, our)))
-                .map(|(in_format, format)| {
-                    let plane_format =
-                        PlaneFormat { format: (*format).clone(), modifiers: in_format.modifiers };
-                    (in_format.format, plane_format)
-                })
-                .collect(),
+            Some((prop, _)) => match get_in_formats(drm, *prop) {
+                Ok(formats) => formats
+                    .into_iter()
+                    .filter(|format| !format.modifiers.is_empty())
+                    .filter_map(|format| FORMATS_MAP.get(&format.format).map(|our| (format, our)))
+                    .map(|(in_format, format)| {
+                        let plane_format = PlaneFormat {
+                            format: (*format).clone(),
+                            modifiers: in_format.modifiers,
+                        };
+                        (in_format.format, plane_format)
+                    })
+                    .collect(),
+                Err(error) => {
+                    log::warn!("skipping DRM plane {plane:?}: {error}");
+                    return None;
+                }
+            },
             None => info
                 .formats()
                 .iter()
@@ -2530,29 +2564,26 @@ impl Drm {
                 .collect::<HashMap<_, _>>(),
         };
 
-        let get_geometry = |x: &str, y: &str, w: &str, h: &str| {
+        let get_geometry = |x: &str, y: &str, w: &str, h: &str| -> Option<Geometry> {
             let get_prop = |(value, info): &(u64, property::Info)| Property {
                 value: *value,
                 handle: info.handle(),
             };
-            Geometry {
-                x: props.get(x).map(get_prop).unwrap(),
-                y: props.get(y).map(get_prop).unwrap(),
-                width: props.get(w).map(get_prop).unwrap(),
-                height: props.get(h).map(get_prop).unwrap(),
-            }
+            Some(Geometry {
+                x: props.get(x).map(get_prop)?,
+                y: props.get(y).map(get_prop)?,
+                width: props.get(w).map(get_prop)?,
+                height: props.get(h).map(get_prop)?,
+            })
         };
-        let get_handle = |s: &str| {
-            let (_, info) = &props[s];
-            info.handle()
-        };
+        let get_handle = |s: &str| props.get(s).map(|(_, info)| info.handle());
 
-        let kind = get_kind(&props).unwrap();
-        let crtc_geometry = get_geometry("CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H");
-        let src_geometry = get_geometry("SRC_X", "SRC_Y", "SRC_W", "SRC_H");
+        let kind = get_kind(&props)?;
+        let crtc_geometry = get_geometry("CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H")?;
+        let src_geometry = get_geometry("SRC_X", "SRC_Y", "SRC_W", "SRC_H")?;
         let possible_crtcs = info.possible_crtcs().0;
-        let fb_id = get_handle("FB_ID");
-        let crtc_id = get_handle("CRTC_ID");
+        let fb_id = get_handle("FB_ID")?;
+        let crtc_id = get_handle("CRTC_ID")?;
         let in_fence_fd = props.get("IN_FENCE_FD").map(|(_, info)| info.handle());
         let fb_damage_clips = props.get("FB_DAMAGE_CLIPS").map(|(_, info)| info.handle());
 
@@ -2572,7 +2603,7 @@ impl Drm {
             fb_damage_clips,
         };
 
-        (handle, plane)
+        Some((handle, plane))
     }
 
     // fn make_plane(drm: &DrmFd, plane: plane::Handle) -> (plane::Handle, Plane) {
@@ -2580,8 +2611,14 @@ impl Drm {
         drm: &DrmFd,
         connector_handle: connector::Handle,
         encoders: &BTreeMap<encoder::Handle, Encoder>,
-    ) -> (connector::Handle, Connector) {
-        let connector = drm.get_connector(connector_handle, true).unwrap();
+    ) -> Option<(connector::Handle, Connector)> {
+        let connector = match drm.get_connector(connector_handle, true) {
+            Ok(connector) => connector,
+            Err(error) => {
+                log::warn!("skipping DRM connector {connector_handle:?}: {error}");
+                return None;
+            }
+        };
 
         let props = get_props(drm, connector_handle);
 
@@ -2652,7 +2689,7 @@ impl Drm {
             crtc_id_prop: props.get("CRTC_ID").map(|(_, info)| info.handle()),
         };
 
-        (connector_handle, connector)
+        Some((connector_handle, connector))
     }
 }
 

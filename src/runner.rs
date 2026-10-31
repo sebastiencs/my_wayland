@@ -13,6 +13,14 @@ type Result<T> = std::result::Result<T, ModelFailure>;
 ///
 /// `Ok(())` continues the session. These variants are the only recoverable
 /// exits from [`Model::process`].
+///
+/// Panics and aborts that remain are ownership or post-validation invariants,
+/// not device or protocol failures. Dropping an [`crate::indexmap::IndexMap`]
+/// while a grab is live aborts. A dispatcher aimed at the wrong model type,
+/// a missing `Model::STOP`, and a value that was checked and then found
+/// absent (a live output id, a KMS property required by an object the kernel
+/// just returned) still panic. Expected startup, poll, modeset, buffer, and
+/// EGL failures return [`ModelFailure::Shutdown`] or skip that output.
 #[derive(Debug)]
 pub enum ModelFailure {
     /// This model cannot continue. The runner stops it and keeps the session.

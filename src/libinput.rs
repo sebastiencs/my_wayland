@@ -20,7 +20,7 @@ use crate::{
         model::IoUringAction,
         ring::{PollCompleted, RingId},
     },
-    runner::{Dispatcher, Model, Redispatcher},
+    runner::{Dispatcher, Model, ModelFailure, Redispatcher, ShutdownReason},
     seat::{
         self, PointerAxisChange, PointerScrollDirection, PointerScrollFrame, PointerScrollSource,
     },
@@ -82,8 +82,8 @@ impl Libinput {
         Box::new(Self { libinput, dev_to_fd, inputs, poll_op_id: None })
     }
 
-    pub fn dispatch(&mut self) {
-        self.libinput.dispatch().unwrap();
+    pub fn dispatch(&mut self) -> std::io::Result<()> {
+        self.libinput.dispatch()
     }
 
     pub fn next_event(&mut self) -> Option<input::Event> {
@@ -97,8 +97,7 @@ impl Libinput {
             id: Some(poll_op_id),
             fd: self.libinput.as_raw_fd(),
             dispatch_to: Redispatcher::to::<Libinput>(|result: std::io::Result<PollCompleted>| {
-                let PollCompleted {} = result.unwrap();
-                LibinputAction::Event
+                LibinputAction::from(result)
             }),
         });
     }
@@ -115,13 +114,16 @@ pub enum LibinputAction {
     Event,
     OpenInput { devnode: String, fd: OwnedFd, devnum: u64 },
     CloseSessionFds,
+    PollFailed { message: String },
     Stop,
 }
 
 impl From<std::io::Result<PollCompleted>> for LibinputAction {
     fn from(result: std::io::Result<PollCompleted>) -> Self {
-        let PollCompleted {} = result.unwrap();
-        Self::Event
+        match result {
+            Ok(PollCompleted {}) => Self::Event,
+            Err(error) => Self::PollFailed { message: error.to_string() },
+        }
     }
 }
 
@@ -147,7 +149,10 @@ impl Model for Libinput {
                 if dispatcher.shutdown_requested() {
                     return Ok(());
                 }
-                self.dispatch();
+                if let Err(error) = self.dispatch() {
+                    log::error!("libinput dispatch failed: {error}");
+                    return Ok(());
+                }
                 while let Some(event) = self.next_event() {
                     match event {
                         input::Event::Pointer(pointer) => match pointer {
@@ -277,6 +282,12 @@ impl Model for Libinput {
 
                 let input_id = state.inputs.insert(Input { device, devnum });
                 self.inputs.insert(input_id);
+            }
+            PollFailed { message } => {
+                return Err(ModelFailure::Shutdown(ShutdownReason::Fatal {
+                    source: "libinput",
+                    message: format!("input poll failed: {message}"),
+                }));
             }
             Stop => {
                 if let Some(poll_op_id) = self.poll_op_id.take() {

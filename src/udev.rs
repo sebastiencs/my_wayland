@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     os::{
         fd::{AsRawFd, OwnedFd, RawFd},
         unix::prelude::OsStrExt,
@@ -26,7 +26,7 @@ use crate::{
         ring::{PollCompleted, RingId},
     },
     libinput::LibinputAction,
-    runner::{Dispatcher, Model, Redispatcher},
+    runner::{Dispatcher, Model, ModelFailure, Redispatcher, ShutdownReason},
     state::{BackendOutputRef, DrmId, Output, OutputId, State},
     wayland_objects::{
         hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1Global,
@@ -35,6 +35,13 @@ use crate::{
         zwlr_gamma_control_manager_v1::ZwlrGammaControlManagerV1Global,
     },
 };
+
+#[derive(Debug, PartialEq, Eq)]
+enum Bringup {
+    Continue,
+    WaitForDevice,
+    FatalNoOutput,
+}
 
 #[derive(Debug)]
 pub struct Device {
@@ -61,6 +68,8 @@ enum PendingControl {
 pub struct Udev {
     udev_monitor: udev::MonitorSocket,
     pending: BTreeMap<libc::dev_t, PendingControl>,
+    /// DRM devices from the initial scan that have not finished TakeDevice.
+    initial_drm: BTreeSet<libc::dev_t>,
     poll_op_id: Option<RingId>,
 }
 
@@ -68,6 +77,8 @@ pub enum UdevAction {
     Start,
     Event,
     DeviceTaken { fd: OwnedFd, inactive: bool, devnum: libc::dev_t },
+    DeviceTakeFailed { devnum: libc::dev_t },
+    PollFailed { message: String },
     FinalizeBackendRemoval { drm_id: DrmId },
     Stop,
 }
@@ -86,28 +97,42 @@ impl Model for Udev {
         match action {
             UdevAction::Start => {
                 self.dispatch_poll(dispatcher);
-                self.enumerate(dispatcher).expect("Failed to enumerate");
+                if let Err(error) = self.enumerate(dispatcher) {
+                    return Err(ModelFailure::Shutdown(ShutdownReason::Fatal {
+                        source: "udev",
+                        message: format!("device enumeration failed: {error}"),
+                    }));
+                }
+                self.shutdown_if_no_output()?;
             }
             UdevAction::Event => {
-                // TODO: Remove `collect()`
                 for event in self.udev_monitor.iter().collect::<Vec<_>>() {
-                    self.handle_event(event, state, dispatcher)
+                    self.handle_event(event, state, dispatcher)?;
                 }
             }
             UdevAction::DeviceTaken { fd, inactive, devnum } => {
-                match self.pending.remove(&devnum).unwrap() {
+                let Some(pending) = self.pending.remove(&devnum) else {
+                    log::warn!("TakeDevice reply for an unknown device {devnum}");
+                    return Ok(());
+                };
+                match pending {
                     PendingControl::Drm(device) => {
-                        self.on_drm_taken(device, fd, inactive, state, dispatcher)
+                        self.on_drm_taken(device, fd, inactive, devnum, state, dispatcher)?
                     }
                     PendingControl::Input(device) => {
                         self.on_input_taken(device, fd, inactive, devnum, dispatcher)
                     }
                 }
-                // self.on_taken(device, fd, inactive, devnum);
-                // let Some(path_node) = device.devnode().map(PathBuf::from) else {
-                //     return Ok(());
-                // };
-                // log::warn!("DEVICE TAKEN devum={:?} fd={:?} inactive={:?} {:?}", devnum, fd, inactive, path_node);
+            }
+            UdevAction::DeviceTakeFailed { devnum } => {
+                self.pending.remove(&devnum);
+                self.settle_initial_drm(devnum, state)?;
+            }
+            UdevAction::PollFailed { message } => {
+                return Err(ModelFailure::Shutdown(ShutdownReason::Fatal {
+                    source: "udev",
+                    message: format!("monitor poll failed: {message}"),
+                }));
             }
             UdevAction::FinalizeBackendRemoval { drm_id } => {
                 let _ = state.drm.remove(drm_id);
@@ -126,7 +151,12 @@ impl Udev {
             .listen()?;
         let pending = BTreeMap::default();
 
-        Ok(Box::new(Udev { udev_monitor, pending, poll_op_id: None }))
+        Ok(Box::new(Udev {
+            udev_monitor,
+            pending,
+            initial_drm: BTreeSet::new(),
+            poll_op_id: None,
+        }))
     }
 
     fn dispatch_poll(&mut self, dispatcher: &mut Dispatcher) {
@@ -136,8 +166,10 @@ impl Udev {
             id: Some(poll_op_id),
             fd: self.udev_monitor.as_raw_fd(),
             dispatch_to: Redispatcher::to::<Self>(|result: std::io::Result<PollCompleted>| {
-                let PollCompleted {} = result.unwrap();
-                UdevAction::Event
+                match result {
+                    Ok(PollCompleted {}) => UdevAction::Event,
+                    Err(error) => UdevAction::PollFailed { message: error.to_string() },
+                }
             }),
         });
     }
@@ -149,18 +181,31 @@ impl Udev {
         for device in enumerator.scan_devices()? {
             self.handle_new_device(device, dispatcher);
         }
+        self.initial_drm = self
+            .pending
+            .iter()
+            .filter_map(|(devnum, pending)| {
+                matches!(pending, PendingControl::Drm(_)).then_some(*devnum)
+            })
+            .collect();
         Ok(())
     }
 
-    fn handle_event(&mut self, event: udev::Event, state: &mut State, dispatcher: &mut Dispatcher) {
+    fn handle_event(
+        &mut self,
+        event: udev::Event,
+        state: &mut State,
+        dispatcher: &mut Dispatcher,
+    ) -> std::result::Result<(), ModelFailure> {
         use udev::EventType::*;
 
         match event.event_type() {
             Add => self.handle_new_device(event.device(), dispatcher),
             Change => self.handle_change_device(event.device(), state, dispatcher),
-            Remove => self.handle_remove_device(event.device(), state, dispatcher),
+            Remove => return self.handle_remove_device(event.device(), state, dispatcher),
             Bind | Unbind | Unknown => log::trace!("Ignored event {:?}", event.action()),
         }
+        Ok(())
     }
 
     fn find_drm_id_for_devnum(state: &State, devnum: libc::dev_t) -> Option<DrmId> {
@@ -199,15 +244,16 @@ impl Udev {
         device: udev::Device,
         state: &mut State,
         dispatcher: &mut Dispatcher,
-    ) {
+    ) -> std::result::Result<(), ModelFailure> {
         let Some(devnum) = device.devnum() else {
-            return;
+            return Ok(());
         };
         let Some(drm_id) = Self::find_drm_id_for_devnum(state, devnum) else {
             log::trace!("Ignored remove event for unmanaged DRM device {:?}", device.devnode());
-            return;
+            return Ok(());
         };
         self.remove_drm_backend(drm_id, state, dispatcher);
+        self.fatal_if_no_output(state)
     }
 
     fn shutdown_backends(&mut self, state: &mut State, dispatcher: &mut Dispatcher) {
@@ -322,16 +368,26 @@ impl Udev {
         device: udev::Device,
         fd: OwnedFd,
         inactive: bool,
+        devnum: libc::dev_t,
         state: &mut State,
         dispatcher: &mut Dispatcher,
-    ) {
+    ) -> std::result::Result<(), ModelFailure> {
         if inactive {
-            return;
+            log::warn!("DRM device {devnum} is inactive");
+            dispatcher.dispatch(DbusAction::ReleaseDevice { devnum });
+            return self.settle_initial_drm(devnum, state);
         }
 
         eprintln!("DRM TAKEN {:?}", device.devnode());
 
-        let drm = Drm::create_drm(fd, device, &state.egl);
+        let drm = match Drm::create_drm(fd, device, &state.egl) {
+            Ok(drm) => drm,
+            Err(error) => {
+                log::error!("DRM device {devnum} failed: {error}");
+                dispatcher.dispatch(DbusAction::ReleaseDevice { devnum });
+                return self.settle_initial_drm(devnum, state);
+            }
+        };
         let drm_id = state.drm.insert(drm);
         let drm_output_ids = state
             .drm
@@ -370,6 +426,51 @@ impl Udev {
             });
         }
         sync_color_control_globals(state, dispatcher);
+        self.settle_initial_drm(devnum, state)
+    }
+
+    /// One failed connector is skipped. The session ends only when every
+    /// initial DRM device has settled and none of them produced an output.
+    fn bringup_decision(ready_outputs: usize, pending_devices: usize) -> Bringup {
+        if ready_outputs > 0 {
+            Bringup::Continue
+        } else if pending_devices > 0 {
+            Bringup::WaitForDevice
+        } else {
+            Bringup::FatalNoOutput
+        }
+    }
+
+    fn shutdown_if_no_output(&self) -> std::result::Result<(), ModelFailure> {
+        Self::fatal_when(Self::bringup_decision(0, self.initial_drm.len()))
+    }
+
+    fn settle_initial_drm(
+        &mut self,
+        devnum: libc::dev_t,
+        state: &State,
+    ) -> std::result::Result<(), ModelFailure> {
+        if !self.initial_drm.remove(&devnum) {
+            return Ok(());
+        }
+        self.fatal_if_no_output(state)
+    }
+
+    fn fatal_if_no_output(&self, state: &State) -> std::result::Result<(), ModelFailure> {
+        Self::fatal_when(Self::bringup_decision(
+            state.outputs.iter().count(),
+            self.initial_drm.len(),
+        ))
+    }
+
+    fn fatal_when(decision: Bringup) -> std::result::Result<(), ModelFailure> {
+        match decision {
+            Bringup::FatalNoOutput => Err(ModelFailure::Shutdown(ShutdownReason::Fatal {
+                source: "drm",
+                message: "no usable output".into(),
+            })),
+            Bringup::Continue | Bringup::WaitForDevice => Ok(()),
+        }
     }
 
     fn publish_output_node(
@@ -478,4 +579,25 @@ fn sync_color_control_globals(state: &mut State, dispatcher: &mut Dispatcher) {
         "hyprland_ctm_control_manager_v1",
         HyprlandCtmControlManagerV1Global::new,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Bringup, Udev};
+
+    #[test]
+    fn bringup_keeps_a_session_that_has_one_working_output() {
+        assert_eq!(Udev::bringup_decision(1, 0), Bringup::Continue);
+        assert_eq!(Udev::bringup_decision(1, 3), Bringup::Continue);
+    }
+
+    #[test]
+    fn bringup_waits_while_an_initial_device_is_still_pending() {
+        assert_eq!(Udev::bringup_decision(0, 2), Bringup::WaitForDevice);
+    }
+
+    #[test]
+    fn bringup_is_fatal_when_every_initial_device_failed() {
+        assert_eq!(Udev::bringup_decision(0, 0), Bringup::FatalNoOutput);
+    }
 }

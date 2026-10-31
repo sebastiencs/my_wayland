@@ -49,7 +49,7 @@ impl EglSyncKhr {
     }
 }
 
-fn load_methods() {
+fn load_methods() -> Result<(), String> {
     use khronos_types::{egl::load as load_egl, gl::load as load_gl};
 
     let get_addr = |s: &CStr| unsafe {
@@ -79,21 +79,21 @@ fn load_methods() {
         load_gl::BindRenderbuffer as _,
         load_gl::EGLImageTargetTexture2DOES as _,
     ] {
-        unsafe { loader(get_addr) }.expect("Failed to load method");
+        let entry: Option<*mut std::ffi::c_void> = unsafe { loader(get_addr) };
+        if entry.is_none() {
+            return Err("failed to load an EGL or GL entry point".into());
+        }
     }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
 pub struct EGL {}
 
 impl EGL {
-    pub fn new() -> Self {
-        load_methods();
-        // gl::GenTextures(loader);
-        // gl::load_glViewport(loader);
-        // gl::load_glGenTexturesEXT(loader);
-        // Self { dyns: load_methods() }
-        Self {}
+    pub fn new() -> Result<Self, String> {
+        load_methods()?;
+        Ok(Self {})
     }
 
     fn error_on<T: PartialEq>(result: T, error_value: T) -> Result<T, egl::Error> {
@@ -457,10 +457,11 @@ impl EGL {
     }
 }
 
-pub fn init() -> EGL {
-    let egl = EGL::new();
-    egl.bind_api(egl::OPENGL_ES_API).unwrap();
-    egl
+pub fn init() -> Result<EGL, String> {
+    let egl = EGL::new()?;
+    egl.bind_api(egl::OPENGL_ES_API)
+        .map_err(|error| format!("eglBindAPI: {error:?}"))?;
+    Ok(egl)
 
     // let egl = unsafe {
     //     egl::DynamicInstance::<EGL1_5>::load_required()
@@ -745,25 +746,25 @@ pub struct EglFrameBuffer {
     pub height: i32,
     render_buffer: EglRenderBuffer,
     pub framebuffer_object: gl::GLuint,
-    texture_program: OnceCell<TextureProgram>,
-    blur_program: OnceCell<BlurProgram>,
-    border_program: OnceCell<BorderProgram>,
-    shadow_program: OnceCell<ShadowProgram>,
+    texture_program: OnceCell<Result<TextureProgram, String>>,
+    blur_program: OnceCell<Result<BlurProgram, String>>,
+    border_program: OnceCell<Result<BorderProgram, String>>,
+    shadow_program: OnceCell<Result<ShadowProgram, String>>,
     dim_texture: OnceCell<GlTexture>,
 }
 
 impl Drop for EglFrameBuffer {
     fn drop(&mut self) {
-        if let Some(program) = self.texture_program.take() {
+        if let Some(Ok(program)) = self.texture_program.take() {
             unsafe { gl::DeleteProgram(program.program) };
         }
-        if let Some(program) = self.blur_program.take() {
+        if let Some(Ok(program)) = self.blur_program.take() {
             unsafe { gl::DeleteProgram(program.program) };
         }
-        if let Some(program) = self.border_program.take() {
+        if let Some(Ok(program)) = self.border_program.take() {
             unsafe { gl::DeleteProgram(program.program) };
         }
-        if let Some(program) = self.shadow_program.take() {
+        if let Some(Ok(program)) = self.shadow_program.take() {
             unsafe { gl::DeleteProgram(program.program) };
         }
         unsafe {
@@ -920,20 +921,32 @@ struct ShadowProgram {
 }
 
 impl EglFrameBuffer {
-    fn texture_program(&self) -> &TextureProgram {
-        self.texture_program.get_or_init(create_texture_program)
+    fn texture_program(&self) -> Result<&TextureProgram, &str> {
+        self.texture_program
+            .get_or_init(create_texture_program)
+            .as_ref()
+            .map_err(String::as_str)
     }
 
-    fn blur_program(&self) -> &BlurProgram {
-        self.blur_program.get_or_init(create_blur_program)
+    fn blur_program(&self) -> Result<&BlurProgram, &str> {
+        self.blur_program
+            .get_or_init(create_blur_program)
+            .as_ref()
+            .map_err(String::as_str)
     }
 
-    fn border_program(&self) -> &BorderProgram {
-        self.border_program.get_or_init(create_border_program)
+    fn border_program(&self) -> Result<&BorderProgram, &str> {
+        self.border_program
+            .get_or_init(create_border_program)
+            .as_ref()
+            .map_err(String::as_str)
     }
 
-    fn shadow_program(&self) -> &ShadowProgram {
-        self.shadow_program.get_or_init(create_shadow_program)
+    fn shadow_program(&self) -> Result<&ShadowProgram, &str> {
+        self.shadow_program
+            .get_or_init(create_shadow_program)
+            .as_ref()
+            .map_err(String::as_str)
     }
 
     fn dim_texture(&self) -> Option<&GlTexture> {
@@ -1104,7 +1117,13 @@ impl EglFrameBuffer {
         if items.is_empty() {
             return;
         }
-        let program = self.texture_program();
+        let program = match self.texture_program() {
+            Ok(program) => program,
+            Err(error) => {
+                log::error!("texture shader is unavailable: {error}");
+                return;
+            }
+        };
         let vertices: [f32; 16] =
             [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0];
         let stride = (4 * std::mem::size_of::<f32>()) as i32;
@@ -1328,7 +1347,13 @@ impl EglFrameBuffer {
         passes: u8,
         projection: Mat3,
     ) {
-        let program = self.blur_program();
+        let program = match self.blur_program() {
+            Ok(program) => program,
+            Err(error) => {
+                log::error!("blur shader is unavailable: {error}");
+                return;
+            }
+        };
         let vertices: [f32; 16] =
             [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0];
         let stride = (4 * std::mem::size_of::<f32>()) as i32;
@@ -1637,7 +1662,13 @@ impl EglFrameBuffer {
             return;
         }
 
-        let program = self.border_program();
+        let program = match self.border_program() {
+            Ok(program) => program,
+            Err(error) => {
+                log::error!("border shader is unavailable: {error}");
+                return;
+            }
+        };
         let vertices: [f32; 8] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
         let stride = (2 * std::mem::size_of::<f32>()) as i32;
         let transform = crate::transform::project_box(
@@ -1758,7 +1789,13 @@ impl EglFrameBuffer {
             return;
         }
 
-        let program = self.shadow_program();
+        let program = match self.shadow_program() {
+            Ok(program) => program,
+            Err(error) => {
+                log::error!("shadow shader is unavailable: {error}");
+                return;
+            }
+        };
         let vertices: [f32; 8] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
         let stride = (2 * std::mem::size_of::<f32>()) as i32;
         let transform = crate::transform::project_box(
@@ -1818,13 +1855,13 @@ impl EglFrameBuffer {
     }
 }
 
-fn create_texture_program() -> TextureProgram {
+fn create_texture_program() -> Result<TextureProgram, String> {
     let vertex_source = include_str!("shaders/texture_clip.vert");
     let fragment_source = include_str!("shaders/texture_clip.frag");
-    let vertex_shader = compile_shader(gl::VERTEX_SHADER as _, vertex_source);
-    let fragment_shader = compile_shader(gl::FRAGMENT_SHADER as _, fragment_source);
-    let program = link_program(vertex_shader, fragment_shader, "texture program");
-    TextureProgram {
+    let vertex_shader = compile_shader(gl::VERTEX_SHADER as _, vertex_source)?;
+    let fragment_shader = compile_shader(gl::FRAGMENT_SHADER as _, fragment_source)?;
+    let program = link_program(vertex_shader, fragment_shader, "texture program")?;
+    Ok(TextureProgram {
         program,
         position_location: unsafe {
             gl::GetAttribLocation(program, b"a_position\0".as_ptr().cast()) as gl::Uint
@@ -1866,17 +1903,17 @@ fn create_texture_program() -> TextureProgram {
             gl::GetUniformLocation(program, b"u_clip_inner_rounding_power\0".as_ptr().cast())
         },
         alpha_location: unsafe { gl::GetUniformLocation(program, b"u_alpha\0".as_ptr().cast()) },
-    }
+    })
 }
 
-fn create_border_program() -> BorderProgram {
+fn create_border_program() -> Result<BorderProgram, String> {
     let vertex_source = include_str!("shaders/shadow.vert");
     let fragment_source = include_str!("shaders/border.frag");
-    let vertex_shader = compile_shader(gl::VERTEX_SHADER as _, vertex_source);
-    let fragment_shader = compile_shader(gl::FRAGMENT_SHADER as _, fragment_source);
-    let program = link_program(vertex_shader, fragment_shader, "border program");
+    let vertex_shader = compile_shader(gl::VERTEX_SHADER as _, vertex_source)?;
+    let fragment_shader = compile_shader(gl::FRAGMENT_SHADER as _, fragment_source)?;
+    let program = link_program(vertex_shader, fragment_shader, "border program")?;
 
-    BorderProgram {
+    Ok(BorderProgram {
         program,
         position_location: unsafe {
             gl::GetAttribLocation(program, b"a_position\0".as_ptr().cast()) as gl::Uint
@@ -1915,17 +1952,17 @@ fn create_border_program() -> BorderProgram {
             gl::GetUniformLocation(program, b"u_gradient_angle_degrees\0".as_ptr().cast())
         },
         alpha_location: unsafe { gl::GetUniformLocation(program, b"u_alpha\0".as_ptr().cast()) },
-    }
+    })
 }
 
-fn create_shadow_program() -> ShadowProgram {
+fn create_shadow_program() -> Result<ShadowProgram, String> {
     let vertex_source = include_str!("shaders/shadow.vert");
     let fragment_source = include_str!("shaders/shadow.frag");
-    let vertex_shader = compile_shader(gl::VERTEX_SHADER as _, vertex_source);
-    let fragment_shader = compile_shader(gl::FRAGMENT_SHADER as _, fragment_source);
-    let program = link_program(vertex_shader, fragment_shader, "shadow program");
+    let vertex_shader = compile_shader(gl::VERTEX_SHADER as _, vertex_source)?;
+    let fragment_shader = compile_shader(gl::FRAGMENT_SHADER as _, fragment_source)?;
+    let program = link_program(vertex_shader, fragment_shader, "shadow program")?;
 
-    ShadowProgram {
+    Ok(ShadowProgram {
         program,
         position_location: unsafe {
             gl::GetAttribLocation(program, b"a_position\0".as_ptr().cast()) as gl::Uint
@@ -1954,7 +1991,7 @@ fn create_shadow_program() -> ShadowProgram {
         shadow_power_location: unsafe {
             gl::GetUniformLocation(program, b"u_shadow_power\0".as_ptr().cast())
         },
-    }
+    })
 }
 
 fn clear_framebuffer(framebuffer_object: gl::GLuint, width: i32, height: i32) {
@@ -1968,13 +2005,13 @@ fn clear_framebuffer(framebuffer_object: gl::GLuint, width: i32, height: i32) {
     }
 }
 
-fn create_blur_program() -> BlurProgram {
+fn create_blur_program() -> Result<BlurProgram, String> {
     let vertex_source = include_str!("shaders/blur.vert");
     let fragment_source = include_str!("shaders/blur.frag");
-    let vertex_shader = compile_shader(gl::VERTEX_SHADER as _, vertex_source);
-    let fragment_shader = compile_shader(gl::FRAGMENT_SHADER as _, fragment_source);
-    let program = link_program(vertex_shader, fragment_shader, "blur program");
-    BlurProgram {
+    let vertex_shader = compile_shader(gl::VERTEX_SHADER as _, vertex_source)?;
+    let fragment_shader = compile_shader(gl::FRAGMENT_SHADER as _, fragment_source)?;
+    let program = link_program(vertex_shader, fragment_shader, "blur program")?;
+    Ok(BlurProgram {
         program,
         position_location: unsafe {
             gl::GetAttribLocation(program, b"a_position\0".as_ptr().cast()) as gl::Uint
@@ -2001,10 +2038,10 @@ fn create_blur_program() -> BlurProgram {
         item_size_location: unsafe {
             gl::GetUniformLocation(program, b"u_item_size\0".as_ptr().cast())
         },
-    }
+    })
 }
 
-fn compile_shader(kind: gl::Enum, source: &str) -> gl::Uint {
+fn compile_shader(kind: gl::Enum, source: &str) -> Result<gl::Uint, String> {
     let shader = unsafe { gl::CreateShader(kind) };
     // `string` and `length` are parallel arrays of `count` elements (here count == 1).
     let strings: [*const gl::GLchar; 1] = [source.as_ptr().cast::<gl::GLchar>()];
@@ -2018,13 +2055,18 @@ fn compile_shader(kind: gl::Enum, source: &str) -> gl::Uint {
     let mut status = 0;
     unsafe { gl::GetShaderiv(shader, gl::COMPILE_STATUS as _, &mut status) };
     if status == 0 {
-        panic!("Could not compile shader");
+        unsafe { gl::DeleteShader(shader) };
+        return Err("could not compile shader".into());
     }
 
-    shader
+    Ok(shader)
 }
 
-fn link_program(vertex_shader: gl::Uint, fragment_shader: gl::Uint, label: &str) -> gl::Uint {
+fn link_program(
+    vertex_shader: gl::Uint,
+    fragment_shader: gl::Uint,
+    label: &str,
+) -> Result<gl::Uint, String> {
     let program = unsafe { gl::CreateProgram() };
     unsafe {
         gl::AttachShader(program, vertex_shader);
@@ -2037,9 +2079,10 @@ fn link_program(vertex_shader: gl::Uint, fragment_shader: gl::Uint, label: &str)
     let mut status = 0;
     unsafe { gl::GetProgramiv(program, gl::LINK_STATUS as _, &mut status) };
     if status == 0 {
-        panic!("Could not link {label}");
+        unsafe { gl::DeleteProgram(program) };
+        return Err(format!("could not link {label}"));
     }
-    program
+    Ok(program)
 }
 
 fn framebuffer_rect_for_target(
@@ -2166,15 +2209,21 @@ impl EglContext {
             .make_current(self.display, None, None, Some(self.context));
     }
 
-    pub fn make(egl: &EGL, gbm: GbmDevice) -> Self {
+    pub fn make(egl: &EGL, gbm: GbmDevice) -> Result<Self, String> {
         let display = egl
             .get_platform_display(EGL_PLATFORM_GBM_KHR, gbm.gbm_device, &[egl::NONE as _])
-            .unwrap();
-        let (_major, _minor) = egl.initialize(display).unwrap();
+            .map_err(|error| format!("platform display: {error:?}"))?;
+        let (_major, _minor) = egl
+            .initialize(display)
+            .map_err(|error| format!("eglInitialize: {error:?}"))?;
 
-        let config = Self::find_config_xrgb8888(egl, display).unwrap();
+        let Some(config) = Self::find_config_xrgb8888(egl, display) else {
+            return Err("no XRGB8888 EGL config".into());
+        };
 
-        let extensions = egl.query_string(Some(display), egl::EXTENSIONS).unwrap();
+        let extensions = egl
+            .query_string(Some(display), egl::EXTENSIONS)
+            .map_err(|error| format!("EGL extensions: {error:?}"))?;
         let extensions: BTreeSet<String> = extensions
             .to_string_lossy()
             .trim()
@@ -2184,12 +2233,12 @@ impl EglContext {
 
         let context = egl
             .create_context(display, config, None, &[egl::CONTEXT_CLIENT_VERSION, 2, egl::NONE])
-            .unwrap();
+            .map_err(|error| format!("eglCreateContext: {error:?}"))?;
 
         let formats = Self::query_formats(egl, &display);
 
         egl.make_current(display, None, None, Some(context))
-            .unwrap();
+            .map_err(|error| format!("eglMakeCurrent: {error:?}"))?;
 
         let opengl_extensions = get_opengl_extensions();
         let opengl_formats = {
@@ -2223,7 +2272,7 @@ impl EglContext {
             && extensions.contains("EGL_ANDROID_native_fence_sync");
         log::info!("EGL native render fence support: {}", supports_native_render_fence);
 
-        Self {
+        Ok(Self {
             egl: egl.clone(),
             display,
             extensions,
@@ -2233,7 +2282,7 @@ impl EglContext {
             formats,
             opengl_formats,
             opengl_extensions,
-        }
+        })
     }
 
     pub fn import_dmabuf(&self, buf: &DmaBuf) -> EglImage {

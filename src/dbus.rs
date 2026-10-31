@@ -492,6 +492,7 @@ impl Dbus {
                     });
                 } else if let Some(Pending::TakeDevice { devnum }) = pending {
                     log::warn!("TakeDevice failed for {devnum}: {error_name:?}");
+                    dispatcher.dispatch(crate::udev::UdevAction::DeviceTakeFailed { devnum });
                 } else {
                     log::warn!("dbus error pending={pending:?} name={error_name:?}");
                 }

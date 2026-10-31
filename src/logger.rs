@@ -116,14 +116,16 @@ fn is_initialized() -> bool {
     false
 }
 
-pub fn install() {
+pub fn install() -> std::io::Result<()> {
     if is_initialized() {
-        return;
+        return Ok(());
     }
 
-    let logger = MyLogger::new().expect("Failed to create logger");
-    log::set_boxed_logger(Box::new(logger)).unwrap();
+    let logger = MyLogger::new()?;
+    log::set_boxed_logger(Box::new(logger))
+        .map_err(|error| std::io::Error::other(format!("logger was already installed: {error}")))?;
     log::set_max_level(log::LevelFilter::Trace);
+    Ok(())
 
     // let mut builder = Builder::from_default_env();
 
@@ -138,7 +140,7 @@ pub fn install() {
 mod tests {
     #[test]
     fn flush_does_not_fail_when_logging_stays_on_stderr() {
-        super::install();
+        super::install().expect("logger");
         log::info!("flush");
         log::logger().flush();
     }

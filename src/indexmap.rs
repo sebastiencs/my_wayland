@@ -79,6 +79,8 @@ impl<K, V> Drop for IndexMap<K, V> {
         if Rc::strong_count(&self.ngrabbed) == 1 {
             return;
         }
+        // Ownership invariant: a grab must not outlive the map. This is not a
+        // device or protocol failure, so it stays an abort.
         eprintln!("ABORT: Dropped `IndexMap` with remaining `Grab` alive");
         eprintln!("ABORT: {}", std::any::type_name::<Self>());
         std::process::abort();

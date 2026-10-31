@@ -60,7 +60,7 @@ pub fn state_for_tests_with_config(config: RuntimeConfig) -> State {
         presentation: Default::default(),
         globals,
         activation_tokens: Default::default(),
-        egl: EGL::new(),
+        egl: EGL::new().expect("egl"),
         config,
         seat: SeatState::default(),
         keyboard,

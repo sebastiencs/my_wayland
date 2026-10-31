@@ -159,7 +159,7 @@ use {globals::Globals, state::State};
 use crate::{
     clients::ClientManager,
     io_uring::model::IoUringState,
-    runner::{Dispatcher, Runner},
+    runner::{Dispatcher, ExitOutcome, Runner},
     udev::Udev,
 };
 
@@ -219,6 +219,25 @@ fn make_timer(duration: Duration) -> TimerFd {
 }
 
 fn main() -> std::process::ExitCode {
+    if let Err(error) = logger::install() {
+        eprintln!("failed to install logger: {error}");
+        return std::process::ExitCode::from(1);
+    }
+    match start_compositor() {
+        Ok(outcome) => {
+            log::info!("compositor stopped: {outcome}");
+            log::logger().flush();
+            std::process::ExitCode::from(u8::try_from(outcome.code).unwrap_or(1))
+        }
+        Err(error) => {
+            log::error!("startup failed: {error}");
+            log::logger().flush();
+            std::process::ExitCode::from(1)
+        }
+    }
+}
+
+fn start_compositor() -> Result<ExitOutcome, StartupError> {
     // use std::any::Any;
 
     // dbus2::init().unwrap();
@@ -246,7 +265,7 @@ fn main() -> std::process::ExitCode {
     // egl.bind_api(khronos_egl::OPENGL_ES_API)
     //    .expect("unable to select OpenGL API");
 
-    let egl = egl::init();
+    let egl = egl::init().map_err(StartupError::Egl)?;
 
     // egl.get_platform_display(EGL_PLATFORM_GBM_KHR, native_display, &[]);
 
@@ -262,15 +281,11 @@ fn main() -> std::process::ExitCode {
 
     // khronos_egl::Instance::new(khronos_egl::Static);
 
-    logger::install();
-
-    // egl::init();
-
     // let xkb = xkb::Xkb::new();
 
     // log::info!("hello");
 
-    let xkb = xkb::Xkb::new();
+    let xkb = xkb::Xkb::try_new().map_err(StartupError::Xkb)?;
     let keyboard = xkb.create_keyboard_state();
     let config = config::RuntimeConfig::load_initial(&xkb);
 
@@ -316,24 +331,18 @@ fn main() -> std::process::ExitCode {
     let mut startup_dispatcher = Dispatcher::default();
     config::apply_general_settings(&mut state, &mut startup_dispatcher);
 
-    let dbus = dbus::Dbus::new().unwrap();
+    let dbus = dbus::Dbus::new().map_err(StartupError::Dbus)?;
 
-    let udev = Udev::new().unwrap();
+    let udev = Udev::new().map_err(StartupError::Udev)?;
     let libinput = libinput::Libinput::new();
 
     // protocol::gen().unwrap();
     // return;
 
-    let uring = Box::<IoUringState>::default();
-    let client_manager = match ClientManager::new() {
-        Ok(manager) => manager,
-        Err(error) => {
-            log::error!("{error}");
-            log::logger().flush();
-            return std::process::ExitCode::from(1);
-        }
-    };
-    let config_watcher = Box::new(config::ConfigWatcher::new(&state.config));
+    let uring = Box::new(IoUringState::try_new().map_err(StartupError::Ring)?);
+    let client_manager = ClientManager::new().map_err(StartupError::Socket)?;
+    let config_watcher =
+        Box::new(config::ConfigWatcher::try_new(&state.config).map_err(StartupError::Config)?);
 
     let mut runner = Runner::with_state(state);
     runner.add_model(uring);
@@ -343,14 +352,7 @@ fn main() -> std::process::ExitCode {
     runner.add_model(client_manager);
     runner.add_model(config_watcher);
     runner.add_model(Box::new(drm::VisualAnimationPump::new()));
-    let signals = match signals::SignalHandler::install() {
-        Ok(handler) => Box::new(handler),
-        Err(error) => {
-            log::error!("failed to install signal handler: {error}");
-            log::logger().flush();
-            return std::process::ExitCode::from(1);
-        }
-    };
+    let signals = Box::new(signals::SignalHandler::install().map_err(StartupError::Signals)?);
     runner.add_model(signals);
 
     let mut dispatcher = Dispatcher::default();
@@ -395,8 +397,31 @@ fn main() -> std::process::ExitCode {
     //     });
     // }
 
-    let outcome = runner.run(dispatcher);
-    log::info!("compositor stopped: {outcome}");
-    log::logger().flush();
-    std::process::ExitCode::from(u8::try_from(outcome.code).unwrap_or(1))
+    Ok(runner.run(dispatcher))
+}
+
+enum StartupError {
+    Egl(String),
+    Xkb(String),
+    Dbus(dbus::DbusError),
+    Udev(std::io::Error),
+    Ring(std::io::Error),
+    Socket(clients::SocketBindError),
+    Config(std::io::Error),
+    Signals(signals::SignalInstallError),
+}
+
+impl std::fmt::Display for StartupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Egl(error) => write!(formatter, "egl: {error}"),
+            Self::Xkb(error) => write!(formatter, "xkb: {error}"),
+            Self::Dbus(error) => write!(formatter, "dbus: {error}"),
+            Self::Udev(error) => write!(formatter, "udev: {error}"),
+            Self::Ring(error) => write!(formatter, "io_uring: {error}"),
+            Self::Socket(error) => write!(formatter, "wayland socket: {error}"),
+            Self::Config(error) => write!(formatter, "config watcher: {error}"),
+            Self::Signals(error) => write!(formatter, "signals: {error}"),
+        }
+    }
 }

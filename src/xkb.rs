@@ -29,19 +29,25 @@ pub struct KeyboardState {
 }
 
 impl Xkb {
-    pub fn new() -> Self {
+    pub fn try_new() -> Result<Self, String> {
         let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         let keymap =
             xkb::Keymap::new_from_names(&ctx, "", "", "us", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
-                .unwrap();
+                .ok_or_else(|| "failed to compile the us keymap".to_string())?;
 
         let keymap_fd = {
             let s = keymap_as_cstr(&keymap);
             let s_slice = s.to_bytes_with_nul();
-            new_memfd(s_slice.as_ptr(), s_slice.len()).unwrap()
+            new_memfd(s_slice.as_ptr(), s_slice.len())
+                .map_err(|error| format!("keymap memfd: {error}"))?
         };
 
-        Self { ctx, keymap, keymap_fd }
+        Ok(Self { ctx, keymap, keymap_fd })
+    }
+
+    /// The us keymap is present in tests. Startup uses [`Self::try_new`].
+    pub fn new() -> Self {
+        Self::try_new().expect("us keymap")
     }
 
     pub fn keymap_fd(&self) -> &MemFd {
