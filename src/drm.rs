@@ -36,7 +36,7 @@ use crate::{
         rounded_ring, EffectElement, FrameElement, FramePhase, OutputFrameRecipe,
         RootSurfaceVisualState, RoundedRing, TextureElement, TextureMask, TextureSource,
     },
-    runner::{Dispatcher, Model, ModelInstanceId},
+    runner::{isolate_session_fault, Dispatcher, Model, ModelInstanceId, SessionFault},
     scene::{ComposedEntry, CompositionTier, OutputCompositionView},
     state::{
         BackendOutputRef, ColorTransformMatrix, DrmId, ObjectId, OutputId, OutputMode,
@@ -1373,7 +1373,10 @@ impl Drm {
         &mut self,
     ) -> Vec<(
         u32,
-        Result<(Vec<DeferredRelease>, Vec<SubmissionPresentationFeedback>, Option<u64>), String>,
+        Result<
+            (Vec<DeferredRelease>, Vec<SubmissionPresentationFeedback>, Option<u64>),
+            OutputRestoreError,
+        >,
     )> {
         let crtc_ids: Vec<u32> = self.outputs.keys().copied().collect();
         crtc_ids
@@ -1385,25 +1388,28 @@ impl Drm {
     fn restore_output(
         &mut self,
         drm_crtc_id: u32,
-    ) -> Result<(Vec<DeferredRelease>, Vec<SubmissionPresentationFeedback>, Option<u64>), String>
-    {
-        self.refresh_retained_output(drm_crtc_id)?;
+    ) -> Result<
+        (Vec<DeferredRelease>, Vec<SubmissionPresentationFeedback>, Option<u64>),
+        OutputRestoreError,
+    > {
+        self.refresh_retained_output(drm_crtc_id)
+            .map_err(OutputRestoreError::Refresh)?;
         let mode = self
             .output(drm_crtc_id)
             .and_then(|output| output.in_use.connector.preferred_mode)
-            .ok_or_else(|| "connector has no retained mode".to_string())?;
+            .ok_or_else(|| OutputRestoreError::Refresh("connector has no retained mode".into()))?;
         let raw_mode = Self::modeinfo_from_mode(mode);
         let mode_blob = self
             .fd
             .create_property_blob(&raw_mode)
-            .map_err(|error| format!("mode blob: {error}"))?;
+            .map_err(|error| OutputRestoreError::Refresh(format!("mode blob: {error}")))?;
         let mode_blob_id = mode_blob
             .as_blob()
-            .ok_or_else(|| "mode blob id missing".to_string())?;
+            .ok_or_else(|| OutputRestoreError::Refresh("mode blob id missing".into()))?;
         let changes = {
             let Some(output) = self.output(drm_crtc_id) else {
                 let _ = self.fd.destroy_property_blob(mode_blob_id);
-                return Err("missing DRM output".into());
+                return Err(OutputRestoreError::Refresh("missing DRM output".into()));
             };
             Self::restore_modeset_request(output, mode_blob_id)
         };
@@ -1412,18 +1418,20 @@ impl Drm {
             .atomic_commit(control::AtomicCommitFlags::ALLOW_MODESET, changes)
         {
             let _ = self.fd.destroy_property_blob(mode_blob_id);
-            return Err(format!("restore modeset: {error}"));
+            return Err(OutputRestoreError::Modeset(error.to_string()));
         }
-        let Some(output) = self.output_mut(drm_crtc_id) else {
-            return Err("missing DRM output".into());
+        let (previous, reset) = {
+            let Some(output) = self.output_mut(drm_crtc_id) else {
+                return Err(OutputRestoreError::Modeset("missing DRM output".into()));
+            };
+            let previous = std::mem::replace(&mut output.in_use.crtc.mode_id, mode_blob_id as u32);
+            output.in_use.crtc.active = true;
+            let bounds = output.output_bounds();
+            let reset = output.pipeline.reset_after_session_resume();
+            output.pipeline.resume_commits();
+            output.pipeline.queue_pending_damage(bounds);
+            (previous, reset)
         };
-        let previous = std::mem::replace(&mut output.in_use.crtc.mode_id, mode_blob_id as u32);
-        output.in_use.crtc.active = true;
-        let bounds = output.output_bounds();
-        let reset = output.pipeline.reset_after_session_resume();
-        output.pipeline.resume_commits();
-        output.pipeline.queue_pending_damage(bounds);
-        drop(output);
         if previous != 0 && u64::from(previous) != mode_blob_id {
             let _ = self.fd.destroy_property_blob(u64::from(previous));
         }
@@ -4436,6 +4444,29 @@ impl DrmOutputModel {
 }
 
 /// Modeset retained outputs on the current DRM fd and ignore flips from the previous generation.
+#[derive(Debug)]
+pub(crate) enum OutputRestoreError {
+    Refresh(String),
+    Modeset(String),
+}
+
+impl OutputRestoreError {
+    fn fault(&self) -> SessionFault {
+        match self {
+            Self::Refresh(_) => SessionFault::KmsRefresh,
+            Self::Modeset(_) => SessionFault::Modeset,
+        }
+    }
+}
+
+impl std::fmt::Display for OutputRestoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refresh(detail) | Self::Modeset(detail) => f.write_str(detail),
+        }
+    }
+}
+
 pub(crate) fn resume_drm_backend(
     state: &mut State,
     dispatcher: &mut Dispatcher,
@@ -4466,7 +4497,7 @@ pub(crate) fn resume_drm_backend(
                 );
             }
             Err(error) => {
-                log::error!("failed to restore CRTC {crtc_id}: {error}");
+                isolate_session_fault(error.fault(), format!("CRTC {crtc_id}: {error}"));
                 failed.push(crtc_id);
             }
         }

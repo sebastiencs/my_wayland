@@ -54,6 +54,86 @@ impl std::fmt::Display for ShutdownReason {
     }
 }
 
+/// One pause/resume failure, and whether the session can continue after it.
+///
+/// A device or output fault drops only that device or output. Losing the
+/// logind session, the system bus, or the last usable output uses the
+/// Milestone 2 shutdown path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionFault {
+    MalformedSignal,
+    PauseAckWrite,
+    MissingResumeFd,
+    UnusableResumeFd,
+    InputRestore,
+    KmsRefresh,
+    Modeset,
+    SessionGone,
+    BusClosed,
+    NoUsableOutput,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionOutcome {
+    Isolate,
+    Shutdown,
+}
+
+impl SessionFault {
+    pub(crate) fn outcome(self) -> SessionOutcome {
+        match self {
+            Self::MalformedSignal
+            | Self::PauseAckWrite
+            | Self::MissingResumeFd
+            | Self::UnusableResumeFd
+            | Self::InputRestore
+            | Self::KmsRefresh
+            | Self::Modeset => SessionOutcome::Isolate,
+            Self::SessionGone | Self::BusClosed | Self::NoUsableOutput => SessionOutcome::Shutdown,
+        }
+    }
+
+    fn source(self) -> &'static str {
+        match self {
+            Self::NoUsableOutput => "drm",
+            Self::MalformedSignal
+            | Self::PauseAckWrite
+            | Self::MissingResumeFd
+            | Self::UnusableResumeFd
+            | Self::InputRestore
+            | Self::KmsRefresh
+            | Self::Modeset
+            | Self::SessionGone
+            | Self::BusClosed => "dbus",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::MalformedSignal => "malformed logind signal",
+            Self::PauseAckWrite => "pause acknowledgement failed",
+            Self::MissingResumeFd => "resume signal has no file descriptor",
+            Self::UnusableResumeFd => "resume file descriptor is unusable",
+            Self::InputRestore => "input restore failed",
+            Self::KmsRefresh => "KMS property refresh failed",
+            Self::Modeset => "restore modeset failed",
+            Self::SessionGone => "logind session is gone",
+            Self::BusClosed => "system bus closed",
+            Self::NoUsableOutput => "no usable output",
+        }
+    }
+}
+
+pub(crate) fn isolate_session_fault(fault: SessionFault, detail: impl std::fmt::Display) {
+    assert_eq!(fault.outcome(), SessionOutcome::Isolate);
+    log::warn!("{}: {detail}", fault.label());
+}
+
+pub(crate) fn session_shutdown(fault: SessionFault, message: impl Into<String>) -> ShutdownReason {
+    assert_eq!(fault.outcome(), SessionOutcome::Shutdown);
+    ShutdownReason::Fatal { source: fault.source(), message: message.into() }
+}
+
 /// Shell convention: a signal exits as `128 + signo` (SIGINT is 130, SIGTERM is 143).
 pub fn exit_code(reason: &ShutdownReason) -> i32 {
     match reason {
@@ -965,5 +1045,33 @@ mod shutdown_tests {
         let outcome = runner.run(dispatcher);
         assert_eq!(outcome.code, 0);
         assert!(!hit.get());
+    }
+
+    #[test]
+    fn session_faults_isolate_a_device_or_shut_the_session_down() {
+        use super::{SessionFault, SessionOutcome};
+
+        for fault in [
+            SessionFault::MalformedSignal,
+            SessionFault::PauseAckWrite,
+            SessionFault::MissingResumeFd,
+            SessionFault::UnusableResumeFd,
+            SessionFault::InputRestore,
+            SessionFault::KmsRefresh,
+            SessionFault::Modeset,
+        ] {
+            assert_eq!(fault.outcome(), SessionOutcome::Isolate);
+        }
+        assert_eq!(SessionFault::SessionGone.outcome(), SessionOutcome::Shutdown);
+        assert_eq!(SessionFault::BusClosed.outcome(), SessionOutcome::Shutdown);
+        assert_eq!(SessionFault::NoUsableOutput.outcome(), SessionOutcome::Shutdown);
+        assert_eq!(
+            session_shutdown(SessionFault::NoUsableOutput, "no usable output"),
+            ShutdownReason::Fatal { source: "drm", message: "no usable output".into() }
+        );
+        assert_eq!(
+            session_shutdown(SessionFault::BusClosed, "system bus closed").to_string(),
+            "dbus: system bus closed"
+        );
     }
 }

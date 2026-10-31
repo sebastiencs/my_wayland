@@ -13,9 +13,12 @@ use dbus_message_parser::encode::EncodeError;
 use crate::{
     io_uring::{
         model::IoUringAction,
-        ring::{RecvmsgCompleted, RingId},
+        ring::{ReadWriteCompleted, RecvmsgCompleted, RingId},
     },
-    runner::{Dispatcher, Model, Redispatcher, ShutdownReason},
+    runner::{
+        isolate_session_fault, session_shutdown, Dispatcher, Model, Redispatcher, SessionFault,
+        ShutdownReason,
+    },
     scheduler::{output_scheduler_id, OutputSchedulerAction},
     state::State,
     udev::{DevicePauseKind, UdevAction},
@@ -137,7 +140,7 @@ impl DeviceLease {
 
 fn pause_device_request(body: &[Value]) -> Option<(libc::dev_t, DevicePauseKind)> {
     let [Value::Uint32(major), Value::Uint32(minor), Value::String(kind)] = body else {
-        log::warn!("PauseDevice body is malformed");
+        isolate_session_fault(SessionFault::MalformedSignal, "PauseDevice body is malformed");
         return None;
     };
     let kind = match kind.as_str() {
@@ -145,7 +148,10 @@ fn pause_device_request(body: &[Value]) -> Option<(libc::dev_t, DevicePauseKind)
         "force" => DevicePauseKind::Force,
         "gone" => DevicePauseKind::Gone,
         other => {
-            log::warn!("PauseDevice type {other} is not pause, force, or gone");
+            isolate_session_fault(
+                SessionFault::MalformedSignal,
+                format!("PauseDevice type {other} is not pause, force, or gone"),
+            );
             return None;
         }
     };
@@ -157,12 +163,15 @@ fn resume_device_request(body: &[Value], fds: &mut Vec<OwnedFd>) -> Option<(libc
         [Value::Uint32(major), Value::Uint32(minor), Value::UnixFD(_)]
         | [Value::Uint32(major), Value::Uint32(minor)] => (*major, *minor),
         _ => {
-            log::warn!("ResumeDevice body is malformed");
+            isolate_session_fault(SessionFault::MalformedSignal, "ResumeDevice body is malformed");
             return None;
         }
     };
     if fds.is_empty() {
-        log::warn!("ResumeDevice for {major}:{minor} has no file descriptor");
+        isolate_session_fault(
+            SessionFault::MissingResumeFd,
+            format!("ResumeDevice for {major}:{minor} has no file descriptor"),
+        );
         return None;
     }
     Some((device_number(major, minor), fds.remove(0)))
@@ -542,13 +551,13 @@ impl Dbus {
                     .map(DbusSerial)
                     .and_then(|serial| self.pending.remove(&serial));
                 if session_ownership_lost(error_name.as_deref()) {
-                    dispatcher.request_shutdown(ShutdownReason::Fatal {
-                        source: "dbus",
-                        message: format!(
+                    dispatcher.request_shutdown(session_shutdown(
+                        SessionFault::SessionGone,
+                        format!(
                             "logind session is gone: {}",
                             error_name.as_deref().unwrap_or("unknown error")
                         ),
-                    });
+                    ));
                 } else if let Some(Pending::TakeDevice { devnum }) = pending {
                     log::warn!("TakeDevice failed for {devnum}: {error_name:?}");
                     dispatcher.dispatch(crate::udev::UdevAction::DeviceTakeFailed { devnum });
@@ -670,6 +679,9 @@ impl Dbus {
         active: bool,
         dispatcher: &mut Dispatcher,
     ) {
+        if dispatcher.shutdown_requested() {
+            return;
+        }
         state.session_active = active;
         if !active {
             crate::seat::quiesce_for_session_pause(state, dispatcher);
@@ -731,6 +743,11 @@ impl Dbus {
         let Some((devnum, fd)) = resume_device_request(msg.get_body(), &mut fds) else {
             return;
         };
+        if dispatcher.shutdown_requested() {
+            log::info!("dropping ResumeDevice for {devnum} because shutdown already started");
+            drop(fd);
+            return;
+        }
         let mut fd = Some(fd);
         let forward = {
             let Some(lease) = self.devices.get_mut(&devnum) else {
@@ -778,6 +795,11 @@ impl Dbus {
         if acknowledge {
             self.queue_pause_device_complete(devnum, dispatcher);
         }
+        if dispatcher.shutdown_requested() {
+            log::info!("dropping a stored resume fd for {devnum} because shutdown already started");
+            drop(pending_resume);
+            return;
+        }
         if let Some(fd) = pending_resume {
             if let Some(lease) = self.devices.get_mut(&devnum) {
                 lease.phase = DevicePhase::Resuming;
@@ -808,7 +830,14 @@ impl Dbus {
             fd: self.socket.as_raw_fd(),
             offset: 0,
             buffer: Box::from(&encoded[..]),
-            dispatch_to: Redispatcher::None,
+            dispatch_to: Redispatcher::to::<Self>(
+                move |result: std::io::Result<ReadWriteCompleted>| match result {
+                    Ok(_) => DbusAction::PauseAckFinished { devnum, error: None },
+                    Err(error) => {
+                        DbusAction::PauseAckFinished { devnum, error: Some(error.to_string()) }
+                    }
+                },
+            ),
         });
     }
 
@@ -934,6 +963,11 @@ pub enum DbusAction {
     DevicePauseQuiesced {
         devnum: libc::dev_t,
     },
+    /// `PauseDeviceComplete` was written, or the write failed and the session continues.
+    PauseAckFinished {
+        devnum: libc::dev_t,
+        error: Option<String>,
+    },
 }
 
 impl Model for Dbus {
@@ -967,6 +1001,14 @@ impl Model for Dbus {
             }
             MsgReceived { msg, fds } => self.handle_message(state, msg, fds, dispatcher),
             DevicePauseQuiesced { devnum } => self.finish_device_pause(devnum, dispatcher),
+            PauseAckFinished { devnum, error } => {
+                if let Some(error) = error {
+                    isolate_session_fault(
+                        SessionFault::PauseAckWrite,
+                        format!("PauseDeviceComplete for {devnum} failed: {error}"),
+                    );
+                }
+            }
         };
 
         Ok(())
@@ -1011,10 +1053,10 @@ impl Model for DbusReader {
             ReadMsg { buffer, fds } => {
                 self.recvmsg_op_id = None;
                 if self.is_eof(&buffer) {
-                    dispatcher.request_shutdown(ShutdownReason::Fatal {
-                        source: "dbus",
-                        message: "system bus closed".into(),
-                    });
+                    dispatcher.request_shutdown(session_shutdown(
+                        SessionFault::BusClosed,
+                        "system bus closed",
+                    ));
                     self.dispatch_close(dispatcher);
                     return Ok(());
                 }
@@ -1577,5 +1619,73 @@ mod session_release_tests {
         assert!(dispatcher.test_has_queued_action(|action: &UdevAction| {
             matches!(action, UdevAction::DeviceTakeFailed { devnum: 9 })
         }));
+    }
+
+    #[test]
+    fn a_failed_pause_ack_keeps_the_device_paused() {
+        let mut session = dbus_for_tests();
+        let devnum = hold_device(&mut session);
+        session.devices.get_mut(&devnum).unwrap().phase = super::DevicePhase::Paused;
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        session
+            .process(
+                &mut state,
+                super::DbusAction::PauseAckFinished { devnum, error: Some("broken pipe".into()) },
+                &mut dispatcher,
+            )
+            .expect("ack failure is recoverable");
+        assert!(!dispatcher.shutdown_requested());
+        assert_eq!(session.devices.get(&devnum).unwrap().phase, super::DevicePhase::Paused);
+    }
+
+    #[test]
+    fn shutdown_cancels_a_resume_and_still_releases_the_device() {
+        use {
+            crate::{runner::ShutdownReason, udev::UdevAction},
+            std::io::Read,
+        };
+
+        let (mut session, mut peer) = dbus_pair();
+        peer.set_nonblocking(true).unwrap();
+        let devnum = hold_device(&mut session);
+        session.devices.get_mut(&devnum).unwrap().phase = super::DevicePhase::Paused;
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        dispatcher.request_shutdown(ShutdownReason::Signal(libc::SIGTERM));
+        session.handle_message(&mut state, resume_signal(), vec![null_fd()], &mut dispatcher);
+        assert!(!dispatcher.test_has_queued_action(|action: &UdevAction| {
+            matches!(action, UdevAction::ResumeDevice { .. })
+        }));
+        assert_eq!(session.devices.get(&devnum).unwrap().phase, super::DevicePhase::Paused);
+
+        session.devices.get_mut(&devnum).unwrap().phase =
+            super::DevicePhase::Pausing(crate::udev::DevicePauseKind::Pause);
+        session.devices.get_mut(&devnum).unwrap().pending_resume = Some(null_fd());
+        session
+            .process(&mut state, super::DbusAction::DevicePauseQuiesced { devnum }, &mut dispatcher)
+            .expect("quiesce during shutdown");
+        assert!(!dispatcher.test_has_queued_action(|action: &UdevAction| {
+            matches!(action, UdevAction::ResumeDevice { .. })
+        }));
+        assert_eq!(session.devices.get(&devnum).unwrap().phase, super::DevicePhase::Paused);
+        assert!(session
+            .devices
+            .get(&devnum)
+            .unwrap()
+            .pending_resume
+            .is_none());
+
+        session.devices.get_mut(&devnum).unwrap().phase = super::DevicePhase::Resuming;
+        session.release_control();
+        let mut bytes = [0u8; 4096];
+        let read = peer.read(&mut bytes).unwrap();
+        let text = String::from_utf8_lossy(&bytes[..read]);
+        let release = text.find("ReleaseDevice").expect("held device is released");
+        let control = text
+            .find("ReleaseControl")
+            .expect("session control is released");
+        assert!(release < control);
+        assert!(session.devices.is_empty());
     }
 }

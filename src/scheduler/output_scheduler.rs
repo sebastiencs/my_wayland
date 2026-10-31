@@ -301,7 +301,11 @@ impl OutputScheduler {
 
     /// One ModeChange after both the session and this output's KMS restore are ready.
     fn maybe_resume_after_restore(&mut self, state: &State, dispatcher: &mut Dispatcher) {
-        if !self.restore_confirmed || !state.session_active || self.session_active {
+        if dispatcher.shutdown_requested()
+            || !self.restore_confirmed
+            || !state.session_active
+            || self.session_active
+        {
             return;
         }
         self.session_active = true;
@@ -887,5 +891,33 @@ mod tests {
             .process(&mut state, OutputSchedulerAction::Restored, &mut dispatcher)
             .unwrap();
         assert_eq!(render_frames(&dispatcher), 1);
+    }
+
+    #[test]
+    fn shutdown_does_not_request_the_post_resume_frame() {
+        use crate::runner::ShutdownReason;
+
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output(
+            BackendOutputRef::new(DrmId::from(0usize)),
+            1,
+            0,
+            0,
+            1920,
+            1080,
+            "test-output",
+        ));
+        let mut scheduler = OutputScheduler::new(DrmId::from(0usize), output_id);
+        let mut dispatcher = Dispatcher::default();
+        scheduler
+            .process(&mut state, OutputSchedulerAction::Disarm, &mut dispatcher)
+            .unwrap();
+        state.session_active = true;
+        dispatcher.request_shutdown(ShutdownReason::Quit);
+        scheduler
+            .process(&mut state, OutputSchedulerAction::Restored, &mut dispatcher)
+            .unwrap();
+        assert_eq!(render_frames(&dispatcher), 0);
+        assert!(!scheduler.session_active);
     }
 }

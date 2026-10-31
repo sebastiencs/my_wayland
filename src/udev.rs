@@ -29,7 +29,10 @@ use crate::{
         ring::{PollCompleted, RingId},
     },
     libinput::LibinputAction,
-    runner::{Dispatcher, Model, ModelFailure, Redispatcher, ShutdownReason},
+    runner::{
+        session_shutdown, Dispatcher, Model, ModelFailure, Redispatcher, SessionFault,
+        ShutdownReason,
+    },
     seat,
     state::{BackendOutputRef, DrmId, Output, OutputId, State},
     wayland_objects::{
@@ -175,7 +178,7 @@ impl Model for Udev {
                 };
                 match pending {
                     PendingControl::Drm(device) => {
-                        self.on_drm_taken(device, fd, inactive, devnum, state, dispatcher)?
+                        self.on_drm_taken(device, fd, inactive, false, devnum, state, dispatcher)?
                     }
                     PendingControl::Input(device) => {
                         self.on_input_taken(device, fd, inactive, devnum, dispatcher)
@@ -224,6 +227,13 @@ impl Model for Udev {
                 }
             }
             UdevAction::ResumeDevice { devnum, fd } => {
+                if dispatcher.shutdown_requested() {
+                    log::info!(
+                        "cancelling resume of device {devnum} because shutdown already started"
+                    );
+                    drop(fd);
+                    return Ok(());
+                }
                 self.resumed_fds.insert(devnum, fd);
                 if state.session_active {
                     if self.retained_inputs.contains_key(&devnum) {
@@ -234,7 +244,7 @@ impl Model for Udev {
                 }
             }
             UdevAction::SessionActive => {
-                if state.session_active {
+                if state.session_active && !dispatcher.shutdown_requested() {
                     let devnums: Vec<_> = self.retained_inputs.keys().copied().collect();
                     for devnum in devnums {
                         self.restore_ready_input(devnum, dispatcher);
@@ -620,7 +630,7 @@ impl Udev {
             return Ok(());
         };
         self.awaiting_drm_resume.remove(&devnum);
-        self.on_drm_taken(device, fd, false, devnum, state, dispatcher)?;
+        self.on_drm_taken(device, fd, false, true, devnum, state, dispatcher)?;
         self.confirm_ready_outputs(state, dispatcher);
         self.finish_drm_restore(state)
     }
@@ -681,6 +691,7 @@ impl Udev {
         device: udev::Device,
         fd: OwnedFd,
         inactive: bool,
+        from_resume: bool,
         devnum: libc::dev_t,
         state: &mut State,
         dispatcher: &mut Dispatcher,
@@ -699,7 +710,14 @@ impl Udev {
         let drm = match Drm::create_drm(fd, device, &state.egl) {
             Ok(drm) => drm,
             Err(error) => {
-                log::error!("DRM device {devnum} failed: {error}");
+                if from_resume {
+                    crate::runner::isolate_session_fault(
+                        crate::runner::SessionFault::UnusableResumeFd,
+                        format!("DRM device {devnum} failed: {error}"),
+                    );
+                } else {
+                    log::error!("DRM device {devnum} failed: {error}");
+                }
                 dispatcher.dispatch(DbusAction::ReleaseDevice { devnum });
                 return self.settle_initial_drm(devnum, state);
             }
@@ -779,10 +797,10 @@ impl Udev {
 
     fn fatal_when(decision: Bringup) -> std::result::Result<(), ModelFailure> {
         match decision {
-            Bringup::FatalNoOutput => Err(ModelFailure::Shutdown(ShutdownReason::Fatal {
-                source: "drm",
-                message: "no usable output".into(),
-            })),
+            Bringup::FatalNoOutput => Err(ModelFailure::Shutdown(session_shutdown(
+                SessionFault::NoUsableOutput,
+                "no usable output",
+            ))),
             Bringup::Continue | Bringup::WaitForDevice => Ok(()),
         }
     }
@@ -1248,6 +1266,45 @@ mod tests {
         assert!(udev.resumed_fds.get(&devnum).is_none());
         assert!(dispatcher.test_has_queued_action(|action: &DbusAction| {
             matches!(action, DbusAction::ReleaseDevice { .. })
+        }));
+    }
+
+    #[test]
+    fn shutdown_cancels_a_stored_input_resume() {
+        use crate::{
+            libinput::LibinputAction,
+            runner::{Model, ShutdownReason},
+        };
+
+        let mut udev = Udev::new().expect("udev monitor");
+        let mut state = crate::test_support::state_for_tests();
+        state.session_active = true;
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        let devnum = 42;
+        udev.retained_inputs
+            .insert(devnum, "/dev/input/event0".into());
+        dispatcher.request_shutdown(ShutdownReason::Quit);
+        let fd: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        udev.process(&mut state, super::UdevAction::ResumeDevice { devnum, fd }, &mut dispatcher)
+            .expect("resume during shutdown");
+        assert!(udev.resumed_fds.get(&devnum).is_none());
+        assert!(!dispatcher.test_has_queued_action(|action: &LibinputAction| {
+            matches!(action, LibinputAction::OpenInput { .. })
+        }));
+
+        state.session_active = false;
+        let fd: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        udev.process(&mut state, super::UdevAction::ResumeDevice { devnum, fd }, &mut dispatcher)
+            .expect("store a resume fd");
+        assert!(udev.resumed_fds.get(&devnum).is_some());
+        state.session_active = true;
+        dispatcher.request_shutdown(ShutdownReason::Signal(libc::SIGTERM));
+        udev.process(&mut state, super::UdevAction::SessionActive, &mut dispatcher)
+            .expect("active during shutdown");
+        assert!(udev.resumed_fds.get(&devnum).is_some());
+        assert!(!dispatcher.test_has_queued_action(|action: &LibinputAction| {
+            matches!(action, LibinputAction::OpenInput { .. })
         }));
     }
 

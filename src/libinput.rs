@@ -158,7 +158,10 @@ impl Libinput {
         let device = match self.libinput.path_add_device(&devnode) {
             Some(device) => device,
             None => {
-                log::error!("failed to restore input device {devnode}");
+                crate::runner::isolate_session_fault(
+                    crate::runner::SessionFault::InputRestore,
+                    format!("failed to restore input device {devnode}"),
+                );
                 dispatcher.dispatch(DbusAction::ReleaseDevice { devnum: devnum as libc::dev_t });
                 dispatcher.dispatch(LibinputAction::CloseFailedFd { devnum });
                 dispatcher.dispatch(UdevAction::InputLost { devnum: devnum as libc::dev_t });
