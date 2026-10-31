@@ -535,7 +535,7 @@ impl Model for Dbus {
         state: &mut State,
         action: Self::Action,
         dispatcher: &mut Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         use DbusAction::*;
 
         match action {
@@ -586,7 +586,7 @@ impl Model for DbusReader {
         _state: &mut State,
         action: Self::Action,
         dispatcher: &mut Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         use DbusReaderAction::*;
 
         match action {
@@ -594,7 +594,8 @@ impl Model for DbusReader {
             ReadMsg { buffer, fds } => {
                 self.recvmsg_op_id = None;
                 if self.is_eof(&buffer) {
-                    return self.dispatch_close(dispatcher);
+                    self.dispatch_close(dispatcher);
+                    return Ok(());
                 }
                 self.read_buffer.append(&buffer);
                 self.fds.extend(fds);
@@ -736,8 +737,7 @@ impl DbusReader {
         });
     }
 
-    fn dispatch_close(&self, dispatcher: &mut Dispatcher) -> Result<(), ()> {
+    fn dispatch_close(&self, dispatcher: &mut Dispatcher) {
         dispatcher.stop_model(DBUS_READER_ID);
-        Ok(())
     }
 }

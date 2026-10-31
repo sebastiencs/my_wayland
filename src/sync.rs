@@ -342,7 +342,7 @@ impl Model for AcquireReadyWaiter {
         state: &mut State,
         action: Self::Action,
         dispatcher: &mut Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         match action {
             AcquireReadyWaiterAction::Start => {
                 let read_op_id = RingId::fresh();

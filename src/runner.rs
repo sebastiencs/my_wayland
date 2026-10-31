@@ -7,7 +7,85 @@ use std::{
 
 use crate::{io_uring::model::IoUringAction, utils::strip_type_name, State};
 
-type Result<T> = std::result::Result<T, ()>;
+type Result<T> = std::result::Result<T, ModelFailure>;
+
+/// How one model action ended.
+///
+/// `Ok(())` continues the session. These variants are the only recoverable
+/// exits from [`Model::process`].
+#[derive(Debug)]
+pub enum ModelFailure {
+    /// This model cannot continue. The runner stops it and keeps the session.
+    StopModel,
+    /// The session cannot continue. The first such request owns the exit.
+    Shutdown(ShutdownReason),
+}
+
+/// Why the compositor is leaving the run loop.
+///
+/// The first request wins. Later requests are recorded as diagnostics and do
+/// not change the exit code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShutdownReason {
+    Quit,
+    /// `signo` is the libc signal number. The exit code is `128 + signo`.
+    Signal(i32),
+    Fatal {
+        source: &'static str,
+        message: String,
+    },
+}
+
+impl std::fmt::Display for ShutdownReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShutdownReason::Quit => write!(f, "quit"),
+            ShutdownReason::Signal(signo) => write!(f, "signal {signo}"),
+            ShutdownReason::Fatal { source, message } => write!(f, "{source}: {message}"),
+        }
+    }
+}
+
+/// Shell convention: a signal exits as `128 + signo` (SIGINT is 130, SIGTERM is 143).
+pub fn exit_code(reason: &ShutdownReason) -> i32 {
+    match reason {
+        ShutdownReason::Quit => 0,
+        ShutdownReason::Signal(signo) => 128 + signo,
+        ShutdownReason::Fatal { .. } => 1,
+    }
+}
+
+/// Where a requested shutdown is. Later phases insert device and client stops
+/// before the runner reports [`ShutdownPhase::Finished`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownPhase {
+    Draining,
+    Finished,
+}
+
+#[derive(Debug)]
+pub struct ExitOutcome {
+    pub code: i32,
+    pub reason: ShutdownReason,
+    pub phase: ShutdownPhase,
+    pub diagnostics: Vec<String>,
+}
+
+impl std::fmt::Display for ExitOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "exit {} ({})", self.code, self.reason)?;
+        for note in &self.diagnostics {
+            write!(f, "; ignored {note}")?;
+        }
+        Ok(())
+    }
+}
+
+struct ShutdownState {
+    reason: ShutdownReason,
+    phase: ShutdownPhase,
+    diagnostics: Vec<String>,
+}
 
 pub trait ModelInstanceId: Copy + 'static {
     type Model: Model;
@@ -22,6 +100,7 @@ pub struct Dispatcher {
     pending_add: VecDeque<(ActionId, AnyModel)>,
     /// Models to remove
     pending_remove: VecDeque<ActionId>,
+    shutdown: Option<ShutdownState>,
 }
 
 impl Default for Dispatcher {
@@ -30,6 +109,7 @@ impl Default for Dispatcher {
             queue: VecDeque::with_capacity(1024),
             pending_add: VecDeque::with_capacity(1024),
             pending_remove: VecDeque::with_capacity(1024),
+            shutdown: None,
         }
     }
 }
@@ -96,6 +176,39 @@ impl Dispatcher {
     {
         let action_id = ActionId::of_model::<I>(id);
         self.pending_remove.push_back(action_id);
+    }
+
+    /// Record a session shutdown. The first reason owns the exit code.
+    pub fn request_shutdown(&mut self, reason: ShutdownReason) {
+        match &mut self.shutdown {
+            Some(state) => {
+                let note = reason.to_string();
+                log::info!(
+                    "shutdown already in progress ({}); additional request ignored: {note}",
+                    state.reason
+                );
+                state.diagnostics.push(note);
+            }
+            None => {
+                log::info!("shutdown requested: {reason}");
+                self.shutdown = Some(ShutdownState {
+                    reason,
+                    phase: ShutdownPhase::Draining,
+                    diagnostics: Vec::new(),
+                });
+            }
+        }
+    }
+
+    fn take_exit(&mut self) -> Option<ExitOutcome> {
+        let ShutdownState { reason, phase, diagnostics } = self.shutdown.take()?;
+        debug_assert_eq!(phase, ShutdownPhase::Draining);
+        Some(ExitOutcome {
+            code: exit_code(&reason),
+            reason,
+            phase: ShutdownPhase::Finished,
+            diagnostics,
+        })
     }
 }
 
@@ -225,6 +338,14 @@ struct ActionId {
     type_name: &'static str,
 }
 
+impl Copy for ActionId {}
+
+impl Clone for ActionId {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 impl PartialEq for ActionId {
     fn eq(&self, other: &Self) -> bool {
         let &ActionId { type_id, specifier, type_name: _ } = self;
@@ -313,10 +434,13 @@ impl Runner {
             .insert(ActionId::of::<M::Action>(), model.into_vtable());
     }
 
-    pub fn run(&mut self, mut dispatcher: Dispatcher) {
+    pub fn run(&mut self, mut dispatcher: Dispatcher) -> ExitOutcome {
         loop {
             while let Some(action) = dispatcher.queue.pop_front() {
                 self.process_action(action, &mut dispatcher)
+            }
+            if let Some(outcome) = dispatcher.take_exit() {
+                return outcome;
             }
             dispatcher.dispatch(IoUringAction::WaitForCompletion);
         }
@@ -329,7 +453,18 @@ impl Runner {
             log::warn!("dropping action for removed model {}", action.type_name);
             return;
         };
-        (vtable.try_process)(model, &mut self.state, action, dispatcher).unwrap();
+        let model_id = action.id;
+        match (vtable.try_process)(model, &mut self.state, action, dispatcher) {
+            Ok(()) => {}
+            Err(ModelFailure::StopModel) => {
+                log::info!(
+                    "stopping model {} after a recoverable failure",
+                    strip_type_name(model_id.type_name)
+                );
+                dispatcher.pending_remove.push_back(model_id);
+            }
+            Err(ModelFailure::Shutdown(reason)) => dispatcher.request_shutdown(reason),
+        }
         self.post_process(dispatcher);
     }
 
@@ -354,7 +489,10 @@ impl Runner {
         let mut index = 0;
         while let Some(id) = dispatcher.pending_remove.get(index) {
             if let Some(AnyModel { model, vtable }) = self.models.get_mut(id) {
-                (vtable.try_stop)(model, &mut self.state, dispatcher).unwrap();
+                match (vtable.try_stop)(model, &mut self.state, dispatcher) {
+                    Ok(()) | Err(ModelFailure::StopModel) => {}
+                    Err(ModelFailure::Shutdown(reason)) => dispatcher.request_shutdown(reason),
+                }
             } else {
                 log::warn!(
                     "dropping stop action for removed model {}",
@@ -567,5 +705,113 @@ mod frontend {
                 Self::Action::Click => todo!(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use crate::test_support::state_for_tests;
+
+    use super::*;
+
+    struct Probe {
+        steps: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    enum ProbeAction {
+        QuitThenFatal,
+        Fatal,
+        StopAndQuit,
+        First,
+        Second,
+        Stop,
+    }
+
+    impl Model for Probe {
+        type Action = ProbeAction;
+        const STOP: Option<Self::Action> = Some(ProbeAction::Stop);
+
+        fn process(
+            &mut self,
+            _state: &mut State,
+            action: Self::Action,
+            dispatcher: &mut Dispatcher,
+        ) -> Result<()> {
+            match action {
+                ProbeAction::QuitThenFatal => {
+                    dispatcher.request_shutdown(ShutdownReason::Quit);
+                    dispatcher.request_shutdown(ShutdownReason::Fatal {
+                        source: "probe",
+                        message: "later".into(),
+                    });
+                }
+                ProbeAction::Fatal => {
+                    return Err(ModelFailure::Shutdown(ShutdownReason::Fatal {
+                        source: "probe",
+                        message: "boom".into(),
+                    }));
+                }
+                ProbeAction::StopAndQuit => {
+                    self.steps.borrow_mut().push("stopping");
+                    dispatcher.request_shutdown(ShutdownReason::Quit);
+                    return Err(ModelFailure::StopModel);
+                }
+                ProbeAction::First => {
+                    self.steps.borrow_mut().push("first");
+                    dispatcher.dispatch(ProbeAction::Second);
+                    dispatcher.request_shutdown(ShutdownReason::Quit);
+                }
+                ProbeAction::Second => self.steps.borrow_mut().push("second"),
+                ProbeAction::Stop => {}
+            }
+            Ok(())
+        }
+    }
+
+    fn run_probe(action: ProbeAction) -> (ExitOutcome, Rc<RefCell<Vec<&'static str>>>, bool) {
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let mut runner = Runner::with_state(state_for_tests());
+        runner.add_model(Box::new(Probe { steps: steps.clone() }));
+        let mut dispatcher = Dispatcher::default();
+        dispatcher.dispatch(action);
+        let outcome = runner.run(dispatcher);
+        let still_loaded = runner.models.contains_key(&ActionId::of::<ProbeAction>());
+        (outcome, steps, still_loaded)
+    }
+
+    #[test]
+    fn first_shutdown_reason_wins() {
+        let (outcome, _, _) = run_probe(ProbeAction::QuitThenFatal);
+        assert_eq!(outcome.code, 0);
+        assert_eq!(outcome.reason, ShutdownReason::Quit);
+        assert_eq!(outcome.phase, ShutdownPhase::Finished);
+        assert_eq!(outcome.diagnostics, vec!["probe: later".to_string()]);
+    }
+
+    #[test]
+    fn fatal_model_failure_exits_nonzero() {
+        let (outcome, _, _) = run_probe(ProbeAction::Fatal);
+        assert_eq!(outcome.code, 1);
+        assert_eq!(
+            outcome.reason,
+            ShutdownReason::Fatal { source: "probe", message: "boom".into() }
+        );
+    }
+
+    #[test]
+    fn stop_model_removes_it_and_quit_still_returns() {
+        let (outcome, steps, still_loaded) = run_probe(ProbeAction::StopAndQuit);
+        assert_eq!(outcome.code, 0);
+        assert_eq!(steps.borrow().as_slice(), ["stopping"]);
+        assert!(!still_loaded);
+    }
+
+    #[test]
+    fn shutdown_drains_queued_actions_without_waiting() {
+        let (outcome, steps, _) = run_probe(ProbeAction::First);
+        assert_eq!(outcome.code, 0);
+        assert_eq!(steps.borrow().as_slice(), ["first", "second"]);
     }
 }

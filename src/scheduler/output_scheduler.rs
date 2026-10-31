@@ -408,7 +408,7 @@ impl Model for OutputScheduler {
         state: &mut State,
         action: Self::Action,
         dispatcher: &mut Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         match action {
             OutputSchedulerAction::Start => {
                 self.sync_mode_from_state(state);

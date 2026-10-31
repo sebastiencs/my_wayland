@@ -165,7 +165,7 @@ impl Model for IoUringState {
         _state: &mut State,
         action: IoUringAction,
         dispatcher: &mut Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         // log::trace!("action={:?}", action);
         match action {
             IoUringAction::Completion => {

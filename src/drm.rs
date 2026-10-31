@@ -2839,7 +2839,7 @@ impl Model for DrmReader {
         state: &mut crate::state::State,
         action: Self::Action,
         dispatcher: &mut crate::runner::Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         use DrmReaderAction::*;
 
         match action {
@@ -3189,7 +3189,7 @@ impl Model for VisualAnimationPump {
         state: &mut crate::state::State,
         action: Self::Action,
         dispatcher: &mut crate::runner::Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         match action {
             VisualAnimationPumpAction::Start => {}
             VisualAnimationPumpAction::Kick => {
@@ -3354,7 +3354,7 @@ impl Model for DrmOutputModel {
         state: &mut crate::state::State,
         action: Self::Action,
         dispatcher: &mut crate::runner::Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         match action {
             DrmAction::Start => {}
             DrmAction::RenderFrame { decision } => {

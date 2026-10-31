@@ -23,7 +23,7 @@ use crate::{
         ring::{PollCompleted, RingId},
     },
     protocol_generated::WlSurfaceId,
-    runner::{Dispatcher, Model, Redispatcher},
+    runner::{Dispatcher, Model, Redispatcher, ShutdownReason},
     state::{FractionalScale, ManagedWindowMode, State, WorkspaceGroupId, WorkspaceId},
     xkb::{KeyboardState, Xkb},
 };
@@ -1107,7 +1107,7 @@ impl Model for ConfigWatcher {
         state: &mut State,
         action: Self::Action,
         dispatcher: &mut Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         match action {
             ConfigWatcherAction::Start => {
                 self.dispatch_poll(dispatcher);
@@ -1193,7 +1193,7 @@ pub fn execute_action(state: &mut State, dispatcher: &mut Dispatcher, action: Co
         }
         CompositorAction::Quit => {
             log::info!("quitting compositor from keybinding");
-            std::process::exit(0);
+            dispatcher.request_shutdown(ShutdownReason::Quit);
         }
         CompositorAction::ReloadConfig => {
             if let Err(error) = reload_from_disk(state, dispatcher, ReloadTrigger::ManualBinding) {

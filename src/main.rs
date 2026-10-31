@@ -188,6 +188,7 @@ pub mod runner;
 mod scene;
 mod scheduler;
 mod seat;
+mod signals;
 mod state;
 mod sync;
 #[cfg(test)]
@@ -335,12 +336,21 @@ fn main() {
     runner.add_model(client_manager);
     runner.add_model(config_watcher);
     runner.add_model(Box::new(drm::VisualAnimationPump::new()));
+    let signals = match signals::SignalHandler::install() {
+        Ok(handler) => Box::new(handler),
+        Err(error) => {
+            log::error!("failed to install signal handler: {error}");
+            std::process::exit(1);
+        }
+    };
+    runner.add_model(signals);
 
     let mut dispatcher = Dispatcher::default();
     dispatcher.start::<ClientManager>();
     dispatcher.start::<libinput::Libinput>();
     dispatcher.start::<config::ConfigWatcher>();
     dispatcher.start::<drm::VisualAnimationPump>();
+    dispatcher.start::<signals::SignalHandler>();
 
     // let timer = make_timer(Duration::from_secs(10));
 
@@ -377,7 +387,12 @@ fn main() {
     //     });
     // }
 
-    runner.run(dispatcher);
+    let outcome = runner.run(dispatcher);
+    log::info!("compositor stopped: {outcome}");
+    // Completions may still be queued on the ring. Unmapping it from `Drop`
+    // is unsafe until that queue is drained, so the process exits with the
+    // recorded code and the kernel reclaims the remaining descriptors.
+    std::process::exit(outcome.code);
 
     // println!("Hello, world! {:?}", std::mem::size_of::<Box<dyn Any>>());
     // println!("Hello, world! {:?}", std::mem::size_of::<Box<()>>());

@@ -197,7 +197,7 @@ impl Model for ClientManager {
         state: &mut State,
         action: ClientManagerAction,
         dispatcher: &mut Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         use ClientManagerAction::*;
 
         match action {
@@ -2113,7 +2113,7 @@ impl Model for Client {
         state: &mut State,
         action: ClientAction,
         dispatcher: &mut Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         use ClientAction::*;
 
         let mut dispatcher = ClientDispatcher::make(self, dispatcher);
@@ -2522,7 +2522,7 @@ impl Model for ClientReader {
         _state: &mut State,
         action: Self::Action,
         dispatcher: &mut Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         use ClientReaderAction::*;
 
         match action {

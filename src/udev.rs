@@ -82,7 +82,7 @@ impl Model for Udev {
         state: &mut State,
         action: Self::Action,
         dispatcher: &mut Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         match action {
             UdevAction::Start => {
                 self.dispatch_poll(dispatcher);

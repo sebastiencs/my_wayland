@@ -24,7 +24,7 @@ xkbcommon = { version = "0.7", default-features = false }
 # TODO: Put some of them in dev dependencies
 itertools = "0.12"
 wayland-scanner = { git = "https://github.com/sebastiencs/wayland-rs.git", branch = "my_wayland" }
-nix = { version = "0.27", features = ["time", "fs", "user", "ioctl", "fs"] }
+nix = { version = "0.27", features = ["time", "fs", "user", "ioctl", "signal"] }
 owo-colors = "4"
 dbus-message-parser = "4"
 drm = { git = "https://github.com/sebastiencs/drm-rs.git", branch = "my_wayland" }

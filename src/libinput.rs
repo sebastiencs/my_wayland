@@ -134,7 +134,7 @@ impl Model for Libinput {
         state: &mut State,
         action: Self::Action,
         dispatcher: &mut Dispatcher,
-    ) -> Result<(), ()> {
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
         use LibinputAction::*;
 
         match action {
