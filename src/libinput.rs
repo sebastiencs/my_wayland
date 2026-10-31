@@ -8,7 +8,11 @@ use std::{
 use input::{
     event::{
         keyboard::{KeyState, KeyboardEvent, KeyboardEventTrait},
-        pointer::{ButtonState, PointerEvent, PointerEventTrait},
+        pointer::{
+            Axis, ButtonState, PointerEvent, PointerEventTrait, PointerScrollEvent,
+            PointerScrollWheelEvent,
+        },
+        EventTrait,
     },
     AsRaw,
 };
@@ -19,7 +23,9 @@ use crate::{
         ring::{PollCompleted, RingId},
     },
     runner::{Dispatcher, Model, Redispatcher},
-    seat,
+    seat::{
+        self, PointerAxisChange, PointerScrollDirection, PointerScrollFrame, PointerScrollSource,
+    },
     state::{InputId, State},
 };
 
@@ -206,6 +212,24 @@ impl Model for Libinput {
                                     button.time(),
                                 );
                             }
+                            PointerEvent::ScrollWheel(wheel) => {
+                                deliver_wheel_scroll(state, dispatcher, &wheel)
+                            }
+                            PointerEvent::ScrollFinger(finger) => deliver_smooth_scroll(
+                                state,
+                                dispatcher,
+                                PointerScrollSource::Finger,
+                                &finger,
+                            ),
+                            PointerEvent::ScrollContinuous(continuous) => deliver_smooth_scroll(
+                                state,
+                                dispatcher,
+                                PointerScrollSource::Continuous,
+                                &continuous,
+                            ),
+                            // libinput emits the deprecated axis event in addition to the
+                            // scroll events above. Forwarding both would scroll twice.
+                            PointerEvent::Axis(_) => {}
                             _ => {}
                         },
                         input::Event::Keyboard(keyboard) => match keyboard {
@@ -304,6 +328,140 @@ unsafe extern "C" fn log_handler(
     log::log!(priority, "libinput: {}", s.to_string_lossy().trim());
 }
 
+/// One reported libinput axis. `value120` is present for wheel events.
+struct LibinputScrollAxis {
+    value: f64,
+    value120: Option<f64>,
+}
+
+/// Build one scroll frame from one libinput scroll event.
+///
+/// `value` is libinput's `scroll_value`: degrees for a wheel, pointer-motion units for
+/// finger and continuous sources. Wheel frames also carry `scroll_value_v120` and the
+/// whole clicks that distance contains. A reported axis whose value is zero is a stop.
+/// An axis libinput did not report stays absent, so a wheel timeout that produces no
+/// event does not invent motion.
+///
+/// wlroots' `handle_pointer_axis_value120` forwards this same pair. Jay turns `value120`
+/// into pixels with a per-device wheel scale; this milestone keeps libinput's values.
+/// Relative direction follows the device natural-scroll setting, which both wlroots and
+/// Jay report, because libinput has already applied that transform to the values.
+fn pointer_scroll_frame(
+    time: u32,
+    source: PointerScrollSource,
+    natural_scroll: bool,
+    vertical: Option<LibinputScrollAxis>,
+    horizontal: Option<LibinputScrollAxis>,
+) -> Option<PointerScrollFrame> {
+    let frame = PointerScrollFrame {
+        time,
+        source,
+        vertical: vertical.map(|axis| pointer_axis_change(natural_scroll, axis)),
+        horizontal: horizontal.map(|axis| pointer_axis_change(natural_scroll, axis)),
+    };
+    (frame.vertical.is_some() || frame.horizontal.is_some()).then_some(frame)
+}
+
+fn pointer_axis_change(natural_scroll: bool, axis: LibinputScrollAxis) -> PointerAxisChange {
+    if axis.value == 0.0 {
+        return PointerAxisChange::Stop;
+    }
+    let value120 = axis.value120.and_then(nonzero_value120);
+    let discrete = value120.and_then(|value| {
+        let steps = value / 120;
+        (steps != 0).then_some(steps)
+    });
+    PointerAxisChange::Scroll {
+        value: axis.value as f32,
+        discrete,
+        value120,
+        relative_direction: Some(if natural_scroll {
+            PointerScrollDirection::Inverted
+        } else {
+            PointerScrollDirection::Identical
+        }),
+    }
+}
+
+fn nonzero_value120(value: f64) -> Option<i32> {
+    let value = value.round() as i32;
+    (value != 0).then_some(value)
+}
+
+fn deliver_wheel_scroll(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    event: &input::event::pointer::PointerScrollWheelEvent,
+) {
+    deliver_pointer_scroll(
+        state,
+        dispatcher,
+        event.time(),
+        PointerScrollSource::Wheel,
+        event.device().config_scroll_natural_scroll_enabled(),
+        wheel_axis(event, Axis::Vertical),
+        wheel_axis(event, Axis::Horizontal),
+    );
+}
+
+fn deliver_smooth_scroll<E>(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    source: PointerScrollSource,
+    event: &E,
+) where
+    E: PointerScrollEvent + PointerEventTrait + EventTrait,
+{
+    deliver_pointer_scroll(
+        state,
+        dispatcher,
+        event.time(),
+        source,
+        event.device().config_scroll_natural_scroll_enabled(),
+        smooth_axis(event, Axis::Vertical),
+        smooth_axis(event, Axis::Horizontal),
+    );
+}
+
+fn deliver_pointer_scroll(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    time: u32,
+    source: PointerScrollSource,
+    natural_scroll: bool,
+    vertical: Option<LibinputScrollAxis>,
+    horizontal: Option<LibinputScrollAxis>,
+) {
+    let Some(frame) = pointer_scroll_frame(time, source, natural_scroll, vertical, horizontal)
+    else {
+        return;
+    };
+    log::debug!(
+        "libinput pointer scroll source={:?} vertical={:?} horizontal={:?} time={}",
+        frame.source,
+        frame.vertical,
+        frame.horizontal,
+        frame.time
+    );
+    seat::handle_pointer_scroll(state, dispatcher, frame);
+}
+
+fn wheel_axis(
+    event: &input::event::pointer::PointerScrollWheelEvent,
+    axis: Axis,
+) -> Option<LibinputScrollAxis> {
+    event.has_axis(axis).then(|| LibinputScrollAxis {
+        value: event.scroll_value(axis),
+        value120: Some(event.scroll_value_v120(axis)),
+    })
+}
+
+fn smooth_axis<E: PointerScrollEvent>(event: &E, axis: Axis) -> Option<LibinputScrollAxis> {
+    event
+        .has_axis(axis)
+        .then(|| LibinputScrollAxis { value: event.scroll_value(axis), value120: None })
+}
+
 fn set_logger(libinput: &input::Libinput) {
     #[link(name = "input")]
     extern "C" {
@@ -320,5 +478,119 @@ fn set_logger(libinput: &input::Libinput) {
             libinput.as_raw() as *mut _,
             input::ffi::libinput_log_priority_LIBINPUT_LOG_PRIORITY_DEBUG,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::{pointer_scroll_frame, LibinputScrollAxis},
+        crate::seat::{
+            PointerAxisChange, PointerScrollDirection, PointerScrollFrame, PointerScrollSource,
+        },
+    };
+
+    fn axis(value: f64, value120: Option<f64>) -> LibinputScrollAxis {
+        LibinputScrollAxis { value, value120 }
+    }
+
+    fn frame(
+        source: PointerScrollSource,
+        natural_scroll: bool,
+        vertical: Option<LibinputScrollAxis>,
+        horizontal: Option<LibinputScrollAxis>,
+    ) -> Option<PointerScrollFrame> {
+        pointer_scroll_frame(12, source, natural_scroll, vertical, horizontal)
+    }
+
+    #[test]
+    fn wheel_click_carries_degrees_and_value120() {
+        let frame = frame(PointerScrollSource::Wheel, false, Some(axis(-15.0, Some(-120.0))), None)
+            .expect("wheel click");
+        assert_eq!(
+            frame.vertical,
+            Some(PointerAxisChange::Scroll {
+                value: -15.0,
+                discrete: Some(-1),
+                value120: Some(-120),
+                relative_direction: Some(PointerScrollDirection::Identical),
+            })
+        );
+        assert!(frame.horizontal.is_none());
+    }
+
+    #[test]
+    fn natural_scroll_marks_the_logical_direction_inverted() {
+        let frame = frame(PointerScrollSource::Wheel, true, None, Some(axis(15.0, Some(120.0))))
+            .expect("horizontal wheel");
+        assert_eq!(
+            frame.horizontal,
+            Some(PointerAxisChange::Scroll {
+                value: 15.0,
+                discrete: Some(1),
+                value120: Some(120),
+                relative_direction: Some(PointerScrollDirection::Inverted),
+            })
+        );
+    }
+
+    #[test]
+    fn partial_high_resolution_wheel_omits_a_whole_click() {
+        let frame = frame(PointerScrollSource::Wheel, false, Some(axis(-3.75, Some(-30.0))), None)
+            .expect("partial wheel");
+        assert_eq!(
+            frame.vertical,
+            Some(PointerAxisChange::Scroll {
+                value: -3.75,
+                discrete: None,
+                value120: Some(-30),
+                relative_direction: Some(PointerScrollDirection::Identical),
+            })
+        );
+    }
+
+    #[test]
+    fn two_wheel_clicks_keep_both_step_counts() {
+        let frame = frame(PointerScrollSource::Wheel, false, Some(axis(30.0, Some(240.0))), None)
+            .expect("two clicks");
+        assert_eq!(
+            frame.vertical,
+            Some(PointerAxisChange::Scroll {
+                value: 30.0,
+                discrete: Some(2),
+                value120: Some(240),
+                relative_direction: Some(PointerScrollDirection::Identical),
+            })
+        );
+    }
+
+    #[test]
+    fn finger_motion_stays_smooth_and_a_zero_axis_stops() {
+        let frame =
+            frame(PointerScrollSource::Finger, false, Some(axis(0.0, None)), Some(axis(4.5, None)))
+                .expect("finger frame");
+        assert_eq!(frame.vertical, Some(PointerAxisChange::Stop));
+        assert_eq!(
+            frame.horizontal,
+            Some(PointerAxisChange::Scroll {
+                value: 4.5,
+                discrete: None,
+                value120: None,
+                relative_direction: Some(PointerScrollDirection::Identical),
+            })
+        );
+    }
+
+    #[test]
+    fn continuous_stop_only_frame_has_no_distance() {
+        let frame = frame(PointerScrollSource::Continuous, true, Some(axis(0.0, None)), None)
+            .expect("continuous stop");
+        assert_eq!(frame.vertical, Some(PointerAxisChange::Stop));
+        assert!(frame.horizontal.is_none());
+    }
+
+    #[test]
+    fn an_event_with_no_reported_axis_is_dropped() {
+        assert!(frame(PointerScrollSource::Wheel, false, None, None).is_none());
     }
 }
