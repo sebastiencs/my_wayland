@@ -229,9 +229,11 @@ struct SceneItemState {
     content_key: SceneItemContentKey,
     bounds: RectI,
     tex_transform: transform::Mat3,
+    alpha: u8,
+    mask: SceneItemMask,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SceneItemMask {
     None,
     RoundedClip { clip: RootSurfaceClip },
@@ -573,6 +575,10 @@ impl DrmOutput {
     fn accumulate_damage_from_age(&self, base_damage: &DamageRegion) -> DamageRegion {
         self.pipeline
             .accumulate_damage_from_age(base_damage.clone(), self.output_bounds())
+    }
+
+    fn queue_pending_damage(&mut self, rect: RectI) {
+        self.pipeline.queue_pending_damage(rect);
     }
 }
 
@@ -3268,6 +3274,7 @@ impl WindowAnimationManager {
     ) {
         let result = state.advance_window_visuals(now);
         let has_no_damage = result.damaged_rects.is_empty();
+        queue_animation_damage(state, &result.damaged_rects);
         if !result.damaged_rects.is_empty() {
             for rect in result.damaged_rects {
                 let output_ids = state.outputs_intersecting_rect(rect);
@@ -3318,6 +3325,7 @@ impl WindowAnimationManager {
     ) {
         let result = state.advance_window_visuals_for_output(output_id, now);
         let completed_outputs = result.completed_transition_outputs.clone();
+        queue_animation_damage(state, &result.damaged_rects);
         if !result.damaged_rects.is_empty() {
             let mut outputs = BTreeSet::new();
             outputs.insert(output_id);
@@ -3335,6 +3343,39 @@ impl WindowAnimationManager {
             );
         }
         publish_completed_workspace_transitions(state, dispatcher, &completed_outputs);
+    }
+}
+
+fn animation_damage_targets(state: &State, rects: &[RectI]) -> Vec<(OutputId, RectI)> {
+    let mut targets = Vec::new();
+    for rect in rects {
+        for output_id in state.outputs_intersecting_rect(*rect) {
+            let Some(bounds) = state.output_bounds(output_id) else {
+                continue;
+            };
+            let Some(local) = rect.intersection(bounds) else {
+                continue;
+            };
+            targets.push((output_id, local.translate(-bounds.x, -bounds.y)));
+        }
+    }
+    targets
+}
+
+fn queue_animation_damage(state: &mut State, rects: &[RectI]) {
+    let targets = animation_damage_targets(state, rects);
+    for (output_id, local) in targets {
+        let Some(output) = state.outputs.try_get(output_id) else {
+            continue;
+        };
+        let drm_id = output.backend.drm_id;
+        let crtc_id = output.drm_crtc_id;
+        let Some(drm) = state.drm.try_get_mut(drm_id) else {
+            continue;
+        };
+        if let Some(drm_output) = drm.output_mut(crtc_id) {
+            drm_output.queue_pending_damage(local);
+        }
     }
 }
 
@@ -3520,7 +3561,7 @@ impl DrmOutputModel {
                     // Clone the effect recipe on cursor fallback to keep the retry path simple;
                     // if fallback becomes hot we should switch this to recipe reuse.
                     let fallback_plan = render_planner::build_frame_plan(
-                        drm.output(drm_crtc_id).unwrap(),
+                        drm.output_mut(drm_crtc_id).unwrap(),
                         items,
                         Vec::new(),
                         frame_elements.clone(),
@@ -3590,7 +3631,7 @@ impl DrmOutputModel {
                             );
                             items.append(&mut software_cursor_items);
                             let fallback_plan = render_planner::build_frame_plan(
-                                drm.output(drm_crtc_id).unwrap(),
+                                drm.output_mut(drm_crtc_id).unwrap(),
                                 items,
                                 Vec::new(),
                                 frame_elements.clone(),
@@ -4199,6 +4240,8 @@ fn collect_named_cursor_render_item(
                         content_key: SceneItemContentKey::NamedCursor(image.content_key()),
                         bounds,
                         tex_transform: transform::Mat3::identity(),
+                        alpha: u8::MAX,
+                        mask: SceneItemMask::None,
                     },
                     mask: SceneItemMask::None,
                     texture: texture_id,
@@ -4217,6 +4260,13 @@ fn collect_named_cursor_render_item(
             ))
         }
         CursorSourceRef::Surface { .. } => None,
+    }
+}
+
+fn commit_visible_scene_state(items: &mut [SceneItem]) {
+    for item in items {
+        item.state.alpha = item.alpha;
+        item.state.mask = item.mask;
     }
 }
 
@@ -4387,6 +4437,8 @@ fn push_scene_items_from_snapshots(
                 content_key: SceneItemContentKey::Buffer(surface_state.buffer),
                 bounds,
                 tex_transform,
+                alpha,
+                mask,
             },
             mask,
             texture,
@@ -4652,6 +4704,10 @@ pub(crate) struct PlannedClosingEffect {
     pub element: EffectElement,
 }
 
+// Window-local frozen image of one closing toplevel. This is not an output capture, a
+// debug view of the CRTC, or a `zwlr_screencopy` source. Output-sized capture must use
+// `collect_output_render_plan` so both live workspace participants and the same frame-plan
+// participation are visible.
 pub(crate) struct ClosingCapturePlan {
     pub source: Resolved<WlSurfaceId>,
     pub drm_id: DrmId,
@@ -5168,6 +5224,8 @@ fn append_closing_snapshots(
                 content_key: SceneItemContentKey::ClosingSnapshot { id: snapshot.id(), alpha },
                 bounds,
                 tex_transform: transform::Mat3::identity(),
+                alpha,
+                mask: SceneItemMask::None,
             },
             mask: SceneItemMask::None,
             texture: snapshot.texture_id(),
@@ -6426,6 +6484,8 @@ mod window_animation_tests {
                 )),
                 bounds,
                 tex_transform: crate::transform::Mat3::identity(),
+                alpha: 200,
+                mask: super::SceneItemMask::RoundedClip { clip },
             },
             mask: super::SceneItemMask::RoundedClip { clip },
             texture: 0,
@@ -6489,6 +6549,28 @@ mod window_animation_tests {
 
         assert!(super::workspace_transition_blocks_scanout(&state, surface));
         assert!(!super::workspace_transition_blocks_scanout(&state, other));
+    }
+
+    #[test]
+    fn animation_damage_reaches_every_intersecting_output_only() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let left = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let right = state.insert_output(test_output_with_crtc_name(backend, 2, 100, 0, 100, 100));
+        let below = state.insert_output(test_output_with_crtc_name(backend, 3, 0, 200, 100, 100));
+        let span = RectI::new(90, 0, 30, 20).unwrap();
+        let local_only = RectI::new(10, 10, 20, 20).unwrap();
+
+        let targets = super::animation_damage_targets(&state, &[span, local_only]);
+
+        assert!(targets.contains(&(left, RectI::new(90, 0, 10, 20).unwrap())));
+        assert!(targets.contains(&(right, RectI::new(0, 0, 20, 20).unwrap())));
+        assert!(targets.contains(&(left, local_only)));
+        assert!(targets.iter().all(|(output_id, _)| *output_id != below));
+        assert!(targets
+            .iter()
+            .all(|(output_id, local)| { *output_id != right || *local != local_only }));
+        super::queue_animation_damage(&mut state, &[span, local_only]);
     }
 }
 
@@ -7016,6 +7098,8 @@ mod render_recipe_tests {
                 ),
                 bounds: item_bounds,
                 tex_transform: transform::Mat3::identity(),
+                alpha: u8::MAX,
+                mask: SceneItemMask::RoundedClip { clip },
             },
             mask: SceneItemMask::RoundedClip { clip },
             texture: 0,
@@ -7148,6 +7232,8 @@ mod render_recipe_tests {
                     ),
                     bounds: bounds_a,
                     tex_transform: transform::Mat3::identity(),
+                    alpha: u8::MAX,
+                    mask: SceneItemMask::None,
                 },
                 mask: SceneItemMask::None,
                 texture: 11,
@@ -7175,6 +7261,8 @@ mod render_recipe_tests {
                     ),
                     bounds: bounds_b,
                     tex_transform: transform::Mat3::identity(),
+                    alpha: u8::MAX,
+                    mask: SceneItemMask::None,
                 },
                 mask: SceneItemMask::None,
                 texture: 22,
@@ -7335,6 +7423,8 @@ mod render_recipe_tests {
                 ),
                 bounds: item_bounds,
                 tex_transform: transform::Mat3::identity(),
+                alpha: u8::MAX,
+                mask: SceneItemMask::None,
             },
             mask: SceneItemMask::None,
             texture: 7,
@@ -7489,6 +7579,8 @@ mod presentation_timing_tests {
                 content_key: SceneItemContentKey::Buffer(buffer),
                 bounds,
                 tex_transform: transform::Mat3::identity(),
+                alpha: u8::MAX,
+                mask: SceneItemMask::None,
             },
             mask: SceneItemMask::None,
             texture: 0,
@@ -7806,6 +7898,8 @@ mod presentation_timing_tests {
             content_key: SceneItemContentKey::Buffer(buffer),
             bounds: RectI::new(80, 0, 80, 100).unwrap(),
             tex_transform: transform::Mat3::identity(),
+            alpha: u8::MAX,
+            mask: SceneItemMask::None,
         }];
 
         let selected = select_presentation_output_for_scene(&state, drm_id, &scene);
@@ -7831,6 +7925,8 @@ mod presentation_timing_tests {
             content_key: SceneItemContentKey::Buffer(buffer),
             bounds: RectI::new(50, 0, 100, 100).unwrap(),
             tex_transform: transform::Mat3::identity(),
+            alpha: u8::MAX,
+            mask: SceneItemMask::None,
         }];
 
         let selected = select_presentation_output_for_scene(&state, drm_id, &scene);

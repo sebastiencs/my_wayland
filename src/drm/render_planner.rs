@@ -1,8 +1,12 @@
 use crate::{
+    region::{DamageRegion, RectI},
     scene::SceneModel,
     state::{DrmId, OutputId, State},
 };
 
+// Output capture and any debug view of a physical output must consume this same
+// `OutputCompositionView` and frame plan, including both participants of a live workspace
+// transition. Retained closing capture is window-local and is not an output or screencopy path.
 pub(super) fn collect_output_render_plan(
     state: &mut State,
     drm_id: DrmId,
@@ -47,9 +51,9 @@ pub(super) fn collect_output_render_plan(
         -global_bounds.y,
     );
     let mut frame = {
-        let drm = state.drm.get(drm_id);
+        let drm = state.drm.get_mut(drm_id);
         build_frame_plan(
-            drm.output(drm_crtc_id)
+            drm.output_mut(drm_crtc_id)
                 .expect("missing DRM output pipeline for frame plan"),
             items,
             software_cursor_items,
@@ -60,7 +64,7 @@ pub(super) fn collect_output_render_plan(
     if state.output_has_live_workspace_transition(logical_output_id) {
         let drm = state.drm.get(drm_id);
         if let Some(bounds) = drm.output(drm_crtc_id).map(|output| output.output_bounds()) {
-            frame.damage.add_rect(bounds);
+            damage_live_workspace_transition(&mut frame.damage, true, bounds);
         }
     }
     let output_id = Some(logical_output_id)
@@ -76,53 +80,36 @@ pub(super) fn collect_output_render_plan(
 }
 
 pub(super) fn build_frame_plan(
-    output: &super::DrmOutput,
+    output: &mut super::DrmOutput,
     items: Vec<super::SceneItem>,
     software_cursor_items: Vec<super::SceneItem>,
     frame_elements: Vec<super::RecordedFrameElement>,
     cursor_plane: Option<super::CursorPlaneCandidate>,
 ) -> super::FramePlan {
     let output_bounds = output.output_bounds();
-    let mut base_damage = crate::region::DamageRegion::new();
     let mut items = items;
     let mut software_cursor_items = software_cursor_items;
+    super::commit_visible_scene_state(&mut items);
+    super::commit_visible_scene_state(&mut software_cursor_items);
     if cursor_plane.is_none() {
         items.append(&mut software_cursor_items);
     }
     let (scene, frame_callback_surfaces, presentation_feedbacks) =
         super::collect_submission_metadata(&items, &software_cursor_items);
-    let last_scene = output.pipeline.last_scene();
-    let order_changed = scene_order(last_scene) != scene_order(&scene);
     let has_effects = frame_elements
         .iter()
         .any(|element| matches!(element, super::RecordedFrameElement::Effect { .. }));
-
-    let had_effects_last_frame = output.pipeline.last_submission_had_effects();
-    if super::effect_transition_requires_full_redraw(has_effects, had_effects_last_frame)
-        || !crate::ENABLE_DAMAGE
-        || output.pipeline.force_full_redraw()
-        || order_changed
-        || scene.len() != last_scene.len()
-    {
-        base_damage.add_rect(output_bounds);
-    } else {
-        for (current, previous) in items.iter().zip(last_scene.iter()) {
-            if current.state.key != previous.key {
-                base_damage.add_rect(output_bounds);
-                break;
-            }
-            if current.state.bounds != previous.bounds
-                || current.state.content_key != previous.content_key
-                || current.state.tex_transform != previous.tex_transform
-            {
-                base_damage.add_rect(previous.bounds);
-                base_damage.add_rect(current.state.bounds);
-            } else {
-                base_damage.add_region(&current.damage);
-            }
-        }
-    }
-
+    let mut base_damage = scene_change_damage(
+        output_bounds,
+        &items,
+        output.pipeline.last_scene(),
+        has_effects,
+        output.pipeline.last_submission_had_effects(),
+        output.pipeline.force_full_redraw(),
+    );
+    // Animation invalidation is snapshotted before buffer-age accumulation so a later
+    // queue during this frame stays in the next generation.
+    base_damage.add_region(&output.pipeline.snapshot_pending_damage());
     base_damage = output.accumulate_damage_from_age(&base_damage);
     base_damage.intersect_rect(output_bounds);
     if !presentation_feedbacks.is_empty()
@@ -256,4 +243,273 @@ pub(super) fn select_presentation_output_for_scene(
 
 fn scene_order(scene: &[super::SceneItemState]) -> Vec<super::SceneItemKey> {
     scene.iter().map(|item| item.key).collect()
+}
+
+pub(super) fn scene_change_damage(
+    output_bounds: RectI,
+    items: &[super::SceneItem],
+    last_scene: &[super::SceneItemState],
+    has_effects: bool,
+    had_effects_last_frame: bool,
+    force_full_redraw: bool,
+) -> DamageRegion {
+    let mut base_damage = DamageRegion::new();
+    let current_order: Vec<_> = items.iter().map(|item| item.state.key).collect();
+    let previous_order = scene_order(last_scene);
+    if super::effect_transition_requires_full_redraw(has_effects, had_effects_last_frame)
+        || !crate::ENABLE_DAMAGE
+        || force_full_redraw
+        || current_order != previous_order
+        || items.len() != last_scene.len()
+    {
+        base_damage.add_rect(output_bounds);
+        return base_damage;
+    }
+    for (current, previous) in items.iter().zip(last_scene.iter()) {
+        if current.state.key != previous.key {
+            base_damage.add_rect(output_bounds);
+            break;
+        }
+        if current.state.bounds != previous.bounds
+            || current.state.content_key != previous.content_key
+            || current.state.tex_transform != previous.tex_transform
+            || current.state.alpha != previous.alpha
+            || current.state.mask != previous.mask
+        {
+            base_damage.add_rect(previous.bounds);
+            base_damage.add_rect(current.state.bounds);
+        } else {
+            base_damage.add_region(&current.damage);
+        }
+    }
+    base_damage
+}
+
+pub(super) fn damage_live_workspace_transition(
+    damage: &mut DamageRegion,
+    live: bool,
+    output_bounds: RectI,
+) {
+    if live {
+        damage.add_rect(output_bounds);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::{
+            clients::{ClientId, Resolved},
+            protocol_generated::{WlBufferId, WlSurfaceId},
+            region::RectI,
+            state::{ObjectId, RootSurfaceClip},
+        },
+    };
+
+    fn surface_key(id: u32) -> Resolved<WlSurfaceId> {
+        Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(id), ObjectId::from(id as usize))
+    }
+
+    fn buffer_key(id: u32) -> Resolved<WlBufferId> {
+        Resolved::new(ClientId::from_raw(1), WlBufferId::from(id), ObjectId::from(id as usize))
+    }
+
+    fn clip(x: i32, y: i32, width: i32, height: i32, radius: i32) -> RootSurfaceClip {
+        RootSurfaceClip::new(
+            RectI::new(x, y, width, height).unwrap(),
+            radius,
+            crate::config::RoundingPower::DEFAULT,
+        )
+    }
+
+    fn item(
+        id: u32,
+        bounds: RectI,
+        alpha: u8,
+        mask: super::super::SceneItemMask,
+        damage: RectI,
+    ) -> super::super::SceneItem {
+        super::super::SceneItem {
+            state: super::super::SceneItemState {
+                key: super::super::SceneItemKey::Surface(surface_key(id)),
+                surface_key: Some(surface_key(id)),
+                content_key: super::super::SceneItemContentKey::Buffer(buffer_key(id)),
+                bounds,
+                tex_transform: crate::transform::Mat3::identity(),
+                alpha,
+                mask,
+            },
+            mask,
+            texture: 0,
+            owned_texture: None,
+            damage: DamageRegion::from_rect(damage),
+            sample_damage_padding: 0,
+            state_has_alpha: false,
+            alpha,
+            opaque_region: DamageRegion::new(),
+            opaque: false,
+            sync: crate::sync::SurfaceSyncState::default(),
+            direct_scanout: None,
+            presentation_feedbacks: Vec::new(),
+        }
+    }
+
+    fn output_bounds() -> RectI {
+        RectI::new(0, 0, 200, 100).unwrap()
+    }
+
+    fn covers_output(damage: &DamageRegion) -> bool {
+        damage.intersects_rect(RectI::new(0, 80, 10, 10).unwrap())
+    }
+
+    #[test]
+    fn alpha_only_change_damages_previous_and_current_bounds() {
+        let bounds = RectI::new(10, 10, 40, 30).unwrap();
+        let previous = item(
+            1,
+            bounds,
+            255,
+            super::super::SceneItemMask::None,
+            RectI::new(0, 0, 0, 0).unwrap_or(bounds),
+        );
+        let mut current = item(1, bounds, 128, super::super::SceneItemMask::None, bounds);
+        current.damage = DamageRegion::new();
+        let damage = scene_change_damage(
+            output_bounds(),
+            &[current],
+            &[previous.state],
+            false,
+            false,
+            false,
+        );
+        assert!(damage.intersects_rect(bounds));
+        assert!(!covers_output(&damage));
+    }
+
+    #[test]
+    fn mask_only_change_damages_previous_and_current_bounds() {
+        let bounds = RectI::new(10, 10, 40, 30).unwrap();
+        let previous = item(
+            1,
+            bounds,
+            255,
+            super::super::SceneItemMask::RoundedClip { clip: clip(10, 10, 40, 30, 4) },
+            bounds,
+        );
+        let mut current = item(
+            1,
+            bounds,
+            255,
+            super::super::SceneItemMask::RoundedClip { clip: clip(10, 10, 40, 30, 12) },
+            bounds,
+        );
+        current.damage = DamageRegion::new();
+        let damage = scene_change_damage(
+            output_bounds(),
+            &[current],
+            &[previous.state],
+            false,
+            false,
+            false,
+        );
+        assert!(damage.intersects_rect(bounds));
+        assert!(!covers_output(&damage));
+    }
+
+    #[test]
+    fn moved_visual_state_damages_previous_and_current_bounds() {
+        let previous_bounds = RectI::new(10, 10, 40, 30).unwrap();
+        let current_bounds = RectI::new(80, 10, 40, 30).unwrap();
+        let previous =
+            item(1, previous_bounds, 255, super::super::SceneItemMask::None, previous_bounds);
+        let mut current =
+            item(1, current_bounds, 255, super::super::SceneItemMask::None, current_bounds);
+        current.damage = DamageRegion::new();
+        let damage = scene_change_damage(
+            output_bounds(),
+            &[current],
+            &[previous.state],
+            false,
+            false,
+            false,
+        );
+        assert!(damage.intersects_rect(previous_bounds));
+        assert!(damage.intersects_rect(current_bounds));
+        assert!(!covers_output(&damage));
+    }
+
+    #[test]
+    fn unchanged_visual_state_keeps_client_damage_only() {
+        let bounds = RectI::new(10, 10, 40, 30).unwrap();
+        let client = RectI::new(12, 12, 4, 4).unwrap();
+        let previous = item(1, bounds, 200, super::super::SceneItemMask::None, client);
+        let current = item(1, bounds, 200, super::super::SceneItemMask::None, client);
+        let damage = scene_change_damage(
+            output_bounds(),
+            &[current],
+            &[previous.state.clone()],
+            false,
+            false,
+            false,
+        );
+        assert!(damage.intersects_rect(client));
+        assert!(!damage.intersects_rect(RectI::new(30, 30, 10, 8).unwrap()));
+        assert!(!covers_output(&damage));
+    }
+
+    #[test]
+    fn effects_and_direct_scanout_transitions_redraw_the_output() {
+        let bounds = RectI::new(10, 10, 40, 30).unwrap();
+        let previous = item(1, bounds, 255, super::super::SceneItemMask::None, bounds);
+        let current = item(1, bounds, 255, super::super::SceneItemMask::None, bounds);
+        let effects = scene_change_damage(
+            output_bounds(),
+            &[current],
+            &[previous.state.clone()],
+            true,
+            false,
+            false,
+        );
+        assert!(covers_output(&effects));
+        let scanout = scene_change_damage(
+            output_bounds(),
+            std::slice::from_ref(&previous),
+            &[previous.state.clone()],
+            false,
+            false,
+            true,
+        );
+        assert!(covers_output(&scanout));
+    }
+
+    #[test]
+    fn scene_order_change_redraws_the_output() {
+        let first_bounds = RectI::new(10, 10, 20, 20).unwrap();
+        let second_bounds = RectI::new(40, 10, 20, 20).unwrap();
+        let first = item(1, first_bounds, 255, super::super::SceneItemMask::None, first_bounds);
+        let second = item(2, second_bounds, 255, super::super::SceneItemMask::None, second_bounds);
+        let damage = scene_change_damage(
+            output_bounds(),
+            &[second, first],
+            &[
+                item(1, first_bounds, 255, super::super::SceneItemMask::None, first_bounds).state,
+                item(2, second_bounds, 255, super::super::SceneItemMask::None, second_bounds).state,
+            ],
+            false,
+            false,
+            false,
+        );
+        assert!(covers_output(&damage));
+    }
+
+    #[test]
+    fn live_workspace_transition_covers_the_output() {
+        let mut damage = DamageRegion::from_rect(RectI::new(10, 10, 4, 4).unwrap());
+        damage_live_workspace_transition(&mut damage, true, output_bounds());
+        assert!(covers_output(&damage));
+        let mut steady = DamageRegion::from_rect(RectI::new(10, 10, 4, 4).unwrap());
+        damage_live_workspace_transition(&mut steady, false, output_bounds());
+        assert!(!covers_output(&steady));
+    }
 }

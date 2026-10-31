@@ -43,6 +43,16 @@ struct OutputPipelineCore {
     retiring_cursor_slot: Option<usize>,
     next_submission_id: u64,
     waiting_for_flip_since: Option<Instant>,
+    pending_damage: Vec<PendingDamage>,
+    open_damage_generation: u64,
+    planned_damage_through: Option<u64>,
+    submitted_damage_through: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingDamage {
+    generation: u64,
+    region: DamageRegion,
 }
 
 impl OutputPipeline {
@@ -67,6 +77,10 @@ impl OutputPipeline {
                 retiring_cursor_slot: None,
                 next_submission_id: 1,
                 waiting_for_flip_since: None,
+                pending_damage: Vec::new(),
+                open_damage_generation: 0,
+                planned_damage_through: None,
+                submitted_damage_through: None,
             },
         }
     }
@@ -117,29 +131,18 @@ impl OutputPipeline {
 
     pub(super) fn accumulate_damage_from_age(
         &self,
-        mut damage: DamageRegion,
+        damage: DamageRegion,
         output_bounds: RectI,
     ) -> DamageRegion {
-        if !super::ENABLE_DAMAGE {
-            damage.add_rect(output_bounds);
-            return damage;
-        }
-        let Some(age) = self.core.buffer_age() else {
-            damage.add_rect(output_bounds);
-            return damage;
-        };
-        if age == 0 || self.core.force_full_redraw {
-            damage.add_rect(output_bounds);
-            return damage;
-        }
-        if age.saturating_sub(1) > self.core.damage_history.len() {
-            damage.add_rect(output_bounds);
-            return damage;
-        }
-        for previous in self.core.damage_history.iter().take(age.saturating_sub(1)) {
-            damage.add_region(previous);
-        }
-        damage
+        self.core.accumulate_damage_from_age(damage, output_bounds)
+    }
+
+    pub(super) fn queue_pending_damage(&mut self, rect: RectI) {
+        self.core.queue_pending_damage(rect);
+    }
+
+    pub(super) fn snapshot_pending_damage(&mut self) -> DamageRegion {
+        self.core.snapshot_pending_damage()
     }
 
     pub(super) fn preserve_render_buffer_contents(&self) -> bool {
@@ -241,6 +244,77 @@ impl OutputPipelineCore {
         self.force_full_redraw = true;
         self.in_flight_frame = None;
         self.waiting_for_flip_since = None;
+        self.submitted_damage_through = None;
+    }
+
+    fn queue_pending_damage(&mut self, rect: RectI) {
+        if rect.is_empty() {
+            return;
+        }
+        if let Some(open) = self.pending_damage.last_mut() {
+            if open.generation == self.open_damage_generation {
+                open.region.add_rect(rect);
+                return;
+            }
+        }
+        self.pending_damage.push(PendingDamage {
+            generation: self.open_damage_generation,
+            region: DamageRegion::from_rect(rect),
+        });
+    }
+
+    fn snapshot_pending_damage(&mut self) -> DamageRegion {
+        let through = self.open_damage_generation;
+        let mut region = DamageRegion::new();
+        for entry in &self.pending_damage {
+            if entry.generation <= through {
+                region.add_region(&entry.region);
+            }
+        }
+        self.open_damage_generation = self.open_damage_generation.saturating_add(1);
+        self.planned_damage_through = Some(through);
+        region
+    }
+
+    fn retire_submitted_pending_damage(&mut self) {
+        let Some(through) = self.submitted_damage_through.take() else {
+            return;
+        };
+        self.pending_damage
+            .retain(|entry| entry.generation > through);
+        if self
+            .planned_damage_through
+            .is_some_and(|planned| planned <= through)
+        {
+            self.planned_damage_through = None;
+        }
+    }
+
+    fn accumulate_damage_from_age(
+        &self,
+        mut damage: DamageRegion,
+        output_bounds: RectI,
+    ) -> DamageRegion {
+        if !super::ENABLE_DAMAGE {
+            damage.add_rect(output_bounds);
+            return damage;
+        }
+        let Some(age) = self.buffer_age() else {
+            damage.add_rect(output_bounds);
+            return damage;
+        };
+        if age == 0 || self.force_full_redraw {
+            damage.add_rect(output_bounds);
+            return damage;
+        }
+        if age.saturating_sub(1) > self.damage_history.len() {
+            damage.add_rect(output_bounds);
+            return damage;
+        }
+        for previous in self.damage_history.iter().take(age.saturating_sub(1)) {
+            damage.add_region(previous);
+        }
+        damage
     }
 
     fn mark_frame_idle(&mut self) {
@@ -268,6 +342,7 @@ impl OutputPipelineCore {
         self.phase = PipelinePhase::WaitingForFlip;
         self.waiting_for_flip_since = Some(Instant::now());
         self.in_flight_frame = Some(frame);
+        self.submitted_damage_through = self.planned_damage_through;
         self.retiring_external_fb = self.displayed_external_fb.take();
         self.retiring_cursor_slot = self.displayed_cursor_slot.take();
     }
@@ -300,10 +375,12 @@ impl OutputPipelineCore {
                 self.displayed_external_fb = None;
                 self.displayed_cursor_slot = cursor_slot;
                 self.force_full_redraw = false;
+                self.retire_submitted_pending_damage();
                 Some(CompletedSubmission { submission, damage_blob })
             }
             Some(SubmittedFrame::DirectScanout { submission, framebuffer, cursor_slot }) => {
                 self.force_full_redraw = true;
+                self.retire_submitted_pending_damage();
                 self.last_scene = submission.scene.clone();
                 self.last_submission_had_effects = false;
                 self.displayed_external_fb = Some(framebuffer);
@@ -382,5 +459,123 @@ mod tests {
         };
         assert!(core.begin_render());
         assert_eq!(core.phase(), PipelinePhase::Rendering);
+    }
+
+    fn rect(x: i32, y: i32, width: i32, height: i32) -> RectI {
+        RectI::new(x, y, width, height).unwrap()
+    }
+
+    fn covers(core: &OutputPipelineCore, area: RectI) -> bool {
+        core.pending_damage
+            .iter()
+            .any(|entry| entry.region.intersects_rect(area))
+    }
+
+    fn submit(core: &mut OutputPipelineCore) {
+        core.mark_frame_submitted(SubmittedFrame::Composited {
+            buffer_index: 0,
+            damage: DamageRegion::new(),
+            submission: test_submission(1),
+            damage_blob: None,
+            cursor_slot: None,
+        });
+    }
+
+    #[test]
+    fn queued_damage_stays_on_its_output_pipeline() {
+        let left = rect(90, 0, 10, 20);
+        let right = rect(0, 0, 20, 20);
+        let mut left_core = OutputPipelineCore::default();
+        let mut right_core = OutputPipelineCore::default();
+        left_core.queue_pending_damage(left);
+        right_core.queue_pending_damage(right);
+        assert!(covers(&left_core, left));
+        assert!(!covers(&left_core, right));
+        assert!(covers(&right_core, right));
+        assert!(!covers(&right_core, left));
+        assert!(left_core.last_scene.is_empty());
+        assert!(right_core.last_scene.is_empty());
+    }
+
+    #[test]
+    fn damage_queued_during_flight_survives_successful_retirement() {
+        let presented = rect(0, 0, 10, 10);
+        let newer = rect(20, 0, 10, 10);
+        let mut core = OutputPipelineCore::default();
+        core.queue_pending_damage(presented);
+        let snapshot = core.snapshot_pending_damage();
+        assert!(snapshot.intersects_rect(presented));
+        core.queue_pending_damage(newer);
+        submit(&mut core);
+        assert!(core.finish_page_flip().is_some());
+        assert!(!covers(&core, presented));
+        assert!(covers(&core, newer));
+        assert!(core.last_scene.is_empty());
+    }
+
+    #[test]
+    fn render_and_submission_failure_keep_queued_damage() {
+        let area = rect(4, 4, 12, 12);
+        let mut core = OutputPipelineCore::default();
+        core.queue_pending_damage(area);
+        let snapshot = core.snapshot_pending_damage();
+        assert!(snapshot.intersects_rect(area));
+        core.mark_render_failed();
+        assert!(covers(&core, area));
+        assert!(core.snapshot_pending_damage().intersects_rect(area));
+
+        let mut submitted = OutputPipelineCore::default();
+        submitted.queue_pending_damage(area);
+        submitted.snapshot_pending_damage();
+        submit(&mut submitted);
+        submitted.queue_pending_damage(rect(40, 0, 8, 8));
+        submitted.mark_render_failed();
+        assert!(covers(&submitted, area));
+        assert!(covers(&submitted, rect(40, 0, 8, 8)));
+
+        let mut discarded = OutputPipelineCore::default();
+        discarded.queue_pending_damage(area);
+        discarded.snapshot_pending_damage();
+        submit(&mut discarded);
+        let _ = discarded.take_in_flight_presentation_feedbacks_for_discard();
+        assert!(covers(&discarded, area));
+        assert!(discarded.finish_page_flip().is_none());
+        assert!(covers(&discarded, area));
+    }
+
+    #[test]
+    fn successful_submission_retires_the_snapshotted_generation() {
+        let area = rect(1, 2, 3, 4);
+        let mut core = OutputPipelineCore::default();
+        core.queue_pending_damage(area);
+        assert!(core.snapshot_pending_damage().intersects_rect(area));
+        submit(&mut core);
+        assert!(core.finish_page_flip().is_some());
+        assert!(!covers(&core, area));
+        assert!(core.pending_damage.is_empty());
+    }
+
+    #[test]
+    fn pending_damage_is_unioned_before_buffer_age_accumulation() {
+        let output = rect(0, 0, 100, 100);
+        let scene = rect(0, 0, 10, 10);
+        let pending = rect(20, 0, 10, 10);
+        let history = rect(40, 0, 10, 10);
+        let mut core = OutputPipelineCore {
+            force_full_redraw: false,
+            present_count: 2,
+            rendered_buffer_present_id: [Some(1), None],
+            ..Default::default()
+        };
+        core.damage_history
+            .push_front(DamageRegion::from_rect(history));
+        core.queue_pending_damage(pending);
+        let mut base = DamageRegion::from_rect(scene);
+        base.add_region(&core.snapshot_pending_damage());
+        let accumulated = core.accumulate_damage_from_age(base, output);
+        assert!(accumulated.intersects_rect(scene));
+        assert!(accumulated.intersects_rect(pending));
+        assert!(accumulated.intersects_rect(history));
+        assert!(!accumulated.intersects_rect(rect(70, 70, 10, 10)));
     }
 }
