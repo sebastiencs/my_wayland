@@ -23,9 +23,9 @@
 //!
 //! `wl_surface.frame` and `wp_presentation` follow surfaces that were actually submitted in the
 //! render item list. They do not follow interactive participation or logical workspace activity.
-//! A later live transition must keep an outgoing participant in that submitted set through its
-//! final frame before protocol or render participation ends. This module does not add another
-//! callback, timer, or presentation path.
+//! A live workspace transition keeps the outgoing workspace in that submitted set through its
+//! final frame, so frame callbacks and presentation feedback follow the pixels that were rendered.
+//! This module does not add another callback, timer, or presentation path.
 
 use crate::{
     clients::Resolved,

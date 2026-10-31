@@ -4654,8 +4654,10 @@ pub(crate) struct PlannedClosingEffect {
     pub element: EffectElement,
 }
 
-// Window-local frozen image of one closing toplevel. This is not an output capture, a
-// debug view of the CRTC, or a `zwlr_screencopy` source. Output-sized capture must use
+// Window-local frozen image of one closing toplevel. This is the only close-animation source:
+// geometry and effects are copied before teardown, the pump fades the texture, and dropping the
+// realized snapshot releases it. Unsupported capture returns no plan. This is not an output
+// capture, a debug view of the CRTC, or a `zwlr_screencopy` source. Output-sized capture must use
 // `collect_output_render_plan` so both live workspace participants and the same frame-plan
 // participation are visible.
 pub(crate) struct ClosingCapturePlan {

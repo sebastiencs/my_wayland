@@ -96,6 +96,14 @@ impl ClosingSnapshotAnimation {
     }
 }
 
+/// Canonical close animation. Capture freezes one managed toplevel into a window-local texture
+/// before teardown. The visual-animation pump fades that texture, then dropping this value
+/// releases it. There is no detached live-surface close path.
+///
+/// Capture is skipped when the toplevel is already snapshotted, the session is inactive, the close
+/// duration is zero, the root is unmapped or has no buffer, the role is not an xdg toplevel, the
+/// render plan is empty, or the window spans more than one DRM device.
+///
 /// Immutable window image retained after the real toplevel has left layout, input, and protocol state.
 pub struct RetainedClosingSnapshot {
     animation: ClosingSnapshotAnimation,

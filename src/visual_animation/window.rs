@@ -84,8 +84,8 @@ impl FocusVisualAnimation {
 /// Opening lifecycle owned separately from the focus style.
 ///
 /// `start_opening` exposes progress zero immediately. The first animation-pump tick starts the
-/// absolute-time track, and completion returns to [`WindowLifecycleAnim::Idle`]. Closing stays
-/// dormant until a later phase.
+/// absolute-time track, and completion returns to [`WindowLifecycleAnim::Idle`]. Closing is not a
+/// lifecycle state: [`crate::visual_animation::RetainedClosingSnapshot`] owns the fade.
 #[derive(Clone, Copy, Debug)]
 pub struct WindowLifecycleAnimation {
     track: RetargetableTrack,
@@ -174,25 +174,22 @@ fn interpolate_window_visual(
 /// Lifecycle contribution composed onto [`WindowVisualBase`] at sample time.
 ///
 /// Production windows stay [`WindowLifecycleAnim::Idle`] until a managed map starts opening.
-/// Closing remains available for a later phase.
+/// A closing toplevel leaves this lifecycle and fades as a retained snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowLifecycleAnim {
     Idle,
     Opening { progress: UnitValue },
-    Closing { progress: UnitValue },
 }
 
-/// Draw modifiers consumed by render assembly.
+/// Alpha modifiers consumed by render assembly.
 ///
-/// `translation` is reserved for later workspace and window motion. Phase 3 resolution keeps it at
-/// the origin and does not move layout or scene geometry.
+/// Workspace translation stays on `WorkspaceMotion` and is applied when scene items are placed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResolvedWindowVisual {
     pub content_alpha: u8,
     pub dim_alpha: u8,
     pub shadow_alpha: u8,
     pub border_alpha: u8,
-    pub translation: (i32, i32),
 }
 
 pub fn resolve_window_visual(
@@ -202,14 +199,12 @@ pub fn resolve_window_visual(
     let factor = match lifecycle {
         WindowLifecycleAnim::Idle => UnitValue::ONE,
         WindowLifecycleAnim::Opening { progress } => progress,
-        WindowLifecycleAnim::Closing { progress } => UnitValue::ONE.saturating_sub(progress),
     };
     ResolvedWindowVisual {
         content_alpha: scale_alpha(base.content_alpha, factor),
         dim_alpha: scale_alpha(base.dim_alpha, factor),
         shadow_alpha: scale_alpha(base.shadow_alpha, factor),
         border_alpha: scale_alpha(base.border_alpha, factor),
-        translation: (0, 0),
     }
 }
 
@@ -261,18 +256,17 @@ mod tests {
     }
 
     #[test]
-    fn idle_resolution_preserves_alpha_and_origin() {
+    fn idle_resolution_preserves_every_alpha_channel() {
         let resolved = resolve_window_visual(base(), WindowLifecycleAnim::Idle);
 
         assert_eq!(resolved.content_alpha, 200);
         assert_eq!(resolved.dim_alpha, 40);
         assert_eq!(resolved.shadow_alpha, 180);
         assert_eq!(resolved.border_alpha, 160);
-        assert_eq!(resolved.translation, (0, 0));
     }
 
     #[test]
-    fn opening_and_closing_scale_every_alpha_channel() {
+    fn opening_scales_every_alpha_channel() {
         let hidden = resolve_window_visual(
             base(),
             WindowLifecycleAnim::Opening { progress: UnitValue::ZERO },
@@ -288,20 +282,8 @@ mod tests {
         );
         assert_eq!(shown.content_alpha, base().content_alpha);
         assert_eq!(shown.dim_alpha, base().dim_alpha);
-
-        let closing_start = resolve_window_visual(
-            base(),
-            WindowLifecycleAnim::Closing { progress: UnitValue::ZERO },
-        );
-        assert_eq!(closing_start.content_alpha, base().content_alpha);
-        let closing_end = resolve_window_visual(
-            base(),
-            WindowLifecycleAnim::Closing { progress: UnitValue::ONE },
-        );
-        assert_eq!(closing_end.content_alpha, 0);
-        assert_eq!(closing_end.shadow_alpha, 0);
-        assert_eq!(closing_end.border_alpha, 0);
-        assert_eq!(closing_end.translation, (0, 0));
+        assert_eq!(shown.shadow_alpha, base().shadow_alpha);
+        assert_eq!(shown.border_alpha, base().border_alpha);
     }
 
     #[test]
@@ -392,9 +374,7 @@ mod tests {
     fn opening_progress(animation: WindowLifecycleAnimation) -> UnitValue {
         match animation.sample() {
             WindowLifecycleAnim::Opening { progress } => progress,
-            WindowLifecycleAnim::Idle | WindowLifecycleAnim::Closing { .. } => {
-                panic!("expected opening progress")
-            }
+            WindowLifecycleAnim::Idle => panic!("expected opening progress"),
         }
     }
 
