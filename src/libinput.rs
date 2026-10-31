@@ -106,15 +106,55 @@ impl Libinput {
         let mut dev_to_fd = self.dev_to_fd.lock().unwrap();
         dev_to_fd.insert(devnum, fd);
     }
+
+    fn drain_events(&mut self) {
+        if let Err(error) = self.dispatch() {
+            log::error!("libinput dispatch failed: {error}");
+        }
+        while self.next_event().is_some() {}
+    }
+
+    fn quiesce_device(&mut self, state: &mut State, devnum: u64) {
+        let input_ids: Vec<_> = self
+            .inputs
+            .iter()
+            .copied()
+            .filter(|input_id| {
+                state
+                    .inputs
+                    .try_get(*input_id)
+                    .is_some_and(|input| input.devnum == devnum)
+            })
+            .collect();
+        for input_id in input_ids {
+            self.inputs.remove(&input_id);
+            let Some(input) = state.inputs.remove(input_id) else {
+                continue;
+            };
+            self.libinput.path_remove_device(input.device);
+        }
+        self.drain_events();
+        self.dev_to_fd.lock().unwrap().remove(&devnum);
+    }
 }
 
 #[derive(Debug)]
 pub enum LibinputAction {
     Start,
     Event,
-    OpenInput { devnode: String, fd: OwnedFd, devnum: u64 },
+    OpenInput {
+        devnode: String,
+        fd: OwnedFd,
+        devnum: u64,
+    },
+    /// Remove one device from libinput and close its session fd afterwards.
+    Quiesce {
+        devnum: u64,
+    },
     CloseSessionFds,
-    PollFailed { message: String },
+    PollFailed {
+        message: String,
+    },
     Stop,
 }
 
@@ -147,6 +187,10 @@ impl Model for Libinput {
             }
             Event => {
                 if dispatcher.shutdown_requested() {
+                    return Ok(());
+                }
+                if !state.session_active {
+                    self.drain_events();
                     return Ok(());
                 }
                 if let Err(error) = self.dispatch() {
@@ -271,6 +315,11 @@ impl Model for Libinput {
                     log::info!("ignoring input device {devnode} opened during shutdown");
                     return Ok(());
                 }
+                if !state.session_active {
+                    log::info!("parking input device {devnode} while the session is inactive");
+                    self.insert_device_fd(fd, devnum);
+                    return Ok(());
+                }
                 self.insert_device_fd(fd, devnum);
                 let device = match self.libinput.path_add_device(&devnode) {
                     Some(device) => device,
@@ -283,6 +332,7 @@ impl Model for Libinput {
                 let input_id = state.inputs.insert(Input { device, devnum });
                 self.inputs.insert(input_id);
             }
+            Quiesce { devnum } => self.quiesce_device(state, devnum),
             PollFailed { message } => {
                 return Err(ModelFailure::Shutdown(ShutdownReason::Fatal {
                     source: "libinput",
@@ -657,6 +707,31 @@ mod device_stop_tests {
             .process(&mut state, LibinputAction::CloseSessionFds, &mut dispatcher)
             .unwrap();
         assert!(libinput.dev_to_fd.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn quiesce_closes_the_session_fd_and_an_inactive_open_stays_parked() {
+        let mut libinput = Libinput::new();
+        let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        libinput.insert_device_fd(fd, 4);
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        libinput
+            .process(&mut state, LibinputAction::Quiesce { devnum: 4 }, &mut dispatcher)
+            .unwrap();
+        assert!(libinput.dev_to_fd.lock().unwrap().get(&4).is_none());
+
+        state.session_active = false;
+        let parked: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        libinput
+            .process(
+                &mut state,
+                LibinputAction::OpenInput { devnode: "/dev/null".into(), fd: parked, devnum: 9 },
+                &mut dispatcher,
+            )
+            .unwrap();
+        assert!(libinput.inputs.is_empty());
+        assert!(libinput.dev_to_fd.lock().unwrap().contains_key(&9));
     }
 }
 

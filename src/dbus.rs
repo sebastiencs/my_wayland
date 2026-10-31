@@ -671,6 +671,9 @@ impl Dbus {
         dispatcher: &mut Dispatcher,
     ) {
         state.session_active = active;
+        if !active {
+            crate::seat::quiesce_for_session_pause(state, dispatcher);
+        }
         crate::drm::kick_visual_animation_pump(dispatcher);
         for (output_id, _) in state.outputs.iter() {
             dispatcher.dispatch_to(

@@ -19,7 +19,10 @@ use nix::{
 use crate::{
     clients::ClientManagerAction,
     dbus::DbusAction,
-    drm::{discard_backend_presentation_feedbacks, sync_output_nodes_for_backend, Drm, DrmReader},
+    drm::{
+        discard_backend_presentation_feedbacks, quiesce_backend, sync_output_nodes_for_backend,
+        Drm, DrmReader,
+    },
     globals::Global,
     io_uring::{
         model::IoUringAction,
@@ -27,6 +30,7 @@ use crate::{
     },
     libinput::LibinputAction,
     runner::{Dispatcher, Model, ModelFailure, Redispatcher, ShutdownReason},
+    seat,
     state::{BackendOutputRef, DrmId, Output, OutputId, State},
     wayland_objects::{
         hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1Global,
@@ -70,9 +74,23 @@ pub struct Udev {
     pending: BTreeMap<libc::dev_t, PendingControl>,
     /// DRM devices from the initial scan that have not finished TakeDevice.
     initial_drm: BTreeSet<libc::dev_t>,
+    /// Devnodes kept so a paused input device can be opened again.
+    retained_inputs: BTreeMap<libc::dev_t, String>,
+    /// TakeDevice results for a session that was not active yet.
+    parked: BTreeMap<libc::dev_t, ParkedSessionDevice>,
     /// Resume fds kept until a later phase opens the device again.
     resumed_fds: BTreeMap<libc::dev_t, OwnedFd>,
     poll_op_id: Option<RingId>,
+}
+
+struct ParkedSessionDevice {
+    kind: ParkedKind,
+    fd: Option<OwnedFd>,
+}
+
+enum ParkedKind {
+    Input,
+    Drm(udev::Device),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,14 +192,16 @@ impl Model for Udev {
                 match kind {
                     DevicePauseKind::Gone => {
                         self.pending.remove(&devnum);
+                        self.retained_inputs.remove(&devnum);
+                        self.parked.remove(&devnum);
+                        dispatcher.dispatch(LibinputAction::Quiesce { devnum: devnum as u64 });
                         if let Some(drm_id) = Self::find_drm_id_for_devnum(state, devnum) {
                             self.remove_drm_backend(drm_id, state, dispatcher);
                             self.fatal_if_no_output(state)?;
                         }
                     }
                     DevicePauseKind::Pause | DevicePauseKind::Force => {
-                        // Input and KMS suspension is inserted in this arm, before the
-                        // confirmation, so PauseDeviceComplete follows it.
+                        self.quiesce_device(devnum, state, dispatcher);
                         dispatcher.dispatch(DbusAction::DevicePauseQuiesced { devnum });
                     }
                 }
@@ -207,6 +227,8 @@ impl Udev {
             udev_monitor,
             pending,
             initial_drm: BTreeSet::new(),
+            retained_inputs: BTreeMap::new(),
+            parked: BTreeMap::new(),
             resumed_fds: BTreeMap::new(),
             poll_op_id: None,
         }))
@@ -404,16 +426,47 @@ impl Udev {
         devnum: libc::dev_t,
         dispatcher: &mut Dispatcher,
     ) {
-        if inactive {
-            return;
-        }
         let Some(devnode) = device.devnode().and_then(|devnode| devnode.to_str()) else {
+            log::warn!("input device {devnum} has no devnode");
+            self.parked
+                .insert(devnum, ParkedSessionDevice { kind: ParkedKind::Input, fd: Some(fd) });
             return;
         };
         let devnode = devnode.to_string();
+        self.retained_inputs.insert(devnum, devnode.clone());
+        if inactive {
+            log::info!("parking inactive input device {devnode}");
+            self.parked
+                .insert(devnum, ParkedSessionDevice { kind: ParkedKind::Input, fd: Some(fd) });
+            return;
+        }
         set_non_blocking(fd.as_raw_fd());
+        dispatcher.dispatch(LibinputAction::OpenInput { devnode, fd, devnum: devnum as u64 });
+    }
 
-        dispatcher.dispatch(LibinputAction::OpenInput { devnode, fd, devnum });
+    /// Stop using one device before logind is told the pause is complete.
+    fn quiesce_device(
+        &mut self,
+        devnum: libc::dev_t,
+        state: &mut State,
+        dispatcher: &mut Dispatcher,
+    ) {
+        if let Some(parked) = self.parked.get_mut(&devnum) {
+            parked.fd.take();
+        }
+        if self.retained_inputs.contains_key(&devnum) {
+            dispatcher.dispatch(LibinputAction::Quiesce { devnum: devnum as u64 });
+        }
+        if let Some(drm_id) = Self::find_drm_id_for_devnum(state, devnum) {
+            quiesce_backend(state, dispatcher, drm_id);
+            for output_id in state.output_ids_for_backend(BackendOutputRef::new(drm_id)) {
+                dispatcher.dispatch_to(
+                    crate::scheduler::output_scheduler_id(output_id),
+                    crate::scheduler::OutputSchedulerAction::Disarm,
+                );
+            }
+        }
+        seat::quiesce_for_session_pause(state, dispatcher);
     }
 
     fn on_drm_taken(
@@ -426,9 +479,12 @@ impl Udev {
         dispatcher: &mut Dispatcher,
     ) -> std::result::Result<(), ModelFailure> {
         if inactive {
-            log::warn!("DRM device {devnum} is inactive");
-            dispatcher.dispatch(DbusAction::ReleaseDevice { devnum });
-            return self.settle_initial_drm(devnum, state);
+            log::info!("parking inactive DRM device {devnum}");
+            self.parked.insert(
+                devnum,
+                ParkedSessionDevice { kind: ParkedKind::Drm(device), fd: Some(fd) },
+            );
+            return Ok(());
         }
 
         eprintln!("DRM TAKEN {:?}", device.devnode());
@@ -751,5 +807,103 @@ mod tests {
         .expect("gone without a backend");
         assert!(!dispatcher.shutdown_requested());
         assert!(udev.resumed_fds.get(&4).is_some());
+    }
+
+    #[test]
+    fn an_inactive_take_is_parked_until_pause_quiesces_it() {
+        use std::os::fd::AsRawFd;
+
+        use crate::{dbus::DbusAction, libinput::LibinputAction, runner::Model};
+
+        let input = first_device("input");
+        let drm = first_device("drm");
+        let input_devnum = input.devnum().expect("input devnum");
+        let drm_devnum = drm.devnum().expect("drm devnum");
+        let mut udev = Udev::new().expect("udev monitor");
+        udev.pending
+            .insert(input_devnum, super::PendingControl::Input(input));
+        udev.pending
+            .insert(drm_devnum, super::PendingControl::Drm(drm));
+        udev.initial_drm.insert(drm_devnum);
+
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        let input_fd: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let input_raw = input_fd.as_raw_fd();
+        udev.process(
+            &mut state,
+            super::UdevAction::DeviceTaken { fd: input_fd, inactive: true, devnum: input_devnum },
+            &mut dispatcher,
+        )
+        .expect("park input");
+        let drm_fd: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let drm_raw = drm_fd.as_raw_fd();
+        udev.process(
+            &mut state,
+            super::UdevAction::DeviceTaken { fd: drm_fd, inactive: true, devnum: drm_devnum },
+            &mut dispatcher,
+        )
+        .expect("park drm");
+
+        assert!(udev.initial_drm.contains(&drm_devnum));
+        assert!(!dispatcher.shutdown_requested());
+        assert!(!dispatcher.test_has_queued_action(|action: &DbusAction| {
+            matches!(action, DbusAction::ReleaseDevice { .. })
+        }));
+        assert!(!dispatcher.test_has_queued_action(|action: &LibinputAction| {
+            matches!(action, LibinputAction::OpenInput { .. })
+        }));
+        assert_eq!(
+            udev.parked
+                .get(&input_devnum)
+                .unwrap()
+                .fd
+                .as_ref()
+                .unwrap()
+                .as_raw_fd(),
+            input_raw
+        );
+        assert_eq!(
+            udev.parked
+                .get(&drm_devnum)
+                .unwrap()
+                .fd
+                .as_ref()
+                .unwrap()
+                .as_raw_fd(),
+            drm_raw
+        );
+        assert!(udev.retained_inputs.contains_key(&input_devnum));
+
+        state.keyboard.update_key(30, true);
+        udev.process(
+            &mut state,
+            super::UdevAction::PauseDevice {
+                devnum: input_devnum,
+                kind: super::DevicePauseKind::Pause,
+            },
+            &mut dispatcher,
+        )
+        .expect("pause input");
+        assert!(udev.parked.get(&input_devnum).unwrap().fd.is_none());
+        assert!(udev.retained_inputs.contains_key(&input_devnum));
+        assert!(state.keyboard.pressed_keys().0.is_empty());
+        assert!(dispatcher.test_has_queued_action(|action: &LibinputAction| {
+            matches!(action, LibinputAction::Quiesce { devnum } if *devnum == input_devnum as u64)
+        }));
+        assert!(dispatcher.test_has_queued_action(|action: &DbusAction| {
+            matches!(action, DbusAction::DevicePauseQuiesced { devnum } if *devnum == input_devnum)
+        }));
+        assert!(matches!(udev.parked.get(&drm_devnum).unwrap().kind, super::ParkedKind::Drm(_)));
+    }
+
+    fn first_device(subsystem: &str) -> udev::Device {
+        let mut enumerator = udev::Enumerator::new().expect("udev enumerator");
+        enumerator.match_subsystem(subsystem).expect("subsystem");
+        enumerator
+            .scan_devices()
+            .expect("scan")
+            .find(|device| device.devnum().is_some() && device.devnode().is_some())
+            .unwrap_or_else(|| panic!("missing {subsystem} device"))
     }
 }

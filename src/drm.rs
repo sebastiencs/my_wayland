@@ -3501,6 +3501,13 @@ impl DrmOutputModel {
         dispatcher: &mut Dispatcher,
         decision: ClockDecision,
     ) {
+        if !state.session_active {
+            dispatcher.dispatch_to(
+                output_scheduler_id(self.output_id),
+                OutputSchedulerAction::RenderAttempted { started: false },
+            );
+            return;
+        }
         let Some(drm_crtc_id) = state.output_crtc_id(self.output_id) else {
             return;
         };
@@ -4058,11 +4065,15 @@ impl DrmOutputModel {
         active: bool,
     ) {
         if !active {
+            quiesce_output(state, dispatcher, self.drm_id, self.output_id);
             return;
         }
         let Some(drm_crtc_id) = state.output_crtc_id(self.output_id) else {
             return;
         };
+        if let Some(output) = state.drm.get_mut(self.drm_id).output_mut(drm_crtc_id) {
+            output.pipeline.resume_commits();
+        }
         let (releases, feedbacks, damage_blob) = {
             let drm = state.drm.get_mut(self.drm_id);
             drm.output_mut(drm_crtc_id)
@@ -4070,32 +4081,74 @@ impl DrmOutputModel {
                 .pipeline
                 .reset_after_session_resume()
         };
-        for release in releases {
-            release.resolve(state, dispatcher);
-        }
-        if feedbacks.is_empty() && damage_blob.is_none() {
-            return;
-        }
-        log::info!(
-            "session resumed for output {:?}; clearing stale in-flight pipeline state",
-            self.output_id
-        );
-        discard_frame_for_timeline(
+        settle_pipeline_reset(
+            state,
             dispatcher,
-            &[crate::scheduler::presentation::DiscardedFeedback { feedbacks }],
+            self.drm_id,
+            self.output_id,
+            releases,
+            feedbacks,
             damage_blob,
-            |blob| {
-                let drm = state.drm.get(self.drm_id);
-                let _ = drm.fd.destroy_property_blob(blob);
-            },
-            |dispatcher, completion| {
-                dispatcher.dispatch_to(
-                    output_scheduler_id(self.output_id),
-                    OutputSchedulerAction::FrameCompleted(completion),
-                );
-            },
         );
     }
+}
+
+pub(crate) fn quiesce_backend(state: &mut State, dispatcher: &mut Dispatcher, drm_id: DrmId) {
+    let output_ids = state.output_ids_for_backend(BackendOutputRef::new(drm_id));
+    for output_id in output_ids {
+        quiesce_output(state, dispatcher, drm_id, output_id);
+    }
+}
+
+fn quiesce_output(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    drm_id: DrmId,
+    output_id: OutputId,
+) {
+    let Some(drm_crtc_id) = state.output_crtc_id(output_id) else {
+        return;
+    };
+    let (releases, feedbacks, damage_blob) = {
+        let Some(output) = state.drm.get_mut(drm_id).output_mut(drm_crtc_id) else {
+            return;
+        };
+        output.pipeline.quiesce()
+    };
+    settle_pipeline_reset(state, dispatcher, drm_id, output_id, releases, feedbacks, damage_blob);
+}
+
+fn settle_pipeline_reset(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    drm_id: DrmId,
+    output_id: OutputId,
+    releases: Vec<DeferredRelease>,
+    feedbacks: Vec<SubmissionPresentationFeedback>,
+    damage_blob: Option<u64>,
+) {
+    for release in releases {
+        release.resolve(state, dispatcher);
+    }
+    if feedbacks.is_empty() && damage_blob.is_none() {
+        return;
+    }
+    log::info!("clearing in-flight pipeline state for output {output_id:?}");
+    discard_frame_for_timeline(
+        dispatcher,
+        &[crate::scheduler::presentation::DiscardedFeedback { feedbacks }],
+        damage_blob,
+        |blob| {
+            let drm = state.drm.get(drm_id);
+            let _ = drm.fd.destroy_property_blob(blob);
+        },
+        |dispatcher, completion| {
+            dispatcher.dispatch_to(
+                output_scheduler_id(output_id),
+                OutputSchedulerAction::FrameCompleted(completion),
+            );
+        },
+    );
 }
 
 fn collect_surface_snapshots(

@@ -35,6 +35,7 @@ struct OutputPipelineCore {
     last_scene: Vec<SceneItemState>,
     last_submission_had_effects: bool,
     force_full_redraw: bool,
+    commits_stopped: bool,
     rendered_buffer_present_id: [Option<u64>; 2],
     in_flight_frame: Option<SubmittedFrame>,
     displayed_external_fb: Option<DrmFrameBuffer>,
@@ -69,6 +70,7 @@ impl OutputPipeline {
                 last_scene: Vec::new(),
                 last_submission_had_effects: false,
                 force_full_redraw: true,
+                commits_stopped: false,
                 rendered_buffer_present_id: [None, None],
                 in_flight_frame: None,
                 displayed_external_fb: None,
@@ -224,6 +226,18 @@ impl OutputPipeline {
         self.mark_render_failed();
         (releases, feedbacks, damage_blob)
     }
+
+    /// Stop new commits, drop in-flight bookkeeping, and keep the next frame full.
+    pub(super) fn quiesce(
+        &mut self,
+    ) -> (Vec<DeferredRelease>, Vec<SubmissionPresentationFeedback>, Option<u64>) {
+        self.core.commits_stopped = true;
+        self.reset_after_session_resume()
+    }
+
+    pub(super) fn resume_commits(&mut self) {
+        self.core.commits_stopped = false;
+    }
 }
 
 impl OutputPipelineCore {
@@ -232,7 +246,7 @@ impl OutputPipelineCore {
     }
 
     fn begin_render(&mut self) -> bool {
-        if !matches!(self.phase, PipelinePhase::Idle) {
+        if self.commits_stopped || !matches!(self.phase, PipelinePhase::Idle) {
             return false;
         }
         self.phase = PipelinePhase::Rendering;
@@ -445,6 +459,18 @@ mod tests {
             cursor_slot: None,
         });
         assert_eq!(core.phase(), PipelinePhase::WaitingForFlip);
+        assert!(!core.begin_render());
+    }
+
+    #[test]
+    fn stopping_commits_blocks_render_and_marks_a_full_redraw() {
+        let mut core = OutputPipelineCore::default();
+        core.phase = PipelinePhase::WaitingForFlip;
+        core.force_full_redraw = false;
+        core.commits_stopped = true;
+        core.mark_render_failed();
+        assert_eq!(core.phase(), PipelinePhase::Idle);
+        assert!(core.force_full_redraw);
         assert!(!core.begin_render());
     }
 

@@ -1237,6 +1237,31 @@ pub fn handle_pointer_motion_absolute(
     }
 }
 
+/// Release keys this seat still considers pressed and drop grabs before a device pause.
+pub fn quiesce_for_session_pause(state: &mut State, dispatcher: &mut Dispatcher) {
+    let keys = state.keyboard.pressed_keys().0;
+    let buttons: Vec<u32> = state
+        .seat
+        .intercepted_pointer_buttons
+        .iter()
+        .copied()
+        .collect();
+    let time = monotonic_time_msec();
+    for key in keys {
+        handle_keyboard_key(state, dispatcher, key, 0, time);
+    }
+    for button in buttons {
+        handle_pointer_button(state, dispatcher, button, 0, time);
+    }
+    state.seat.pointer_button_count = 0;
+    state.seat.last_pointer_press = None;
+    state.seat.popup_grab = None;
+    state.seat.pointer_interactive_grab = None;
+    state.seat.intercepted_keyboard_keys.clear();
+    state.seat.intercepted_pointer_buttons.clear();
+    state.seat.active_drag = None;
+}
+
 pub fn handle_keyboard_key(
     state: &mut State,
     dispatcher: &mut Dispatcher,

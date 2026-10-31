@@ -72,16 +72,30 @@ pub struct OutputScheduler {
 #[derive(Debug)]
 pub enum OutputSchedulerAction {
     Start,
-    RequestFrame { reason: RequestFrameReason },
+    RequestFrame {
+        reason: RequestFrameReason,
+    },
     Arm,
-    RenderAttempted { started: bool },
-    ScheduleAnimation { delay_msec: Option<u32> },
-    PipelineBlocked { watchdog_deadline: Instant },
+    RenderAttempted {
+        started: bool,
+    },
+    ScheduleAnimation {
+        delay_msec: Option<u32>,
+    },
+    PipelineBlocked {
+        watchdog_deadline: Instant,
+    },
     FrameCompleted(FrameCompletionOutcome),
     ModeUpdated,
-    SessionChanged { active: bool },
+    SessionChanged {
+        active: bool,
+    },
+    /// Cancel pending frame and watchdog work while a device pause is in progress.
+    Disarm,
     Fired,
-    Failed { error: std::io::Error },
+    Failed {
+        error: std::io::Error,
+    },
     Stop,
 }
 
@@ -271,6 +285,14 @@ impl OutputScheduler {
         self.dispatch_read(dispatcher);
     }
 
+    fn disarm_clock(&mut self) {
+        self.session_active = false;
+        self.blocked_on_pipeline = false;
+        self.flip_watchdog_deadline = None;
+        self.clock.update_mode(FrameClockMode::Passive, 60_000);
+        let _ = self.set_expiration(None);
+    }
+
     fn try_dispatch_render(&mut self, dispatcher: &mut Dispatcher) {
         if self.render_dispatched || self.blocked_on_pipeline || !self.clock.pending_work() {
             return;
@@ -445,10 +467,10 @@ impl Model for OutputScheduler {
                     self.try_dispatch_render(dispatcher);
                     self.arm_from_clock(dispatcher);
                 } else {
-                    self.clock.update_mode(FrameClockMode::Passive, 60_000);
-                    let _ = self.set_expiration(None);
+                    self.disarm_clock();
                 }
             }
+            OutputSchedulerAction::Disarm => self.disarm_clock(),
             OutputSchedulerAction::Fired => {
                 self.read_op_id = None;
                 if self.blocked_on_pipeline
@@ -680,5 +702,37 @@ mod tests {
         let snapshot = state.frame_scheduler.get(&output_id).expect("snapshot");
         assert!(snapshot.clock.pending_work);
         assert_eq!(snapshot.clock.mode, FrameClockMode::Fixed);
+    }
+
+    #[test]
+    fn disarm_drops_pending_schedule_work() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output(
+            BackendOutputRef::new(DrmId::from(0usize)),
+            1,
+            0,
+            0,
+            1920,
+            1080,
+            "test-output",
+        ));
+        let mut scheduler = OutputScheduler::new(DrmId::from(0usize), output_id);
+        let mut dispatcher = Dispatcher::default();
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::RequestFrame { reason: RequestFrameReason::Damage },
+                &mut dispatcher,
+            )
+            .unwrap();
+        scheduler.blocked_on_pipeline = true;
+        scheduler.flip_watchdog_deadline = Some(std::time::Instant::now());
+        scheduler
+            .process(&mut state, OutputSchedulerAction::Disarm, &mut dispatcher)
+            .unwrap();
+        assert!(!scheduler.session_active);
+        assert!(!scheduler.blocked_on_pipeline);
+        assert!(scheduler.flip_watchdog_deadline.is_none());
+        assert_eq!(scheduler.clock.mode(), FrameClockMode::Passive);
     }
 }
