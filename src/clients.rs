@@ -3308,12 +3308,116 @@ mod socket_shutdown_tests {
     }
 
     #[test]
+    fn quit_unlinks_the_socket_and_the_next_session_can_bind_it() {
+        let (_dir, path) = temp_socket();
+        let manager = ClientManager::bind(&path).unwrap();
+        let state = state_for_tests();
+        let watcher = crate::config::ConfigWatcher::try_new(&state.config).unwrap();
+        let mut runner = Runner::with_state(state);
+        runner.add_model(Box::new(manager));
+        runner.add_model(Box::new(watcher));
+        runner.add_model(Box::new(crate::drm::VisualAnimationPump::new()));
+        let mut dispatcher = Dispatcher::default();
+        dispatcher.request_shutdown(ShutdownReason::Quit);
+        dispatcher
+            .request_shutdown(ShutdownReason::Fatal { source: "late", message: "ignored".into() });
+        let outcome = runner.run(dispatcher);
+
+        assert_eq!(outcome.code, 0);
+        assert_eq!(outcome.reason, ShutdownReason::Quit);
+        assert_eq!(outcome.diagnostics, vec!["late: ignored".to_string()]);
+        assert!(!path.exists());
+        assert!(!runner.test_has_model::<ClientManager>());
+        assert!(!runner.test_has_model::<crate::config::ConfigWatcher>());
+        assert!(!runner.test_has_model::<crate::drm::VisualAnimationPump>());
+
+        let manager = ClientManager::bind(&path).unwrap();
+        UnixStream::connect(&path).unwrap();
+        drop(manager);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_fatal_model_still_unlinks_the_socket() {
+        let (_dir, path) = temp_socket();
+        let manager = ClientManager::bind(&path).unwrap();
+        let mut runner = Runner::with_state(state_for_tests());
+        runner.add_model(Box::new(manager));
+        runner.add_model(Box::new(Boom));
+        let mut dispatcher = Dispatcher::default();
+        dispatcher.dispatch(BoomAction::Fail);
+        let outcome = runner.run(dispatcher);
+
+        assert_eq!(outcome.code, 1);
+        assert!(!path.exists());
+        assert!(!runner.test_has_model::<ClientManager>());
+    }
+
+    #[test]
+    fn an_unsupported_request_does_not_fail_the_session() {
+        use std::collections::VecDeque;
+
+        let mut client = Client::new_for_tests(ClientId::from_raw(7));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let request = RawRequest {
+            object_id: 1,
+            request_id: 50,
+            arguments: Arguments { args: VecDeque::new() },
+            fds: None,
+        };
+        assert!(matches!(
+            client.parse::<WlDisplay>(request, &mut client_dispatcher),
+            Err(AbortRequest::Malformed)
+        ));
+        assert!(!dispatcher.shutdown_requested());
+        assert!(dispatcher.test_has_queued_action(|action: &ClientManagerAction| {
+            matches!(action, ClientManagerAction::Close { id } if *id == ClientId::from_raw(7))
+        }));
+        dispatcher.request_shutdown(ShutdownReason::Quit);
+        let outcome = Runner::with_state(state_for_tests()).run(dispatcher);
+        assert_eq!(outcome.code, 0);
+    }
+
+    #[test]
     fn bind_failure_is_an_error() {
         let (_dir, path) = temp_socket();
         let missing = path.join("nested").join("sock");
         match ClientManager::bind(&missing) {
             Err(error) => assert!(error.to_string().contains("bind Wayland socket")),
             Ok(_manager) => panic!("bind succeeded"),
+        }
+    }
+}
+
+#[cfg(test)]
+struct Boom;
+
+#[cfg(test)]
+enum BoomAction {
+    Fail,
+    Stop,
+}
+
+#[cfg(test)]
+impl Model for Boom {
+    type Action = BoomAction;
+    const STOP: Option<Self::Action> = Some(BoomAction::Stop);
+
+    fn process(
+        &mut self,
+        _state: &mut State,
+        action: Self::Action,
+        _dispatcher: &mut Dispatcher,
+    ) -> std::result::Result<(), crate::runner::ModelFailure> {
+        match action {
+            BoomAction::Fail => {
+                Err(crate::runner::ModelFailure::Shutdown(crate::runner::ShutdownReason::Fatal {
+                    source: "test",
+                    message: "injected".into(),
+                }))
+            }
+            BoomAction::Stop => Ok(()),
         }
     }
 }

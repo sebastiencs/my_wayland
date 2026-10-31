@@ -668,6 +668,14 @@ fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
 impl drm::Device for DrmFd {}
 impl drm::control::Device for DrmFd {}
 
+fn apply_output_disables(crtc_ids: &[u32], mut disable: impl FnMut(u32) -> Result<(), String>) {
+    for &crtc_id in crtc_ids {
+        if let Err(error) = disable(crtc_id) {
+            log::warn!("failed to disable CRTC {crtc_id}: {error}");
+        }
+    }
+}
+
 fn output_disable_request(in_use: &ConnectorInUse) -> control::atomic::AtomicModeReq {
     let mut changes = control::atomic::AtomicModeReq::new();
     if let Some(active_prop) = in_use.crtc.active_prop {
@@ -1325,11 +1333,7 @@ impl Drm {
     /// active before the compositor started.
     pub fn disable_outputs(&mut self) {
         let crtc_ids: Vec<u32> = self.outputs.keys().copied().collect();
-        for crtc_id in crtc_ids {
-            if let Err(error) = self.disable_output(crtc_id) {
-                log::warn!("failed to disable CRTC {crtc_id}: {error}");
-            }
-        }
+        apply_output_disables(&crtc_ids, |crtc_id| self.disable_output(crtc_id));
     }
 
     fn disable_output(&mut self, crtc_id: u32) -> Result<(), String> {
@@ -8549,5 +8553,18 @@ mod surface_tree_render_tests {
             .collect();
         assert_eq!(positions, vec![(640, 0), (1004, 19), (1049, 73)]);
         assert_eq!(clip_flags, vec![true, false, false]);
+    }
+}
+
+#[cfg(test)]
+mod output_disable_tests {
+    #[test]
+    fn a_failed_disable_still_attempts_every_output() {
+        let mut attempted = Vec::new();
+        super::apply_output_disables(&[4, 9, 2], |crtc_id| {
+            attempted.push(crtc_id);
+            Err(format!("forced failure {crtc_id}"))
+        });
+        assert_eq!(attempted, [4, 9, 2]);
     }
 }

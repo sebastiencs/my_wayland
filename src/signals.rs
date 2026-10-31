@@ -173,4 +173,44 @@ mod tests {
         assert_eq!(info.ssi_signo, libc::SIGTERM as u32);
         mask.thread_unblock().unwrap();
     }
+
+    #[test]
+    fn sigint_finishes_the_runner_with_code_130() {
+        assert_eq!(finish_on_signal(libc::SIGINT).code, 130);
+    }
+
+    #[test]
+    fn sigterm_finishes_the_runner_with_code_143() {
+        assert_eq!(finish_on_signal(libc::SIGTERM).code, 143);
+    }
+
+    fn finish_on_signal(signo: i32) -> crate::runner::ExitOutcome {
+        use crate::runner::Model;
+
+        struct RestoreSignals;
+        impl Drop for RestoreSignals {
+            fn drop(&mut self) {
+                let mut mask = SigSet::empty();
+                mask.add(Signal::SIGINT);
+                mask.add(Signal::SIGTERM);
+                mask.add(Signal::SIGPIPE);
+                let _ = mask.thread_unblock();
+            }
+        }
+        let _restore = RestoreSignals;
+
+        let mut handler = SignalHandler::install().unwrap();
+        unsafe { libc::raise(signo) };
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        handler
+            .process(&mut state, SignalAction::Ready, &mut dispatcher)
+            .unwrap();
+        assert!(dispatcher.shutdown_requested());
+        let mut runner = crate::runner::Runner::with_state(state);
+        runner.add_model(Box::new(handler));
+        let outcome = runner.run(dispatcher);
+        assert_eq!(outcome.reason, crate::runner::ShutdownReason::Signal(signo));
+        outcome
+    }
 }

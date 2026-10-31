@@ -600,4 +600,54 @@ mod tests {
     fn bringup_is_fatal_when_every_initial_device_failed() {
         assert_eq!(Udev::bringup_decision(0, 0), Bringup::FatalNoOutput);
     }
+
+    #[test]
+    fn a_monitor_poll_failure_shuts_the_session_down() {
+        use crate::{
+            runner::{Model, ModelFailure, ShutdownReason},
+            test_support::state_for_tests,
+        };
+
+        let mut udev = Udev::new().expect("udev monitor");
+        let mut state = state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        let error = udev
+            .process(
+                &mut state,
+                super::UdevAction::PollFailed { message: "monitor closed".into() },
+                &mut dispatcher,
+            )
+            .expect_err("poll failure is fatal");
+        assert!(matches!(
+            error,
+            ModelFailure::Shutdown(ShutdownReason::Fatal { source: "udev", .. })
+        ));
+    }
+
+    #[test]
+    fn the_last_failed_device_with_no_output_is_fatal() {
+        use crate::{
+            runner::{Model, ModelFailure, ShutdownReason},
+            test_support::state_for_tests,
+        };
+
+        let mut udev = Udev::new().expect("udev monitor");
+        udev.initial_drm.insert(7);
+        udev.initial_drm.insert(8);
+        let mut state = state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        udev.process(
+            &mut state,
+            super::UdevAction::DeviceTakeFailed { devnum: 7 },
+            &mut dispatcher,
+        )
+        .expect("another initial device is still pending");
+        let error = udev
+            .process(&mut state, super::UdevAction::DeviceTakeFailed { devnum: 8 }, &mut dispatcher)
+            .expect_err("no output remains");
+        assert!(matches!(
+            error,
+            ModelFailure::Shutdown(ShutdownReason::Fatal { source: "drm", .. })
+        ));
+    }
 }

@@ -724,7 +724,45 @@ mod drain_tests {
             return;
         };
         let fd = ring.raw_fd();
+        // Hold a second reference so a reused descriptor number can be told
+        // apart from this ring. `cargo test` runs tests on other threads, and
+        // those threads open files in this same process.
+        let kept = unsafe { libc::dup(fd) };
+        assert!(kept >= 0, "{}", std::io::Error::last_os_error());
         drop(ring);
-        assert!(std::fs::metadata(format!("/proc/self/fd/{fd}")).is_err());
+        let pid = unsafe { libc::getpid() };
+        let same = unsafe {
+            libc::syscall(
+                libc::SYS_kcmp,
+                pid,
+                pid,
+                libc::c_long::from(0), // KCMP_FILE
+                fd as libc::c_ulong,
+                kept as libc::c_ulong,
+            )
+        };
+        unsafe { libc::close(kept) };
+        assert_ne!(same, 0, "drop left the io_uring fd open");
+    }
+
+    #[test]
+    fn a_failed_cancel_submit_still_finishes_the_drain() {
+        let Ok(mut ring) = IoUringState::try_new() else {
+            return;
+        };
+        let (read, _write) = pipe();
+        let hit = Rc::new(Cell::new(false));
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        ring.process(&mut state, poll_action(read.as_raw_fd(), hit.clone()), &mut dispatcher)
+            .unwrap();
+
+        let null = std::fs::File::open("/dev/null").unwrap();
+        let fd = ring.raw_fd();
+        assert_eq!(unsafe { libc::dup2(null.as_raw_fd(), fd) }, fd);
+        ring.process(&mut state, IoUringAction::Drain, &mut dispatcher)
+            .unwrap();
+        assert!(ring.drained);
+        assert!(!hit.get());
     }
 }

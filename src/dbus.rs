@@ -976,4 +976,69 @@ mod session_release_tests {
             Some("org.freedesktop.DBus.Error.UnknownMember")
         );
     }
+
+    fn dbus_for_tests() -> super::Dbus {
+        use std::os::unix::net::UnixStream;
+
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        super::Dbus {
+            socket,
+            session_path: "/org/freedesktop/login1/session/self".into(),
+            seat: "seat0".into(),
+            current_serial: super::DbusSerial(1),
+            pending: Default::default(),
+            held_devices: Default::default(),
+            took_control: true,
+            released_control: false,
+        }
+    }
+
+    fn error_reply(serial: u32, name: &str) -> dbus_message_parser::message::Message {
+        let mut call = dbus_message_parser::message::Message::method_call(
+            "org.freedesktop.login1".try_into().unwrap(),
+            "/org/freedesktop/login1/session/self".try_into().unwrap(),
+            "org.freedesktop.login1.Session".try_into().unwrap(),
+            "TakeDevice".try_into().unwrap(),
+        );
+        call.set_serial(serial);
+        let error_name: dbus_message_parser::value::Error = name.to_string().try_into().unwrap();
+        call.error(error_name, "injected".into())
+    }
+
+    #[test]
+    fn a_lost_session_shuts_down_and_a_device_error_does_not() {
+        use crate::{runner::Dispatcher, test_support::state_for_tests, udev::UdevAction};
+
+        use super::{DbusSerial, Pending};
+
+        let mut session = dbus_for_tests();
+        session
+            .pending
+            .insert(DbusSerial(4), Pending::TakeDevice { devnum: 9 });
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        session.handle_message(
+            &mut state,
+            error_reply(4, "org.freedesktop.login1.NoSession"),
+            Vec::new(),
+            &mut dispatcher,
+        );
+        assert!(dispatcher.shutdown_requested());
+
+        let mut session = dbus_for_tests();
+        session
+            .pending
+            .insert(DbusSerial(4), Pending::TakeDevice { devnum: 9 });
+        let mut dispatcher = Dispatcher::default();
+        session.handle_message(
+            &mut state,
+            error_reply(4, "org.freedesktop.DBus.Error.AccessDenied"),
+            Vec::new(),
+            &mut dispatcher,
+        );
+        assert!(!dispatcher.shutdown_requested());
+        assert!(dispatcher.test_has_queued_action(|action: &UdevAction| {
+            matches!(action, UdevAction::DeviceTakeFailed { devnum: 9 })
+        }));
+    }
 }

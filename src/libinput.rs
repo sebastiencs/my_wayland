@@ -659,3 +659,49 @@ mod device_stop_tests {
         assert!(libinput.dev_to_fd.lock().unwrap().is_empty());
     }
 }
+
+#[cfg(test)]
+mod fault_tests {
+    use std::os::fd::AsRawFd;
+
+    use crate::{
+        runner::{Dispatcher, Model, ModelFailure, ShutdownReason},
+        test_support::state_for_tests,
+    };
+
+    use super::{Libinput, LibinputAction};
+
+    #[test]
+    fn a_poll_failure_shuts_the_session_down() {
+        let mut input = Libinput::new();
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        let error = input
+            .process(
+                &mut state,
+                LibinputAction::PollFailed { message: "input closed".into() },
+                &mut dispatcher,
+            )
+            .expect_err("poll failure is fatal");
+        assert!(matches!(
+            error,
+            ModelFailure::Shutdown(ShutdownReason::Fatal { source: "libinput", .. })
+        ));
+    }
+
+    #[test]
+    fn a_dispatch_failure_leaves_the_session_running() {
+        let mut input = Libinput::new();
+        let null = std::fs::File::open("/dev/null").unwrap();
+        let fd = input.libinput.as_raw_fd();
+        assert_eq!(unsafe { libc::dup2(null.as_raw_fd(), fd) }, fd);
+        input.dispatch().expect_err("libinput fd was replaced");
+
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        input
+            .process(&mut state, LibinputAction::Event, &mut dispatcher)
+            .expect("a dispatch error is recoverable");
+        assert!(!dispatcher.shutdown_requested());
+    }
+}
