@@ -20,8 +20,8 @@ use crate::{
     clients::ClientManagerAction,
     dbus::DbusAction,
     drm::{
-        discard_backend_presentation_feedbacks, quiesce_backend, sync_output_nodes_for_backend,
-        Drm, DrmReader,
+        discard_backend_presentation_feedbacks, quiesce_backend, resume_drm_backend,
+        sync_output_nodes_for_backend, Drm, DrmReader,
     },
     globals::Global,
     io_uring::{
@@ -78,8 +78,10 @@ pub struct Udev {
     retained_inputs: BTreeMap<libc::dev_t, String>,
     /// TakeDevice results for a session that was not active yet.
     parked: BTreeMap<libc::dev_t, ParkedSessionDevice>,
-    /// Resume fds kept until a later phase opens the device again.
+    /// Resume fds kept until the session is active and the device can be restored.
     resumed_fds: BTreeMap<libc::dev_t, OwnedFd>,
+    /// Live or parked DRM devices waiting for a resume fd before they are modeset.
+    awaiting_drm_resume: BTreeSet<libc::dev_t>,
     poll_op_id: Option<RingId>,
 }
 
@@ -200,6 +202,7 @@ impl Model for Udev {
                         self.pending.remove(&devnum);
                         self.retained_inputs.remove(&devnum);
                         self.parked.remove(&devnum);
+                        self.awaiting_drm_resume.remove(&devnum);
                         dispatcher.dispatch(LibinputAction::Quiesce { devnum: devnum as u64 });
                         if let Some(drm_id) = Self::find_drm_id_for_devnum(state, devnum) {
                             self.remove_drm_backend(drm_id, state, dispatcher);
@@ -207,7 +210,15 @@ impl Model for Udev {
                         }
                     }
                     DevicePauseKind::Pause | DevicePauseKind::Force => {
+                        let live_drm = Self::find_drm_id_for_devnum(state, devnum).is_some();
+                        let parked_drm = self
+                            .parked
+                            .get(&devnum)
+                            .is_some_and(|parked| matches!(parked.kind, ParkedKind::Drm(_)));
                         self.quiesce_device(devnum, state, dispatcher);
+                        if live_drm || parked_drm {
+                            self.awaiting_drm_resume.insert(devnum);
+                        }
                         dispatcher.dispatch(DbusAction::DevicePauseQuiesced { devnum });
                     }
                 }
@@ -215,7 +226,11 @@ impl Model for Udev {
             UdevAction::ResumeDevice { devnum, fd } => {
                 self.resumed_fds.insert(devnum, fd);
                 if state.session_active {
-                    self.restore_ready_input(devnum, dispatcher);
+                    if self.retained_inputs.contains_key(&devnum) {
+                        self.restore_ready_input(devnum, dispatcher);
+                    } else {
+                        self.restore_ready_drm(devnum, state, dispatcher)?;
+                    }
                 }
             }
             UdevAction::SessionActive => {
@@ -223,6 +238,26 @@ impl Model for Udev {
                     let devnums: Vec<_> = self.retained_inputs.keys().copied().collect();
                     for devnum in devnums {
                         self.restore_ready_input(devnum, dispatcher);
+                    }
+                    let mut drm_devnums: Vec<_> = self
+                        .parked
+                        .iter()
+                        .filter(|(_, parked)| matches!(parked.kind, ParkedKind::Drm(_)))
+                        .map(|(devnum, _)| *devnum)
+                        .collect();
+                    for (_, drm) in state.drm.iter() {
+                        if let Some(devnum) = drm.devnum() {
+                            if self.awaiting_drm_resume.contains(&devnum)
+                                || self.resumed_fds.contains_key(&devnum)
+                            {
+                                drm_devnums.push(devnum);
+                            }
+                        }
+                    }
+                    drm_devnums.sort_unstable();
+                    drm_devnums.dedup();
+                    for devnum in drm_devnums {
+                        self.restore_ready_drm(devnum, state, dispatcher)?;
                     }
                 }
             }
@@ -258,6 +293,7 @@ impl Udev {
             retained_inputs: BTreeMap::new(),
             parked: BTreeMap::new(),
             resumed_fds: BTreeMap::new(),
+            awaiting_drm_resume: BTreeSet::new(),
             poll_op_id: None,
         }))
     }
@@ -527,6 +563,98 @@ impl Udev {
         }
     }
 
+    /// Modeset a live DRM backend, or open a parked one, once a resume fd is available.
+    fn restore_ready_drm(
+        &mut self,
+        devnum: libc::dev_t,
+        state: &mut State,
+        dispatcher: &mut Dispatcher,
+    ) -> std::result::Result<(), ModelFailure> {
+        if let Some(drm_id) = Self::find_drm_id_for_devnum(state, devnum) {
+            let Some(fd) = self.resumed_fds.remove(&devnum) else {
+                self.awaiting_drm_resume.insert(devnum);
+                return Ok(());
+            };
+            self.awaiting_drm_resume.remove(&devnum);
+            {
+                // The resume fd is the temporary master. Closing it, then
+                // SET_MASTER, keeps the GBM and framebuffer ids on the original fd.
+                let drm = state.drm.get(drm_id);
+                drop(fd);
+                if let Err(error) = drm.reclaim_master() {
+                    log::warn!("DRM device {devnum} kept its fd, setmaster failed: {error}");
+                }
+            }
+            let failed = resume_drm_backend(state, dispatcher, drm_id);
+            for crtc_id in failed {
+                if let Some(output_id) = state.output_id_for_drm_crtc(drm_id, crtc_id) {
+                    self.remove_output_node(output_id, state, dispatcher);
+                }
+            }
+            if state
+                .output_ids_for_backend(BackendOutputRef::new(drm_id))
+                .is_empty()
+            {
+                self.remove_drm_backend(drm_id, state, dispatcher);
+            }
+            return self.finish_drm_restore(state);
+        }
+
+        let parked_drm = self
+            .parked
+            .get(&devnum)
+            .is_some_and(|parked| matches!(parked.kind, ParkedKind::Drm(_)));
+        if !parked_drm {
+            return Ok(());
+        }
+        let Some(fd) = self.take_drm_fd(devnum) else {
+            self.awaiting_drm_resume.insert(devnum);
+            return Ok(());
+        };
+        let Some(parked) = self.parked.remove(&devnum) else {
+            return Ok(());
+        };
+        let ParkedKind::Drm(device) = parked.kind else {
+            return Ok(());
+        };
+        self.awaiting_drm_resume.remove(&devnum);
+        self.on_drm_taken(device, fd, false, devnum, state, dispatcher)?;
+        self.finish_drm_restore(state)
+    }
+
+    fn take_drm_fd(&mut self, devnum: libc::dev_t) -> Option<OwnedFd> {
+        let resumed = self.resumed_fds.remove(&devnum);
+        let parked = self.parked.get_mut(&devnum).and_then(|parked| {
+            matches!(parked.kind, ParkedKind::Drm(_))
+                .then(|| parked.fd.take())
+                .flatten()
+        });
+        match (resumed, parked) {
+            (Some(resumed), parked) => {
+                drop(parked);
+                Some(resumed)
+            }
+            (None, parked) => parked,
+        }
+    }
+
+    fn finish_drm_restore(&self, state: &State) -> std::result::Result<(), ModelFailure> {
+        if self.drm_restore_pending() {
+            Ok(())
+        } else {
+            self.fatal_if_no_output(state)
+        }
+    }
+
+    fn drm_restore_pending(&self) -> bool {
+        !self.initial_drm.is_empty()
+            || !self.awaiting_drm_resume.is_empty()
+            || self
+                .parked
+                .values()
+                .any(|parked| matches!(parked.kind, ParkedKind::Drm(_)))
+    }
+
     fn on_drm_taken(
         &mut self,
         device: udev::Device,
@@ -624,10 +752,8 @@ impl Udev {
     }
 
     fn fatal_if_no_output(&self, state: &State) -> std::result::Result<(), ModelFailure> {
-        Self::fatal_when(Self::bringup_decision(
-            state.outputs.iter().count(),
-            self.initial_drm.len(),
-        ))
+        let pending = usize::from(self.drm_restore_pending());
+        Self::fatal_when(Self::bringup_decision(state.outputs.iter().count(), pending))
     }
 
     fn fatal_when(decision: Bringup) -> std::result::Result<(), ModelFailure> {
@@ -1064,6 +1190,43 @@ mod tests {
         assert_eq!(udev.resumed_fds.get(&devnum).unwrap().as_raw_fd(), raw);
         assert!(!dispatcher.test_has_queued_action(|action: &LibinputAction| {
             matches!(action, LibinputAction::OpenInput { .. })
+        }));
+    }
+
+    #[test]
+    fn a_parked_drm_device_waits_for_a_resume_fd_then_fails_closed() {
+        use crate::{
+            dbus::DbusAction,
+            runner::{Model, ModelFailure, ShutdownReason},
+        };
+
+        let drm = first_device("drm");
+        let devnum = drm.devnum().expect("drm devnum");
+        let mut udev = Udev::new().expect("udev monitor");
+        udev.parked.insert(
+            devnum,
+            super::ParkedSessionDevice { kind: super::ParkedKind::Drm(drm), fd: None },
+        );
+        let mut state = crate::test_support::state_for_tests();
+        state.session_active = true;
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        udev.process(&mut state, super::UdevAction::SessionActive, &mut dispatcher)
+            .expect("active before the resume fd");
+        assert!(udev.awaiting_drm_resume.contains(&devnum));
+        assert!(!dispatcher.shutdown_requested());
+        assert!(udev.parked.contains_key(&devnum));
+
+        let fd: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let error = udev
+            .process(&mut state, super::UdevAction::ResumeDevice { devnum, fd }, &mut dispatcher)
+            .expect_err("the parked fd cannot be restored");
+        assert!(matches!(
+            error,
+            ModelFailure::Shutdown(ShutdownReason::Fatal { source: "drm", .. })
+        ));
+        assert!(udev.resumed_fds.get(&devnum).is_none());
+        assert!(dispatcher.test_has_queued_action(|action: &DbusAction| {
+            matches!(action, DbusAction::ReleaseDevice { .. })
         }));
     }
 

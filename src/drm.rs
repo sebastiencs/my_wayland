@@ -167,6 +167,8 @@ pub struct Drm {
     driver: Driver,
     supports_syncobj_timeline: bool,
     supports_syncobj_eventfd: bool,
+    /// Bumped on each in-place restore. Flip events armed earlier are ignored.
+    event_generation: u64,
 }
 
 impl Drop for Drm {
@@ -667,6 +669,18 @@ fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
 
 impl drm::Device for DrmFd {}
 impl drm::control::Device for DrmFd {}
+
+nix::ioctl_none!(drm_set_master, b'd', 0x1e);
+
+impl DrmFd {
+    /// Become DRM master on this fd. Logind's resume fd is a different master;
+    /// closing it and calling this keeps framebuffer ids valid on the retained fd.
+    pub(crate) fn set_master(&self) -> std::io::Result<()> {
+        unsafe { drm_set_master(self.as_raw_fd()) }
+            .map(|_| ())
+            .map_err(std::io::Error::from)
+    }
+}
 
 fn apply_output_disables(crtc_ids: &[u32], mut disable: impl FnMut(u32) -> Result<(), String>) {
     for &crtc_id in crtc_ids {
@@ -1304,6 +1318,7 @@ impl Drm {
             outputs,
             supports_syncobj_timeline,
             supports_syncobj_eventfd,
+            event_generation: 0,
         };
         let drm_output_ids = drm_backend.outputs.keys().copied().collect::<Vec<_>>();
         for drm_output_id in drm_output_ids {
@@ -1322,6 +1337,10 @@ impl Drm {
 
     pub fn fd(&self) -> DrmFd {
         self.fd.clone()
+    }
+
+    pub(crate) fn reclaim_master(&self) -> std::io::Result<()> {
+        self.fd.set_master()
     }
 
     pub fn devnum(&self) -> Option<libc::dev_t> {
@@ -1346,6 +1365,295 @@ impl Drm {
         self.fd
             .atomic_commit(control::AtomicCommitFlags::ALLOW_MODESET, changes)
             .map_err(|error| format!("{error:?}"))
+    }
+
+    /// Refresh connector state and modeset every retained output with its scanout buffer.
+    /// Failed CRTCs are returned so the caller can remove only those outputs.
+    pub(crate) fn restore_outputs_in_place(
+        &mut self,
+    ) -> Vec<(
+        u32,
+        Result<(Vec<DeferredRelease>, Vec<SubmissionPresentationFeedback>, Option<u64>), String>,
+    )> {
+        let crtc_ids: Vec<u32> = self.outputs.keys().copied().collect();
+        crtc_ids
+            .into_iter()
+            .map(|crtc_id| (crtc_id, self.restore_output(crtc_id)))
+            .collect()
+    }
+
+    fn restore_output(
+        &mut self,
+        drm_crtc_id: u32,
+    ) -> Result<(Vec<DeferredRelease>, Vec<SubmissionPresentationFeedback>, Option<u64>), String>
+    {
+        self.refresh_retained_output(drm_crtc_id)?;
+        let mode = self
+            .output(drm_crtc_id)
+            .and_then(|output| output.in_use.connector.preferred_mode)
+            .ok_or_else(|| "connector has no retained mode".to_string())?;
+        let raw_mode = Self::modeinfo_from_mode(mode);
+        let mode_blob = self
+            .fd
+            .create_property_blob(&raw_mode)
+            .map_err(|error| format!("mode blob: {error}"))?;
+        let mode_blob_id = mode_blob
+            .as_blob()
+            .ok_or_else(|| "mode blob id missing".to_string())?;
+        let changes = {
+            let Some(output) = self.output(drm_crtc_id) else {
+                let _ = self.fd.destroy_property_blob(mode_blob_id);
+                return Err("missing DRM output".into());
+            };
+            Self::restore_modeset_request(output, mode_blob_id)
+        };
+        if let Err(error) = self
+            .fd
+            .atomic_commit(control::AtomicCommitFlags::ALLOW_MODESET, changes)
+        {
+            let _ = self.fd.destroy_property_blob(mode_blob_id);
+            return Err(format!("restore modeset: {error}"));
+        }
+        let Some(output) = self.output_mut(drm_crtc_id) else {
+            return Err("missing DRM output".into());
+        };
+        let previous = std::mem::replace(&mut output.in_use.crtc.mode_id, mode_blob_id as u32);
+        output.in_use.crtc.active = true;
+        let bounds = output.output_bounds();
+        let reset = output.pipeline.reset_after_session_resume();
+        output.pipeline.resume_commits();
+        output.pipeline.queue_pending_damage(bounds);
+        drop(output);
+        if previous != 0 && u64::from(previous) != mode_blob_id {
+            let _ = self.fd.destroy_property_blob(u64::from(previous));
+        }
+        Ok(reset)
+    }
+
+    fn refresh_retained_output(&mut self, drm_crtc_id: u32) -> Result<(), String> {
+        let (connector_handle, retained_mode, crtc_handle, plane_handle) = {
+            let output = self
+                .output(drm_crtc_id)
+                .ok_or_else(|| "missing DRM output".to_string())?;
+            let (plane, _) = output.in_use.primary_plane();
+            (
+                output.in_use.connector.handler,
+                output.in_use.connector.preferred_mode,
+                output.in_use.crtc.handle,
+                plane.handle,
+            )
+        };
+        let info = self
+            .fd
+            .get_connector(connector_handle, true)
+            .map_err(|error| format!("connector refresh: {error}"))?;
+        let connected = matches!(info.state(), connector::State::Connected);
+        let advertised = retained_mode.is_some_and(|mode| {
+            info.modes()
+                .iter()
+                .any(|candidate| candidate.size() == mode.size())
+        });
+        if let Some(reason) =
+            Self::retained_assignment_failure(connected, retained_mode.is_some(), advertised)
+        {
+            return Err(reason.into());
+        }
+        let crtc_props = Self::readable_properties(&self.fd, crtc_handle)?;
+        let plane_props = Self::readable_properties(&self.fd, plane_handle)?;
+        let connector_props = Self::readable_properties(&self.fd, connector_handle)?;
+        let active_prop = crtc_props
+            .get("ACTIVE")
+            .map(|(_, info)| info.handle())
+            .ok_or_else(|| "CRTC has no ACTIVE property".to_string())?;
+        let mode_id_prop = crtc_props
+            .get("MODE_ID")
+            .map(|(_, info)| info.handle())
+            .ok_or_else(|| "CRTC has no MODE_ID property".to_string())?;
+        let fb_id = plane_props
+            .get("FB_ID")
+            .map(|(_, info)| info.handle())
+            .ok_or_else(|| "primary plane has no FB_ID property".to_string())?;
+        let plane_crtc = plane_props
+            .get("CRTC_ID")
+            .map(|(_, info)| info.handle())
+            .ok_or_else(|| "primary plane has no CRTC_ID property".to_string())?;
+        let connector_crtc = connector_props
+            .get("CRTC_ID")
+            .map(|(_, info)| info.handle())
+            .ok_or_else(|| "connector has no CRTC_ID property".to_string())?;
+        let output = self.output_mut(drm_crtc_id).unwrap();
+        output.in_use.connector.state = info.state();
+        output.in_use.crtc.active_prop = Some(active_prop);
+        output.in_use.crtc.mode_id_prop = Some(mode_id_prop);
+        output.in_use.connector.crtc_id_prop = Some(connector_crtc);
+        let plane = &mut output.in_use.planes[output.in_use.primary_plane_index];
+        plane.fb_id = fb_id;
+        plane.crtc_id = plane_crtc;
+        Ok(())
+    }
+
+    fn modeinfo_from_mode(mode: control::Mode) -> drm_ffi::drm_sys::drm_mode_modeinfo {
+        let mut raw: drm_ffi::drm_sys::drm_mode_modeinfo = unsafe { std::mem::zeroed() };
+        raw.clock = mode.clock();
+        let (hdisplay, vdisplay) = mode.size();
+        raw.hdisplay = hdisplay;
+        raw.vdisplay = vdisplay;
+        let (start, end, total) = mode.hsync();
+        raw.hsync_start = start;
+        raw.hsync_end = end;
+        raw.htotal = total;
+        let (start, end, total) = mode.vsync();
+        raw.vsync_start = start;
+        raw.vsync_end = end;
+        raw.vtotal = total;
+        raw.hskew = mode.hskew();
+        raw.vscan = mode.vscan();
+        raw.vrefresh = mode.vrefresh();
+        raw.flags = mode.flags().bits();
+        raw.type_ = mode.mode_type().bits();
+        let name = mode.name().to_bytes();
+        let len = name.len().min(raw.name.len().saturating_sub(1));
+        for (slot, byte) in raw.name[..len].iter_mut().zip(name[..len].iter()) {
+            *slot = *byte as i8;
+        }
+        raw
+    }
+
+    fn retained_assignment_failure(
+        connected: bool,
+        has_mode: bool,
+        mode_advertised: bool,
+    ) -> Option<&'static str> {
+        if !connected {
+            Some("connector is not connected")
+        } else if !has_mode {
+            Some("connector has no retained mode")
+        } else if !mode_advertised {
+            Some("retained mode is no longer advertised")
+        } else {
+            None
+        }
+    }
+
+    fn readable_properties<T: control::ResourceHandle>(
+        drm: &DrmFd,
+        object: T,
+    ) -> Result<BTreeMap<String, (u64, property::Info)>, String> {
+        let properties = drm
+            .get_properties(object)
+            .map_err(|error| format!("properties: {error}"))?;
+        let mut named = BTreeMap::new();
+        for (prop, value) in properties {
+            let info = drm
+                .get_property(prop)
+                .map_err(|error| format!("property: {error}"))?;
+            let name = info
+                .name()
+                .to_str()
+                .map_err(|_| "property name is not utf-8".to_string())?;
+            named.insert(name.to_string(), (value, info));
+        }
+        Ok(named)
+    }
+
+    fn restore_modeset_request(
+        output: &DrmOutput,
+        mode_blob_id: u64,
+    ) -> control::atomic::AtomicModeReq {
+        let mut changes = control::atomic::AtomicModeReq::new();
+        let (plane, _) = output.in_use.primary_plane();
+        let fb = output.render_buffer().drm_fb.id();
+        let (width, height) = output
+            .in_use
+            .connector
+            .preferred_mode
+            .map(|mode| mode.size())
+            .unwrap_or((0, 0));
+        if let Some(active_prop) = output.in_use.crtc.active_prop {
+            changes.add_property(
+                output.in_use.crtc.handle,
+                active_prop,
+                control::property::Value::UnsignedRange(1),
+            );
+        }
+        if let Some(mode_id_prop) = output.in_use.crtc.mode_id_prop {
+            changes.add_property(
+                output.in_use.crtc.handle,
+                mode_id_prop,
+                control::property::Value::Blob(mode_blob_id),
+            );
+        }
+        if let Some(crtc_id_prop) = output.in_use.connector.crtc_id_prop {
+            changes.add_property(
+                output.in_use.connector.handler,
+                crtc_id_prop,
+                control::property::Value::CRTC(Some(output.in_use.crtc.handle)),
+            );
+        }
+        changes.add_property(
+            plane.handle,
+            plane.fb_id,
+            control::property::Value::Object(Some(fb.into())),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.crtc_id,
+            control::property::Value::CRTC(Some(output.in_use.crtc.handle)),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.crtc.x.handle,
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.crtc.y.handle,
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.crtc.width.handle,
+            control::property::Value::UnsignedRange(width as u64),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.crtc.height.handle,
+            control::property::Value::UnsignedRange(height as u64),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.src.x.handle,
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.src.y.handle,
+            control::property::Value::UnsignedRange(0),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.src.width.handle,
+            control::property::Value::UnsignedRange((width as u64) << 16),
+        );
+        changes.add_property(
+            plane.handle,
+            plane.src.height.handle,
+            control::property::Value::UnsignedRange((height as u64) << 16),
+        );
+        if let Some(property) = plane.in_fence_fd {
+            changes.add_property(plane.handle, property, control::property::Value::SignedRange(-1));
+        }
+        if let Some(property) = plane.fb_damage_clips {
+            changes.add_property(plane.handle, property, control::property::Value::Blob(0));
+        }
+        for extra in &output.in_use.planes {
+            if extra.handle == plane.handle {
+                continue;
+            }
+            changes.add_property(extra.handle, extra.fb_id, control::property::Value::Object(None));
+            changes.add_property(extra.handle, extra.crtc_id, control::property::Value::CRTC(None));
+        }
+        changes
     }
 
     pub fn supports_syncobj_timeline(&self) -> bool {
@@ -2844,6 +3152,10 @@ impl DrmBuffer {
         Self { data: vec![0; 4096], pos: 0 }
     }
 
+    fn clear(&mut self) {
+        self.pos = 0;
+    }
+
     fn append(&mut self, buffer: &[u8]) {
         let pos = self.pos;
         let buffer_len = buffer.len();
@@ -2918,6 +3230,8 @@ pub struct DrmReader {
     read_buffer: DrmBuffer,
     poll_op_id: Option<RingId>,
     read_op_id: Option<RingId>,
+    /// Completions armed under another generation belong to the pre-resume fd session.
+    generation: u64,
 }
 
 impl ModelInstanceId for DrmId {
@@ -2931,10 +3245,24 @@ impl ModelInstanceId for DrmId {
 #[derive(Debug)]
 pub enum DrmReaderAction {
     Start,
-    PollReady,
-    ReadChunk { buffer: Box<[u8]> },
-    ReadDrained,
-    ReadError { error: std::io::Error },
+    PollReady {
+        generation: u64,
+    },
+    ReadChunk {
+        buffer: Box<[u8]>,
+        generation: u64,
+    },
+    ReadDrained {
+        generation: u64,
+    },
+    ReadError {
+        error: std::io::Error,
+        generation: u64,
+    },
+    /// Drop in-flight reads and ignore events armed before this generation.
+    SetGeneration {
+        generation: u64,
+    },
     Stop,
 }
 
@@ -2955,14 +3283,28 @@ impl Model for DrmReader {
             Start => {
                 self.dispatch_poll(dispatcher);
             }
-            PollReady => {
-                if self.read_op_id.is_some() {
+            SetGeneration { generation } => {
+                self.generation = generation;
+                if let Some(poll_op_id) = self.poll_op_id.take() {
+                    dispatcher.dispatch(IoUringAction::PollRemove { target: poll_op_id });
+                }
+                if let Some(read_op_id) = self.read_op_id.take() {
+                    dispatcher.dispatch(IoUringAction::Cancel { target: read_op_id });
+                }
+                self.read_buffer.clear();
+                self.dispatch_poll(dispatcher);
+            }
+            PollReady { generation } => {
+                if generation != self.generation || self.read_op_id.is_some() {
                     return Ok(());
                 }
                 self.dispatch_read_some(dispatcher);
             }
-            ReadChunk { buffer } => {
+            ReadChunk { buffer, generation } => {
                 self.read_op_id = None;
+                if generation != self.generation {
+                    return Ok(());
+                }
                 self.read_buffer.append(&buffer);
                 loop {
                     let event = match self.read_buffer.next_event() {
@@ -2988,7 +3330,13 @@ impl Model for DrmReader {
                             {
                                 dispatcher.dispatch_to(
                                     output_id,
-                                    DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id },
+                                    DrmAction::FlipComplete {
+                                        sequence,
+                                        tv_sec,
+                                        tv_usec,
+                                        crtc_id,
+                                        generation,
+                                    },
                                 );
                             }
                         }
@@ -2997,12 +3345,16 @@ impl Model for DrmReader {
                     self.read_buffer.consume_event(len);
                 }
             }
-            ReadDrained => {
-                self.read_op_id = None;
+            ReadDrained { generation } => {
+                if generation == self.generation {
+                    self.read_op_id = None;
+                }
             }
-            ReadError { error } => {
-                self.read_op_id = None;
-                log::error!("Could not read DRM events: {:?}", error);
+            ReadError { error, generation } => {
+                if generation == self.generation {
+                    self.read_op_id = None;
+                    log::error!("Could not read DRM events: {:?}", error);
+                }
             }
             Stop => {
                 if let Some(poll_op_id) = self.poll_op_id.take() {
@@ -3026,6 +3378,7 @@ impl DrmReader {
             read_buffer: DrmBuffer::new(),
             poll_op_id: None,
             read_op_id: None,
+            generation: 0,
         }
     }
 
@@ -3041,9 +3394,12 @@ impl DrmReader {
         dispatcher.dispatch(IoUringAction::Poll {
             id: Some(poll_op_id),
             fd: self.fd.as_raw_fd(),
-            dispatch_to: Redispatcher::to_instance(self.model_id(), |result| match result {
-                Ok(PollCompleted {}) => DrmReaderAction::PollReady,
-                Err(error) => DrmReaderAction::ReadError { error },
+            dispatch_to: Redispatcher::to_instance(self.model_id(), {
+                let generation = self.generation;
+                move |result| match result {
+                    Ok(PollCompleted {}) => DrmReaderAction::PollReady { generation },
+                    Err(error) => DrmReaderAction::ReadError { error, generation },
+                }
             }),
         });
     }
@@ -3058,16 +3414,18 @@ impl DrmReader {
             fd: self.fd.as_raw_fd(),
             offset: 0,
             length: 4096,
-            dispatch_to: Redispatcher::to_instance(
-                self.model_id(),
-                |result: std::io::Result<ReadWriteCompleted>| match result {
-                    Ok(ReadWriteCompleted { buffer, .. }) => DrmReaderAction::ReadChunk { buffer },
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        DrmReaderAction::ReadDrained
+            dispatch_to: Redispatcher::to_instance(self.model_id(), {
+                let generation = self.generation;
+                move |result: std::io::Result<ReadWriteCompleted>| match result {
+                    Ok(ReadWriteCompleted { buffer, .. }) => {
+                        DrmReaderAction::ReadChunk { buffer, generation }
                     }
-                    Err(error) => DrmReaderAction::ReadError { error },
-                },
-            ),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        DrmReaderAction::ReadDrained { generation }
+                    }
+                    Err(error) => DrmReaderAction::ReadError { error, generation },
+                }
+            }),
         });
     }
 }
@@ -3089,7 +3447,7 @@ impl ModelInstanceId for OutputId {
 pub enum DrmAction {
     Start,
     RenderFrame { decision: ClockDecision },
-    FlipComplete { sequence: u32, tv_sec: u32, tv_usec: u32, crtc_id: u32 },
+    FlipComplete { sequence: u32, tv_sec: u32, tv_usec: u32, crtc_id: u32, generation: u64 },
     FlipWatchdog,
     SessionChanged { active: bool },
     Stop,
@@ -3475,7 +3833,14 @@ impl Model for DrmOutputModel {
             DrmAction::RenderFrame { decision } => {
                 self.render_frame(state, dispatcher, decision);
             }
-            DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id } => {
+            DrmAction::FlipComplete { sequence, tv_sec, tv_usec, crtc_id, generation } => {
+                let current = state
+                    .drm
+                    .try_get(self.drm_id)
+                    .map(|drm| drm.event_generation);
+                if current != Some(generation) {
+                    return Ok(());
+                }
                 self.handle_flip_complete(state, dispatcher, sequence, tv_sec, tv_usec, crtc_id);
             }
             DrmAction::FlipWatchdog => {
@@ -4091,6 +4456,45 @@ impl DrmOutputModel {
             damage_blob,
         );
     }
+}
+
+/// Modeset retained outputs on the current DRM fd and ignore flips from the previous generation.
+pub(crate) fn resume_drm_backend(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    drm_id: DrmId,
+) -> Vec<u32> {
+    let generation = {
+        let drm = state.drm.get_mut(drm_id);
+        drm.event_generation = drm.event_generation.wrapping_add(1);
+        drm.event_generation
+    };
+    dispatcher.dispatch_to(drm_id, DrmReaderAction::SetGeneration { generation });
+    let results = state.drm.get_mut(drm_id).restore_outputs_in_place();
+    let mut failed = Vec::new();
+    for (crtc_id, result) in results {
+        match result {
+            Ok((releases, feedbacks, damage_blob)) => {
+                let Some(output_id) = state.output_id_for_drm_crtc(drm_id, crtc_id) else {
+                    continue;
+                };
+                settle_pipeline_reset(
+                    state,
+                    dispatcher,
+                    drm_id,
+                    output_id,
+                    releases,
+                    feedbacks,
+                    damage_blob,
+                );
+            }
+            Err(error) => {
+                log::error!("failed to restore CRTC {crtc_id}: {error}");
+                failed.push(crtc_id);
+            }
+        }
+    }
+    failed
 }
 
 pub(crate) fn quiesce_backend(state: &mut State, dispatcher: &mut Dispatcher, drm_id: DrmId) {
@@ -5885,6 +6289,82 @@ mod drm_event_tests {
             crtc_id: 0,
         };
         assert_eq!(f.len(), 32);
+    }
+
+    #[test]
+    fn a_stale_flip_cannot_target_the_restored_backend() {
+        use crate::{
+            runner::{Dispatcher, Model},
+            state::DrmId,
+            test_support::{state_for_tests, test_output_with_crtc_name},
+        };
+
+        use super::{DrmAction, DrmReader, DrmReaderAction};
+
+        let drm_id = DrmId::from(1usize);
+        let fd: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let mut reader = DrmReader::new(drm_id, super::DrmFd { fd: std::rc::Rc::new(fd) });
+        let mut state = state_for_tests();
+        state.insert_output(test_output_with_crtc_name(
+            crate::state::BackendOutputRef::new(drm_id),
+            7,
+            0,
+            0,
+            100,
+            100,
+        ));
+        let mut dispatcher = Dispatcher::default();
+        reader
+            .process(&mut state, DrmReaderAction::SetGeneration { generation: 2 }, &mut dispatcher)
+            .unwrap();
+
+        reader
+            .process(
+                &mut state,
+                DrmReaderAction::ReadChunk { buffer: flip_event(7).into(), generation: 1 },
+                &mut dispatcher,
+            )
+            .unwrap();
+        assert!(!dispatcher.test_has_queued_action(|action: &DrmAction| {
+            matches!(action, DrmAction::FlipComplete { .. })
+        }));
+
+        reader
+            .process(
+                &mut state,
+                DrmReaderAction::ReadChunk { buffer: flip_event(7).into(), generation: 2 },
+                &mut dispatcher,
+            )
+            .unwrap();
+        let output_id = state.output_id_for_drm_crtc(drm_id, 7).unwrap();
+        assert!(dispatcher.test_has_queued_action_for::<DrmAction, _>(output_id, |action| {
+            matches!(action, DrmAction::FlipComplete { crtc_id: 7, generation: 2, .. })
+        }));
+    }
+
+    fn flip_event(crtc_id: u32) -> Vec<u8> {
+        let mut bytes = vec![0u8; 32];
+        bytes[0..4].copy_from_slice(&2u32.to_ne_bytes());
+        bytes[4..8].copy_from_slice(&32u32.to_ne_bytes());
+        bytes[28..32].copy_from_slice(&crtc_id.to_ne_bytes());
+        bytes
+    }
+
+    #[test]
+    fn retained_assignment_requires_a_connected_advertised_mode() {
+        assert!(super::Drm::retained_assignment_failure(true, true, true).is_none());
+        assert_eq!(
+            super::Drm::retained_assignment_failure(false, true, true),
+            Some("connector is not connected")
+        );
+        assert_eq!(
+            super::Drm::retained_assignment_failure(true, false, false),
+            Some("connector has no retained mode")
+        );
+        assert_eq!(
+            super::Drm::retained_assignment_failure(true, true, false),
+            Some("retained mode is no longer advertised")
+        );
     }
 }
 
