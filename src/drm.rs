@@ -3193,9 +3193,15 @@ impl Model for VisualAnimationPump {
         match action {
             VisualAnimationPumpAction::Start => {}
             VisualAnimationPumpAction::Kick => {
+                if dispatcher.shutdown_requested() {
+                    return Ok(());
+                }
                 self.advance_and_schedule(state, dispatcher, Instant::now());
             }
             VisualAnimationPumpAction::KickOutput { output_id } => {
+                if dispatcher.shutdown_requested() {
+                    return Ok(());
+                }
                 self.advance_and_schedule_output(state, dispatcher, Instant::now(), output_id);
             }
             VisualAnimationPumpAction::Stop => {}

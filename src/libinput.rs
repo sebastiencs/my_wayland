@@ -142,6 +142,9 @@ impl Model for Libinput {
                 self.dispatch_poll_libinput(dispatcher);
             }
             Event => {
+                if dispatcher.shutdown_requested() {
+                    return Ok(());
+                }
                 self.dispatch();
                 while let Some(event) = self.next_event() {
                     match event {
@@ -257,6 +260,10 @@ impl Model for Libinput {
                 }
             }
             OpenInput { devnode, fd, devnum } => {
+                if dispatcher.shutdown_requested() {
+                    log::info!("ignoring input device {devnode} opened during shutdown");
+                    return Ok(());
+                }
                 self.insert_device_fd(fd, devnum);
                 let device = match self.libinput.path_add_device(&devnode) {
                     Some(device) => device,

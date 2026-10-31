@@ -200,6 +200,21 @@ impl Dispatcher {
         }
     }
 
+    pub fn shutdown_requested(&self) -> bool {
+        self.shutdown.is_some()
+    }
+
+    /// Queue removal of a singleton model. Repeated calls stay idempotent.
+    pub fn stop_singleton<M>(&mut self)
+    where
+        M: Model,
+    {
+        let id = ActionId::of::<M::Action>();
+        if !self.pending_remove.contains(&id) {
+            self.pending_remove.push_back(id);
+        }
+    }
+
     fn take_exit(&mut self) -> Option<ExitOutcome> {
         let ShutdownState { reason, phase, diagnostics } = self.shutdown.take()?;
         debug_assert_eq!(phase, ShutdownPhase::Draining);
@@ -235,6 +250,22 @@ impl Dispatcher {
             .filter(|action| action.id.specifier == id)
             .filter_map(|action| action.ptr.downcast_ref::<T>())
             .any(predicate)
+    }
+
+    pub(crate) fn test_stop_queued<I: ModelInstanceId>(&self, id: I) -> bool {
+        let id = ActionId::of_model::<I>(id);
+        self.pending_remove.iter().any(|queued| *queued == id)
+    }
+
+    pub(crate) fn test_count_queued_action<T: 'static>(
+        &self,
+        predicate: impl Fn(&T) -> bool,
+    ) -> usize {
+        self.queue
+            .iter()
+            .filter_map(|action| action.ptr.downcast_ref::<T>())
+            .filter(|action| predicate(action))
+            .count()
     }
 }
 
@@ -434,15 +465,47 @@ impl Runner {
             .insert(ActionId::of::<M::Action>(), model.into_vtable());
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_has_model<M: Model>(&self) -> bool {
+        self.models.contains_key(&ActionId::of::<M::Action>())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_has_instance<I: ModelInstanceId>(&self, id: I) -> bool {
+        self.models.contains_key(&ActionId::of_model::<I>(id))
+    }
+
     pub fn run(&mut self, mut dispatcher: Dispatcher) -> ExitOutcome {
+        let mut ingress_stopped = false;
         loop {
             while let Some(action) = dispatcher.queue.pop_front() {
                 self.process_action(action, &mut dispatcher)
             }
-            if let Some(outcome) = dispatcher.take_exit() {
-                return outcome;
+            if dispatcher.shutdown_requested() {
+                if !ingress_stopped {
+                    // Stop listeners before disconnecting clients. Output and
+                    // device teardown comes after the clients are gone.
+                    ingress_stopped = true;
+                    self.stop_loaded_singleton::<crate::clients::ClientManager>(&mut dispatcher);
+                    self.stop_loaded_singleton::<crate::config::ConfigWatcher>(&mut dispatcher);
+                    self.stop_loaded_singleton::<crate::libinput::Libinput>(&mut dispatcher);
+                    self.stop_loaded_singleton::<crate::drm::VisualAnimationPump>(&mut dispatcher);
+                    self.maybe_remove_models(&mut dispatcher);
+                    continue;
+                }
+                return dispatcher.take_exit().expect("shutdown was requested");
             }
             dispatcher.dispatch(IoUringAction::WaitForCompletion);
+        }
+    }
+
+    fn stop_loaded_singleton<M>(&mut self, dispatcher: &mut Dispatcher)
+    where
+        M: Model,
+    {
+        let id = ActionId::of::<M::Action>();
+        if self.models.contains_key(&id) {
+            dispatcher.stop_singleton::<M>();
         }
     }
 

@@ -67,6 +67,7 @@ pub enum IoUringAction {
         dispatch_to: Redispatcher<std::io::Result<SendmsgCompleted>>,
     },
     Accept {
+        id: Option<RingId>,
         fd: RawFd,
         dispatch_to: Redispatcher<std::io::Result<AcceptCompleted>>,
     },
@@ -124,8 +125,9 @@ impl std::fmt::Debug for IoUringAction {
                 .field("fds", fds)
                 .field("dispatch_to", dispatch_to)
                 .finish(),
-            Self::Accept { fd, dispatch_to } => f
+            Self::Accept { id, fd, dispatch_to } => f
                 .debug_struct("Accept")
+                .field("id", id)
                 .field("fd", fd)
                 .field("dispatch_to", dispatch_to)
                 .finish(),
@@ -265,8 +267,8 @@ impl Model for IoUringState {
                 }
                 self.push_op(Operation::Sendmsg { id, fd, data, dispatch_to });
             }
-            IoUringAction::Accept { fd, dispatch_to } => {
-                let id = self.next_id();
+            IoUringAction::Accept { id, fd, dispatch_to } => {
+                let id = id.unwrap_or_else(RingId::fresh);
                 self.push_op(Operation::Accept { id, fd, dispatch_to });
             }
             IoUringAction::Poll { id, fd, dispatch_to } => {

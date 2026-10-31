@@ -1,6 +1,7 @@
 use std::{
     any::TypeId,
     collections::{BTreeMap, BTreeSet, VecDeque},
+    io,
     os::{
         fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
         unix::net::UnixListener,
@@ -123,10 +124,34 @@ where
     }
 }
 
+pub const WAYLAND_DISPLAY_NAME: &str = "my-wayland-0";
+
 pub struct ClientManager {
     current_id: u64,
     fd: UnixListener,
+    path: PathBuf,
     set: BTreeSet<ClientId>,
+    accept_op_id: Option<RingId>,
+    accepting: bool,
+    unlinked: bool,
+}
+
+#[derive(Debug)]
+pub struct SocketBindError {
+    path: PathBuf,
+    source: io::Error,
+}
+
+impl std::fmt::Display for SocketBindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "bind Wayland socket {}: {}", self.path.display(), self.source)
+    }
+}
+
+impl std::error::Error for SocketBindError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
 }
 
 #[derive(Debug)]
@@ -146,23 +171,35 @@ pub enum ClientManagerAction {
     WorkspaceStateChanged,
     LayerShellLayoutChanged,
     Close { id: ClientId },
+    Stop,
 }
 
 impl ClientManager {
-    pub fn new() -> Box<Self> {
+    pub fn new() -> Result<Box<Self>, SocketBindError> {
         let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-        let filename = PathBuf::from(runtime).join("my-wayland-0");
-        if filename.exists() {
-            let _ = std::fs::remove_file(&filename);
-        }
-        let fd = UnixListener::bind(&filename).unwrap_or_else(|e| {
-            panic!("bind Wayland socket {:?}: {}", filename, e);
-        });
-        log::info!("Listening on Wayland socket {:?}", filename);
-        let current_id = 0;
-        let set = BTreeSet::default();
+        let path = PathBuf::from(runtime).join(WAYLAND_DISPLAY_NAME);
+        Self::bind(path).map(Box::new)
+    }
 
-        Box::new(Self { current_id, fd, set })
+    pub(crate) fn bind(path: impl Into<PathBuf>) -> Result<Self, SocketBindError> {
+        let path = path.into();
+        if path.exists() {
+            if let Err(error) = std::fs::remove_file(&path) {
+                log::warn!("could not remove stale Wayland socket {}: {error}", path.display());
+            }
+        }
+        let fd = UnixListener::bind(&path)
+            .map_err(|source| SocketBindError { path: path.clone(), source })?;
+        log::info!("Listening on Wayland socket {}", path.display());
+        Ok(Self {
+            current_id: 0,
+            fd,
+            path,
+            set: BTreeSet::default(),
+            accept_op_id: None,
+            accepting: true,
+            unlinked: false,
+        })
     }
 
     fn next_id(&mut self) -> ClientId {
@@ -171,8 +208,14 @@ impl ClientManager {
         ClientId(id)
     }
 
-    fn dispatch_accept(&self, dispatcher: &mut Dispatcher) {
+    fn dispatch_accept(&mut self, dispatcher: &mut Dispatcher) {
+        if !self.accepting || self.accept_op_id.is_some() {
+            return;
+        }
+        let accept_op_id = RingId::fresh();
+        self.accept_op_id = Some(accept_op_id);
         dispatcher.dispatch(IoUringAction::Accept {
+            id: Some(accept_op_id),
             fd: self.fd.as_raw_fd(),
             dispatch_to: Redispatcher::to::<Self>(|result| match result {
                 Ok(AcceptCompleted { fd: _, new_client }) => {
@@ -185,12 +228,49 @@ impl ClientManager {
             }),
         });
     }
+
+    fn close_client(&mut self, dispatcher: &mut Dispatcher, id: ClientId) {
+        log::trace!("client {:?} closed", id);
+        if self.set.remove(&id) {
+            dispatcher.stop_model(id);
+        }
+    }
+
+    fn unlink_socket(&mut self) {
+        if self.unlinked {
+            return;
+        }
+        self.unlinked = true;
+        if let Err(error) = std::fs::remove_file(&self.path) {
+            if error.kind() != io::ErrorKind::NotFound {
+                log::warn!("could not unlink Wayland socket {}: {error}", self.path.display());
+            }
+        }
+    }
+
+    fn stop(&mut self, dispatcher: &mut Dispatcher) {
+        self.accepting = false;
+        if let Some(accept_op_id) = self.accept_op_id.take() {
+            dispatcher.dispatch(IoUringAction::Cancel { target: accept_op_id });
+        }
+        for id in self.set.iter().copied().collect::<Vec<_>>() {
+            self.close_client(dispatcher, id);
+        }
+        self.unlink_socket();
+    }
+}
+
+impl Drop for ClientManager {
+    fn drop(&mut self) {
+        self.unlink_socket();
+    }
 }
 
 impl Model for ClientManager {
     type Action = ClientManagerAction;
 
     const START: Option<Self::Action> = Some(ClientManagerAction::Start);
+    const STOP: Option<Self::Action> = Some(ClientManagerAction::Stop);
 
     fn process(
         &mut self,
@@ -207,9 +287,15 @@ impl Model for ClientManager {
                 dispatcher.start::<Udev>();
             }
             RearmAccept => {
+                self.accept_op_id = None;
                 self.dispatch_accept(dispatcher);
             }
             NewClient { new_client } => {
+                self.accept_op_id = None;
+                if !self.accepting {
+                    drop(unsafe { OwnedFd::from_raw_fd(new_client) });
+                    return Ok(());
+                }
                 self.dispatch_accept(dispatcher);
 
                 let client_id = self.next_id();
@@ -295,12 +381,8 @@ impl Model for ClientManager {
                     dispatcher.dispatch_to(client_id, ClientAction::RefreshLayerSurfaces);
                 }
             }
-            Close { id } => {
-                log::trace!("client {:?} closed", id);
-                if self.set.remove(&id) {
-                    dispatcher.stop_model(id);
-                }
-            }
+            Close { id } => self.close_client(dispatcher, id),
+            Stop => self.stop(dispatcher),
         }
         Ok(())
     }
@@ -2981,5 +3063,176 @@ mod surface_output_refresh_tests {
 
         assert_eq!(state.output_bounds(enabled).is_some(), true);
         assert!(crate::scene::visibility::root_has_protocol_visibility(&state, surface_resolved));
+    }
+}
+
+#[cfg(test)]
+mod socket_shutdown_tests {
+    use std::{io::Read, os::unix::net::UnixStream};
+
+    use {
+        super::*,
+        crate::{
+            runner::{Runner, ShutdownReason},
+            test_support::state_for_tests,
+        },
+    };
+
+    fn temp_socket() -> (mktemp::Temp, PathBuf) {
+        let dir = mktemp::Temp::new_dir().unwrap();
+        let path = dir.to_path_buf().join("wayland-test");
+        (dir, path)
+    }
+
+    fn socket_pair() -> (RawFd, UnixStream) {
+        let (server, client) = UnixStream::pair().unwrap();
+        (server.into_raw_fd(), client)
+    }
+
+    #[test]
+    fn stop_closes_every_client_and_cancels_accept() {
+        let (_dir, path) = temp_socket();
+        let mut manager = ClientManager::bind(&path).unwrap();
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        manager
+            .process(&mut state, ClientManagerAction::Start, &mut dispatcher)
+            .unwrap();
+        let (first, _first_peer) = socket_pair();
+        let (second, _second_peer) = socket_pair();
+        manager
+            .process(
+                &mut state,
+                ClientManagerAction::NewClient { new_client: first },
+                &mut dispatcher,
+            )
+            .unwrap();
+        manager
+            .process(
+                &mut state,
+                ClientManagerAction::NewClient { new_client: second },
+                &mut dispatcher,
+            )
+            .unwrap();
+        manager
+            .process(&mut state, ClientManagerAction::Stop, &mut dispatcher)
+            .unwrap();
+
+        assert!(dispatcher.test_stop_queued(ClientId(0)));
+        assert!(dispatcher.test_stop_queued(ClientId(1)));
+        assert_eq!(
+            dispatcher.test_count_queued_action(|action: &IoUringAction| {
+                matches!(action, IoUringAction::Cancel { .. })
+            }),
+            1
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn repeated_stop_cancels_accept_once() {
+        let (_dir, path) = temp_socket();
+        let mut manager = ClientManager::bind(&path).unwrap();
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        manager
+            .process(&mut state, ClientManagerAction::Start, &mut dispatcher)
+            .unwrap();
+        manager
+            .process(&mut state, ClientManagerAction::Stop, &mut dispatcher)
+            .unwrap();
+        manager
+            .process(&mut state, ClientManagerAction::Stop, &mut dispatcher)
+            .unwrap();
+        assert_eq!(
+            dispatcher.test_count_queued_action(|action: &IoUringAction| {
+                matches!(action, IoUringAction::Cancel { .. })
+            }),
+            1
+        );
+    }
+
+    #[test]
+    fn shutdown_does_not_accept_a_new_client() {
+        let (_dir, path) = temp_socket();
+        let mut manager = ClientManager::bind(&path).unwrap();
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        manager
+            .process(&mut state, ClientManagerAction::Start, &mut dispatcher)
+            .unwrap();
+        manager
+            .process(&mut state, ClientManagerAction::Stop, &mut dispatcher)
+            .unwrap();
+        let accepts = dispatcher.test_count_queued_action(|action: &IoUringAction| {
+            matches!(action, IoUringAction::Accept { .. })
+        });
+
+        let (server, mut peer) = socket_pair();
+        peer.set_nonblocking(true).unwrap();
+        manager
+            .process(
+                &mut state,
+                ClientManagerAction::NewClient { new_client: server },
+                &mut dispatcher,
+            )
+            .unwrap();
+        manager
+            .process(&mut state, ClientManagerAction::RearmAccept, &mut dispatcher)
+            .unwrap();
+
+        let mut buffer = [0];
+        assert_eq!(peer.read(&mut buffer).unwrap(), 0);
+        assert!(!dispatcher.test_stop_queued(ClientId(0)));
+        assert_eq!(
+            dispatcher.test_count_queued_action(|action: &IoUringAction| {
+                matches!(action, IoUringAction::Accept { .. })
+            }),
+            accepts
+        );
+    }
+
+    #[test]
+    fn stale_socket_is_replaced_and_drop_unlinks_it() {
+        let (_dir, path) = temp_socket();
+        std::fs::write(&path, b"stale").unwrap();
+        let manager = ClientManager::bind(&path).unwrap();
+        UnixStream::connect(&path).unwrap();
+        drop(manager);
+        assert!(!path.exists());
+
+        std::fs::write(&path, b"stale").unwrap();
+        let manager = ClientManager::bind(&path).unwrap();
+        UnixStream::connect(&path).unwrap();
+        drop(manager);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn shutdown_closes_clients_and_unlinks_before_returning() {
+        let (_dir, path) = temp_socket();
+        let manager = ClientManager::bind(&path).unwrap();
+        let mut runner = Runner::with_state(state_for_tests());
+        runner.add_model(Box::new(manager));
+        let (server, _peer) = socket_pair();
+        let mut dispatcher = Dispatcher::default();
+        dispatcher.dispatch(ClientManagerAction::NewClient { new_client: server });
+        dispatcher.request_shutdown(ShutdownReason::Quit);
+        let outcome = runner.run(dispatcher);
+
+        assert_eq!(outcome.code, 0);
+        assert!(!path.exists());
+        assert!(!runner.test_has_model::<ClientManager>());
+        assert!(!runner.test_has_instance(ClientId(0)));
+    }
+
+    #[test]
+    fn bind_failure_is_an_error() {
+        let (_dir, path) = temp_socket();
+        let missing = path.join("nested").join("sock");
+        match ClientManager::bind(&missing) {
+            Err(error) => assert!(error.to_string().contains("bind Wayland socket")),
+            Ok(_manager) => panic!("bind succeeded"),
+        }
     }
 }

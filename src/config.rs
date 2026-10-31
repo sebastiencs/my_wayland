@@ -16,7 +16,7 @@ use {
 };
 
 use crate::{
-    clients::{ClientManagerAction, Resolved},
+    clients::{ClientManagerAction, Resolved, WAYLAND_DISPLAY_NAME},
     drm::{kick_visual_animation_pump, request_outputs, request_outputs_for_points},
     io_uring::{
         model::IoUringAction,
@@ -30,7 +30,6 @@ use crate::{
 
 const CONFIG_DIR_NAME: &str = "my_wayland";
 const CONFIG_FILE_NAME: &str = "config.toml";
-const WAYLAND_DISPLAY_NAME: &str = "my-wayland-0";
 const DEFAULT_CURSOR_THEME: &str = "default";
 const DEFAULT_CURSOR_SIZE: u32 = 24;
 const INOTIFY_BUFFER_SIZE: usize = 4096;
@@ -324,6 +323,7 @@ pub struct ConfigWatcher {
     event_buffer: Box<[u8]>,
     poll_op_id: Option<RingId>,
     watches: HashMap<WatchDescriptor, ConfigWatchSlot>,
+    stopped: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -341,6 +341,7 @@ pub enum ConfigWatcherAction {
     Start,
     Event,
     Failed { error: std::io::Error },
+    Stop,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -927,6 +928,7 @@ impl ConfigWatcher {
             event_buffer: vec![0; INOTIFY_BUFFER_SIZE].into_boxed_slice(),
             poll_op_id: None,
             watches: HashMap::new(),
+            stopped: false,
         };
         watcher
             .sync_watches(initial_state.path())
@@ -935,7 +937,7 @@ impl ConfigWatcher {
     }
 
     fn dispatch_poll(&mut self, dispatcher: &mut Dispatcher) {
-        if self.poll_op_id.is_some() {
+        if self.stopped || self.poll_op_id.is_some() {
             return;
         }
         let poll_op_id = RingId::fresh();
@@ -1101,6 +1103,7 @@ impl ConfigWatcher {
 impl Model for ConfigWatcher {
     type Action = ConfigWatcherAction;
     const START: Option<Self::Action> = Some(ConfigWatcherAction::Start);
+    const STOP: Option<Self::Action> = Some(ConfigWatcherAction::Stop);
 
     fn process(
         &mut self,
@@ -1109,17 +1112,30 @@ impl Model for ConfigWatcher {
         dispatcher: &mut Dispatcher,
     ) -> std::result::Result<(), crate::runner::ModelFailure> {
         match action {
-            ConfigWatcherAction::Start => {
+            ConfigWatcherAction::Start if !self.stopped => {
                 self.dispatch_poll(dispatcher);
             }
-            ConfigWatcherAction::Event => {
+            ConfigWatcherAction::Event if !self.stopped => {
                 self.on_event(state, dispatcher);
             }
-            ConfigWatcherAction::Failed { error } => {
+            ConfigWatcherAction::Failed { error } if !self.stopped => {
                 self.poll_op_id = None;
                 log::warn!("config watcher poll failed: {:?}", error);
                 self.dispatch_poll(dispatcher);
             }
+            ConfigWatcherAction::Stop => {
+                self.stopped = true;
+                if let Some(poll_op_id) = self.poll_op_id.take() {
+                    dispatcher.dispatch(IoUringAction::PollRemove { target: poll_op_id });
+                }
+                for descriptor in self.watches.keys().cloned().collect::<Vec<_>>() {
+                    let _ = self.inotify.watches().remove(descriptor);
+                }
+                self.watches.clear();
+            }
+            ConfigWatcherAction::Start
+            | ConfigWatcherAction::Event
+            | ConfigWatcherAction::Failed { .. } => {}
         }
         Ok(())
     }
@@ -2303,6 +2319,31 @@ mod tests {
         let config = RuntimeConfig::load_from_path(&path, &xkb).unwrap();
         let watcher = ConfigWatcher::new(&config);
         assert_eq!(watcher.watch_slot_count(), 1);
+    }
+
+    #[test]
+    fn config_watcher_stop_drops_watches_and_ignores_later_events() {
+        let temp_dir = mktemp::Temp::new_dir().unwrap();
+        let path = temp_dir.to_path_buf().join("missing.toml");
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::load_from_path(&path, &xkb).unwrap();
+        let mut watcher = ConfigWatcher::new(&config);
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        watcher
+            .process(&mut state, ConfigWatcherAction::Start, &mut dispatcher)
+            .unwrap();
+        watcher
+            .process(&mut state, ConfigWatcherAction::Stop, &mut dispatcher)
+            .unwrap();
+        assert_eq!(watcher.watch_slot_count(), 0);
+        assert!(dispatcher.test_has_queued_action(|action: &IoUringAction| {
+            matches!(action, IoUringAction::PollRemove { .. })
+        }));
+        watcher
+            .process(&mut state, ConfigWatcherAction::Event, &mut dispatcher)
+            .unwrap();
+        assert_eq!(watcher.watch_slot_count(), 0);
     }
 
     #[test]

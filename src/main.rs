@@ -325,7 +325,13 @@ fn main() {
     // return;
 
     let uring = Box::<IoUringState>::default();
-    let client_manager = ClientManager::new();
+    let client_manager = match ClientManager::new() {
+        Ok(manager) => manager,
+        Err(error) => {
+            log::error!("{error}");
+            std::process::exit(1);
+        }
+    };
     let config_watcher = Box::new(config::ConfigWatcher::new(&state.config));
 
     let mut runner = Runner::with_state(state);
