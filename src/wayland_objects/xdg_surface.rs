@@ -1,13 +1,14 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
+    clients::{Client, ClientAction, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
     protocol_generated::{
         xdg_surface, xdg_wm_base, WaylandId, WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgToplevelId,
         XdgWmBaseId,
     },
     region::RectI,
+    runner::Dispatcher,
     state::{GrabbedObject, ObjectId, State},
     transform::SizeI,
     wayland_objects::{
@@ -146,6 +147,13 @@ impl XdgSurface {
 
     pub(crate) fn is_toplevel_parent(&self) -> bool {
         matches!(self.role_object, RoleObject::Toplevel(_))
+    }
+
+    pub(crate) fn toplevel_role(&self) -> Option<Resolved<XdgToplevelId>> {
+        match self.role_object {
+            RoleObject::Toplevel(toplevel) => Some(toplevel),
+            RoleObject::None | RoleObject::Popup(_) => None,
+        }
     }
 
     pub(crate) fn parent_geometry(&self, _client: &Client, state: &State) -> RectI {
@@ -713,6 +721,24 @@ impl Object for XdgSurface {
     }
 }
 
+/// Send `xdg_toplevel.close` for a managed root. A window without a toplevel role is ignored.
+pub(crate) fn request_toplevel_close(
+    state: &State,
+    dispatcher: &mut Dispatcher,
+    root: Resolved<WlSurfaceId>,
+) -> bool {
+    let Some(toplevel) = root
+        .try_ref(state)
+        .and_then(|surface| surface.xdg_surface())
+        .and_then(|xdg_surface| xdg_surface.try_ref(state))
+        .and_then(|xdg_surface| xdg_surface.toplevel_role())
+    else {
+        return false;
+    };
+    dispatcher.dispatch_to(root.client_id(), ClientAction::RequestToplevelClose { toplevel });
+    true
+}
+
 pub mod xdg_toplevel {
     use std::collections::BTreeSet;
 
@@ -892,6 +918,12 @@ pub mod xdg_toplevel {
                 states.insert(proto_xdg_toplevel::State::TiledBottom);
             }
             states.into_iter().map(|state| state as u32).collect()
+        }
+
+        /// Ask the client to close. Sway's `kill` sends this request and leaves the client
+        /// connected; the client may ignore it.
+        pub(crate) fn send_close(&self, dispatcher: &mut ClientDispatcher) {
+            self.send_event(proto_xdg_toplevel::Event::Close, dispatcher);
         }
 
         fn send_configure(&self, dispatcher: &mut ClientDispatcher) {
@@ -1750,6 +1782,35 @@ pub mod xdg_toplevel {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn send_close_queues_the_toplevel_close_event() {
+            let client =
+                crate::clients::Client::new_for_tests(crate::clients::ClientId::from_raw(1));
+            let toplevel = XdgToplevel::new(
+                XdgToplevelId::from(9),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    super::super::XdgSurfaceId::from(8),
+                    ObjectId::from(8usize),
+                ),
+                7,
+            );
+            let mut dispatcher = crate::runner::Dispatcher::default();
+            {
+                let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+                toplevel.send_close(&mut client_dispatcher);
+            }
+            assert!(dispatcher.test_has_queued_action::<crate::io_uring::model::IoUringAction>(
+                |action| match action {
+                    crate::io_uring::model::IoUringAction::Sendmsg { buffer, .. } => {
+                        buffer.len() == 8
+                            && u32::from_ne_bytes(buffer[4..8].try_into().unwrap()) & 0xffff == 1
+                    }
+                    _ => false,
+                },
+            ));
+        }
 
         #[test]
         fn acked_tiled_maximized_hint_does_not_count_as_maximized() {

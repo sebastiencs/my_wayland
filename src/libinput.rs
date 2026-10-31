@@ -8,10 +8,7 @@ use std::{
 use input::{
     event::{
         keyboard::{KeyState, KeyboardEvent, KeyboardEventTrait},
-        pointer::{
-            Axis, ButtonState, PointerEvent, PointerEventTrait, PointerScrollEvent,
-            PointerScrollWheelEvent,
-        },
+        pointer::{Axis, ButtonState, PointerEvent, PointerEventTrait, PointerScrollEvent},
         EventTrait,
     },
     AsRaw,

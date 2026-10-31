@@ -359,6 +359,9 @@ pub enum ClientAction {
     SeatEvent {
         event: SeatClientEvent,
     },
+    RequestToplevelClose {
+        toplevel: Resolved<crate::protocol_generated::XdgToplevelId>,
+    },
     RefreshDataDeviceSelection,
     DataDeviceDragEnter {
         serial: u32,
@@ -2138,6 +2141,11 @@ impl Model for Client {
             }
             SeatEvent { event } => {
                 self.handle_seat_event(state, &mut dispatcher, event);
+            }
+            RequestToplevelClose { toplevel } => {
+                if let Some(toplevel) = toplevel.try_ref(state) {
+                    toplevel.send_close(&mut dispatcher);
+                }
             }
             RefreshDataDeviceSelection => {
                 self.refresh_data_device_selection(state, &mut dispatcher);

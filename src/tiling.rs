@@ -213,6 +213,44 @@ impl WorkspaceLayout {
         true
     }
 
+    /// Move tiled windows through the existing split slots.
+    ///
+    /// The tree shape stays, so a focus cycle can change which window is backmost
+    /// without rebuilding containers. Rects are applied on the next layout pass.
+    pub fn reorder_tiled_scene_order(&mut self, order: &[Resolved<WlSurfaceId>]) -> bool {
+        let current = self.tiled_scene_order();
+        if !same_surface_set(&current, order) {
+            return false;
+        }
+        if current == order {
+            return true;
+        }
+        let leaf_ids = current
+            .iter()
+            .map(|surface| self.surface_leaves[surface])
+            .collect::<Vec<_>>();
+        for (leaf_id, surface) in leaf_ids.iter().copied().zip(order.iter().copied()) {
+            let Some(LayoutNode::Leaf(leaf)) = self.nodes.get_mut(&leaf_id) else {
+                return false;
+            };
+            leaf.surface_object_id = surface;
+        }
+        self.surface_leaves.clear();
+        for (leaf_id, surface) in leaf_ids.iter().copied().zip(order.iter().copied()) {
+            self.surface_leaves.insert(surface, leaf_id);
+        }
+        self.mark_dirty();
+        true
+    }
+
+    pub fn set_floating_scene_order(&mut self, order: Vec<Resolved<WlSurfaceId>>) -> bool {
+        if !same_surface_set(&self.floating.stack, &order) {
+            return false;
+        }
+        self.floating.stack = order;
+        true
+    }
+
     pub fn insert_tiled(&mut self, surface_object_id: Resolved<WlSurfaceId>) -> bool {
         if self.contains_surface(surface_object_id) {
             return false;
@@ -1226,6 +1264,17 @@ fn workspace_gap_policy(state: &State, _workspace_id: WorkspaceId) -> GapPolicy 
         outer_gap: state.config.general.outer_gap,
         inner_gap: state.config.general.inner_gap,
     }
+}
+
+fn same_surface_set(left: &[Resolved<WlSurfaceId>], right: &[Resolved<WlSurfaceId>]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left = left.to_vec();
+    let mut right = right.to_vec();
+    left.sort();
+    right.sort();
+    left == right
 }
 
 fn decoration_insets_for_surface(

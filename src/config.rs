@@ -24,7 +24,7 @@ use crate::{
     },
     protocol_generated::WlSurfaceId,
     runner::{Dispatcher, Model, Redispatcher},
-    state::{FractionalScale, State, WorkspaceGroupId, WorkspaceId},
+    state::{FractionalScale, ManagedWindowMode, State, WorkspaceGroupId, WorkspaceId},
     xkb::{KeyboardState, Xkb},
 };
 
@@ -1215,19 +1215,41 @@ pub fn execute_action(state: &mut State, dispatcher: &mut Dispatcher, action: Co
             );
         }
         CompositorAction::Close => {
-            let _ = require_focused_window(state, "close");
+            let Some(root) = require_focused_window(state, "close") else {
+                return;
+            };
+            if !crate::wayland_objects::xdg_surface::request_toplevel_close(state, dispatcher, root)
+            {
+                log::info!("close ignored; focused window has no toplevel");
+            }
         }
         CompositorAction::FocusNext => {
-            let _ = require_focused_window(state, "focus-next");
+            cycle_focused_workspace(state, dispatcher, FocusCycle::Next);
         }
         CompositorAction::FocusPrevious => {
-            let _ = require_focused_window(state, "focus-previous");
+            cycle_focused_workspace(state, dispatcher, FocusCycle::Previous);
         }
         CompositorAction::ToggleFloating => {
-            let _ = require_focused_window(state, "toggle-floating");
+            let Some(root) = require_focused_window(state, "toggle-floating") else {
+                return;
+            };
+            let floating = state
+                .managed_root_surface_state(root)
+                .is_some_and(|managed| managed.mode == ManagedWindowMode::Floating);
+            if state.set_root_surface_floating(root, !floating) {
+                finish_root_mode_change(state, dispatcher, root);
+            }
         }
         CompositorAction::ToggleFullscreen => {
-            let _ = require_focused_window(state, "toggle-fullscreen");
+            let Some(root) = require_focused_window(state, "toggle-fullscreen") else {
+                return;
+            };
+            let fullscreen = state
+                .managed_root_surface_state(root)
+                .is_some_and(|managed| managed.fullscreen);
+            if state.set_root_surface_fullscreen(root, !fullscreen) {
+                finish_root_mode_change(state, dispatcher, root);
+            }
         }
         CompositorAction::WorkspaceIndex { index } => {
             let _ = require_workspace_index(state, "workspace-index", index);
@@ -1390,6 +1412,123 @@ pub(crate) fn require_workspace_index(
         log::info!("{action} ignored; workspace index {index} is unavailable");
     }
     workspace_id
+}
+
+enum FocusCycle {
+    Next,
+    Previous,
+}
+
+/// Rotate one stacking band of the focused window's workspace.
+///
+/// Paint order is tiled windows, back to front, then floating windows. Next moves the
+/// backmost window to the front of its band, so repeated next walks tiled windows when
+/// any exist and otherwise walks the floating stack. Previous moves the frontmost window
+/// to the back of its band, so repeated previous walks floating windows when any exist.
+/// A floating raise-to-top would bounce between the top two windows, so the whole band
+/// rotates. Tiled windows keep their split slots and move through them.
+fn cycle_focused_workspace(state: &mut State, dispatcher: &mut Dispatcher, cycle: FocusCycle) {
+    let action = match cycle {
+        FocusCycle::Next => "focus-next",
+        FocusCycle::Previous => "focus-previous",
+    };
+    let Some(root) = require_focused_window(state, action) else {
+        return;
+    };
+    let Some(workspace_id) = state.root_surface_workspace(root) else {
+        log::info!("{action} ignored; focused window has no workspace");
+        return;
+    };
+    let Some(workspace) = state.workspaces.try_get(workspace_id) else {
+        return;
+    };
+    if workspace.layout.fullscreen.is_some() {
+        return;
+    }
+    let mut tiled = workspace.layout.tiled_scene_order();
+    let mut floating = workspace.layout.floating_scene_order();
+    if tiled.is_empty() && floating.is_empty() {
+        log::info!("{action} ignored; no workspace window");
+        return;
+    }
+
+    let target = match cycle {
+        FocusCycle::Next => {
+            if !tiled.is_empty() {
+                rotate_back_to_front(&mut tiled);
+                tiled[tiled.len() - 1]
+            } else {
+                rotate_back_to_front(&mut floating);
+                floating[floating.len() - 1]
+            }
+        }
+        FocusCycle::Previous => {
+            if !floating.is_empty() {
+                rotate_front_to_back(&mut floating);
+                floating[floating.len() - 1]
+            } else {
+                rotate_front_to_back(&mut tiled);
+                tiled[tiled.len() - 1]
+            }
+        }
+    };
+
+    {
+        let Some(workspace) = state.workspaces.try_get_mut(workspace_id) else {
+            return;
+        };
+        if !workspace.layout.reorder_tiled_scene_order(&tiled)
+            || !workspace.layout.set_floating_scene_order(floating)
+        {
+            return;
+        }
+        workspace.layout.focus_surface(target);
+    }
+    let outputs = state.workspace_output_ids(workspace_id);
+    if !outputs.is_empty() {
+        request_outputs(state, outputs, dispatcher);
+    }
+    dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
+    crate::input::set_keyboard_focus(
+        state,
+        dispatcher,
+        Some(crate::input::SurfaceFocus::new(target)),
+    );
+}
+
+fn rotate_back_to_front(order: &mut Vec<Resolved<WlSurfaceId>>) {
+    if order.len() < 2 {
+        return;
+    }
+    let backmost = order.remove(0);
+    order.push(backmost);
+}
+
+fn rotate_front_to_back(order: &mut Vec<Resolved<WlSurfaceId>>) {
+    if order.len() < 2 {
+        return;
+    }
+    let Some(frontmost) = order.pop() else {
+        return;
+    };
+    order.insert(0, frontmost);
+}
+
+fn finish_root_mode_change(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    root: Resolved<WlSurfaceId>,
+) {
+    let outputs = state
+        .root_surface_workspace(root)
+        .map(|workspace_id| state.workspace_output_ids(workspace_id))
+        .unwrap_or_default();
+    if !outputs.is_empty() {
+        request_outputs(state, outputs, dispatcher);
+    }
+    // A keybinding keeps the focused window. `refresh_scene_focus` would replace keyboard
+    // focus with whatever is under the pointer.
+    dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
 }
 
 fn publish_workspace_group(
@@ -2319,5 +2458,229 @@ mod tests {
             CompositorAction::WorkspaceIndex { index: 5 },
         );
         assert_eq!(state.active_workspace_for_output(output), before);
+    }
+
+    fn focus_managed_root(state: &mut State) -> Resolved<WlSurfaceId> {
+        let (_output, surface) = insert_managed_root(state);
+        state.seat.keyboard_focus = Some(SurfaceFocus::new(surface));
+        surface
+    }
+
+    #[test]
+    fn close_without_a_toplevel_is_a_no_op() {
+        let mut state = state_for_tests();
+        let surface = focus_managed_root(&mut state);
+        let mut dispatcher = Dispatcher::default();
+        execute_action(&mut state, &mut dispatcher, CompositorAction::Close);
+        assert!(!dispatcher.test_has_queued_action::<crate::clients::ClientAction>(|action| {
+            matches!(action, crate::clients::ClientAction::RequestToplevelClose { .. })
+        }));
+        assert!(state.managed_root_surface_state(surface).is_some());
+    }
+
+    #[test]
+    fn toggle_floating_and_fullscreen_flip_and_restore() {
+        let mut state = state_for_tests();
+        let surface = focus_managed_root(&mut state);
+        let mut dispatcher = Dispatcher::default();
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::ToggleFloating);
+        assert_eq!(
+            state.managed_root_surface_state(surface).unwrap().mode,
+            crate::state::ManagedWindowMode::Floating
+        );
+        execute_action(&mut state, &mut dispatcher, CompositorAction::ToggleFloating);
+        assert_eq!(
+            state.managed_root_surface_state(surface).unwrap().mode,
+            crate::state::ManagedWindowMode::Tiled
+        );
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::ToggleFullscreen);
+        assert!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .fullscreen
+        );
+        execute_action(&mut state, &mut dispatcher, CompositorAction::ToggleFullscreen);
+        assert!(
+            !state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .fullscreen
+        );
+    }
+
+    fn add_root(state: &mut State, raw: u32) -> Resolved<WlSurfaceId> {
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(raw), ClientId::from_raw(1), 6));
+        let surface = Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(raw), object_id);
+        state.register_root_surface(surface);
+        surface
+    }
+
+    fn layout_mut<'a>(
+        state: &'a mut State,
+        surface: Resolved<WlSurfaceId>,
+    ) -> &'a mut crate::tiling::WorkspaceLayout {
+        let workspace_id = state.root_surface_workspace(surface).unwrap();
+        &mut state.workspaces.try_get_mut(workspace_id).unwrap().layout
+    }
+
+    fn place_tiled(state: &mut State, surface: Resolved<WlSurfaceId>) {
+        let layout = layout_mut(state, surface);
+        if !layout.is_tiled_surface(surface) {
+            assert!(layout.insert_tiled(surface));
+        }
+    }
+
+    fn place_floating(state: &mut State, surface: Resolved<WlSurfaceId>) {
+        {
+            let layout = layout_mut(state, surface);
+            if !layout.contains_surface(surface) {
+                assert!(layout.insert_tiled(surface));
+            }
+            if !layout.is_floating_surface(surface) {
+                assert!(layout.set_floating(surface, true));
+            }
+        }
+        state.managed_root_surfaces.get_mut(&surface).unwrap().mode =
+            crate::state::ManagedWindowMode::Floating;
+    }
+
+    fn scene_orders(
+        state: &State,
+        surface: Resolved<WlSurfaceId>,
+    ) -> (Vec<Resolved<WlSurfaceId>>, Vec<Resolved<WlSurfaceId>>) {
+        let workspace_id = state.root_surface_workspace(surface).unwrap();
+        let layout = &state.workspaces.try_get(workspace_id).unwrap().layout;
+        (layout.tiled_scene_order(), layout.floating_scene_order())
+    }
+
+    fn keyboard_surface(state: &State) -> Option<Resolved<WlSurfaceId>> {
+        state.seat.keyboard_focus.map(|focus| focus.surface)
+    }
+
+    #[test]
+    fn focus_cycle_on_one_window_stays_put() {
+        let mut state = state_for_tests();
+        let surface = focus_managed_root(&mut state);
+        place_tiled(&mut state, surface);
+        let mut dispatcher = Dispatcher::default();
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusNext);
+        assert_eq!(keyboard_surface(&state), Some(surface));
+        assert_eq!(scene_orders(&state, surface).0, vec![surface]);
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusPrevious);
+        assert_eq!(keyboard_surface(&state), Some(surface));
+        assert_eq!(scene_orders(&state, surface).0, vec![surface]);
+    }
+
+    #[test]
+    fn focus_cycle_rotates_floating_windows_without_bouncing() {
+        let mut state = state_for_tests();
+        let first = focus_managed_root(&mut state);
+        let second = add_root(&mut state, 42);
+        let third = add_root(&mut state, 43);
+        let fourth = add_root(&mut state, 44);
+        for surface in [first, second, third, fourth] {
+            place_floating(&mut state, surface);
+        }
+        let mut dispatcher = Dispatcher::default();
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusNext);
+        assert_eq!(scene_orders(&state, first).1, vec![second, third, fourth, first]);
+        assert_eq!(keyboard_surface(&state), Some(first));
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusNext);
+        assert_eq!(scene_orders(&state, first).1, vec![third, fourth, first, second]);
+        assert_eq!(keyboard_surface(&state), Some(second));
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusNext);
+        assert_eq!(scene_orders(&state, first).1, vec![fourth, first, second, third]);
+        assert_eq!(keyboard_surface(&state), Some(third));
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusNext);
+        assert_eq!(scene_orders(&state, first).1, vec![first, second, third, fourth]);
+        assert_eq!(keyboard_surface(&state), Some(fourth));
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusPrevious);
+        assert_eq!(scene_orders(&state, first).1, vec![fourth, first, second, third]);
+        assert_eq!(keyboard_surface(&state), Some(third));
+    }
+
+    #[test]
+    fn focus_cycle_two_windows_swaps_in_either_direction() {
+        let mut state = state_for_tests();
+        let back = focus_managed_root(&mut state);
+        let front = add_root(&mut state, 42);
+        place_floating(&mut state, back);
+        place_floating(&mut state, front);
+        let mut dispatcher = Dispatcher::default();
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusNext);
+        assert_eq!(scene_orders(&state, back).1, vec![front, back]);
+        assert_eq!(keyboard_surface(&state), Some(back));
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusPrevious);
+        assert_eq!(scene_orders(&state, back).1, vec![back, front]);
+        assert_eq!(keyboard_surface(&state), Some(front));
+    }
+
+    #[test]
+    fn focus_cycle_keeps_tiled_and_floating_in_separate_bands() {
+        let mut state = state_for_tests();
+        let tiled_back = focus_managed_root(&mut state);
+        let tiled_front = add_root(&mut state, 42);
+        let floating_back = add_root(&mut state, 43);
+        let floating_front = add_root(&mut state, 44);
+        place_tiled(&mut state, tiled_back);
+        place_tiled(&mut state, tiled_front);
+        place_floating(&mut state, floating_back);
+        place_floating(&mut state, floating_front);
+        let mut dispatcher = Dispatcher::default();
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusNext);
+        assert_eq!(scene_orders(&state, tiled_back).0, vec![tiled_front, tiled_back]);
+        assert_eq!(scene_orders(&state, tiled_back).1, vec![floating_back, floating_front]);
+        assert_eq!(keyboard_surface(&state), Some(tiled_back));
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusNext);
+        assert_eq!(scene_orders(&state, tiled_back).0, vec![tiled_back, tiled_front]);
+        assert_eq!(keyboard_surface(&state), Some(tiled_front));
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusPrevious);
+        assert_eq!(scene_orders(&state, tiled_back).0, vec![tiled_back, tiled_front]);
+        assert_eq!(scene_orders(&state, tiled_back).1, vec![floating_front, floating_back]);
+        assert_eq!(keyboard_surface(&state), Some(floating_back));
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusPrevious);
+        assert_eq!(scene_orders(&state, tiled_back).1, vec![floating_back, floating_front]);
+        assert_eq!(keyboard_surface(&state), Some(floating_front));
+    }
+
+    #[test]
+    fn focus_cycle_rotates_tiled_windows_when_nothing_floats() {
+        let mut state = state_for_tests();
+        let first = focus_managed_root(&mut state);
+        let second = add_root(&mut state, 42);
+        let third = add_root(&mut state, 43);
+        place_tiled(&mut state, first);
+        place_tiled(&mut state, second);
+        place_tiled(&mut state, third);
+        let mut dispatcher = Dispatcher::default();
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusPrevious);
+        assert_eq!(scene_orders(&state, first).0, vec![third, first, second]);
+        assert_eq!(keyboard_surface(&state), Some(second));
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusPrevious);
+        assert_eq!(scene_orders(&state, first).0, vec![second, third, first]);
+        assert_eq!(keyboard_surface(&state), Some(first));
+
+        execute_action(&mut state, &mut dispatcher, CompositorAction::FocusPrevious);
+        assert_eq!(scene_orders(&state, first).0, vec![first, second, third]);
+        assert_eq!(keyboard_surface(&state), Some(third));
     }
 }
