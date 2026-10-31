@@ -4431,30 +4431,7 @@ impl DrmOutputModel {
     ) {
         if !active {
             quiesce_output(state, dispatcher, self.drm_id, self.output_id);
-            return;
         }
-        let Some(drm_crtc_id) = state.output_crtc_id(self.output_id) else {
-            return;
-        };
-        if let Some(output) = state.drm.get_mut(self.drm_id).output_mut(drm_crtc_id) {
-            output.pipeline.resume_commits();
-        }
-        let (releases, feedbacks, damage_blob) = {
-            let drm = state.drm.get_mut(self.drm_id);
-            drm.output_mut(drm_crtc_id)
-                .unwrap()
-                .pipeline
-                .reset_after_session_resume()
-        };
-        settle_pipeline_reset(
-            state,
-            dispatcher,
-            self.drm_id,
-            self.output_id,
-            releases,
-            feedbacks,
-            damage_blob,
-        );
     }
 }
 

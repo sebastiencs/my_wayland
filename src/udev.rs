@@ -259,6 +259,7 @@ impl Model for Udev {
                     for devnum in drm_devnums {
                         self.restore_ready_drm(devnum, state, dispatcher)?;
                     }
+                    self.confirm_ready_outputs(state, dispatcher);
                 }
             }
             UdevAction::InputLost { devnum } => {
@@ -597,6 +598,7 @@ impl Udev {
             {
                 self.remove_drm_backend(drm_id, state, dispatcher);
             }
+            self.confirm_ready_outputs(state, dispatcher);
             return self.finish_drm_restore(state);
         }
 
@@ -619,7 +621,26 @@ impl Udev {
         };
         self.awaiting_drm_resume.remove(&devnum);
         self.on_drm_taken(device, fd, false, devnum, state, dispatcher)?;
+        self.confirm_ready_outputs(state, dispatcher);
         self.finish_drm_restore(state)
+    }
+
+    /// Let schedulers paint outputs whose DRM device is no longer waiting for a resume fd.
+    fn confirm_ready_outputs(&self, state: &State, dispatcher: &mut Dispatcher) {
+        for (output_id, output) in state.outputs.iter() {
+            let waiting = state
+                .drm
+                .try_get(output.backend.drm_id)
+                .and_then(|drm| drm.devnum())
+                .is_some_and(|devnum| self.awaiting_drm_resume.contains(&devnum));
+            if waiting {
+                continue;
+            }
+            dispatcher.dispatch_to(
+                crate::scheduler::output_scheduler_id(output_id),
+                crate::scheduler::OutputSchedulerAction::Restored,
+            );
+        }
     }
 
     fn take_drm_fd(&mut self, devnum: libc::dev_t) -> Option<OwnedFd> {

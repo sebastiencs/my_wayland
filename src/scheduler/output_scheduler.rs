@@ -59,6 +59,8 @@ pub struct OutputScheduler {
     blocked_on_pipeline: bool,
     flip_watchdog_deadline: Option<Instant>,
     session_active: bool,
+    /// Cleared on pause. A fresh frame waits until restore sets this again.
+    restore_confirmed: bool,
     presented_frames: u64,
     discarded_frames: u64,
     watchdog_timeouts: u64,
@@ -92,6 +94,8 @@ pub enum OutputSchedulerAction {
     },
     /// Cancel pending frame and watchdog work while a device pause is in progress.
     Disarm,
+    /// The output's KMS state has been restored, so one fresh frame may be scheduled.
+    Restored,
     Fired,
     Failed {
         error: std::io::Error,
@@ -120,6 +124,7 @@ impl OutputScheduler {
             blocked_on_pipeline: false,
             flip_watchdog_deadline: None,
             session_active: true,
+            restore_confirmed: true,
             presented_frames: 0,
             discarded_frames: 0,
             watchdog_timeouts: 0,
@@ -287,14 +292,33 @@ impl OutputScheduler {
 
     fn disarm_clock(&mut self) {
         self.session_active = false;
+        self.restore_confirmed = false;
         self.blocked_on_pipeline = false;
         self.flip_watchdog_deadline = None;
         self.clock.update_mode(FrameClockMode::Passive, 60_000);
         let _ = self.set_expiration(None);
     }
 
+    /// One ModeChange after both the session and this output's KMS restore are ready.
+    fn maybe_resume_after_restore(&mut self, state: &State, dispatcher: &mut Dispatcher) {
+        if !self.restore_confirmed || !state.session_active || self.session_active {
+            return;
+        }
+        self.session_active = true;
+        self.blocked_on_pipeline = false;
+        self.flip_watchdog_deadline = None;
+        self.sync_mode_from_state(state);
+        self.clock.request_frame(RequestFrameReason::ModeChange);
+        self.try_dispatch_render(dispatcher);
+        self.arm_from_clock(dispatcher);
+    }
+
     fn try_dispatch_render(&mut self, dispatcher: &mut Dispatcher) {
-        if self.render_dispatched || self.blocked_on_pipeline || !self.clock.pending_work() {
+        if !self.session_active
+            || self.render_dispatched
+            || self.blocked_on_pipeline
+            || !self.clock.pending_work()
+        {
             return;
         }
         let decision = self.clock.decide(Instant::now());
@@ -457,18 +481,16 @@ impl Model for OutputScheduler {
                 self.on_frame_completed(state, dispatcher, outcome);
             }
             OutputSchedulerAction::SessionChanged { active } => {
-                self.session_active = active;
                 dispatcher.dispatch_to(self.output_id, DrmAction::SessionChanged { active });
                 if active {
-                    self.sync_mode_from_state(state);
-                    self.blocked_on_pipeline = false;
-                    self.flip_watchdog_deadline = None;
-                    self.clock.request_frame(RequestFrameReason::ModeChange);
-                    self.try_dispatch_render(dispatcher);
-                    self.arm_from_clock(dispatcher);
+                    self.maybe_resume_after_restore(state, dispatcher);
                 } else {
                     self.disarm_clock();
                 }
+            }
+            OutputSchedulerAction::Restored => {
+                self.restore_confirmed = true;
+                self.maybe_resume_after_restore(state, dispatcher);
             }
             OutputSchedulerAction::Disarm => self.disarm_clock(),
             OutputSchedulerAction::Fired => {
@@ -734,5 +756,136 @@ mod tests {
         assert!(!scheduler.blocked_on_pipeline);
         assert!(scheduler.flip_watchdog_deadline.is_none());
         assert_eq!(scheduler.clock.mode(), FrameClockMode::Passive);
+    }
+
+    fn render_frames(dispatcher: &Dispatcher) -> usize {
+        dispatcher.test_count_queued_action(|action: &DrmAction| {
+            matches!(action, DrmAction::RenderFrame { .. })
+        })
+    }
+
+    #[test]
+    fn resume_waits_for_restore_then_requests_one_mode_change() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output(
+            BackendOutputRef::new(DrmId::from(0usize)),
+            1,
+            0,
+            0,
+            1920,
+            1080,
+            "test-output",
+        ));
+        let mut scheduler = OutputScheduler::new(DrmId::from(0usize), output_id);
+        let mut dispatcher = Dispatcher::default();
+        scheduler
+            .process(&mut state, OutputSchedulerAction::Disarm, &mut dispatcher)
+            .unwrap();
+        state.session_active = true;
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::SessionChanged { active: true },
+                &mut dispatcher,
+            )
+            .unwrap();
+        assert_eq!(render_frames(&dispatcher), 0);
+        assert!(!scheduler.session_active);
+
+        scheduler
+            .process(&mut state, OutputSchedulerAction::Restored, &mut dispatcher)
+            .unwrap();
+        assert!(scheduler.session_active);
+        assert_eq!(render_frames(&dispatcher), 1);
+        assert!(dispatcher.test_has_queued_action(|action: &DrmAction| {
+            matches!(
+                action,
+                DrmAction::RenderFrame { decision }
+                    if decision.mode == FrameClockMode::Fixed
+                        && decision.disposition == ClockDisposition::RenderNow
+            )
+        }));
+
+        scheduler
+            .process(&mut state, OutputSchedulerAction::Restored, &mut dispatcher)
+            .unwrap();
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::SessionChanged { active: true },
+                &mut dispatcher,
+            )
+            .unwrap();
+        assert_eq!(render_frames(&dispatcher), 1);
+
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::RenderAttempted { started: true },
+                &mut dispatcher,
+            )
+            .unwrap();
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::FrameCompleted(super::FrameCompletionOutcome::Presented(
+                    crate::scheduler::frame_clock::PresentSample {
+                        present_time: std::time::Instant::now(),
+                        sequence: 1,
+                        flags: crate::scheduler::frame_clock::PresentFlags {
+                            zero_copy: false,
+                            refresh_is_constant: true,
+                        },
+                        timing: None,
+                    },
+                )),
+                &mut dispatcher,
+            )
+            .unwrap();
+        assert_eq!(scheduler.clock.mode(), FrameClockMode::Fixed);
+        assert!(scheduler.clock.refresh_is_constant());
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::RequestFrame { reason: RequestFrameReason::Damage },
+                &mut dispatcher,
+            )
+            .unwrap();
+        assert_eq!(scheduler.clock.mode(), FrameClockMode::Fixed);
+    }
+
+    #[test]
+    fn a_device_resume_frames_once_without_another_active_signal() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output(
+            BackendOutputRef::new(DrmId::from(0usize)),
+            1,
+            0,
+            0,
+            1920,
+            1080,
+            "test-output",
+        ));
+        let mut scheduler = OutputScheduler::new(DrmId::from(0usize), output_id);
+        let mut dispatcher = Dispatcher::default();
+        state.session_active = false;
+        scheduler
+            .process(&mut state, OutputSchedulerAction::Restored, &mut dispatcher)
+            .unwrap();
+        assert_eq!(render_frames(&dispatcher), 0);
+
+        scheduler
+            .process(&mut state, OutputSchedulerAction::Disarm, &mut dispatcher)
+            .unwrap();
+        state.session_active = true;
+        scheduler
+            .process(&mut state, OutputSchedulerAction::Restored, &mut dispatcher)
+            .unwrap();
+        assert!(scheduler.session_active);
+        assert_eq!(render_frames(&dispatcher), 1);
+        scheduler
+            .process(&mut state, OutputSchedulerAction::Restored, &mut dispatcher)
+            .unwrap();
+        assert_eq!(render_frames(&dispatcher), 1);
     }
 }
