@@ -1688,4 +1688,245 @@ mod session_release_tests {
         assert!(release < control);
         assert!(session.devices.is_empty());
     }
+
+    #[test]
+    fn shutdown_releases_every_held_phase_before_release_control() {
+        use {super::DevicePhase, std::io::Read};
+
+        for phase in [
+            DevicePhase::Active,
+            DevicePhase::Pausing(crate::udev::DevicePauseKind::Pause),
+            DevicePhase::Pausing(crate::udev::DevicePauseKind::Force),
+            DevicePhase::Paused,
+            DevicePhase::Resuming,
+        ] {
+            let (mut session, mut peer) = dbus_pair();
+            peer.set_nonblocking(true).unwrap();
+            let devnum = hold_device(&mut session);
+            session.devices.get_mut(&devnum).unwrap().phase = phase;
+            session.release_control();
+            let mut bytes = [0u8; 4096];
+            let read = peer.read(&mut bytes).unwrap();
+            let text = String::from_utf8_lossy(&bytes[..read]);
+            let release = text.find("ReleaseDevice").expect("held device is released");
+            let control = text
+                .find("ReleaseControl")
+                .expect("session control is released");
+            assert!(release < control);
+            assert!(session.devices.is_empty());
+        }
+
+        let (mut session, mut peer) = dbus_pair();
+        peer.set_nonblocking(true).unwrap();
+        let devnum = hold_device(&mut session);
+        session.devices.get_mut(&devnum).unwrap().phase = DevicePhase::Gone;
+        session.release_control();
+        let mut bytes = [0u8; 4096];
+        let read = peer.read(&mut bytes).unwrap();
+        let text = String::from_utf8_lossy(&bytes[..read]);
+        assert!(!text.contains("ReleaseDevice"));
+        assert!(text.contains("ReleaseControl"));
+        assert!(session.devices.contains_key(&devnum));
+    }
+
+    #[test]
+    fn a_pause_and_resume_keeps_the_output_and_requests_one_frame() {
+        use crate::{
+            drm::DrmAction,
+            libinput::{Libinput, LibinputAction},
+            runner::Model,
+            scheduler::{
+                frame_clock::{ClockDisposition, FrameClockMode},
+                OutputScheduler, OutputSchedulerAction,
+            },
+            state::{BackendOutputRef, DrmId},
+            test_support::test_output,
+            udev::{DevicePauseKind, Udev, UdevAction},
+        };
+
+        let mut session = dbus_for_tests();
+        let devnum = hold_device(&mut session);
+        let mut udev = Udev::new().expect("udev monitor");
+        udev.test_retain_input(devnum, "/dev/input/event0");
+        let mut input = Libinput::new();
+        let mut state = crate::test_support::state_for_tests();
+        let output_id = state.insert_output(test_output(
+            BackendOutputRef::new(DrmId::from(0usize)),
+            1,
+            0,
+            0,
+            1920,
+            1080,
+            "lifecycle",
+        ));
+        let mut scheduler = OutputScheduler::new(DrmId::from(0usize), output_id);
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        state.keyboard.update_key(30, true);
+
+        deliver_pause(&mut session, "pause", &mut dispatcher);
+        assert_eq!(pause_routes(&dispatcher), 1);
+        assert_eq!(pause_complete_count(&dispatcher, 1), 0);
+        udev.process(
+            &mut state,
+            UdevAction::PauseDevice { devnum, kind: DevicePauseKind::Pause },
+            &mut dispatcher,
+        )
+        .expect("pause");
+        input
+            .process(&mut state, LibinputAction::Quiesce { devnum: devnum as u64 }, &mut dispatcher)
+            .expect("quiesce input");
+        assert!(state.keyboard.pressed_keys().0.is_empty());
+        assert!(udev.test_has_retained_input(devnum));
+        session
+            .process(&mut state, super::DbusAction::DevicePauseQuiesced { devnum }, &mut dispatcher)
+            .expect("ack");
+        assert_eq!(pause_complete_count(&dispatcher, 1), 1);
+        assert_eq!(session.devices.get(&devnum).unwrap().phase, super::DevicePhase::Paused);
+        assert_eq!(state.outputs.try_get(output_id).unwrap().name, "lifecycle");
+
+        session.dispatch_session_active(&mut state, false, &mut dispatcher);
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::SessionChanged { active: false },
+                &mut dispatcher,
+            )
+            .unwrap();
+        let paused = state
+            .frame_scheduler
+            .get(&output_id)
+            .expect("scheduler snapshot");
+        assert!(!paused.session_active);
+        assert_eq!(paused.clock.mode, FrameClockMode::Passive);
+
+        session.handle_message(&mut state, resume_signal(), vec![null_fd()], &mut dispatcher);
+        udev.process(
+            &mut state,
+            UdevAction::ResumeDevice { devnum, fd: null_fd() },
+            &mut dispatcher,
+        )
+        .expect("store resume");
+        assert!(udev.test_has_retained_input(devnum));
+        assert!(!dispatcher.test_has_queued_action(|action: &LibinputAction| {
+            matches!(action, LibinputAction::OpenInput { .. })
+        }));
+
+        session.dispatch_session_active(&mut state, true, &mut dispatcher);
+        udev.process(&mut state, UdevAction::SessionActive, &mut dispatcher)
+            .expect("resume input");
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::SessionChanged { active: true },
+                &mut dispatcher,
+            )
+            .unwrap();
+        assert_eq!(render_frames(&dispatcher), 0);
+        scheduler
+            .process(&mut state, OutputSchedulerAction::Restored, &mut dispatcher)
+            .unwrap();
+        assert_eq!(render_frames(&dispatcher), 1);
+        assert!(dispatcher.test_has_queued_action(|action: &DrmAction| {
+            matches!(
+                action,
+                DrmAction::RenderFrame { decision }
+                    if decision.mode == FrameClockMode::Fixed
+                        && decision.disposition == ClockDisposition::RenderNow
+            )
+        }));
+        assert_eq!(
+            dispatcher.test_count_queued_action(|action: &LibinputAction| {
+                matches!(action, LibinputAction::OpenInput { .. })
+            }),
+            1
+        );
+        assert_eq!(state.outputs.try_get(output_id).unwrap().name, "lifecycle");
+
+        session.dispatch_session_active(&mut state, true, &mut dispatcher);
+        udev.process(&mut state, UdevAction::SessionActive, &mut dispatcher)
+            .expect("duplicate active");
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::SessionChanged { active: true },
+                &mut dispatcher,
+            )
+            .unwrap();
+        scheduler
+            .process(&mut state, OutputSchedulerAction::Restored, &mut dispatcher)
+            .unwrap();
+        assert_eq!(render_frames(&dispatcher), 1);
+        assert_eq!(
+            dispatcher.test_count_queued_action(|action: &LibinputAction| {
+                matches!(action, LibinputAction::OpenInput { .. })
+            }),
+            1
+        );
+    }
+
+    #[test]
+    fn a_failed_input_restore_releases_only_that_device() {
+        use crate::{
+            libinput::{Libinput, LibinputAction},
+            runner::Model,
+            state::{BackendOutputRef, DrmId},
+            test_support::test_output,
+            udev::{Udev, UdevAction},
+        };
+
+        let mut udev = Udev::new().expect("udev monitor");
+        let devnum = super::device_number(8, 3);
+        udev.test_retain_input(devnum, "/dev/null");
+        let mut input = Libinput::new();
+        let mut state = crate::test_support::state_for_tests();
+        let output_id = state.insert_output(test_output(
+            BackendOutputRef::new(DrmId::from(0usize)),
+            1,
+            0,
+            0,
+            800,
+            600,
+            "kept",
+        ));
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        udev.process(
+            &mut state,
+            UdevAction::ResumeDevice { devnum, fd: null_fd() },
+            &mut dispatcher,
+        )
+        .expect("queue the failed open");
+        input
+            .process(&mut state, LibinputAction::Quiesce { devnum: devnum as u64 }, &mut dispatcher)
+            .expect("quiesce before the failed open");
+        input
+            .process(
+                &mut state,
+                LibinputAction::OpenInput {
+                    devnode: "/dev/null".into(),
+                    fd: null_fd(),
+                    devnum: devnum as u64,
+                },
+                &mut dispatcher,
+            )
+            .expect("isolated input failure");
+        assert!(!dispatcher.shutdown_requested());
+        assert!(dispatcher.test_has_queued_action(|action: &super::DbusAction| {
+            matches!(action, super::DbusAction::ReleaseDevice { .. })
+        }));
+        assert!(dispatcher.test_has_queued_action(|action: &UdevAction| {
+            matches!(action, UdevAction::InputLost { .. })
+        }));
+        udev.process(&mut state, UdevAction::InputLost { devnum }, &mut dispatcher)
+            .expect("drop the failed input");
+        assert!(!udev.test_has_retained_input(devnum));
+        assert_eq!(state.outputs.try_get(output_id).unwrap().name, "kept");
+    }
+
+    fn render_frames(dispatcher: &crate::runner::Dispatcher) -> usize {
+        use crate::drm::DrmAction;
+
+        dispatcher.test_count_queued_action(|action: &DrmAction| {
+            matches!(action, DrmAction::RenderFrame { .. })
+        })
+    }
 }

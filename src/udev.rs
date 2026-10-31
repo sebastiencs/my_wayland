@@ -896,6 +896,17 @@ fn sync_color_control_global(
     }
 }
 
+#[cfg(test)]
+impl Udev {
+    pub(crate) fn test_retain_input(&mut self, devnum: libc::dev_t, devnode: impl Into<String>) {
+        self.retained_inputs.insert(devnum, devnode.into());
+    }
+
+    pub(crate) fn test_has_retained_input(&self, devnum: libc::dev_t) -> bool {
+        self.retained_inputs.contains_key(&devnum)
+    }
+}
+
 fn sync_color_control_globals(state: &mut State, dispatcher: &mut Dispatcher) {
     sync_color_control_global(
         state,
@@ -1264,6 +1275,41 @@ mod tests {
             ModelFailure::Shutdown(ShutdownReason::Fatal { source: "drm", .. })
         ));
         assert!(udev.resumed_fds.get(&devnum).is_none());
+        assert!(dispatcher.test_has_queued_action(|action: &DbusAction| {
+            matches!(action, DbusAction::ReleaseDevice { .. })
+        }));
+    }
+
+    #[test]
+    fn a_failed_drm_resume_leaves_another_output_in_place() {
+        use crate::{
+            dbus::DbusAction, runner::Model, state::BackendOutputRef, test_support::test_output,
+        };
+
+        let drm = first_device("drm");
+        let devnum = drm.devnum().expect("drm devnum");
+        let mut udev = Udev::new().expect("udev monitor");
+        udev.parked.insert(
+            devnum,
+            super::ParkedSessionDevice { kind: super::ParkedKind::Drm(drm), fd: None },
+        );
+        let mut state = crate::test_support::state_for_tests();
+        state.session_active = true;
+        let surviving = state.insert_output(test_output(
+            BackendOutputRef::new(crate::state::DrmId::from(0usize)),
+            1,
+            0,
+            0,
+            1920,
+            1080,
+            "surviving",
+        ));
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        let fd: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        udev.process(&mut state, super::UdevAction::ResumeDevice { devnum, fd }, &mut dispatcher)
+            .expect("the other output keeps the session up");
+        assert!(!dispatcher.shutdown_requested());
+        assert_eq!(state.outputs.try_get(surviving).unwrap().name, "surviving");
         assert!(dispatcher.test_has_queued_action(|action: &DbusAction| {
             matches!(action, DbusAction::ReleaseDevice { .. })
         }));
