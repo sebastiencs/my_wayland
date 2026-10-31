@@ -22,6 +22,7 @@ use crate::{
     sync::{self, AcquireReadyWaiter, RetiredBufferCandidate, SurfaceSyncState},
     transform::{self, BufferTransform, SizeI, SurfaceViewport},
     wayland_objects::{
+        pointer_constraint::SurfacePointerConstraint,
         wl_callback::WlCallback,
         wl_region::WlRegion,
         wp_fractional_scale_v1::WpFractionalScaleV1,
@@ -29,6 +30,7 @@ use crate::{
         zwlr_layer_surface_v1::{
             output_usable_bounds, LayerLayoutObjectSnapshot, ZwlrLayerSurfaceV1,
         },
+        zwp_pointer_constraints_v1::{apply_pointer_constraint_commit, defunct_pointer_constraint},
     },
     ENABLE_DAMAGE,
 };
@@ -185,6 +187,7 @@ pub struct WlSurface {
     preferred_fractional_scale_sent: Option<u32>,
     preferred_buffer_scale_sent: Option<i32>,
     preferred_buffer_transform_sent: Option<u32>,
+    pointer_constraint: Option<SurfacePointerConstraint>,
 }
 
 #[derive(Clone, Debug)]
@@ -200,6 +203,9 @@ struct Pending {
     damage_buffer: Vec<DamageRect>,
     input_region: Option<RegionValue>,
     opaque_region: Option<RegionValue>,
+    /// `None` means `set_region` was not called. `Some(None)` is a null region.
+    pointer_constraint_region: Option<Option<RegionValue>>,
+    pointer_constraint_hint: Option<(f32, f32)>,
 }
 
 impl Default for Pending {
@@ -215,6 +221,8 @@ impl Default for Pending {
             damage_buffer: Vec::new(),
             input_region: None,
             opaque_region: None,
+            pointer_constraint_region: None,
+            pointer_constraint_hint: None,
         }
     }
 }
@@ -411,7 +419,32 @@ impl WlSurface {
             preferred_fractional_scale_sent: None,
             preferred_buffer_scale_sent: None,
             preferred_buffer_transform_sent: None,
+            pointer_constraint: None,
         }
+    }
+
+    pub(crate) fn pointer_constraint(&self) -> Option<SurfacePointerConstraint> {
+        self.pointer_constraint
+    }
+
+    pub(crate) fn set_pointer_constraint(&mut self, constraint: SurfacePointerConstraint) {
+        self.pointer_constraint = Some(constraint);
+    }
+
+    pub(crate) fn clear_pointer_constraint(&mut self, expected: SurfacePointerConstraint) {
+        if self.pointer_constraint == Some(expected) {
+            self.pointer_constraint = None;
+            self.pending.pointer_constraint_region = None;
+            self.pending.pointer_constraint_hint = None;
+        }
+    }
+
+    pub(crate) fn set_pending_pointer_constraint_region(&mut self, region: Option<RegionValue>) {
+        self.pending.pointer_constraint_region = Some(region);
+    }
+
+    pub(crate) fn set_pending_pointer_constraint_hint(&mut self, hint: (f32, f32)) {
+        self.pending.pointer_constraint_hint = Some(hint);
     }
 
     pub fn set_syncobj_surface_object(
@@ -1799,7 +1832,10 @@ impl WlSurface {
             return;
         }
 
+        let constraint_region = this.pending.pointer_constraint_region.take();
+        let constraint_hint = this.pending.pointer_constraint_hint.take();
         let payload = this.build_commit_payload();
+        apply_pointer_constraint_commit(&this, state, constraint_region, constraint_hint);
         let frame_callbacks = std::mem::take(&mut this.pending_frame_callbacks);
         let presentation_feedbacks = std::mem::take(&mut this.pending_presentation_feedbacks);
 
@@ -2566,6 +2602,8 @@ impl WlSurface {
         begin_managed_toplevel_close_surface(state, object, self, dispatcher);
         let scene_bounds = state.surface_scene_bounds_with_ref(object, self);
         state.seat.clear_cursor_surface(object);
+        let constraint = self.pointer_constraint.take();
+        defunct_pointer_constraint(constraint, state);
         self.discard_all_presentation_feedbacks(client, state, dispatcher);
         for child_surface in self.child_surface_ids() {
             Self::detach_subsurface_tree(child_surface, client, state, dispatcher);
@@ -2726,6 +2764,8 @@ impl Object for WlSurface {
         if let Some(resolved) = client.resolve(self.id, state) {
             begin_managed_toplevel_close_surface(state, resolved, self, dispatcher);
         }
+        let constraint = self.pointer_constraint.take();
+        defunct_pointer_constraint(constraint, state);
         if let Some(waiter_id) = self.blocked_waiter_id.take() {
             dispatcher.stop_model(waiter_id);
         }

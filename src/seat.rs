@@ -12,7 +12,7 @@ use crate::{
     },
     protocol_generated::{
         Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlKeyboardId, WlPointerId, WlSeatId,
-        WlSurfaceId, XdgPopupId, XdgToplevelId,
+        WlSurfaceId, XdgPopupId, XdgToplevelId, ZwpRelativePointerV1Id,
     },
     root_geometry::WindowTargetGeometry,
     runner::Dispatcher,
@@ -285,6 +285,7 @@ pub struct SeatState {
     selection_serial: u32,
     active_drag: Option<DragState>,
     pointer_resources: BTreeMap<ClientId, Vec<Resolved<WlPointerId>>>,
+    relative_pointers: BTreeMap<Resolved<WlPointerId>, Vec<Resolved<ZwpRelativePointerV1Id>>>,
     keyboard_resources: BTreeMap<ClientId, Vec<Resolved<WlKeyboardId>>>,
     intercepted_keyboard_keys: BTreeSet<u32>,
     intercepted_pointer_buttons: BTreeSet<u32>,
@@ -314,6 +315,7 @@ impl Default for SeatState {
             selection_serial: 0,
             active_drag: None,
             pointer_resources: BTreeMap::default(),
+            relative_pointers: BTreeMap::default(),
             keyboard_resources: BTreeMap::default(),
             intercepted_keyboard_keys: BTreeSet::default(),
             intercepted_pointer_buttons: BTreeSet::default(),
@@ -351,6 +353,42 @@ impl SeatState {
 
     pub fn unregister_pointer(&mut self, pointer: Resolved<WlPointerId>) {
         remove_resource(&mut self.pointer_resources, pointer.client_id(), pointer);
+        self.relative_pointers.remove(&pointer);
+    }
+
+    pub fn register_relative_pointer(
+        &mut self,
+        pointer: Resolved<WlPointerId>,
+        relative: Resolved<ZwpRelativePointerV1Id>,
+    ) {
+        let resources = self.relative_pointers.entry(pointer).or_default();
+        if !resources.contains(&relative) {
+            resources.push(relative);
+        }
+    }
+
+    pub fn unregister_relative_pointer(
+        &mut self,
+        pointer: Resolved<WlPointerId>,
+        relative: ZwpRelativePointerV1Id,
+    ) {
+        let Some(resources) = self.relative_pointers.get_mut(&pointer) else {
+            return;
+        };
+        resources.retain(|registered| registered.wayland_id() != relative);
+        if resources.is_empty() {
+            self.relative_pointers.remove(&pointer);
+        }
+    }
+
+    pub fn relative_pointers(
+        &self,
+        pointer: Resolved<WlPointerId>,
+    ) -> &[Resolved<ZwpRelativePointerV1Id>] {
+        self.relative_pointers
+            .get(&pointer)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub fn register_keyboard(&mut self, keyboard: Resolved<WlKeyboardId>) {
@@ -678,6 +716,8 @@ impl SeatState {
         self.client_serials.remove(&client_id);
         self.data_device_resources.remove(&client_id);
         self.pointer_resources.remove(&client_id);
+        self.relative_pointers
+            .retain(|pointer, _| pointer.client_id() != client_id);
         self.keyboard_resources.remove(&client_id);
         if self
             .selection_source

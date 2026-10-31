@@ -94,6 +94,11 @@ wayland_id! {
   ZwpLinuxExplicitSynchronizationV1Id,
   ZwpLinuxSurfaceSynchronizationV1Id,
   ZwpLinuxBufferReleaseV1Id,
+  ZwpPointerConstraintsV1Id,
+  ZwpLockedPointerV1Id,
+  ZwpConfinedPointerV1Id,
+  ZwpRelativePointerManagerV1Id,
+  ZwpRelativePointerV1Id,
   ZwpTabletManagerV2Id,
   ZwpTabletSeatV2Id,
   ZwpTabletToolV2Id,
@@ -13852,5 +13857,576 @@ pub mod hyprland_ctm_control_manager_v1 {
     pub enum Error {
         /// The matrix values are invalid.,
         InvalidMatrix = 0,
+    }
+}
+
+/// Constrain the movement of a pointer
+///
+/// The global interface exposing pointer constraining functionality. It
+/// exposes two requests: lock_pointer for locking the pointer to its
+/// position, and confine_pointer for locking the pointer to a region.
+///
+/// The lock_pointer and confine_pointer requests create the objects
+/// wp_locked_pointer and wp_confined_pointer respectively, and the client can
+/// use these objects to interact with the lock.
+///
+/// For any surface, only one lock or confinement may be active across all
+/// wl_pointer objects of the same seat. If a lock or confinement is requested
+/// when another lock or confinement is active or requested on the same surface
+/// and with any of the wl_pointer objects of the same seat, an
+/// 'already_constrained' error will be raised.
+pub mod zwp_pointer_constraints_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1 {
+        const INTERFACE_NAME: &'static str = "zwp_pointer_constraints_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpPointerConstraintsV1Id {
+        type Object = crate::wayland_objects::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1
+    {
+        type Id = ZwpPointerConstraintsV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the pointer constraints manager object
+        ///
+        /// Used by the client to notify the server that it will no longer use this
+        /// pointer constraints object.
+        Destroy,
+        /// Lock pointer to a position
+        ///
+        /// The lock_pointer request lets the client request to disable movements of
+        /// the virtual pointer (i.e. the cursor), effectively locking the pointer
+        /// to a position. This request may not take effect immediately; in the
+        /// future, when the compositor deems implementation-specific constraints
+        /// are satisfied, the pointer lock will be activated and the compositor
+        /// sends a locked event.
+        ///
+        /// The protocol provides no guarantee that the constraints are ever
+        /// satisfied, and does not require the compositor to send an error if the
+        /// constraints cannot ever be satisfied. It is thus possible to request a
+        /// lock that will never activate.
+        ///
+        /// There may not be another pointer constraint of any kind requested or
+        /// active on the surface for any of the wl_pointer objects of the seat of
+        /// the passed pointer when requesting a lock. If there is, an error will be
+        /// raised. See general pointer lock documentation for more details.
+        ///
+        /// The intersection of the region passed with this request and the input
+        /// region of the surface is used to determine where the pointer must be
+        /// in order for the lock to activate. It is up to the compositor whether to
+        /// warp the pointer or require some kind of user interaction for the lock
+        /// to activate. If the region is null the surface input region is used.
+        ///
+        /// A surface may receive pointer focus without the lock being activated.
+        ///
+        /// The request creates a new object wp_locked_pointer which is used to
+        /// interact with the lock as well as receive updates about its state. See
+        /// the the description of wp_locked_pointer for further information.
+        ///
+        /// Note that while a pointer is locked, the wl_pointer objects of the
+        /// corresponding seat will not emit any wl_pointer.motion events, but
+        /// relative motion events will still be emitted via wp_relative_pointer
+        /// objects of the same seat. wl_pointer.axis and wl_pointer.button events
+        /// are unaffected.
+        LockPointer {
+            id: ZwpLockedPointerV1Id,
+            /// Surface to lock pointer to,
+            surface: WlSurfaceId,
+            /// The pointer that should be locked,
+            pointer: WlPointerId,
+            /// Region of surface,
+            region: WlRegionId,
+            /// Lock lifetime,
+            lifetime: u32,
+        },
+        /// Confine pointer to a region
+        ///
+        /// The confine_pointer request lets the client request to confine the
+        /// pointer cursor to a given region. This request may not take effect
+        /// immediately; in the future, when the compositor deems implementation-
+        /// specific constraints are satisfied, the pointer confinement will be
+        /// activated and the compositor sends a confined event.
+        ///
+        /// The intersection of the region passed with this request and the input
+        /// region of the surface is used to determine where the pointer must be
+        /// in order for the confinement to activate. It is up to the compositor
+        /// whether to warp the pointer or require some kind of user interaction for
+        /// the confinement to activate. If the region is null the surface input
+        /// region is used.
+        ///
+        /// The request will create a new object wp_confined_pointer which is used
+        /// to interact with the confinement as well as receive updates about its
+        /// state. See the the description of wp_confined_pointer for further
+        /// information.
+        ConfinePointer {
+            id: ZwpConfinedPointerV1Id,
+            /// Surface to lock pointer to,
+            surface: WlSurfaceId,
+            /// The pointer that should be confined,
+            pointer: WlPointerId,
+            /// Region of surface,
+            region: WlRegionId,
+            /// Confinement lifetime,
+            lifetime: u32,
+        },
+    }
+    impl Parser for crate::wayland_objects::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => LockPointer {
+                    id: req.id()?,
+                    surface: req.id()?,
+                    pointer: req.id()?,
+                    region: req.id()?,
+                    lifetime: req.uint()?,
+                },
+                2 => ConfinePointer {
+                    id: req.id()?,
+                    surface: req.id()?,
+                    pointer: req.id()?,
+                    region: req.id()?,
+                    lifetime: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    /// Wp_pointer_constraints error values
+    ///
+    /// These errors can be emitted in response to wp_pointer_constraints
+    /// requests.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Pointer constraint already requested on that surface,
+        AlreadyConstrained = 1,
+    }
+    /// Constraint lifetime
+    ///
+    /// These values represent different lifetime semantics. They are passed
+    /// as arguments to the factory requests to specify how the constraint
+    /// lifetimes should be managed.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Lifetime {
+        /// The pointer constraint is defunct once deactivated
+        ///
+        /// A oneshot pointer constraint will never reactivate once it has been
+        /// deactivated. See the corresponding deactivation event
+        /// (wp_locked_pointer.unlocked and wp_confined_pointer.unconfined) for
+        /// details.
+        Oneshot = 1,
+        /// The pointer constraint may reactivate
+        ///
+        /// A persistent pointer constraint may again reactivate once it has
+        /// been deactivated. See the corresponding deactivation event
+        /// (wp_locked_pointer.unlocked and wp_confined_pointer.unconfined) for
+        /// details.
+        Persistent = 2,
+    }
+}
+
+/// Receive relative pointer motion events
+///
+/// The wp_locked_pointer interface represents a locked pointer state.
+///
+/// While the lock of this object is active, the wl_pointer objects of the
+/// associated seat will not emit any wl_pointer.motion events.
+///
+/// This object will send the event 'locked' when the lock is activated.
+/// Whenever the lock is activated, it is guaranteed that the locked surface
+/// will already have received pointer focus and that the pointer will be
+/// within the region passed to the request creating this object.
+///
+/// To unlock the pointer, send the destroy request. This will also destroy
+/// the wp_locked_pointer object.
+///
+/// If the compositor decides to unlock the pointer the unlocked event is
+/// sent. See wp_locked_pointer.unlock for details.
+///
+/// When unlocking, the compositor may warp the cursor position to the set
+/// cursor position hint. If it does, it will not result in any relative
+/// motion events emitted via wp_relative_pointer.
+///
+/// If the surface the lock was requested on is destroyed and the lock is not
+/// yet activated, the wp_locked_pointer object is now defunct and must be
+/// destroyed.
+pub mod zwp_locked_pointer_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1 {
+        const INTERFACE_NAME: &'static str = "zwp_locked_pointer_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpLockedPointerV1Id {
+        type Object = crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1
+    {
+        type Id = ZwpLockedPointerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the locked pointer object
+        ///
+        /// Destroy the locked pointer object. If applicable, the compositor will
+        /// unlock the pointer.
+        Destroy,
+        /// Set the pointer cursor position hint
+        ///
+        /// Set the cursor position hint relative to the top left corner of the
+        /// surface.
+        ///
+        /// If the client is drawing its own cursor, it should update the position
+        /// hint to the position of its own cursor. A compositor may use this
+        /// information to warp the pointer upon unlock in order to avoid pointer
+        /// jumps.
+        ///
+        /// The cursor position hint is double-buffered state, see
+        /// wl_surface.commit.
+        SetCursorPositionHint {
+            /// Surface-local x coordinate,
+            surface_x: f32,
+            /// Surface-local y coordinate,
+            surface_y: f32,
+        },
+        /// Set a new lock region
+        ///
+        /// Set a new region used to lock the pointer.
+        ///
+        /// The new lock region is double-buffered, see wl_surface.commit.
+        ///
+        /// For details about the lock region, see wp_locked_pointer.
+        SetRegion {
+            /// Region of surface,
+            region: WlRegionId,
+        },
+    }
+    impl Parser for crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => SetCursorPositionHint { surface_x: req.fixed()?, surface_y: req.fixed()? },
+                2 => SetRegion { region: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Lock activation event
+        ///
+        /// Notification that the pointer lock of the seat's pointer is activated.
+        Locked,
+        /// Lock deactivation event
+        ///
+        /// Notification that the pointer lock of the seat's pointer is no longer
+        /// active. If this is a oneshot pointer lock (see
+        /// wp_pointer_constraints.lifetime) this object is now defunct and should
+        /// be destroyed. If this is a persistent pointer lock (see
+        /// wp_pointer_constraints.lifetime) this pointer lock may again
+        /// reactivate in the future.
+        Unlocked,
+    }
+    impl EventWriter for crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Locked {} => {
+                    let mut raw = RawEvent::new(self.id(), 0, 0);
+                    raw
+                }
+                Unlocked {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// Confined pointer object
+///
+/// The wp_confined_pointer interface represents a confined pointer state.
+///
+/// This object will send the event 'confined' when the confinement is
+/// activated. Whenever the confinement is activated, it is guaranteed that
+/// the surface the pointer is confined to will already have received pointer
+/// focus and that the pointer will be within the region passed to the request
+/// creating this object. It is up to the compositor to decide whether this
+/// requires some user interaction and if the pointer will warp to within the
+/// passed region if outside.
+///
+/// To unconfine the pointer, send the destroy request. This will also destroy
+/// the wp_confined_pointer object.
+///
+/// If the compositor decides to unconfine the pointer the unconfined event is
+/// sent. The wp_confined_pointer object is at this point defunct and should
+/// be destroyed.
+pub mod zwp_confined_pointer_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1 {
+        const INTERFACE_NAME: &'static str = "zwp_confined_pointer_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpConfinedPointerV1Id {
+        type Object = crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1
+    {
+        type Id = ZwpConfinedPointerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the confined pointer object
+        ///
+        /// Destroy the confined pointer object. If applicable, the compositor will
+        /// unconfine the pointer.
+        Destroy,
+        /// Set a new confine region
+        ///
+        /// Set a new region used to confine the pointer.
+        ///
+        /// The new confine region is double-buffered, see wl_surface.commit.
+        ///
+        /// If the confinement is active when the new confinement region is applied
+        /// and the pointer ends up outside of newly applied region, the pointer may
+        /// warped to a position within the new confinement region. If warped, a
+        /// wl_pointer.motion event will be emitted, but no
+        /// wp_relative_pointer.relative_motion event.
+        ///
+        /// The compositor may also, instead of using the new region, unconfine the
+        /// pointer.
+        ///
+        /// For details about the confine region, see wp_confined_pointer.
+        SetRegion {
+            /// Region of surface,
+            region: WlRegionId,
+        },
+    }
+    impl Parser for crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => SetRegion { region: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Pointer confined
+        ///
+        /// Notification that the pointer confinement of the seat's pointer is
+        /// activated.
+        Confined,
+        /// Pointer unconfined
+        ///
+        /// Notification that the pointer confinement of the seat's pointer is no
+        /// longer active. If this is a oneshot pointer confinement (see
+        /// wp_pointer_constraints.lifetime) this object is now defunct and should
+        /// be destroyed. If this is a persistent pointer confinement (see
+        /// wp_pointer_constraints.lifetime) this pointer confinement may again
+        /// reactivate in the future.
+        Unconfined,
+    }
+    impl EventWriter for crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Confined {} => {
+                    let mut raw = RawEvent::new(self.id(), 0, 0);
+                    raw
+                }
+                Unconfined {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// Get relative pointer objects
+///
+/// A global interface used for getting the relative pointer object for a
+/// given pointer.
+pub mod zwp_relative_pointer_manager_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
+    {
+        const INTERFACE_NAME: &'static str = "zwp_relative_pointer_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpRelativePointerManagerV1Id {
+        type Object =
+            crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
+    {
+        type Id = ZwpRelativePointerManagerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the relative pointer manager object
+        ///
+        /// Used by the client to notify the server that it will no longer use this
+        /// relative pointer manager object.
+        Destroy,
+        /// Get a relative pointer object
+        ///
+        /// Create a relative pointer interface given a wl_pointer object. See the
+        /// wp_relative_pointer interface for more details.
+        GetRelativePointer { id: ZwpRelativePointerV1Id, pointer: WlPointerId },
+    }
+    impl Parser
+        for crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetRelativePointer { id: req.id()?, pointer: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
+/// Relative pointer object
+///
+/// A wp_relative_pointer object is an extension to the wl_pointer interface
+/// used for emitting relative pointer events. It shares the same focus as
+/// wl_pointer objects of the same seat and will only emit events when it has
+/// focus.
+pub mod zwp_relative_pointer_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1 {
+        const INTERFACE_NAME: &'static str = "zwp_relative_pointer_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpRelativePointerV1Id {
+        type Object = crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1
+    {
+        type Id = ZwpRelativePointerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Release the relative pointer object
+        ///
+        ///
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Relative pointer motion
+        ///
+        /// Relative x/y pointer motion from the pointer of the seat associated with
+        /// this object.
+        ///
+        /// A relative motion is in the same dimension as regular wl_pointer motion
+        /// events, except they do not represent an absolute position. For example,
+        /// moving a pointer from (x, y) to (x', y') would have the equivalent
+        /// relative motion (x' - x, y' - y). If a pointer motion caused the
+        /// absolute pointer position to be clipped by for example the edge of the
+        /// monitor, the relative motion is unaffected by the clipping and will
+        /// represent the unclipped motion.
+        ///
+        /// This event also contains non-accelerated motion deltas. The
+        /// non-accelerated delta is, when applicable, the regular pointer motion
+        /// delta as it was before having applied motion acceleration and other
+        /// transformations such as normalization.
+        ///
+        /// Note that the non-accelerated delta does not represent 'raw' events as
+        /// they were read from some device. Pointer motion acceleration is device-
+        /// and configuration-specific and non-accelerated deltas and accelerated
+        /// deltas may have the same value on some devices.
+        ///
+        /// Relative motions are not coupled to wl_pointer.motion events, and can be
+        /// sent in combination with such events, but also independently. There may
+        /// also be scenarios where wl_pointer.motion is sent, but there is no
+        /// relative motion. The order of an absolute and relative motion event
+        /// originating from the same physical motion is not guaranteed.
+        ///
+        /// If the client needs button events or focus state, it can receive them
+        /// from a wl_pointer object of the same seat that the wp_relative_pointer
+        /// object is associated with.
+        RelativeMotion {
+            /// High 32 bits of a 64 bit timestamp with microsecond granularity,
+            utime_hi: u32,
+            /// Low 32 bits of a 64 bit timestamp with microsecond granularity,
+            utime_lo: u32,
+            /// The x component of the motion vector,
+            dx: f32,
+            /// The y component of the motion vector,
+            dy: f32,
+            /// The x component of the unaccelerated motion vector,
+            dx_unaccel: f32,
+            /// The y component of the unaccelerated motion vector,
+            dy_unaccel: f32,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                RelativeMotion { utime_hi, utime_lo, dx, dy, dx_unaccel, dy_unaccel } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 6);
+                    raw.uint(utime_hi);
+                    raw.uint(utime_lo);
+                    raw.fixed(dx);
+                    raw.fixed(dy);
+                    raw.fixed(dx_unaccel);
+                    raw.fixed(dy_unaccel);
+                    raw
+                }
+            }
+        }
     }
 }
