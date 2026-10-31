@@ -253,7 +253,10 @@ impl Model for Libinput {
                                     dispatcher,
                                     motion.dx(),
                                     motion.dy(),
+                                    motion.dx_unaccelerated(),
+                                    motion.dy_unaccelerated(),
                                     motion.time(),
+                                    motion.time_usec(),
                                 )
                             }
                             PointerEvent::MotionAbsolute(motion) => {

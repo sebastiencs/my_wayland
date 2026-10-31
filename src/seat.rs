@@ -69,6 +69,15 @@ pub enum SeatClientEvent {
     /// One hardware scroll, expanded per pointer version into a single logical frame.
     PointerScroll(PointerScrollFrame),
     PointerFrame,
+    /// Unclipped relative motion for `zwp_relative_pointer_v1` resources of the focused client.
+    RelativePointerMotion {
+        utime_hi: u32,
+        utime_lo: u32,
+        dx: f32,
+        dy: f32,
+        dx_unaccel: f32,
+        dy_unaccel: f32,
+    },
     KeyboardEnter {
         serial: u32,
         surface: Resolved<WlSurfaceId>,
@@ -389,6 +398,17 @@ impl SeatState {
             .get(&pointer)
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    pub fn relative_pointers_for_client(
+        &self,
+        client_id: ClientId,
+    ) -> Vec<Resolved<ZwpRelativePointerV1Id>> {
+        self.relative_pointers
+            .iter()
+            .filter(|(pointer, _)| pointer.client_id() == client_id)
+            .flat_map(|(_, relatives)| relatives.iter().copied())
+            .collect()
     }
 
     pub fn register_keyboard(&mut self, keyboard: Resolved<WlKeyboardId>) {
@@ -1092,8 +1112,13 @@ pub fn handle_pointer_motion(
     dispatcher: &mut Dispatcher,
     dx: f64,
     dy: f64,
+    dx_unaccel: f64,
+    dy_unaccel: f64,
     time: u32,
+    time_usec: u64,
 ) {
+    // The focused client receives the device delta before the pointer is clipped to an output.
+    send_relative_pointer_motion(state, dispatcher, dx, dy, dx_unaccel, dy_unaccel, time_usec);
     let old_pointer_pos = state.seat.pointer_position();
     let seat = &mut state.seat;
     seat.pointer_pos.0 += dx;
@@ -1588,6 +1613,40 @@ pub(crate) fn refresh_pointer_focus(
     update_idle_pointer_cursor(state, dispatcher);
 }
 
+fn send_relative_pointer_motion(
+    state: &State,
+    dispatcher: &mut Dispatcher,
+    dx: f64,
+    dy: f64,
+    dx_unaccel: f64,
+    dy_unaccel: f64,
+    time_usec: u64,
+) {
+    let Some(focus) = state.seat.pointer_focus else {
+        return;
+    };
+    let client_id = focus.target.client_id();
+    if state
+        .seat
+        .relative_pointers_for_client(client_id)
+        .is_empty()
+    {
+        return;
+    }
+    dispatch_client_event(
+        dispatcher,
+        client_id,
+        SeatClientEvent::RelativePointerMotion {
+            utime_hi: (time_usec >> 32) as u32,
+            utime_lo: time_usec as u32,
+            dx: dx as f32,
+            dy: dy as f32,
+            dx_unaccel: dx_unaccel as f32,
+            dy_unaccel: dy_unaccel as f32,
+        },
+    );
+}
+
 fn clamp_pointer_to_outputs(state: &mut State) {
     let x = state.seat.pointer_pos.0.round() as i32;
     let y = state.seat.pointer_pos.1.round() as i32;
@@ -2042,8 +2101,9 @@ mod xdg_seat_tests {
             cursor::CursorSourceRef,
             object::Object,
             protocol_generated::{
-                xdg_toplevel, Constants, WlSeatId, WlSubsurfaceId, WlSurfaceId, XdgPopupId,
-                XdgPositionerId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
+                xdg_toplevel, Constants, WlPointerId, WlSeatId, WlSubsurfaceId, WlSurfaceId,
+                XdgPopupId, XdgPositionerId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
+                ZwpRelativePointerV1Id,
             },
             region::RectI,
             state::{
@@ -2056,6 +2116,7 @@ mod xdg_seat_tests {
                 test_client_and_dispatcher, test_output_with_crtc_name,
             },
             wayland_objects::{
+                wl_pointer::WlPointer,
                 wl_seat::WlSeat,
                 wl_surface::{Role, WlSurface},
                 xdg_popup::XdgPopup,
@@ -2065,6 +2126,7 @@ mod xdg_seat_tests {
                     XdgSurface,
                 },
                 xdg_wm_base::XdgWmBase,
+                zwp_relative_pointer_v1::ZwpRelativePointerV1,
             },
         },
     };
@@ -3901,7 +3963,7 @@ mod xdg_seat_tests {
         assert!(state.seat.pointer_interactive_grab.is_some());
         assert!(state.remove_object(wl_surface_object_id).is_some());
 
-        handle_pointer_motion(&mut state, &mut dispatcher, 5.0, 0.0, 110);
+        handle_pointer_motion(&mut state, &mut dispatcher, 5.0, 0.0, 5.0, 0.0, 110, 110_000);
 
         assert!(state.seat.pointer_interactive_grab.is_none());
         assert!(state.seat.intercepted_pointer_buttons.is_empty());
@@ -4325,7 +4387,7 @@ mod xdg_seat_tests {
         }
         client_dispatcher.drain_post_actions(&mut client, &mut state);
 
-        handle_pointer_motion(&mut state, &mut dispatcher, 60.0, 0.0, 110);
+        handle_pointer_motion(&mut state, &mut dispatcher, 60.0, 0.0, 60.0, 0.0, 110, 110_000);
 
         let surface = state
             .objects
@@ -4820,6 +4882,152 @@ mod xdg_seat_tests {
                 ClientAction::SeatEvent { event: SeatClientEvent::PointerFrame }
             )
         ));
+    }
+
+    fn register_relative_pointer(
+        state: &mut State,
+        client: &mut Client,
+        pointer_id: u32,
+        relative_id: u32,
+    ) -> Resolved<ZwpRelativePointerV1Id> {
+        let (pointer, _) =
+            client.insert_object(state, WlPointer::new(WlPointerId::from(pointer_id), 9));
+        let (relative, _) = client.insert_object(
+            state,
+            ZwpRelativePointerV1::new(ZwpRelativePointerV1Id::from(relative_id), pointer),
+        );
+        state.seat.register_relative_pointer(pointer, relative);
+        relative
+    }
+
+    #[test]
+    fn relative_motion_reaches_only_the_focused_client_with_the_unclipped_delta() {
+        let mut state = state_for_tests();
+        state.insert_output(crate::test_support::test_output_drm0_wh(100, 80));
+        let (mut focused, mut dispatcher) = test_client_and_dispatcher(7);
+        let (mut other, _) = test_client_and_dispatcher(8);
+        register_relative_pointer(&mut state, &mut focused, 5, 7);
+        register_relative_pointer(&mut state, &mut other, 6, 8);
+        state.seat.pointer_pos = (99.0, 10.0);
+        state.seat.pointer_focus = Some(super::PointerFocus {
+            target: fake_focus(ClientId::from_raw(7), WlSurfaceId::from(50)),
+            rect: super::SurfaceRect { x: 0, y: 0, width: 20, height: 20 },
+        });
+
+        handle_pointer_motion(
+            &mut state,
+            &mut dispatcher,
+            40.0,
+            -2.25,
+            3.0,
+            -0.5,
+            20,
+            (1u64 << 32) | 5,
+        );
+
+        assert_eq!(state.seat.pointer_pos.0, 99.0);
+        assert_eq!(state.seat.pointer_pos.1, 8.0);
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            ClientId::from_raw(7),
+            |action| matches!(
+                action,
+                ClientAction::SeatEvent {
+                    event: SeatClientEvent::RelativePointerMotion {
+                        utime_hi: 1,
+                        utime_lo: 5,
+                        dx,
+                        dy,
+                        dx_unaccel,
+                        dy_unaccel,
+                    }
+                } if *dx == 40.0 && *dy == -2.25 && *dx_unaccel == 3.0 && *dy_unaccel == -0.5
+            )
+        ));
+        assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            ClientId::from_raw(8),
+            |action| matches!(
+                action,
+                ClientAction::SeatEvent { event: SeatClientEvent::RelativePointerMotion { .. } }
+            )
+        ));
+    }
+
+    #[test]
+    fn absolute_motion_does_not_synthesize_relative_motion() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        register_relative_pointer(&mut state, &mut client, 5, 7);
+        state.seat.pointer_focus = Some(super::PointerFocus {
+            target: fake_focus(ClientId::from_raw(7), WlSurfaceId::from(50)),
+            rect: super::SurfaceRect { x: 0, y: 0, width: 20, height: 20 },
+        });
+
+        handle_pointer_motion_absolute(&mut state, &mut dispatcher, 12.0, 8.0, 20);
+
+        assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            ClientId::from_raw(7),
+            |action| matches!(
+                action,
+                ClientAction::SeatEvent { event: SeatClientEvent::RelativePointerMotion { .. } }
+            )
+        ));
+    }
+
+    #[test]
+    fn relative_motion_stops_after_the_object_or_client_is_gone() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let relative = register_relative_pointer(&mut state, &mut client, 5, 7);
+        state.seat.pointer_focus = Some(super::PointerFocus {
+            target: fake_focus(ClientId::from_raw(7), WlSurfaceId::from(50)),
+            rect: super::SurfaceRect { x: 0, y: 0, width: 20, height: 20 },
+        });
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        state
+            .objects
+            .grab(relative.object_id())
+            .on(
+                &mut client,
+                &mut state,
+                crate::clients::RawRequest {
+                    object_id: 7,
+                    request_id: 0,
+                    arguments: crate::clients::Arguments::from_words(
+                        std::collections::VecDeque::new(),
+                    ),
+                    fds: None,
+                },
+                &mut client_dispatcher,
+            )
+            .unwrap();
+        drop(client_dispatcher);
+
+        handle_pointer_motion(&mut state, &mut dispatcher, 4.0, 1.0, 4.0, 1.0, 20, 20);
+        assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            ClientId::from_raw(7),
+            |action| matches!(
+                action,
+                ClientAction::SeatEvent { event: SeatClientEvent::RelativePointerMotion { .. } }
+            )
+        ));
+
+        register_relative_pointer(&mut state, &mut client, 6, 8);
+        state.seat.remove_client(ClientId::from_raw(7));
+        state.seat.pointer_focus = Some(super::PointerFocus {
+            target: fake_focus(ClientId::from_raw(7), WlSurfaceId::from(50)),
+            rect: super::SurfaceRect { x: 0, y: 0, width: 20, height: 20 },
+        });
+        handle_pointer_motion(&mut state, &mut dispatcher, 4.0, 1.0, 4.0, 1.0, 21, 21);
+        assert!(state
+            .seat
+            .relative_pointers_for_client(ClientId::from_raw(7))
+            .is_empty());
+        assert!(!dispatcher.test_has_queued_action(|action: &ClientAction| matches!(
+            action,
+            ClientAction::SeatEvent {
+                event: SeatClientEvent::RelativePointerMotion { utime_lo: 21, .. }
+            }
+        )));
     }
 
     #[test]

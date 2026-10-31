@@ -970,6 +970,23 @@ impl Client {
                     pointer.ref_mut(state).send_frame(dispatcher);
                 }
             }
+            SeatClientEvent::RelativePointerMotion {
+                utime_hi,
+                utime_lo,
+                dx,
+                dy,
+                dx_unaccel,
+                dy_unaccel,
+            } => {
+                for relative in state.seat.relative_pointers_for_client(self.id) {
+                    if !relative.exists(state) {
+                        continue;
+                    }
+                    relative.ref_mut(state).send_relative_motion(
+                        utime_hi, utime_lo, dx, dy, dx_unaccel, dy_unaccel, dispatcher,
+                    );
+                }
+            }
             SeatClientEvent::PointerScroll(frame) => {
                 for pointer in state.seat.pointer_resources(self.id) {
                     if !pointer.exists(state) {
