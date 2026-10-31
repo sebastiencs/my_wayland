@@ -158,7 +158,7 @@ impl WindowLifecycleAnimation {
 /// Linear blend of every focus channel.
 ///
 /// Progress zero returns `from` and progress one returns `to`.
-pub fn interpolate_window_visual(
+fn interpolate_window_visual(
     from: WindowVisualBase,
     to: WindowVisualBase,
     progress: UnitValue,

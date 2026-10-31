@@ -334,13 +334,13 @@ fn main() {
     runner.add_model(libinput);
     runner.add_model(client_manager);
     runner.add_model(config_watcher);
-    runner.add_model(Box::new(drm::WindowAnimationManager::new()));
+    runner.add_model(Box::new(drm::VisualAnimationPump::new()));
 
     let mut dispatcher = Dispatcher::default();
     dispatcher.start::<ClientManager>();
     dispatcher.start::<libinput::Libinput>();
     dispatcher.start::<config::ConfigWatcher>();
-    dispatcher.start::<drm::WindowAnimationManager>();
+    dispatcher.start::<drm::VisualAnimationPump>();
 
     // let timer = make_timer(Duration::from_secs(10));
 

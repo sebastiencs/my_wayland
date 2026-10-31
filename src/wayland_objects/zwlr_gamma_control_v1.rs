@@ -2,7 +2,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
-    drm::schedule_output,
+    drm::request_output,
     object::{Object, Parser, RequestResult},
     protocol_generated::{zwlr_gamma_control_v1, Constants, WaylandId, ZwlrGammaControlV1Id},
     state::{GrabbedObject, OutputId, State},
@@ -71,7 +71,7 @@ impl ZwlrGammaControlV1 {
         let Some(output_id) = self.release_gamma(state) else {
             return;
         };
-        schedule_output(state, output_id, dispatcher);
+        request_output(state, output_id, dispatcher);
     }
 
     pub fn invalidate(&mut self, state: &mut State, dispatcher: &mut ClientDispatcher) {
@@ -158,7 +158,7 @@ impl ZwlrGammaControlV1 {
             return;
         }
 
-        schedule_output(state, output_id, dispatcher);
+        request_output(state, output_id, dispatcher);
     }
 }
 

@@ -84,7 +84,7 @@ impl Object for WpCursorShapeDeviceV1 {
                         crate::clients::ClientAction::RefreshSurfaceOutputs,
                     );
                     let pointer_pos = state.seat.pointer_position();
-                    crate::drm::schedule_outputs_for_points(state, [pointer_pos], dispatcher);
+                    crate::drm::request_outputs_for_points(state, [pointer_pos], dispatcher);
                 }
             }
         }

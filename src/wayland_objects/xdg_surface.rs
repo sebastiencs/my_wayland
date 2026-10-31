@@ -721,7 +721,7 @@ pub mod xdg_toplevel {
             Client, ClientDispatcher, ClientId, ClientManagerAction, EventWriter, RawRequest,
             Resolved,
         },
-        drm::{begin_managed_toplevel_close_id, schedule_outputs},
+        drm::{begin_managed_toplevel_close_id, request_outputs},
         object::{Object, Parser, PostAction, RequestResult},
         protocol_generated::{
             xdg_toplevel as proto_xdg_toplevel, zxdg_toplevel_decoration_v1, Array, WaylandId,
@@ -1655,7 +1655,7 @@ pub mod xdg_toplevel {
                         .unwrap_or_default();
                     if state.set_root_surface_fullscreen(root_surface, true) {
                         if !affected_outputs.is_empty() {
-                            schedule_outputs(state, affected_outputs.into_iter(), dispatcher);
+                            request_outputs(state, affected_outputs.into_iter(), dispatcher);
                         }
                         crate::seat::refresh_scene_focus(state, dispatcher);
                         dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
@@ -1674,7 +1674,7 @@ pub mod xdg_toplevel {
                         .unwrap_or_default();
                     if state.set_root_surface_fullscreen(root_surface, false) {
                         if !affected_outputs.is_empty() {
-                            schedule_outputs(state, affected_outputs.into_iter(), dispatcher);
+                            request_outputs(state, affected_outputs.into_iter(), dispatcher);
                         }
                         crate::seat::refresh_scene_focus(state, dispatcher);
                         dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);

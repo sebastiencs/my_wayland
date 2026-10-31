@@ -13,7 +13,7 @@ use libc::getsockopt;
 
 use crate::{
     dbus::Dbus,
-    drm::{kick_window_animation_manager, schedule_active_output, schedule_output},
+    drm::{kick_visual_animation_pump, request_active_output, request_output},
     io_uring::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted, RingId},
@@ -1638,7 +1638,7 @@ impl Client {
     ) {
         let opened = state.relayout_dirty_workspaces();
         if !opened.is_empty() {
-            kick_window_animation_manager(dispatcher);
+            kick_visual_animation_pump(dispatcher);
         }
         let tiled_resize_surfaces = crate::seat::tiled_resize_active_root_surfaces(state);
         let toplevels = self
@@ -2178,7 +2178,7 @@ impl Model for Client {
                 if self.invalidate_gamma_control_for_output(state, &mut dispatcher, output_id)
                     && state.outputs.try_get(output_id).is_some()
                 {
-                    schedule_output(state, output_id, &mut dispatcher);
+                    request_output(state, output_id, &mut dispatcher);
                 }
             }
             RefreshLayerSurfaces => {
@@ -2357,7 +2357,7 @@ impl Model for Client {
                     || seat_removal.interactive_grab_cleared
                     || had_client_objects
                 {
-                    schedule_active_output(state, &mut dispatcher);
+                    request_active_output(state, &mut dispatcher);
                 }
                 if had_client_objects {
                     dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);

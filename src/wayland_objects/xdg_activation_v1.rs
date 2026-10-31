@@ -1,6 +1,6 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
-    drm::{schedule_active_output, schedule_outputs_for_rect},
+    drm::{request_active_output, request_outputs_for_rect},
     globals::Global,
     object::{Object, Parser, RequestResult},
     protocol_generated::{
@@ -93,9 +93,9 @@ impl Object for XdgActivationV1 {
                     .root_surface_for_surface(focus.surface)
                     .and_then(|root_surface| state.root_surface_surface_bounds_global(root_surface))
                 {
-                    schedule_outputs_for_rect(state, bounds, dispatcher);
+                    request_outputs_for_rect(state, bounds, dispatcher);
                 } else {
-                    schedule_active_output(state, dispatcher);
+                    request_active_output(state, dispatcher);
                 }
             }
         }

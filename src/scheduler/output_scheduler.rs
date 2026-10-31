@@ -359,7 +359,7 @@ impl OutputScheduler {
             }
             FrameCompletionOutcome::NoPresent => {}
         }
-        dispatcher.dispatch(crate::drm::WindowAnimationManagerAction::KickOutput {
+        dispatcher.dispatch(crate::drm::VisualAnimationPumpAction::KickOutput {
             output_id: self.output_id,
         });
         self.try_dispatch_render(dispatcher);

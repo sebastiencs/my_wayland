@@ -12,7 +12,7 @@ use {
 
 use crate::{
     clients::{ClientDispatcher, Resolved},
-    drm::{schedule_active_output, schedule_outputs_for_rect, DrmFd},
+    drm::{request_active_output, request_outputs_for_rect, DrmFd},
     egl::EglContext,
     io_uring::{model::IoUringAction, ring::RingId},
     protocol_generated::{WlBufferId, WlSurfaceId},
@@ -384,9 +384,9 @@ impl Model for AcquireReadyWaiter {
                                 state.root_surface_surface_bounds_global(root_surface)
                             })
                     {
-                        schedule_outputs_for_rect(state, bounds, dispatcher);
+                        request_outputs_for_rect(state, bounds, dispatcher);
                     } else {
-                        schedule_active_output(state, dispatcher);
+                        request_active_output(state, dispatcher);
                     }
                 }
                 dispatcher.stop_model(self.waiter_id);

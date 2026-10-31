@@ -5,7 +5,7 @@ use crate::{
         Client, ClientDispatcher, ClientId, ClientManagerAction, EventWriter, RawRequest, Resolved,
     },
     drm::{
-        begin_managed_toplevel_close_surface, kick_window_animation_manager, request_active_output,
+        begin_managed_toplevel_close_surface, kick_visual_animation_pump, request_active_output,
         request_outputs, request_outputs_for_rect,
     },
     input::{set_keyboard_focus_from_surface, SurfaceFocus},
@@ -1903,7 +1903,7 @@ impl WlSurface {
                             this = regrabbed;
                             bounds_after_first_map_relayout = relayout_bounds;
                             if !opened.is_empty() {
-                                kick_window_animation_manager(dispatcher);
+                                kick_visual_animation_pump(dispatcher);
                             }
                         }
                         dispatcher.dispatch_post_action(PostWlSurface::FocusNewToplevel {
@@ -2742,7 +2742,7 @@ mod tests {
         crate::{
             clients::{Client, ClientId, ClientManagerAction, RawEvent, RawRequest, Resolved},
             cursor::CursorSourceRef,
-            drm::WindowAnimationManagerAction,
+            drm::VisualAnimationPumpAction,
             io_uring::model::IoUringAction,
             object::{Object, RequestResult},
             protocol_generated::{
@@ -3464,8 +3464,8 @@ mod tests {
                 .opacity_alpha,
             0
         );
-        assert!(dispatcher.test_has_queued_action::<WindowAnimationManagerAction>(|action| {
-            matches!(action, WindowAnimationManagerAction::Kick)
+        assert!(dispatcher.test_has_queued_action::<VisualAnimationPumpAction>(|action| {
+            matches!(action, VisualAnimationPumpAction::Kick)
         }));
         assert!(state.seat.keyboard_focus.is_none());
     }
@@ -3706,8 +3706,8 @@ mod tests {
                 .sample(),
             WindowLifecycleAnim::Idle
         );
-        assert!(!dispatcher.test_has_queued_action::<WindowAnimationManagerAction>(|action| {
-            matches!(action, WindowAnimationManagerAction::Kick)
+        assert!(!dispatcher.test_has_queued_action::<VisualAnimationPumpAction>(|action| {
+            matches!(action, VisualAnimationPumpAction::Kick)
         }));
 
         {
@@ -3731,8 +3731,8 @@ mod tests {
                 .opacity_alpha,
             0
         );
-        assert!(dispatcher.test_has_queued_action::<WindowAnimationManagerAction>(|action| {
-            matches!(action, WindowAnimationManagerAction::Kick)
+        assert!(dispatcher.test_has_queued_action::<VisualAnimationPumpAction>(|action| {
+            matches!(action, VisualAnimationPumpAction::Kick)
         }));
         assert!(state.seat.keyboard_focus.is_none());
     }

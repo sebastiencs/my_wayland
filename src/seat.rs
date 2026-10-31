@@ -4,7 +4,7 @@ use crate::{
     clients::{Client, ClientAction, ClientId, Resolved},
     config,
     cursor::{CursorSourceRef, CursorState},
-    drm::schedule_outputs_for_points,
+    drm::request_outputs_for_points,
     input::{
         maybe_dismiss_popup_grab_on_button, popup_keyboard_focus, refresh_drag_focus,
         set_keyboard_focus, ActiveGrabState, PointerInteractiveGrab, ScenePick, SurfaceFocusPick,
@@ -917,7 +917,7 @@ pub fn handle_pointer_motion(
         refresh_visible_cursor_surface_outputs(state, dispatcher);
         refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
         if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
-            schedule_outputs_for_points(state, [old_pointer_pos, new_pointer_pos], dispatcher);
+            request_outputs_for_points(state, [old_pointer_pos, new_pointer_pos], dispatcher);
         }
         return;
     }
@@ -928,7 +928,7 @@ pub fn handle_pointer_motion(
     refresh_visible_cursor_surface_outputs(state, dispatcher);
     refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
     if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
-        schedule_outputs_for_points(state, [old_pointer_pos, new_pointer_pos], dispatcher);
+        request_outputs_for_points(state, [old_pointer_pos, new_pointer_pos], dispatcher);
     }
 }
 
@@ -1051,7 +1051,7 @@ pub fn handle_pointer_motion_absolute(
         refresh_visible_cursor_surface_outputs(state, dispatcher);
         refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
         if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
-            schedule_outputs_for_points(state, [old_pointer_pos, new_pointer_pos], dispatcher);
+            request_outputs_for_points(state, [old_pointer_pos, new_pointer_pos], dispatcher);
         }
         return;
     }
@@ -1062,7 +1062,7 @@ pub fn handle_pointer_motion_absolute(
     refresh_visible_cursor_surface_outputs(state, dispatcher);
     refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
     if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
-        schedule_outputs_for_points(state, [old_pointer_pos, new_pointer_pos], dispatcher);
+        request_outputs_for_points(state, [old_pointer_pos, new_pointer_pos], dispatcher);
     }
 }
 
@@ -1204,7 +1204,7 @@ pub fn finish_active_drag(state: &mut State, dispatcher: &mut Dispatcher) {
             drag.source.initiator_client_id(),
             ClientAction::RefreshSurfaceOutputs,
         );
-        schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
+        request_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
     }
     if let Some(target) = drag.target {
         dispatcher.dispatch_to(target.client_id(), ClientAction::DataDeviceDragLeave);
@@ -1225,7 +1225,7 @@ pub fn cancel_active_drag(
             drag.source.initiator_client_id(),
             ClientAction::RefreshSurfaceOutputs,
         );
-        schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
+        request_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
     }
     if let Some(target) = drag.target {
         dispatcher.dispatch_to(target.client_id(), ClientAction::DataDeviceDragLeave);
@@ -1314,7 +1314,7 @@ fn update_idle_pointer_cursor(state: &mut State, dispatcher: &mut Dispatcher) {
     if let Some(client_id) = previous_cursor_owner {
         dispatch_client_action(dispatcher, client_id, ClientAction::RefreshSurfaceOutputs);
     }
-    schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
+    request_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
 }
 
 pub(crate) fn refresh_pointer_focus(

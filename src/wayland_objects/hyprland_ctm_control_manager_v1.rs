@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest},
-    drm::schedule_outputs,
+    drm::request_outputs,
     globals::Global,
     object::{Object, Parser, RequestResult},
     protocol_generated::{
@@ -162,7 +162,7 @@ impl HyprlandCtmControlManagerV1 {
             let desired = self.current_ctms.get(output_id).copied();
             let _ = state.set_output_ctm(*output_id, desired);
         }
-        schedule_outputs(state, supported_outputs.iter().copied(), dispatcher);
+        request_outputs(state, supported_outputs.iter().copied(), dispatcher);
         self.applied_outputs = supported_outputs.into_iter().collect();
     }
 
@@ -177,7 +177,7 @@ impl HyprlandCtmControlManagerV1 {
         for output_id in &output_ids {
             let _ = state.set_output_ctm(*output_id, None);
         }
-        schedule_outputs(state, output_ids, dispatcher);
+        request_outputs(state, output_ids, dispatcher);
         self.applied_outputs.clear();
         self.pending_ctms.clear();
         self.current_ctms.clear();

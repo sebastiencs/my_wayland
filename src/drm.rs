@@ -2986,14 +2986,14 @@ pub enum DrmAction {
     Stop,
 }
 
-pub enum WindowAnimationManagerAction {
+pub enum VisualAnimationPumpAction {
     Start,
     Kick,
     KickOutput { output_id: OutputId },
     Stop,
 }
 
-pub struct WindowAnimationManager;
+pub struct VisualAnimationPump;
 
 pub fn sync_output_nodes_for_backend(state: &mut State, drm_id: DrmId) {
     state.refresh_outputs_for_backend(BackendOutputRef::new(drm_id));
@@ -3006,7 +3006,7 @@ pub fn request_output_frame(
     dispatcher: &mut Dispatcher,
 ) {
     if state.backend_for_output(output_id).is_none() {
-        log::warn!("schedule_output: invalid logical output {:?}", output_id);
+        log::warn!("request_output: invalid logical output {:?}", output_id);
         return;
     }
     dispatcher.dispatch_to(
@@ -3019,21 +3019,13 @@ pub fn request_output(state: &State, output_id: OutputId, dispatcher: &mut Dispa
     request_output_frame(state, output_id, RequestFrameReason::Damage, dispatcher);
 }
 
-pub fn schedule_output(state: &State, output_id: OutputId, dispatcher: &mut Dispatcher) {
-    request_output(state, output_id, dispatcher);
-}
-
 pub fn request_active_output(state: &State, dispatcher: &mut Dispatcher) {
     let Some(output_id) = state.active_output_id() else {
-        log::warn!("schedule_active_output: no active logical output");
+        log::warn!("request_active_output: no active logical output");
         return;
     };
 
     request_output(state, output_id, dispatcher);
-}
-
-pub fn schedule_active_output(state: &State, dispatcher: &mut Dispatcher) {
-    request_active_output(state, dispatcher);
 }
 
 fn dispatch_gamma_control_failed_if_pending(
@@ -3065,13 +3057,6 @@ where
     }
 }
 
-pub fn schedule_outputs<I>(state: &State, output_ids: I, dispatcher: &mut Dispatcher)
-where
-    I: IntoIterator<Item = OutputId>,
-{
-    request_outputs(state, output_ids, dispatcher);
-}
-
 pub fn request_outputs_for_rect(state: &State, rect: RectI, dispatcher: &mut Dispatcher) {
     let output_ids = state.outputs_intersecting_rect(rect);
     if output_ids.is_empty() {
@@ -3081,10 +3066,6 @@ pub fn request_outputs_for_rect(state: &State, rect: RectI, dispatcher: &mut Dis
         return;
     }
     request_outputs(state, output_ids, dispatcher);
-}
-
-pub fn schedule_outputs_for_rect(state: &State, rect: RectI, dispatcher: &mut Dispatcher) {
-    request_outputs_for_rect(state, rect, dispatcher);
 }
 
 pub fn request_outputs_for_rects<I>(state: &State, rects: I, dispatcher: &mut Dispatcher)
@@ -3105,13 +3086,6 @@ where
     request_outputs(state, output_ids, dispatcher);
 }
 
-pub fn schedule_outputs_for_rects<I>(state: &State, rects: I, dispatcher: &mut Dispatcher)
-where
-    I: IntoIterator<Item = RectI>,
-{
-    request_outputs_for_rects(state, rects, dispatcher);
-}
-
 pub fn request_outputs_for_points(
     state: &State,
     points: impl IntoIterator<Item = (f64, f64)>,
@@ -3124,16 +3098,8 @@ pub fn request_outputs_for_points(
     request_outputs(state, output_ids, dispatcher);
 }
 
-pub fn schedule_outputs_for_points(
-    state: &State,
-    points: impl IntoIterator<Item = (f64, f64)>,
-    dispatcher: &mut Dispatcher,
-) {
-    request_outputs_for_points(state, points, dispatcher);
-}
-
-pub fn kick_window_animation_manager(dispatcher: &mut Dispatcher) {
-    dispatcher.dispatch(WindowAnimationManagerAction::Kick);
+pub fn kick_visual_animation_pump(dispatcher: &mut Dispatcher) {
+    dispatcher.dispatch(VisualAnimationPumpAction::Kick);
 }
 
 fn animation_delay_msec_for_output(state: &State, output_id: OutputId) -> Option<u32> {
@@ -3144,24 +3110,6 @@ fn animation_delay_msec_for_output(state: &State, output_id: OutputId) -> Option
         .filter(|refresh| *refresh > 0)?;
     let interval_ns = (1_000_000_000_000u64 / u64::from(refresh_millihz)).max(1);
     Some(((interval_ns + 999_999) / 1_000_000).max(1) as u32)
-}
-
-fn animation_delay_msec_for_rects(state: &State, rects: &[RectI]) -> Option<u32> {
-    let mut output_ids = BTreeSet::new();
-    for &rect in rects {
-        let rect_outputs = state.outputs_intersecting_rect(rect);
-        if rect_outputs.is_empty() {
-            if let Some(output_id) = state.primary_output_for_rect(rect, None) {
-                output_ids.insert(output_id);
-            }
-            continue;
-        }
-        output_ids.extend(rect_outputs);
-    }
-    output_ids
-        .into_iter()
-        .filter_map(|output_id| animation_delay_msec_for_output(state, output_id))
-        .min()
 }
 
 fn remember_animation_outputs(state: &State, rect: RectI, output_ids: &mut BTreeSet<OutputId>) {
@@ -3178,10 +3126,10 @@ fn remember_animation_outputs(state: &State, rect: RectI, output_ids: &mut BTree
 fn active_animation_output_ids(state: &State) -> BTreeSet<OutputId> {
     let mut output_ids = BTreeSet::new();
     for (&surface, managed) in &state.managed_root_surfaces {
-        if !managed.visual_animation.is_active() && !managed.lifecycle_animation.is_active() {
+        if !managed.focus_animation.is_active() && !managed.lifecycle_animation.is_active() {
             continue;
         }
-        let Some(rect) = state.root_surface_animation_damage_rect(surface) else {
+        let Some(rect) = state.root_surface_visual_damage_rect(surface) else {
             continue;
         };
         remember_animation_outputs(state, rect, &mut output_ids);
@@ -3231,10 +3179,10 @@ pub fn discard_backend_presentation_feedbacks(
     PresentationSubsystem::dispatch_discarded(dispatcher, &discarded_feedbacks);
 }
 
-impl Model for WindowAnimationManager {
-    type Action = WindowAnimationManagerAction;
-    const START: Option<Self::Action> = Some(WindowAnimationManagerAction::Start);
-    const STOP: Option<Self::Action> = Some(WindowAnimationManagerAction::Stop);
+impl Model for VisualAnimationPump {
+    type Action = VisualAnimationPumpAction;
+    const START: Option<Self::Action> = Some(VisualAnimationPumpAction::Start);
+    const STOP: Option<Self::Action> = Some(VisualAnimationPumpAction::Stop);
 
     fn process(
         &mut self,
@@ -3243,20 +3191,20 @@ impl Model for WindowAnimationManager {
         dispatcher: &mut crate::runner::Dispatcher,
     ) -> Result<(), ()> {
         match action {
-            WindowAnimationManagerAction::Start => {}
-            WindowAnimationManagerAction::Kick => {
+            VisualAnimationPumpAction::Start => {}
+            VisualAnimationPumpAction::Kick => {
                 self.advance_and_schedule(state, dispatcher, Instant::now());
             }
-            WindowAnimationManagerAction::KickOutput { output_id } => {
+            VisualAnimationPumpAction::KickOutput { output_id } => {
                 self.advance_and_schedule_output(state, dispatcher, Instant::now(), output_id);
             }
-            WindowAnimationManagerAction::Stop => {}
+            VisualAnimationPumpAction::Stop => {}
         }
         Ok(())
     }
 }
 
-impl WindowAnimationManager {
+impl VisualAnimationPump {
     pub fn new() -> Self {
         Self
     }
@@ -3272,41 +3220,12 @@ impl WindowAnimationManager {
         dispatcher: &mut Dispatcher,
         now: Instant,
     ) {
-        let result = state.advance_window_visuals(now);
+        let result = state.advance_visual_animations(now);
         let has_no_damage = result.damaged_rects.is_empty();
-        queue_animation_damage(state, &result.damaged_rects);
-        if !result.damaged_rects.is_empty() {
-            for rect in result.damaged_rects {
-                let output_ids = state.outputs_intersecting_rect(rect);
-                if output_ids.is_empty() {
-                    if let Some(output_id) = state.primary_output_for_rect(rect, None) {
-                        request_output_frame(
-                            state,
-                            output_id,
-                            RequestFrameReason::Animation,
-                            dispatcher,
-                        );
-                    }
-                    continue;
-                }
-                for output_id in output_ids {
-                    request_output_frame(
-                        state,
-                        output_id,
-                        RequestFrameReason::Animation,
-                        dispatcher,
-                    );
-                }
-            }
-        }
+        publish_animation_damage(state, dispatcher, &result.damaged_rects, None);
         if result.has_active_animations && has_no_damage {
-            let output_ids = active_animation_output_ids(state);
-            for output_id in output_ids {
-                let delay_msec = animation_delay_msec_for_output(state, output_id);
-                dispatcher.dispatch_to(
-                    output_scheduler_id(output_id),
-                    OutputSchedulerAction::ScheduleAnimation { delay_msec },
-                );
+            for output_id in active_animation_output_ids(state) {
+                schedule_animation_wakeup(state, dispatcher, output_id);
             }
         }
         publish_completed_workspace_transitions(
@@ -3323,27 +3242,58 @@ impl WindowAnimationManager {
         now: Instant,
         output_id: OutputId,
     ) {
-        let result = state.advance_window_visuals_for_output(output_id, now);
+        let result = state.advance_visual_animations_for_output(output_id, now);
         let completed_outputs = result.completed_transition_outputs.clone();
-        queue_animation_damage(state, &result.damaged_rects);
-        if !result.damaged_rects.is_empty() {
-            let mut outputs = BTreeSet::new();
-            outputs.insert(output_id);
-            for rect in result.damaged_rects {
-                outputs.extend(state.outputs_intersecting_rect(rect));
-            }
-            for output_id in outputs {
-                request_output_frame(state, output_id, RequestFrameReason::Animation, dispatcher);
-            }
-        } else if result.has_active_animations {
-            let delay_msec = animation_delay_msec_for_output(state, output_id);
-            dispatcher.dispatch_to(
-                output_scheduler_id(output_id),
-                OutputSchedulerAction::ScheduleAnimation { delay_msec },
-            );
+        let has_no_damage = result.damaged_rects.is_empty();
+        publish_animation_damage(state, dispatcher, &result.damaged_rects, Some(output_id));
+        if has_no_damage && result.has_active_animations {
+            schedule_animation_wakeup(state, dispatcher, output_id);
         }
         publish_completed_workspace_transitions(state, dispatcher, &completed_outputs);
     }
+}
+
+fn publish_animation_damage(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    rects: &[RectI],
+    always_include: Option<OutputId>,
+) {
+    queue_animation_damage(state, rects);
+    if rects.is_empty() {
+        return;
+    }
+    if let Some(output_id) = always_include {
+        let mut outputs = BTreeSet::new();
+        outputs.insert(output_id);
+        for rect in rects {
+            outputs.extend(state.outputs_intersecting_rect(*rect));
+        }
+        for output_id in outputs {
+            request_output_frame(state, output_id, RequestFrameReason::Animation, dispatcher);
+        }
+        return;
+    }
+    for rect in rects {
+        let output_ids = state.outputs_intersecting_rect(*rect);
+        if output_ids.is_empty() {
+            if let Some(output_id) = state.primary_output_for_rect(*rect, None) {
+                request_output_frame(state, output_id, RequestFrameReason::Animation, dispatcher);
+            }
+            continue;
+        }
+        for output_id in output_ids {
+            request_output_frame(state, output_id, RequestFrameReason::Animation, dispatcher);
+        }
+    }
+}
+
+fn schedule_animation_wakeup(state: &State, dispatcher: &mut Dispatcher, output_id: OutputId) {
+    let delay_msec = animation_delay_msec_for_output(state, output_id);
+    dispatcher.dispatch_to(
+        output_scheduler_id(output_id),
+        OutputSchedulerAction::ScheduleAnimation { delay_msec },
+    );
 }
 
 fn animation_damage_targets(state: &State, rects: &[RectI]) -> Vec<(OutputId, RectI)> {
@@ -4813,7 +4763,7 @@ fn begin_closing_from_peek(
         return;
     };
     state.closing_snapshots.push(snapshot);
-    kick_window_animation_manager(dispatcher);
+    kick_visual_animation_pump(dispatcher);
 }
 
 pub(crate) fn plan_closing_capture(
@@ -5773,7 +5723,7 @@ mod window_animation_tests {
     use std::time::{Duration, Instant};
 
     use {
-        super::{animation_delay_msec_for_output, WindowAnimationManager},
+        super::{animation_delay_msec_for_output, VisualAnimationPump},
         crate::{
             clients::ClientId,
             protocol_generated::WlSurfaceId,
@@ -5840,7 +5790,7 @@ mod window_animation_tests {
             .managed_root_surfaces
             .get(&surface)
             .unwrap()
-            .visual_animation
+            .focus_animation
             .current()
             .content_alpha
     }
@@ -5862,7 +5812,7 @@ mod window_animation_tests {
         let (output_id, surface) = mapped_focus_target(&mut state);
         state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
 
-        let mut manager = WindowAnimationManager::new();
+        let mut manager = VisualAnimationPump::new();
         let mut dispatcher = Dispatcher::default();
         manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
 
@@ -5876,7 +5826,7 @@ mod window_animation_tests {
         let (output_id, surface) = mapped_focus_target(&mut state);
         state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
         let now = Instant::now();
-        let mut manager = WindowAnimationManager::new();
+        let mut manager = VisualAnimationPump::new();
         let mut dispatcher = Dispatcher::default();
         manager.advance_and_schedule(&mut state, &mut dispatcher, now);
 
@@ -5894,7 +5844,7 @@ mod window_animation_tests {
         let (output_id, surface) = mapped_focus_target(&mut state);
         state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
         state.config.animations.window.duration_msec = 0;
-        let mut manager = WindowAnimationManager::new();
+        let mut manager = VisualAnimationPump::new();
         let mut dispatcher = Dispatcher::default();
         manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
         assert!(queues_animation_frame(&dispatcher, output_id));
@@ -5912,7 +5862,7 @@ mod window_animation_tests {
         let (output_id, surface) = mapped_focus_target(&mut state);
         state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
         let now = Instant::now();
-        let mut manager = WindowAnimationManager::new();
+        let mut manager = VisualAnimationPump::new();
         let mut dispatcher = Dispatcher::default();
         manager.advance_and_schedule_output(&mut state, &mut dispatcher, now, output_id);
         assert_eq!(content_alpha(&state, surface), 120);
@@ -5969,7 +5919,7 @@ mod window_animation_tests {
             .lifecycle_animation
             .start_opening();
         let now = Instant::now();
-        let mut manager = WindowAnimationManager::new();
+        let mut manager = VisualAnimationPump::new();
         let mut dispatcher = Dispatcher::default();
         manager.advance_and_schedule(&mut state, &mut dispatcher, now);
 
@@ -6012,7 +5962,7 @@ mod window_animation_tests {
             .unwrap()
             .lifecycle_animation
             .start_opening();
-        let mut manager = WindowAnimationManager::new();
+        let mut manager = VisualAnimationPump::new();
         let mut dispatcher = Dispatcher::default();
         manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
 
@@ -6046,7 +5996,7 @@ mod window_animation_tests {
         );
         state.closing_snapshots.push(snapshot);
         state.config.animations.window.close_duration_msec = 100;
-        let mut manager = WindowAnimationManager::new();
+        let mut manager = VisualAnimationPump::new();
         let now = Instant::now();
 
         let mut dispatcher = Dispatcher::default();
@@ -6085,7 +6035,7 @@ mod window_animation_tests {
         );
         state.closing_snapshots.push(snapshot);
         state.config.animations.window.close_duration_msec = 0;
-        let mut manager = WindowAnimationManager::new();
+        let mut manager = VisualAnimationPump::new();
         let mut dispatcher = Dispatcher::default();
         manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
         assert!(state.closing_snapshots.is_empty());
@@ -6106,7 +6056,7 @@ mod window_animation_tests {
         );
         state.closing_snapshots.push(snapshot);
         state.config.animations.window.close_duration_msec = 100;
-        let mut manager = WindowAnimationManager::new();
+        let mut manager = VisualAnimationPump::new();
         let now = Instant::now();
         let mut dispatcher = Dispatcher::default();
         manager.advance_and_schedule_output(&mut state, &mut dispatcher, now, left);
@@ -6155,8 +6105,11 @@ mod window_animation_tests {
         let third = state.create_workspace(Some(group_id), Some("3".to_string()));
         assert!(state.activate_workspace(second));
         let now = Instant::now();
-        assert!(state.advance_window_visuals(now).damaged_rects.is_empty());
-        state.advance_window_visuals(now + Duration::from_millis(80));
+        assert!(state
+            .advance_visual_animations(now)
+            .damaged_rects
+            .is_empty());
+        state.advance_visual_animations(now + Duration::from_millis(80));
         let progress = state
             .workspace_groups
             .try_get(group_id)
@@ -6188,7 +6141,7 @@ mod window_animation_tests {
         assert_eq!(restarted.progress(), crate::visual_animation::UnitValue::ZERO);
 
         state.config.animations.workspace.duration_msec = 0;
-        let result = state.advance_window_visuals(now + Duration::from_millis(90));
+        let result = state.advance_visual_animations(now + Duration::from_millis(90));
         assert!(state
             .workspace_groups
             .try_get(group_id)
@@ -6290,8 +6243,8 @@ mod window_animation_tests {
         state.output_workspace_groups.insert(narrow, group_id);
         assert!(state.activate_workspace(to));
         let now = Instant::now();
-        state.advance_window_visuals(now);
-        let progressed = state.advance_window_visuals(now + Duration::from_millis(100));
+        state.advance_visual_animations(now);
+        let progressed = state.advance_visual_animations(now + Duration::from_millis(100));
         assert!(progressed
             .damaged_rects
             .contains(&state.output_bounds(wide).unwrap()));
@@ -6316,7 +6269,7 @@ mod window_animation_tests {
             .unwrap()
             .progress();
         state.outputs.try_get_mut(narrow).unwrap().enabled = false;
-        state.advance_window_visuals(now + Duration::from_millis(150));
+        state.advance_visual_animations(now + Duration::from_millis(150));
         assert!(
             state
                 .workspace_groups
@@ -6336,7 +6289,7 @@ mod window_animation_tests {
             .transition
             .unwrap()
             .progress();
-        state.advance_window_visuals(now + Duration::from_millis(400));
+        state.advance_visual_animations(now + Duration::from_millis(400));
         assert_eq!(
             state
                 .workspace_groups
@@ -6364,8 +6317,8 @@ mod window_animation_tests {
         let (output_id, _, from, to) = live_group(&mut state, 800, 600, 1);
         assert!(state.activate_workspace(to));
         let now = Instant::now();
-        state.advance_window_visuals(now);
-        state.advance_window_visuals(now + Duration::from_millis(100));
+        state.advance_visual_animations(now);
+        state.advance_visual_animations(now + Duration::from_millis(100));
         let outgoing = state.workspace_motion_for_output(output_id, Some(from));
         let incoming = state.workspace_motion_for_output(output_id, Some(to));
         assert_eq!(outgoing.alpha, 255);
@@ -6380,7 +6333,7 @@ mod window_animation_tests {
         state.config.animations.workspace.duration_msec = 100;
         let (output_id, group_id, _, second) = live_group(&mut state, 320, 200, 1);
         assert!(state.activate_workspace(second));
-        let mut manager = WindowAnimationManager::new();
+        let mut manager = VisualAnimationPump::new();
         let now = Instant::now();
         let mut dispatcher = Dispatcher::default();
         manager.advance_and_schedule(&mut state, &mut dispatcher, now);
@@ -6921,8 +6874,8 @@ mod closing_capture_tests {
         let incoming = state.create_workspace(Some(group_id), Some("2".to_string()));
         assert!(state.activate_workspace(incoming));
         let now = std::time::Instant::now();
-        state.advance_window_visuals(now);
-        state.advance_window_visuals(now + std::time::Duration::from_millis(100));
+        state.advance_visual_animations(now);
+        state.advance_visual_animations(now + std::time::Duration::from_millis(100));
         let outgoing_motion = state.workspace_motion_for_output(output_id, Some(outgoing));
         let incoming_motion = state.workspace_motion_for_output(output_id, Some(incoming));
         for (id, workspace_id) in [(21u64, Some(outgoing)), (22, Some(incoming)), (23, None)] {
@@ -7508,9 +7461,9 @@ mod presentation_timing_tests {
             build_surface_cursor_plane_request, collect_submission_metadata,
             cursor_plane_commit_dimensions, effect_transition_requires_full_redraw,
             find_cursor_slot_index_for_key, presentation_feedback_flags,
-            render_planner::select_presentation_output_for_scene, rgba_to_drm_argb8888,
-            scene_item_requires_compositor_compositing, schedule_output,
-            schedule_outputs_for_rects, select_cursor_upload_slot,
+            render_planner::select_presentation_output_for_scene, request_output,
+            request_outputs_for_rects, rgba_to_drm_argb8888,
+            scene_item_requires_compositor_compositing, select_cursor_upload_slot,
             submitted_frame_feedbacks_for_discard, surface_allows_direct_scanout,
             CursorPlaneContentKey, CursorSurfaceContentKey, OutputSubmission, SceneItem,
             SceneItemContentKey, SceneItemKey, SceneItemMask, SceneItemState,
@@ -7936,7 +7889,7 @@ mod presentation_timing_tests {
     }
 
     #[test]
-    fn schedule_output_targets_logical_output_model_id() {
+    fn request_output_targets_logical_output_model_id() {
         let mut state = state_for_tests();
         let drm_id = DrmId::from(0usize);
         let backend = BackendOutputRef::new(drm_id);
@@ -7944,7 +7897,7 @@ mod presentation_timing_tests {
         let right = state.insert_output(test_output(backend, 2, 100, 0, 100, 100, ""));
         let mut dispatcher = Dispatcher::default();
 
-        schedule_output(&state, right, &mut dispatcher);
+        request_output(&state, right, &mut dispatcher);
 
         assert!(dispatcher.test_has_queued_action_for::<OutputSchedulerAction, _>(
             output_scheduler_id(right),
@@ -7963,7 +7916,7 @@ mod presentation_timing_tests {
     }
 
     #[test]
-    fn schedule_outputs_for_rects_marks_old_and_new_outputs() {
+    fn request_outputs_for_rects_marks_old_and_new_outputs() {
         let mut state = state_for_tests();
         let drm_id = DrmId::from(0usize);
         let backend = BackendOutputRef::new(drm_id);
@@ -7971,7 +7924,7 @@ mod presentation_timing_tests {
         let right = state.insert_output(test_output(backend, 2, 100, 0, 100, 100, ""));
         let mut dispatcher = Dispatcher::default();
 
-        schedule_outputs_for_rects(
+        request_outputs_for_rects(
             &state,
             [RectI::new(0, 0, 100, 100).unwrap(), RectI::new(100, 0, 100, 100).unwrap()],
             &mut dispatcher,

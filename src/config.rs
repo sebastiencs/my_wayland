@@ -17,7 +17,7 @@ use {
 
 use crate::{
     clients::ClientManagerAction,
-    drm::{kick_window_animation_manager, schedule_outputs, schedule_outputs_for_points},
+    drm::{kick_visual_animation_pump, request_outputs, request_outputs_for_points},
     io_uring::{
         model::IoUringAction,
         ring::{PollCompleted, RingId},
@@ -1116,8 +1116,8 @@ pub fn reload_from_disk(
     if changed {
         state.mark_all_workspaces_dirty();
         dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
-        schedule_outputs(state, state.outputs.iter().map(|(output_id, _)| output_id), dispatcher);
-        kick_window_animation_manager(dispatcher);
+        request_outputs(state, state.outputs.iter().map(|(output_id, _)| output_id), dispatcher);
+        kick_visual_animation_pump(dispatcher);
     }
     let trigger = match trigger {
         ReloadTrigger::ManualBinding => "manual binding",
@@ -1133,7 +1133,7 @@ pub fn apply_general_settings(state: &mut State, dispatcher: &mut Dispatcher) {
         .seat
         .set_cursor_theme(general.cursor_theme.clone(), general.cursor_size);
     if changed && state.seat.cursor_is_visible() {
-        schedule_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
+        request_outputs_for_points(state, [state.seat.pointer_position()], dispatcher);
     }
 }
 
@@ -1143,7 +1143,7 @@ pub fn apply_output_settings(state: &mut State, dispatcher: &mut Dispatcher) {
         return;
     }
 
-    schedule_outputs(state, changed_outputs.iter().copied(), dispatcher);
+    request_outputs(state, changed_outputs.iter().copied(), dispatcher);
     for output_id in changed_outputs {
         dispatcher.dispatch(ClientManagerAction::OutputStateChanged { output_id });
     }
@@ -1202,7 +1202,7 @@ fn activate_adjacent_workspace(
     crate::wayland_objects::ext_workspace_manager_v1::publish_workspace_state_changed(
         state, dispatcher, outputs,
     );
-    kick_window_animation_manager(dispatcher);
+    kick_visual_animation_pump(dispatcher);
 }
 
 pub fn default_config_path() -> PathBuf {

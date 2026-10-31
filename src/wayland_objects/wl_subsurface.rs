@@ -1,6 +1,6 @@
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
-    drm::{schedule_active_output, schedule_outputs_for_rect},
+    drm::{request_active_output, request_outputs_for_rect},
     object::{Object, Parser, RequestResult},
     protocol_generated::{wl_subsurface, WaylandId, WlSubsurfaceId, WlSurfaceId},
     state::{GrabbedObject, ObjectId, State},
@@ -91,9 +91,9 @@ impl Object for WlSubsurface {
                     .root_surface_for_surface(self.surface)
                     .and_then(|root_surface| state.root_surface_surface_bounds_global(root_surface))
                 {
-                    schedule_outputs_for_rect(state, bounds, dispatcher);
+                    request_outputs_for_rect(state, bounds, dispatcher);
                 } else {
-                    schedule_active_output(state, dispatcher);
+                    request_active_output(state, dispatcher);
                 }
             }
             SetPosition { x, y } => {

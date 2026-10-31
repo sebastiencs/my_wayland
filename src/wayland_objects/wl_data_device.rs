@@ -283,7 +283,7 @@ fn start_drag(
     });
     if icon.is_some() {
         dispatcher.dispatch_to(client_id, ClientAction::RefreshSurfaceOutputs);
-        crate::drm::schedule_active_output(state, dispatcher);
+        crate::drm::request_active_output(state, dispatcher);
     }
     seat::refresh_active_drag_focus(state, dispatcher, 0);
 
