@@ -2383,6 +2383,54 @@ mod tests {
     }
 
     #[test]
+    fn example_config_keeps_the_daily_bindings() {
+        let xkb = Xkb::new();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.toml.example");
+        let config = RuntimeConfig::load_from_path(&path, &xkb).unwrap();
+        let mut actions: Vec<_> = config
+            .bindings
+            .iter()
+            .map(|binding| (binding.trigger.description.as_str(), binding.action.clone()))
+            .collect();
+        actions.sort_by_key(|(description, _)| *description);
+        assert_eq!(
+            actions,
+            vec![
+                ("Super+1", CompositorAction::WorkspaceIndex { index: 1 }),
+                ("Super+2", CompositorAction::WorkspaceIndex { index: 2 }),
+                ("Super+3", CompositorAction::WorkspaceIndex { index: 3 }),
+                ("Super+4", CompositorAction::WorkspaceIndex { index: 4 }),
+                ("Super+Escape", CompositorAction::Quit),
+                ("Super+F", CompositorAction::ToggleFullscreen),
+                ("Super+Left", CompositorAction::FocusPrevious),
+                ("Super+Page_Down", CompositorAction::WorkspacePrevious),
+                ("Super+Page_Up", CompositorAction::WorkspaceNext),
+                ("Super+Q", CompositorAction::Close),
+                ("Super+Return", CompositorAction::Spawn { command: "alacritty".to_string() }),
+                ("Super+Right", CompositorAction::FocusNext),
+                ("Super+Shift+1", CompositorAction::MoveToWorkspace { index: 1 }),
+                ("Super+Shift+2", CompositorAction::MoveToWorkspace { index: 2 }),
+                ("Super+Shift+3", CompositorAction::MoveToWorkspace { index: 3 }),
+                ("Super+Shift+4", CompositorAction::MoveToWorkspace { index: 4 }),
+                ("Super+Shift+C", CompositorAction::ReloadConfig),
+                ("Super+Space", CompositorAction::ToggleFloating),
+            ]
+        );
+        let mouse: Vec<_> = config
+            .mouse_bindings
+            .iter()
+            .map(|binding| (binding.trigger.description.as_str(), binding.action))
+            .collect();
+        assert_eq!(
+            mouse,
+            vec![
+                ("Ctrl+mouse:left", MouseBindingAction::MoveWindow),
+                ("Ctrl+mouse:right", MouseBindingAction::ResizeWindow),
+            ]
+        );
+    }
+
+    #[test]
     fn parses_window_and_indexed_workspace_actions() {
         let xkb = Xkb::new();
         let config = RuntimeConfig::parse_for_test(

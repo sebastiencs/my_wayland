@@ -75,9 +75,23 @@ fade = false
 "Super+Escape" = { action = "quit" }
 "Super+Shift+C" = { action = "reload-config" }
 "Super+Return" = { action = "spawn", command = "alacritty" }
-# Each output starts with four workspaces. These bindings wrap through that list.
+"Super+Q" = { action = "close" }
+"Super+Left" = { action = "focus-previous" }
+"Super+Right" = { action = "focus-next" }
+"Super+Space" = { action = "toggle-floating" }
+"Super+F" = { action = "toggle-fullscreen" }
+# Each output starts with four workspaces. Page Up and Page Down wrap through that list.
 "Super+Page_Up" = { action = "workspace-next" }
 "Super+Page_Down" = { action = "workspace-previous" }
+# Number keys select a workspace by its one-based index. Shift moves the focused window there.
+"Super+1" = { action = "workspace-index", index = 1 }
+"Super+2" = { action = "workspace-index", index = 2 }
+"Super+3" = { action = "workspace-index", index = 3 }
+"Super+4" = { action = "workspace-index", index = 4 }
+"Super+Shift+1" = { action = "move-to-workspace", index = 1 }
+"Super+Shift+2" = { action = "move-to-workspace", index = 2 }
+"Super+Shift+3" = { action = "move-to-workspace", index = 3 }
+"Super+Shift+4" = { action = "move-to-workspace", index = 4 }
 
 [mouse_bindings]
 # Mouse bindings use modifier names plus `mouse:<button>`.

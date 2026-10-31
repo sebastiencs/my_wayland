@@ -226,6 +226,7 @@ impl Model for Libinput {
                             ),
                             // libinput emits the deprecated axis event in addition to the
                             // scroll events above. Forwarding both would scroll twice.
+                            #[allow(deprecated)]
                             PointerEvent::Axis(_) => {}
                             _ => {}
                         },
