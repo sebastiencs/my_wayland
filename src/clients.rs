@@ -3077,6 +3077,18 @@ impl Arguments {
         Ok(v as f32 / 256.0)
     }
 
+    /// Wayland array: a byte length, then the contents padded to a 32-bit boundary.
+    pub fn array(&mut self) -> Result<Array, ParserError> {
+        let len = self.uint()? as usize;
+        let nwords = len.next_multiple_of(4) / 4;
+        let mut words = Vec::with_capacity(nwords);
+        for _ in 0..nwords {
+            words.push(self.pop()?);
+        }
+        words.truncate(len / 4);
+        Ok(Array(words))
+    }
+
     pub fn fd(&mut self) -> Result<RawFd, ParserError> {
         // Implemented by `RawRequest`
         Err(ParserError::Malformed)
@@ -3093,6 +3105,22 @@ mod clients_wire_tests {
     use super::{Arguments, ParserError, RawRequest};
 
     #[test]
+    fn arguments_array_reads_padded_words() {
+        let mut args = VecDeque::new();
+        args.push_back(8);
+        args.push_back(0x1111);
+        args.push_back(0x2222);
+        let mut args = Arguments::from_words(args);
+        assert_eq!(args.array().unwrap().0, vec![0x1111, 0x2222]);
+
+        let mut partial = VecDeque::new();
+        partial.push_back(2);
+        partial.push_back(u32::from_ne_bytes([1, 2, 0, 0]));
+        let mut partial = Arguments::from_words(partial);
+        assert!(partial.array().unwrap().0.is_empty());
+        assert!(partial.uint().is_err());
+    }
+
     fn arguments_string_rejects_invalid_utf8() {
         let mut args = VecDeque::new();
         args.push_back(2);

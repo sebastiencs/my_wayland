@@ -54,6 +54,18 @@ wayland_id! {
   WlSubcompositorId,
   WlSubsurfaceId,
   WlFixesId,
+  ZwpLinuxDmabufV1Id,
+  ZwpLinuxBufferParamsV1Id,
+  ZwpLinuxDmabufFeedbackV1Id,
+  ZwpTabletManagerV2Id,
+  ZwpTabletSeatV2Id,
+  ZwpTabletToolV2Id,
+  ZwpTabletV2Id,
+  ZwpTabletPadRingV2Id,
+  ZwpTabletPadStripV2Id,
+  ZwpTabletPadGroupV2Id,
+  ZwpTabletPadV2Id,
+  ZwpTabletPadDialV2Id,
   WpPresentationId,
   WpPresentationFeedbackId,
   WpViewporterId,
@@ -90,9 +102,6 @@ wayland_id! {
   WpLinuxDrmSyncobjSurfaceV1Id,
   ZwpIdleInhibitManagerV1Id,
   ZwpIdleInhibitorV1Id,
-  ZwpLinuxDmabufV1Id,
-  ZwpLinuxBufferParamsV1Id,
-  ZwpLinuxDmabufFeedbackV1Id,
   ZwpLinuxExplicitSynchronizationV1Id,
   ZwpLinuxSurfaceSynchronizationV1Id,
   ZwpLinuxBufferReleaseV1Id,
@@ -101,14 +110,6 @@ wayland_id! {
   ZwpConfinedPointerV1Id,
   ZwpRelativePointerManagerV1Id,
   ZwpRelativePointerV1Id,
-  ZwpTabletManagerV2Id,
-  ZwpTabletSeatV2Id,
-  ZwpTabletToolV2Id,
-  ZwpTabletV2Id,
-  ZwpTabletPadRingV2Id,
-  ZwpTabletPadStripV2Id,
-  ZwpTabletPadGroupV2Id,
-  ZwpTabletPadV2Id,
   ZxdgDecorationManagerV1Id,
   ZxdgToplevelDecorationV1Id,
   ZxdgOutputManagerV1Id,
@@ -5048,6 +5049,2626 @@ pub mod wl_fixes {
     }
 }
 
+/// Factory for creating dmabuf-based wl_buffers
+///
+/// This interface offers ways to create generic dmabuf-based wl_buffers.
+///
+/// For more information about dmabuf, see:
+/// https://www.kernel.org/doc/html/next/userspace-api/dma-buf-alloc-exchange.html
+///
+/// Clients can use the get_surface_feedback request to get dmabuf feedback
+/// for a particular surface. If the client wants to retrieve feedback not
+/// tied to a surface, they can use the get_default_feedback request.
+///
+/// The following are required from clients:
+///
+/// - Clients must ensure that either all data in the dma-buf is
+/// coherent for all subsequent read access or that coherency is
+/// correctly handled by the underlying kernel-side dma-buf
+/// implementation.
+///
+/// - Don't make any more attachments after sending the buffer to the
+/// compositor. Making more attachments later increases the risk of
+/// the compositor not being able to use (re-import) an existing
+/// dmabuf-based wl_buffer.
+///
+/// The underlying graphics stack must ensure the following:
+///
+/// - The dmabuf file descriptors relayed to the server will stay valid
+/// for the whole lifetime of the wl_buffer. This means the server may
+/// at any time use those fds to import the dmabuf into any kernel
+/// sub-system that might accept it.
+///
+/// However, when the underlying graphics stack fails to deliver the
+/// promise, because of e.g. a device hot-unplug which raises internal
+/// errors, after the wl_buffer has been successfully created the
+/// compositor must not raise protocol errors to the client when dmabuf
+/// import later fails.
+///
+/// To create a wl_buffer from one or more dmabufs, a client creates a
+/// zwp_linux_buffer_params_v1 object with a zwp_linux_dmabuf_v1.create_params
+/// request. All planes required by the intended format are added with
+/// the 'add' request. Finally, a 'create' or 'create_immed' request is
+/// issued, which has the following outcome depending on the import success.
+///
+/// The 'create' request,
+/// - on success, triggers a 'created' event which provides the final
+/// wl_buffer to the client.
+/// - on failure, triggers a 'failed' event to convey that the server
+/// cannot use the dmabufs received from the client.
+///
+/// For the 'create_immed' request,
+/// - on success, the server immediately imports the added dmabufs to
+/// create a wl_buffer. No event is sent from the server in this case.
+/// - on failure, the server can choose to either:
+/// - terminate the client by raising a fatal error.
+/// - mark the wl_buffer as failed, and send a 'failed' event to the
+/// client. If the client uses a failed wl_buffer as an argument to any
+/// request, the behaviour is compositor implementation-defined.
+///
+/// For all DRM formats and unless specified in another protocol extension,
+/// pre-multiplied alpha is used for pixel values.
+///
+/// Unless specified otherwise in another protocol extension, implicit
+/// synchronization is used. In other words, compositors and clients must
+/// wait and signal fences implicitly passed via the DMA-BUF's reservation
+/// mechanism.
+pub mod zwp_linux_dmabuf_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 {
+        const INTERFACE_NAME: &'static str = "zwp_linux_dmabuf_v1";
+        const INTERFACE_VERSION: u32 = 6;
+    }
+    impl crate::object::IdToObject for ZwpLinuxDmabufV1Id {
+        type Object = crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 {
+        type Id = ZwpLinuxDmabufV1Id;
+    }
+    /// Minimum interface version for the `get_default_feedback` message (XML `since` / `version`).
+    pub const GET_DEFAULT_FEEDBACK_SINCE: u32 = 4;
+    /// Minimum interface version for the `get_surface_feedback` message (XML `since` / `version`).
+    pub const GET_SURFACE_FEEDBACK_SINCE: u32 = 4;
+    #[derive(Debug)]
+    pub enum Request {
+        /// Unbind the factory
+        ///
+        /// Objects created through this interface, especially wl_buffers, will
+        /// remain valid.
+        Destroy,
+        /// Create a temporary object for buffer parameters
+        ///
+        /// This temporary object is used to collect multiple dmabuf handles into
+        /// a single batch to create a wl_buffer. It can only be used once and
+        /// should be destroyed after a 'created' or 'failed' event has been
+        /// received.
+        CreateParams {
+            /// Id for the newly created zwp_linux_buffer_params_v1,
+            params_id: ZwpLinuxBufferParamsV1Id,
+        },
+        /// Get default feedback
+        ///
+        /// This request creates a new zwp_linux_dmabuf_feedback_v1 object not bound
+        /// to a particular surface. This object will deliver feedback about dmabuf
+        /// parameters to use if the client doesn't support per-surface feedback
+        /// (see get_surface_feedback).
+        GetDefaultFeedback { id: ZwpLinuxDmabufFeedbackV1Id },
+        /// Get feedback for a surface
+        ///
+        /// This request creates a new zwp_linux_dmabuf_feedback_v1 object for the
+        /// specified wl_surface. This object will deliver feedback about dmabuf
+        /// parameters to use for buffers attached to this surface.
+        ///
+        /// If the surface is destroyed before the zwp_linux_dmabuf_feedback_v1 object,
+        /// the feedback object becomes inert.
+        GetSurfaceFeedback { id: ZwpLinuxDmabufFeedbackV1Id, surface: WlSurfaceId },
+    }
+    impl Parser for crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => CreateParams { params_id: req.id()? },
+                2 => GetDefaultFeedback { id: req.id()? },
+                3 => GetSurfaceFeedback { id: req.id()?, surface: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    /// Minimum interface version for the `modifier` message (XML `since` / `version`).
+    pub const MODIFIER_SINCE: u32 = 3;
+    #[derive(Debug)]
+    pub enum Event {
+        /// Supported buffer format
+        ///
+        /// This event advertises one buffer format that the server supports.
+        /// All the supported formats are advertised once when the client
+        /// binds to this interface. A roundtrip after binding guarantees
+        /// that the client has received all supported formats.
+        ///
+        /// For the definition of the format codes, see the
+        /// zwp_linux_buffer_params_v1::create request.
+        ///
+        /// Starting version 4, the format event is deprecated and must not be
+        /// sent by compositors. Instead, use get_default_feedback or
+        /// get_surface_feedback.
+        Format {
+            /// DRM_FORMAT code,
+            format: u32,
+        },
+        /// Supported buffer format modifier
+        ///
+        /// This event advertises the formats that the server supports, along with
+        /// the modifiers supported for each format. All the supported modifiers
+        /// for all the supported formats are advertised once when the client
+        /// binds to this interface. A roundtrip after binding guarantees that
+        /// the client has received all supported format-modifier pairs.
+        ///
+        /// For legacy support, DRM_FORMAT_MOD_INVALID (that is, modifier_hi ==
+        /// 0x00ffffff and modifier_lo == 0xffffffff) is allowed in this event.
+        /// It indicates that the server can support the format with an implicit
+        /// modifier. When a plane has DRM_FORMAT_MOD_INVALID as its modifier, it
+        /// is as if no explicit modifier is specified. The effective modifier
+        /// will be derived from the dmabuf.
+        ///
+        /// A compositor that sends valid modifiers and DRM_FORMAT_MOD_INVALID for
+        /// a given format supports both explicit modifiers and implicit modifiers.
+        ///
+        /// For the definition of the format and modifier codes, see the
+        /// zwp_linux_buffer_params_v1::create and zwp_linux_buffer_params_v1::add
+        /// requests.
+        ///
+        /// Starting version 4, the modifier event is deprecated and must not be
+        /// sent by compositors. Instead, use get_default_feedback or
+        /// get_surface_feedback.
+        Modifier {
+            /// DRM_FORMAT code,
+            format: u32,
+            /// High 32 bits of layout modifier,
+            modifier_hi: u32,
+            /// Low 32 bits of layout modifier,
+            modifier_lo: u32,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Format { format } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(format);
+                    raw
+                }
+                Modifier { format, modifier_hi, modifier_lo } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 3);
+                    raw.uint(format);
+                    raw.uint(modifier_hi);
+                    raw.uint(modifier_lo);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// Parameters for creating a dmabuf-based wl_buffer
+///
+/// This temporary object is a collection of dmabufs and other
+/// parameters that together form a single logical buffer. The temporary
+/// object may eventually create one wl_buffer unless cancelled by
+/// destroying it before requesting 'create'.
+///
+/// Single-planar formats only require one dmabuf, however
+/// multi-planar formats may require more than one dmabuf. For all
+/// formats, an 'add' request must be called once per plane (even if the
+/// underlying dmabuf fd is identical).
+///
+/// You must use consecutive plane indices ('plane_idx' argument for 'add')
+/// from zero to the number of planes used by the drm_fourcc format code.
+/// All planes required by the format must be given exactly once, but can
+/// be given in any order. Each plane index can only be set once; subsequent
+/// calls with a plane index which has already been set will result in a
+/// plane_set error being generated.
+pub mod zwp_linux_buffer_params_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1 {
+        const INTERFACE_NAME: &'static str = "zwp_linux_buffer_params_v1";
+        const INTERFACE_VERSION: u32 = 6;
+    }
+    impl crate::object::IdToObject for ZwpLinuxBufferParamsV1Id {
+        type Object = crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1
+    {
+        type Id = ZwpLinuxBufferParamsV1Id;
+    }
+    /// Minimum interface version for the `create_immed` message (XML `since` / `version`).
+    pub const CREATE_IMMED_SINCE: u32 = 2;
+    /// Minimum interface version for the `set_sampling_device` message (XML `since` / `version`).
+    pub const SET_SAMPLING_DEVICE_SINCE: u32 = 6;
+    #[derive(Debug)]
+    pub enum Request {
+        /// Delete this object, used or not
+        ///
+        /// Cleans up the temporary data sent to the server for dmabuf-based
+        /// wl_buffer creation.
+        Destroy,
+        /// Add a dmabuf to the temporary set
+        ///
+        /// This request adds one dmabuf to the set in this
+        /// zwp_linux_buffer_params_v1.
+        ///
+        /// The 64-bit unsigned value combined from modifier_hi and modifier_lo
+        /// is the dmabuf layout modifier. DRM AddFB2 ioctl calls this the
+        /// fb modifier, which is defined in drm_mode.h of Linux UAPI.
+        /// This is an opaque token. Drivers use this token to express tiling,
+        /// compression, etc. driver-specific modifications to the base format
+        /// defined by the DRM fourcc code.
+        ///
+        /// Starting from version 4, the invalid_format protocol error is sent if
+        /// the format + modifier pair was not advertised as supported.
+        ///
+        /// Starting from version 5, the invalid_format protocol error is sent if
+        /// all planes don't use the same modifier.
+        ///
+        /// This request raises the PLANE_IDX error if plane_idx is too large.
+        /// The error PLANE_SET is raised if attempting to set a plane that
+        /// was already set.
+        Add {
+            /// Dmabuf fd,
+            fd: RawFd,
+            /// Plane index,
+            plane_idx: u32,
+            /// Offset in bytes,
+            offset: u32,
+            /// Stride in bytes,
+            stride: u32,
+            /// High 32 bits of layout modifier,
+            modifier_hi: u32,
+            /// Low 32 bits of layout modifier,
+            modifier_lo: u32,
+        },
+        /// Create a wl_buffer from the given dmabufs
+        ///
+        /// This asks for creation of a wl_buffer from the added dmabuf
+        /// buffers. The wl_buffer is not created immediately but returned via
+        /// the 'created' event if the dmabuf sharing succeeds. The sharing
+        /// may fail at runtime for reasons a client cannot predict, in
+        /// which case the 'failed' event is triggered.
+        ///
+        /// The 'format' argument is a DRM_FORMAT code, as defined by the
+        /// libdrm's drm_fourcc.h. The Linux kernel's DRM sub-system is the
+        /// authoritative source on how the format codes should work.
+        ///
+        /// The 'flags' is a bitfield of the flags defined in enum "flags".
+        /// 'y_invert' means that the image needs to be y-flipped.
+        ///
+        /// Flag 'interlaced' means that the frame in the buffer is not
+        /// progressive as usual, but interlaced. An interlaced buffer as
+        /// supported here must always contain both top and bottom fields.
+        /// The top field always begins on the first pixel row. The temporal
+        /// ordering between the two fields is top field first, unless
+        /// 'bottom_first' is specified. It is undefined whether 'bottom_first'
+        /// is ignored if 'interlaced' is not set.
+        ///
+        /// This protocol does not convey any information about field rate,
+        /// duration, or timing, other than the relative ordering between the
+        /// two fields in one buffer. A compositor may have to estimate the
+        /// intended field rate from the incoming buffer rate. It is undefined
+        /// whether the time of receiving wl_surface.commit with a new buffer
+        /// attached, applying the wl_surface state, wl_surface.frame callback
+        /// trigger, presentation, or any other point in the compositor cycle
+        /// is used to measure the frame or field times. There is no support
+        /// for detecting missed or late frames/fields/buffers either, and
+        /// there is no support whatsoever for cooperating with interlaced
+        /// compositor output.
+        ///
+        /// The composited image quality resulting from the use of interlaced
+        /// buffers is explicitly undefined. A compositor may use elaborate
+        /// hardware features or software to deinterlace and create progressive
+        /// output frames from a sequence of interlaced input buffers, or it
+        /// may produce substandard image quality. However, compositors that
+        /// cannot guarantee reasonable image quality in all cases are recommended
+        /// to just reject all interlaced buffers.
+        ///
+        /// Any argument errors, including non-positive width or height,
+        /// mismatch between the number of planes and the format, bad
+        /// format, bad offset or stride, may be indicated by fatal protocol
+        /// errors: INCOMPLETE, INVALID_FORMAT, INVALID_DIMENSIONS,
+        /// OUT_OF_BOUNDS.
+        ///
+        /// Dmabuf import errors in the server that are not obvious client
+        /// bugs are returned via the 'failed' event as non-fatal. This
+        /// allows attempting dmabuf sharing and falling back in the client
+        /// if it fails.
+        ///
+        /// This request can be sent only once in the object's lifetime, after
+        /// which the only legal request is destroy. This object should be
+        /// destroyed after issuing a 'create' request. Attempting to use this
+        /// object after issuing 'create' raises the ALREADY_USED protocol error.
+        ///
+        /// It is not mandatory to issue 'create'. If a client wants to
+        /// cancel the buffer creation, it can just destroy this object.
+        Create {
+            /// Base plane width in pixels,
+            width: i32,
+            /// Base plane height in pixels,
+            height: i32,
+            /// DRM_FORMAT code,
+            format: u32,
+            /// See enum flags,
+            flags: u32,
+        },
+        /// Immediately create a wl_buffer from the given dmabufs
+        ///
+        /// This asks for immediate creation of a wl_buffer by importing the
+        /// added dmabufs.
+        ///
+        /// In case of import success, no event is sent from the server, and the
+        /// wl_buffer is ready to be used by the client.
+        ///
+        /// Upon import failure, either of the following may happen, as seen fit
+        /// by the implementation:
+        /// - the client is terminated with one of the following fatal protocol
+        /// errors:
+        /// - INCOMPLETE, INVALID_FORMAT, INVALID_DIMENSIONS, OUT_OF_BOUNDS,
+        /// in case of argument errors such as mismatch between the number
+        /// of planes and the format, bad format, non-positive width or
+        /// height, or bad offset or stride.
+        /// - INVALID_WL_BUFFER, in case the cause for failure is unknown or
+        /// platform specific.
+        /// - the server creates an invalid wl_buffer, marks it as failed and
+        /// sends a 'failed' event to the client. The result of using this
+        /// invalid wl_buffer as an argument in any request by the client is
+        /// defined by the compositor implementation.
+        ///
+        /// This takes the same arguments as a 'create' request, and obeys the
+        /// same restrictions.
+        CreateImmed {
+            /// Id for the newly created wl_buffer,
+            buffer_id: WlBufferId,
+            /// Base plane width in pixels,
+            width: i32,
+            /// Base plane height in pixels,
+            height: i32,
+            /// DRM_FORMAT code,
+            format: u32,
+            /// See enum flags,
+            flags: u32,
+        },
+        /// Set the target device of the wl_buffer
+        ///
+        /// Set the device the compositor should import the dmabufs to for sampling
+        /// in the next create or create_immed request.
+        ///
+        /// To avoid race conditions when the compositor removes a device from the
+        /// tranches, it is not a protocol error if the device hasn't been advertised
+        /// by the compositor in a tranche with the sampling flag, but the import is
+        /// likely to fail in that case.
+        ///
+        /// If the client doesn't know a suitable target device, it shouldn't set one,
+        /// and the compositor should attempt import on all devices it supports.
+        ///
+        /// If the array is too small to contain a dev_t or larger than required, the
+        /// invalid_dev_t_size error will be emitted.
+        SetSamplingDevice {
+            /// Device dev_t value,
+            device: Array,
+        },
+    }
+    impl Parser for crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => Add {
+                    fd: req.fd()?,
+                    plane_idx: req.uint()?,
+                    offset: req.uint()?,
+                    stride: req.uint()?,
+                    modifier_hi: req.uint()?,
+                    modifier_lo: req.uint()?,
+                },
+                2 => Create {
+                    width: req.int()?,
+                    height: req.int()?,
+                    format: req.uint()?,
+                    flags: req.uint()?,
+                },
+                3 => CreateImmed {
+                    buffer_id: req.id()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                    format: req.uint()?,
+                    flags: req.uint()?,
+                },
+                4 => SetSamplingDevice { device: req.array()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Buffer creation succeeded
+        ///
+        /// This event indicates that the attempted buffer creation was
+        /// successful. It provides the new wl_buffer referencing the dmabuf(s).
+        ///
+        /// Upon receiving this event, the client should destroy the
+        /// zwp_linux_buffer_params_v1 object.
+        Created {
+            /// Id for the the newly created wl_buffer,
+            buffer: WlBufferId,
+        },
+        /// Buffer creation failed
+        ///
+        /// This event indicates that the attempted buffer creation has
+        /// failed. It usually means that one of the dmabuf constraints
+        /// has not been fulfilled.
+        ///
+        /// Upon receiving this event, the client should destroy the
+        /// zwp_linux_buffer_params_v1 object.
+        Failed,
+    }
+    impl EventWriter for crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Created { buffer } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(buffer);
+                    raw
+                }
+                Failed {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// The zwp_linux_buffer_params_v1 object has already been used to create a wl_buffer,
+        AlreadyUsed = 0,
+        /// Plane index out of bounds,
+        PlaneIdx = 1,
+        /// The plane index was already set,
+        PlaneSet = 2,
+        /// Missing or too many planes to create a buffer,
+        Incomplete = 3,
+        /// Format not supported,
+        InvalidFormat = 4,
+        /// Invalid width or height,
+        InvalidDimensions = 5,
+        /// Offset + stride * height goes out of dmabuf bounds,
+        OutOfBounds = 6,
+        /// Invalid wl_buffer resulted from importing dmabufs via the create_immed request on given buffer_params,
+        InvalidWlBuffer = 7,
+        /// An array with mismatching size for a dev_t was used,
+        InvalidDevTSize = 8,
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Flags {
+        /// Contents are y-inverted,
+        YInvert = 1,
+        /// Content is interlaced,
+        Interlaced = 2,
+        /// Bottom field first,
+        BottomFirst = 4,
+    }
+}
+
+/// Dmabuf feedback
+///
+/// This object advertises dmabuf parameters feedback. This includes the
+/// preferred devices and the supported formats/modifiers.
+///
+/// The parameters are sent once when this object is created and whenever they
+/// change. The done event is always sent once after all parameters have been
+/// sent. When a single parameter changes, all parameters are re-sent by the
+/// compositor.
+///
+/// Compositors can re-send the parameters when the current client buffer
+/// allocations are sub-optimal. Compositors should not re-send the
+/// parameters if re-allocating the buffers would not result in a more optimal
+/// configuration. In particular, compositors should avoid sending the exact
+/// same parameters multiple times in a row.
+///
+/// The tranche_target_device and tranche_formats events are grouped by
+/// tranches of preference. For each tranche, a tranche_target_device, one
+/// tranche_flags and one or more tranche_formats events are sent, followed
+/// by a tranche_done event finishing the list. The tranches are sent in
+/// descending order of preference. All formats and modifiers in the same
+/// tranche have the same preference.
+///
+/// To send parameters, the compositor sends one main_device event (unless
+/// the client bound version 6 or above), tranches (each consisting of one
+/// tranche_target_device event, one tranche_flags event, tranche_formats
+/// events and then a tranche_done event), then one done event.
+///
+/// With version 6 and above, the compositor must always advertise at least
+/// one tranche with the sampling flag set.
+pub mod zwp_linux_dmabuf_feedback_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 {
+        const INTERFACE_NAME: &'static str = "zwp_linux_dmabuf_feedback_v1";
+        const INTERFACE_VERSION: u32 = 6;
+    }
+    impl crate::object::IdToObject for ZwpLinuxDmabufFeedbackV1Id {
+        type Object =
+            crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1
+    {
+        type Id = ZwpLinuxDmabufFeedbackV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the feedback object
+        ///
+        /// Using this request a client can tell the server that it is not going to
+        /// use the zwp_linux_dmabuf_feedback_v1 object anymore.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// All feedback has been sent
+        ///
+        /// This event is sent after all parameters of a zwp_linux_dmabuf_feedback_v1
+        /// object have been sent.
+        ///
+        /// This allows changes to the zwp_linux_dmabuf_feedback_v1 parameters to be
+        /// seen as atomic, even if they happen via multiple events.
+        Done,
+        /// Format and modifier table
+        ///
+        /// This event provides a file descriptor which can be memory-mapped to
+        /// access the format and modifier table.
+        ///
+        /// The table contains a tightly packed array of consecutive format +
+        /// modifier pairs. Each pair is 16 bytes wide. It contains a format as a
+        /// 32-bit unsigned integer, followed by 4 bytes of unused padding, and a
+        /// modifier as a 64-bit unsigned integer. The native endianness is used.
+        ///
+        /// The client must map the file descriptor in read-only private mode.
+        ///
+        /// Compositors are not allowed to mutate the table file contents once this
+        /// event has been sent. Instead, compositors must create a new, separate
+        /// table file and re-send feedback parameters. Compositors are allowed to
+        /// store duplicate format + modifier pairs in the table.
+        FormatTable {
+            /// Table file descriptor,
+            fd: RawFd,
+            /// Table size, in bytes,
+            size: u32,
+        },
+        /// Preferred main device
+        ///
+        /// This event advertises the main device that the server prefers to use
+        /// when direct scan-out to the target device isn't possible. The
+        /// advertised main device may be different for each
+        /// zwp_linux_dmabuf_feedback_v1 object, and may change over time.
+        ///
+        /// There is exactly one main device. The compositor must send at least
+        /// one preference tranche with tranche_target_device equal to main_device.
+        ///
+        /// Clients need to create buffers that the main device can import and
+        /// read from, otherwise creating the dmabuf wl_buffer will fail (see the
+        /// zwp_linux_buffer_params_v1.create and create_immed requests for details).
+        /// The main device will also likely be kept active by the compositor,
+        /// so clients can use it instead of waking up another device for power
+        /// savings.
+        ///
+        /// In general the device is a DRM node. The DRM node type (primary vs.
+        /// render) is unspecified. Clients must not rely on the compositor sending
+        /// a particular node type. Clients cannot check two devices for equality
+        /// by comparing the dev_t value.
+        ///
+        /// If explicit modifiers are not supported and the client performs buffer
+        /// allocations on a different device than the main device, then the client
+        /// must force the buffer to have a linear layout.
+        ///
+        /// With version 6 and above, this event is no longer sent. Clients should
+        /// use a device with the sampling flag in the tranches instead.
+        MainDevice {
+            /// Device dev_t value,
+            device: Array,
+        },
+        /// A preference tranche has been sent
+        ///
+        /// This event splits tranche_target_device and tranche_formats events into
+        /// preference tranches. It is sent after a set of tranche_target_device
+        /// and tranche_formats events; it represents the end of a tranche. The
+        /// next tranche will have a lower preference.
+        TrancheDone,
+        /// Target device
+        ///
+        /// This event advertises the target device that the server prefers to use
+        /// for a buffer created given this tranche. The advertised target device
+        /// may be different for each preference tranche, and may change over time.
+        ///
+        /// There is exactly one target device per tranche.
+        ///
+        /// The target device may be a scan-out device, for example if the
+        /// compositor prefers to directly scan-out a buffer created given this
+        /// tranche. The target device may be a rendering device, for example if
+        /// the compositor prefers to texture from said buffer.
+        ///
+        /// The client can use this hint to allocate the buffer in a way that makes
+        /// it accessible from the target device, ideally directly. The buffer must
+        /// still be accessible from a device with the sampling flag, either through
+        /// direct import or a potentially more expensive fallback path. If the
+        /// buffer can't be directly imported for sampling, then clients must be
+        /// prepared for the compositor changing the tranche priority or making
+        /// wl_buffer creation fail (see the zwp_linux_buffer_params_v1.create and
+        /// create_immed requests for details).
+        ///
+        /// If the device is a DRM node, the DRM node type (primary vs. render) is
+        /// unspecified. Clients must not rely on the compositor sending a
+        /// particular node type. Clients cannot check two devices for equality by
+        /// comparing the dev_t value.
+        ///
+        /// This event is tied to a preference tranche, see the tranche_done event.
+        TrancheTargetDevice {
+            /// Device dev_t value,
+            device: Array,
+        },
+        /// Supported buffer format modifiers
+        ///
+        /// This event advertises the format + modifier combinations that the
+        /// compositor supports.
+        ///
+        /// It carries an array of indices, each referring to a format + modifier
+        /// pair in the last received format table (see the format_table event).
+        /// Each index is a 16-bit unsigned integer in native endianness.
+        ///
+        /// For legacy support, DRM_FORMAT_MOD_INVALID is an allowed modifier.
+        /// It indicates that the server can support the format with an implicit
+        /// modifier. When a buffer has DRM_FORMAT_MOD_INVALID as its modifier, it
+        /// is as if no explicit modifier is specified. The effective modifier
+        /// will be derived from the dmabuf.
+        ///
+        /// A compositor that sends valid modifiers and DRM_FORMAT_MOD_INVALID for
+        /// a given format supports both explicit modifiers and implicit modifiers.
+        ///
+        /// Compositors must not send duplicate format + modifier pairs within the
+        /// same tranche or across two different tranches with the same target
+        /// device and flags.
+        ///
+        /// This event is tied to a preference tranche, see the tranche_done event.
+        ///
+        /// For the definition of the format and modifier codes, see the
+        /// zwp_linux_buffer_params_v1.create request.
+        TrancheFormats {
+            /// Array of 16-bit indexes,
+            indices: Array,
+        },
+        /// Tranche flags
+        ///
+        /// This event sets tranche-specific flags. This event is tied to a
+        /// preference tranche, see the tranche_done event.
+        /// With version 6 and above, the compositor must set at least one flag
+        /// in each tranche.
+        TrancheFlags {
+            /// Tranche flags,
+            flags: u32,
+        },
+    }
+    impl EventWriter
+        for crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 0, 0);
+                    raw
+                }
+                FormatTable { fd, size } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 2);
+                    raw.fd(fd);
+                    raw.uint(size);
+                    raw
+                }
+                MainDevice { device } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.array(device);
+                    raw
+                }
+                TrancheDone {} => {
+                    let mut raw = RawEvent::new(self.id(), 3, 0);
+                    raw
+                }
+                TrancheTargetDevice { device } => {
+                    let mut raw = RawEvent::new(self.id(), 4, 1);
+                    raw.array(device);
+                    raw
+                }
+                TrancheFormats { indices } => {
+                    let mut raw = RawEvent::new(self.id(), 5, 1);
+                    raw.array(indices);
+                    raw
+                }
+                TrancheFlags { flags } => {
+                    let mut raw = RawEvent::new(self.id(), 6, 1);
+                    raw.uint(flags);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum TrancheFlags {
+        /// Direct scan-out tranche
+        ///
+        /// The scanout flag is a hint that direct scan-out may be attempted by
+        /// the compositor on the target device if the client appropriately
+        /// allocates a buffer. How to allocate a buffer that can be scanned out
+        /// on the target device is implementation-defined.
+        Scanout = 1,
+        /// Sampling tranche
+        ///
+        /// The sampling flag describes that the compositor is able to efficiently
+        /// sample from buffers imported to the target device if the client
+        /// appropriately allocates a buffer. How to allocate a buffer that can be
+        /// efficiently sampled on the target device is implementation defined.
+        Sampling = 2,
+    }
+}
+
+/// Controller object for graphic tablet devices
+///
+/// An object that provides access to the graphics tablets available on this
+/// system. All tablets are associated with a seat, to get access to the
+/// actual tablets, use zwp_tablet_manager_v2.get_tablet_seat.
+pub mod zwp_tablet_manager_v2 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_tablet_manager_v2::ZwpTabletManagerV2 {
+        const INTERFACE_NAME: &'static str = "zwp_tablet_manager_v2";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwpTabletManagerV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_manager_v2::ZwpTabletManagerV2;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_tablet_manager_v2::ZwpTabletManagerV2
+    {
+        type Id = ZwpTabletManagerV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Get the tablet seat
+        ///
+        /// Get the zwp_tablet_seat_v2 object for the given seat. This object
+        /// provides access to all graphics tablets in this seat.
+        GetTabletSeat {
+            tablet_seat: ZwpTabletSeatV2Id,
+            /// The wl_seat object to retrieve the tablets for,
+            seat: WlSeatId,
+        },
+        /// Release the memory for the tablet manager object
+        ///
+        /// Destroy the zwp_tablet_manager_v2 object. Objects created from this
+        /// object are unaffected and should be destroyed separately.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_tablet_manager_v2::ZwpTabletManagerV2 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => GetTabletSeat { tablet_seat: req.id()?, seat: req.id()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
+/// Controller object for graphic tablet devices of a seat
+///
+/// An object that provides access to the graphics tablets available on this
+/// seat. After binding to this interface, the compositor sends a set of
+/// zwp_tablet_seat_v2.tablet_added and zwp_tablet_seat_v2.tool_added events.
+pub mod zwp_tablet_seat_v2 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2 {
+        const INTERFACE_NAME: &'static str = "zwp_tablet_seat_v2";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwpTabletSeatV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2 {
+        type Id = ZwpTabletSeatV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Release the memory for the tablet seat object
+        ///
+        /// Destroy the zwp_tablet_seat_v2 object. Objects created from this
+        /// object are unaffected and should be destroyed separately.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// New device notification
+        ///
+        /// This event is sent whenever a new tablet becomes available on this
+        /// seat. This event only provides the object id of the tablet, any
+        /// static information about the tablet (device name, vid/pid, etc.) is
+        /// sent through the zwp_tablet_v2 interface.
+        TabletAdded {
+            /// The newly added graphics tablet,
+            id: ZwpTabletV2Id,
+        },
+        /// A new tool has been used with a tablet
+        ///
+        /// This event is sent whenever a tool that has not previously been used
+        /// with a tablet comes into use. This event only provides the object id
+        /// of the tool; any static information about the tool (capabilities,
+        /// type, etc.) is sent through the zwp_tablet_tool_v2 interface.
+        ToolAdded {
+            /// The newly added tablet tool,
+            id: ZwpTabletToolV2Id,
+        },
+        /// New pad notification
+        ///
+        /// This event is sent whenever a new pad is known to the system. Typically,
+        /// pads are physically attached to tablets and a pad_added event is
+        /// sent immediately after the zwp_tablet_seat_v2.tablet_added.
+        /// However, some standalone pad devices logically attach to tablets at
+        /// runtime, and the client must wait for zwp_tablet_pad_v2.enter to know
+        /// the tablet a pad is attached to.
+        ///
+        /// This event only provides the object id of the pad. All further
+        /// features (buttons, strips, rings) are sent through the zwp_tablet_pad_v2
+        /// interface.
+        PadAdded {
+            /// The newly added pad,
+            id: ZwpTabletPadV2Id,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                TabletAdded { id } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(id);
+                    raw
+                }
+                ToolAdded { id } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.id(id);
+                    raw
+                }
+                PadAdded { id } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.id(id);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// A physical tablet tool
+///
+/// An object that represents a physical tool that has been, or is
+/// currently in use with a tablet in this seat. Each zwp_tablet_tool_v2
+/// object stays valid until the client destroys it; the compositor
+/// reuses the zwp_tablet_tool_v2 object to indicate that the object's
+/// respective physical tool has come into proximity of a tablet again.
+///
+/// A zwp_tablet_tool_v2 object's relation to a physical tool depends on the
+/// tablet's ability to report serial numbers. If the tablet supports
+/// this capability, then the object represents a specific physical tool
+/// and can be identified even when used on multiple tablets.
+///
+/// A tablet tool has a number of static characteristics, e.g. tool type,
+/// hardware_serial and capabilities. These capabilities are sent in an
+/// event sequence after the zwp_tablet_seat_v2.tool_added event before any
+/// actual events from this tool. This initial event sequence is
+/// terminated by a zwp_tablet_tool_v2.done event.
+///
+/// Tablet tool events are grouped by zwp_tablet_tool_v2.frame events.
+/// Any events received before a zwp_tablet_tool_v2.frame event should be
+/// considered part of the same hardware state change.
+pub mod zwp_tablet_tool_v2 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2 {
+        const INTERFACE_NAME: &'static str = "zwp_tablet_tool_v2";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwpTabletToolV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2 {
+        type Id = ZwpTabletToolV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Set the tablet tool's surface
+        ///
+        /// Sets the surface of the cursor used for this tool on the given
+        /// tablet. This request only takes effect if the tool is in proximity
+        /// of one of the requesting client's surfaces or the surface parameter
+        /// is the current pointer surface. If there was a previous surface set
+        /// with this request it is replaced. If surface is NULL, the cursor
+        /// image is hidden.
+        ///
+        /// The parameters hotspot_x and hotspot_y define the position of the
+        /// pointer surface relative to the pointer location. Its top-left corner
+        /// is always at (x, y) - (hotspot_x, hotspot_y), where (x, y) are the
+        /// coordinates of the pointer location, in surface-local coordinates.
+        ///
+        /// On surface.attach requests to the pointer surface, hotspot_x and
+        /// hotspot_y are decremented by the x and y parameters passed to the
+        /// request. Attach must be confirmed by wl_surface.commit as usual.
+        ///
+        /// The hotspot can also be updated by passing the currently set pointer
+        /// surface to this request with new values for hotspot_x and hotspot_y.
+        ///
+        /// The current and pending input regions of the wl_surface are cleared,
+        /// and wl_surface.set_input_region is ignored until the wl_surface is no
+        /// longer used as the cursor. When the use as a cursor ends, the current
+        /// and pending input regions become undefined, and the wl_surface is
+        /// unmapped.
+        ///
+        /// This request gives the surface the role of a zwp_tablet_tool_v2 cursor. A
+        /// surface may only ever be used as the cursor surface for one
+        /// zwp_tablet_tool_v2. If the surface already has another role or has
+        /// previously been used as cursor surface for a different tool, a
+        /// protocol error is raised.
+        SetCursor {
+            /// Serial of the proximity_in event,
+            serial: u32,
+            surface: WlSurfaceId,
+            /// Surface-local x coordinate,
+            hotspot_x: i32,
+            /// Surface-local y coordinate,
+            hotspot_y: i32,
+        },
+        /// Destroy the tool object
+        ///
+        /// This destroys the client's resource for this tool object.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetCursor {
+                    serial: req.uint()?,
+                    surface: req.id()?,
+                    hotspot_x: req.int()?,
+                    hotspot_y: req.int()?,
+                },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Tool type
+        ///
+        /// The tool type is the high-level type of the tool and usually decides
+        /// the interaction expected from this tool.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_tool_v2.done event.
+        Type {
+            /// The physical tool type,
+            tool_type: u32,
+        },
+        /// Unique hardware serial number of the tool
+        ///
+        /// If the physical tool can be identified by a unique 64-bit serial
+        /// number, this event notifies the client of this serial number.
+        ///
+        /// If multiple tablets are available in the same seat and the tool is
+        /// uniquely identifiable by the serial number, that tool may move
+        /// between tablets.
+        ///
+        /// Otherwise, if the tool has no serial number and this event is
+        /// missing, the tool is tied to the tablet it first comes into
+        /// proximity with. Even if the physical tool is used on multiple
+        /// tablets, separate zwp_tablet_tool_v2 objects will be created, one per
+        /// tablet.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_tool_v2.done event.
+        HardwareSerial {
+            /// The unique serial number of the tool, most significant bits,
+            hardware_serial_hi: u32,
+            /// The unique serial number of the tool, least significant bits,
+            hardware_serial_lo: u32,
+        },
+        /// Hardware id notification in Wacom's format
+        ///
+        /// This event notifies the client of a hardware id available on this tool.
+        ///
+        /// The hardware id is a device-specific 64-bit id that provides extra
+        /// information about the tool in use, beyond the wl_tool.type
+        /// enumeration. The format of the id is specific to tablets made by
+        /// Wacom Inc. For example, the hardware id of a Wacom Grip
+        /// Pen (a stylus) is 0x802.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_tool_v2.done event.
+        HardwareIdWacom {
+            /// The hardware id, most significant bits,
+            hardware_id_hi: u32,
+            /// The hardware id, least significant bits,
+            hardware_id_lo: u32,
+        },
+        /// Tool capability notification
+        ///
+        /// This event notifies the client of any capabilities of this tool,
+        /// beyond the main set of x/y axes and tip up/down detection.
+        ///
+        /// One event is sent for each extra capability available on this tool.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_tool_v2.done event.
+        Capability {
+            /// The capability,
+            capability: u32,
+        },
+        /// Tool description events sequence complete
+        ///
+        /// This event signals the end of the initial burst of descriptive
+        /// events. A client may consider the static description of the tool to
+        /// be complete and finalize initialization of the tool.
+        Done,
+        /// Tool removed
+        ///
+        /// This event is sent when the tool is removed from the system and will
+        /// send no further events. Should the physical tool come back into
+        /// proximity later, a new zwp_tablet_tool_v2 object will be created.
+        ///
+        /// It is compositor-dependent when a tool is removed. A compositor may
+        /// remove a tool on proximity out, tablet removal or any other reason.
+        /// A compositor may also keep a tool alive until shutdown.
+        ///
+        /// If the tool is currently in proximity, a proximity_out event will be
+        /// sent before the removed event. See zwp_tablet_tool_v2.proximity_out for
+        /// the handling of any buttons logically down.
+        ///
+        /// When this event is received, the client must zwp_tablet_tool_v2.destroy
+        /// the object.
+        Removed,
+        /// Proximity in event
+        ///
+        /// Notification that this tool is focused on a certain surface.
+        ///
+        /// This event can be received when the tool has moved from one surface to
+        /// another, or when the tool has come back into proximity above the
+        /// surface.
+        ///
+        /// If any button is logically down when the tool comes into proximity,
+        /// the respective button event is sent after the proximity_in event but
+        /// within the same frame as the proximity_in event.
+        ProximityIn {
+            serial: u32,
+            /// The tablet the tool is in proximity of,
+            tablet: ZwpTabletV2Id,
+            /// The current surface the tablet tool is over,
+            surface: WlSurfaceId,
+        },
+        /// Proximity out event
+        ///
+        /// Notification that this tool has either left proximity, or is no
+        /// longer focused on a certain surface.
+        ///
+        /// When the tablet tool leaves proximity of the tablet, button release
+        /// events are sent for each button that was held down at the time of
+        /// leaving proximity. These events are sent before the proximity_out
+        /// event but within the same zwp_tablet_v2.frame.
+        ///
+        /// If the tool stays within proximity of the tablet, but the focus
+        /// changes from one surface to another, a button release event may not
+        /// be sent until the button is actually released or the tool leaves the
+        /// proximity of the tablet.
+        ProximityOut,
+        /// Tablet tool is making contact
+        ///
+        /// Sent whenever the tablet tool comes in contact with the surface of the
+        /// tablet.
+        ///
+        /// If the tool is already in contact with the tablet when entering the
+        /// input region, the client owning said region will receive a
+        /// zwp_tablet_v2.proximity_in event, followed by a zwp_tablet_v2.down
+        /// event and a zwp_tablet_v2.frame event.
+        ///
+        /// Note that this event describes logical contact, not physical
+        /// contact. On some devices, a compositor may not consider a tool in
+        /// logical contact until a minimum physical pressure threshold is
+        /// exceeded.
+        Down { serial: u32 },
+        /// Tablet tool is no longer making contact
+        ///
+        /// Sent whenever the tablet tool stops making contact with the surface of
+        /// the tablet, or when the tablet tool moves out of the input region
+        /// and the compositor grab (if any) is dismissed.
+        ///
+        /// If the tablet tool moves out of the input region while in contact
+        /// with the surface of the tablet and the compositor does not have an
+        /// ongoing grab on the surface, the client owning said region will
+        /// receive a zwp_tablet_v2.up event, followed by a zwp_tablet_v2.proximity_out
+        /// event and a zwp_tablet_v2.frame event. If the compositor has an ongoing
+        /// grab on this device, this event sequence is sent whenever the grab
+        /// is dismissed in the future.
+        ///
+        /// Note that this event describes logical contact, not physical
+        /// contact. On some devices, a compositor may not consider a tool out
+        /// of logical contact until physical pressure falls below a specific
+        /// threshold.
+        Up,
+        /// Motion event
+        ///
+        /// Sent whenever a tablet tool moves.
+        Motion {
+            /// Surface-local x coordinate,
+            x: f32,
+            /// Surface-local y coordinate,
+            y: f32,
+        },
+        /// Pressure change event
+        ///
+        /// Sent whenever the pressure axis on a tool changes. The value of this
+        /// event is normalized to a value between 0 and 65535.
+        ///
+        /// Note that pressure may be nonzero even when a tool is not in logical
+        /// contact. See the down and up events for more details.
+        Pressure {
+            /// The current pressure value,
+            pressure: u32,
+        },
+        /// Distance change event
+        ///
+        /// Sent whenever the distance axis on a tool changes. The value of this
+        /// event is normalized to a value between 0 and 65535.
+        ///
+        /// Note that distance may be nonzero even when a tool is not in logical
+        /// contact. See the down and up events for more details.
+        Distance {
+            /// The current distance value,
+            distance: u32,
+        },
+        /// Tilt change event
+        ///
+        /// Sent whenever one or both of the tilt axes on a tool change. Each tilt
+        /// value is in degrees, relative to the z-axis of the tablet.
+        /// The angle is positive when the top of a tool tilts along the
+        /// positive x or y axis.
+        Tilt {
+            /// The current value of the X tilt axis,
+            tilt_x: f32,
+            /// The current value of the Y tilt axis,
+            tilt_y: f32,
+        },
+        /// Z-rotation change event
+        ///
+        /// Sent whenever the z-rotation axis on the tool changes. The
+        /// rotation value is in degrees clockwise from the tool's
+        /// logical neutral position.
+        Rotation {
+            /// The current rotation of the Z axis,
+            degrees: f32,
+        },
+        /// Slider position change event
+        ///
+        /// Sent whenever the slider position on the tool changes. The
+        /// value is normalized between -65535 and 65535, with 0 as the logical
+        /// neutral position of the slider.
+        ///
+        /// The slider is available on e.g. the Wacom Airbrush tool.
+        Slider {
+            /// The current position of slider,
+            position: i32,
+        },
+        /// Wheel delta event
+        ///
+        /// Sent whenever the wheel on the tool emits an event. This event
+        /// contains two values for the same axis change. The degrees value is
+        /// in the same orientation as the wl_pointer.vertical_scroll axis. The
+        /// clicks value is in discrete logical clicks of the mouse wheel. This
+        /// value may be zero if the movement of the wheel was less
+        /// than one logical click.
+        ///
+        /// Clients should choose either value and avoid mixing degrees and
+        /// clicks. The compositor may accumulate values smaller than a logical
+        /// click and emulate click events when a certain threshold is met.
+        /// Thus, zwp_tablet_tool_v2.wheel events with non-zero clicks values may
+        /// have different degrees values.
+        Wheel {
+            /// The wheel delta in degrees,
+            degrees: f32,
+            /// The wheel delta in discrete clicks,
+            clicks: i32,
+        },
+        /// Button event
+        ///
+        /// Sent whenever a button on the tool is pressed or released.
+        ///
+        /// If a button is held down when the tool moves in or out of proximity,
+        /// button events are generated by the compositor. See
+        /// zwp_tablet_tool_v2.proximity_in and zwp_tablet_tool_v2.proximity_out for
+        /// details.
+        Button {
+            serial: u32,
+            /// The button whose state has changed,
+            button: u32,
+            /// Whether the button was pressed or released,
+            state: u32,
+        },
+        /// Frame event
+        ///
+        /// Marks the end of a series of axis and/or button updates from the
+        /// tablet. The Wayland protocol requires axis updates to be sent
+        /// sequentially, however all events within a frame should be considered
+        /// one hardware event.
+        Frame {
+            /// The time of the event with millisecond granularity,
+            time: u32,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Type { tool_type } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(tool_type);
+                    raw
+                }
+                HardwareSerial { hardware_serial_hi, hardware_serial_lo } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 2);
+                    raw.uint(hardware_serial_hi);
+                    raw.uint(hardware_serial_lo);
+                    raw
+                }
+                HardwareIdWacom { hardware_id_hi, hardware_id_lo } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 2);
+                    raw.uint(hardware_id_hi);
+                    raw.uint(hardware_id_lo);
+                    raw
+                }
+                Capability { capability } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.uint(capability);
+                    raw
+                }
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 4, 0);
+                    raw
+                }
+                Removed {} => {
+                    let mut raw = RawEvent::new(self.id(), 5, 0);
+                    raw
+                }
+                ProximityIn { serial, tablet, surface } => {
+                    let mut raw = RawEvent::new(self.id(), 6, 3);
+                    raw.uint(serial);
+                    raw.id(tablet);
+                    raw.id(surface);
+                    raw
+                }
+                ProximityOut {} => {
+                    let mut raw = RawEvent::new(self.id(), 7, 0);
+                    raw
+                }
+                Down { serial } => {
+                    let mut raw = RawEvent::new(self.id(), 8, 1);
+                    raw.uint(serial);
+                    raw
+                }
+                Up {} => {
+                    let mut raw = RawEvent::new(self.id(), 9, 0);
+                    raw
+                }
+                Motion { x, y } => {
+                    let mut raw = RawEvent::new(self.id(), 10, 2);
+                    raw.fixed(x);
+                    raw.fixed(y);
+                    raw
+                }
+                Pressure { pressure } => {
+                    let mut raw = RawEvent::new(self.id(), 11, 1);
+                    raw.uint(pressure);
+                    raw
+                }
+                Distance { distance } => {
+                    let mut raw = RawEvent::new(self.id(), 12, 1);
+                    raw.uint(distance);
+                    raw
+                }
+                Tilt { tilt_x, tilt_y } => {
+                    let mut raw = RawEvent::new(self.id(), 13, 2);
+                    raw.fixed(tilt_x);
+                    raw.fixed(tilt_y);
+                    raw
+                }
+                Rotation { degrees } => {
+                    let mut raw = RawEvent::new(self.id(), 14, 1);
+                    raw.fixed(degrees);
+                    raw
+                }
+                Slider { position } => {
+                    let mut raw = RawEvent::new(self.id(), 15, 1);
+                    raw.int(position);
+                    raw
+                }
+                Wheel { degrees, clicks } => {
+                    let mut raw = RawEvent::new(self.id(), 16, 2);
+                    raw.fixed(degrees);
+                    raw.int(clicks);
+                    raw
+                }
+                Button { serial, button, state } => {
+                    let mut raw = RawEvent::new(self.id(), 17, 3);
+                    raw.uint(serial);
+                    raw.uint(button);
+                    raw.uint(state);
+                    raw
+                }
+                Frame { time } => {
+                    let mut raw = RawEvent::new(self.id(), 18, 1);
+                    raw.uint(time);
+                    raw
+                }
+            }
+        }
+    }
+    /// A physical tool type
+    ///
+    /// Describes the physical type of a tool. The physical type of a tool
+    /// generally defines its base usage.
+    ///
+    /// The mouse tool represents a mouse-shaped tool that is not a relative
+    /// device but bound to the tablet's surface, providing absolute
+    /// coordinates.
+    ///
+    /// The lens tool is a mouse-shaped tool with an attached lens to
+    /// provide precision focus.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Type {
+        /// Pen,
+        Pen = 320,
+        /// Eraser,
+        Eraser = 321,
+        /// Brush,
+        Brush = 322,
+        /// Pencil,
+        Pencil = 323,
+        /// Airbrush,
+        Airbrush = 324,
+        /// Finger,
+        Finger = 325,
+        /// Mouse,
+        Mouse = 326,
+        /// Lens,
+        Lens = 327,
+    }
+    /// Capability flags for a tool
+    ///
+    /// Describes extra capabilities on a tablet.
+    ///
+    /// Any tool must provide x and y values, extra axes are
+    /// device-specific.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Capability {
+        /// Tilt axes,
+        Tilt = 1,
+        /// Pressure axis,
+        Pressure = 2,
+        /// Distance axis,
+        Distance = 3,
+        /// Z-rotation axis,
+        Rotation = 4,
+        /// Slider axis,
+        Slider = 5,
+        /// Wheel axis,
+        Wheel = 6,
+    }
+    /// Physical button state
+    ///
+    /// Describes the physical state of a button that produced the button event.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum ButtonState {
+        /// Button is not pressed,
+        Released = 0,
+        /// Button is pressed,
+        Pressed = 1,
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Given wl_surface has another role,
+        Role = 0,
+    }
+}
+
+/// Graphics tablet device
+///
+/// The zwp_tablet_v2 interface represents one graphics tablet device. The
+/// tablet interface itself does not generate events; all events are
+/// generated by zwp_tablet_tool_v2 objects when in proximity above a tablet.
+///
+/// A tablet has a number of static characteristics, e.g. device name and
+/// pid/vid. These capabilities are sent in an event sequence after the
+/// zwp_tablet_seat_v2.tablet_added event. This initial event sequence is
+/// terminated by a zwp_tablet_v2.done event.
+pub mod zwp_tablet_v2 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2 {
+        const INTERFACE_NAME: &'static str = "zwp_tablet_v2";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwpTabletV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2 {
+        type Id = ZwpTabletV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the tablet object
+        ///
+        /// This destroys the client's resource for this tablet object.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    /// Minimum interface version for the `bustype` message (XML `since` / `version`).
+    pub const BUSTYPE_SINCE: u32 = 2;
+    #[derive(Debug)]
+    pub enum Event {
+        /// Tablet device name
+        ///
+        /// A descriptive name for the tablet device.
+        ///
+        /// If the device has no descriptive name, this event is not sent.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_v2.done event.
+        Name {
+            /// The device name,
+            name: String,
+        },
+        /// Tablet device vendor/product id
+        ///
+        /// The vendor and product IDs for the tablet device.
+        ///
+        /// The interpretation of the id depends on the zwp_tablet_v2.bustype.
+        /// Prior to version v2 of this protocol, the id was implied to be a USB
+        /// vendor and product ID. If no zwp_tablet_v2.bustype is sent, the ID
+        /// is to be interpreted as USB vendor and product ID.
+        ///
+        /// If the device has no vendor/product ID, this event is not sent.
+        /// This can happen for virtual devices or non-USB devices, for instance.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_v2.done event.
+        Id {
+            /// Vendor id,
+            vid: u32,
+            /// Product id,
+            pid: u32,
+        },
+        /// Path to the device
+        ///
+        /// A system-specific device path that indicates which device is behind
+        /// this zwp_tablet_v2. This information may be used to gather additional
+        /// information about the device, e.g. through libwacom.
+        ///
+        /// A device may have more than one device path. If so, multiple
+        /// zwp_tablet_v2.path events are sent. A device may be emulated and not
+        /// have a device path, and in that case this event will not be sent.
+        ///
+        /// The format of the path is unspecified, it may be a device node, a
+        /// sysfs path, or some other identifier. It is up to the client to
+        /// identify the string provided.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_v2.done event.
+        Path {
+            /// Path to local device,
+            path: String,
+        },
+        /// Tablet description events sequence complete
+        ///
+        /// This event is sent immediately to signal the end of the initial
+        /// burst of descriptive events. A client may consider the static
+        /// description of the tablet to be complete and finalize initialization
+        /// of the tablet.
+        Done,
+        /// Tablet removed event
+        ///
+        /// Sent when the tablet has been removed from the system. When a tablet
+        /// is removed, some tools may be removed.
+        ///
+        /// When this event is received, the client must zwp_tablet_v2.destroy
+        /// the object.
+        Removed,
+        /// Tablet device bus type
+        ///
+        /// The bustype argument is one of the BUS_ defines in the Linux kernel's
+        /// linux/input.h
+        ///
+        /// If the device has no known bustype or the bustype cannot be
+        /// queried, this event is not sent.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_v2.done event.
+        Bustype {
+            /// Bus type,
+            bustype: u32,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Name { name } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.string(name);
+                    raw
+                }
+                Id { vid, pid } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 2);
+                    raw.uint(vid);
+                    raw.uint(pid);
+                    raw
+                }
+                Path { path } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.string(path);
+                    raw
+                }
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 3, 0);
+                    raw
+                }
+                Removed {} => {
+                    let mut raw = RawEvent::new(self.id(), 4, 0);
+                    raw
+                }
+                Bustype { bustype } => {
+                    let mut raw = RawEvent::new(self.id(), 5, 1);
+                    raw.uint(bustype);
+                    raw
+                }
+            }
+        }
+    }
+    /// Bus type
+    ///
+    /// Describes the bus types this tablet is connected to.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Bustype {
+        /// USB,
+        Usb = 3,
+        /// Bluetooth,
+        Bluetooth = 5,
+        /// Virtual,
+        Virtual = 6,
+        /// Serial,
+        Serial = 17,
+        /// I2C,
+        I2c = 24,
+    }
+}
+
+/// Pad ring
+///
+/// A circular interaction area, such as the touch ring on the Wacom Intuos
+/// Pro series tablets.
+///
+/// Events on a ring are logically grouped by the zwp_tablet_pad_ring_v2.frame
+/// event.
+pub mod zwp_tablet_pad_ring_v2 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2 {
+        const INTERFACE_NAME: &'static str = "zwp_tablet_pad_ring_v2";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwpTabletPadRingV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2
+    {
+        type Id = ZwpTabletPadRingV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Set compositor feedback
+        ///
+        /// Request that the compositor use the provided feedback string
+        /// associated with this ring. This request should be issued immediately
+        /// after a zwp_tablet_pad_group_v2.mode_switch event from the corresponding
+        /// group is received, or whenever the ring is mapped to a different
+        /// action. See zwp_tablet_pad_group_v2.mode_switch for more details.
+        ///
+        /// Clients are encouraged to provide context-aware descriptions for
+        /// the actions associated with the ring; compositors may use this
+        /// information to offer visual feedback about the button layout
+        /// (eg. on-screen displays).
+        ///
+        /// The provided string 'description' is a UTF-8 encoded string to be
+        /// associated with this ring, and is considered user-visible; general
+        /// internationalization rules apply.
+        ///
+        /// The serial argument will be that of the last
+        /// zwp_tablet_pad_group_v2.mode_switch event received for the group of this
+        /// ring. Requests providing other serials than the most recent one will be
+        /// ignored.
+        SetFeedback {
+            /// Ring description,
+            description: String,
+            /// Serial of the mode switch event,
+            serial: u32,
+        },
+        /// Destroy the ring object
+        ///
+        /// This destroys the client's resource for this ring object.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetFeedback { description: req.string()?, serial: req.uint()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Ring event source
+        ///
+        /// Source information for ring events.
+        ///
+        /// This event does not occur on its own. It is sent before a
+        /// zwp_tablet_pad_ring_v2.frame event and carries the source information
+        /// for all events within that frame.
+        ///
+        /// The source specifies how this event was generated. If the source is
+        /// zwp_tablet_pad_ring_v2.source.finger, a zwp_tablet_pad_ring_v2.stop event
+        /// will be sent when the user lifts the finger off the device.
+        ///
+        /// This event is optional. If the source is unknown for an interaction,
+        /// no event is sent.
+        Source {
+            /// The event source,
+            source: u32,
+        },
+        /// Angle changed
+        ///
+        /// Sent whenever the angle on a ring changes.
+        ///
+        /// The angle is provided in degrees clockwise from the logical
+        /// north of the ring in the pad's current rotation.
+        Angle {
+            /// The current angle in degrees,
+            degrees: f32,
+        },
+        /// Interaction stopped
+        ///
+        /// Stop notification for ring events.
+        ///
+        /// For some zwp_tablet_pad_ring_v2.source types, a zwp_tablet_pad_ring_v2.stop
+        /// event is sent to notify a client that the interaction with the ring
+        /// has terminated. This enables the client to implement kinetic scrolling.
+        /// See the zwp_tablet_pad_ring_v2.source documentation for information on
+        /// when this event may be generated.
+        ///
+        /// Any zwp_tablet_pad_ring_v2.angle events with the same source after this
+        /// event should be considered as the start of a new interaction.
+        Stop,
+        /// End of a ring event sequence
+        ///
+        /// Indicates the end of a set of ring events that logically belong
+        /// together. A client is expected to accumulate the data in all events
+        /// within the frame before proceeding.
+        ///
+        /// All zwp_tablet_pad_ring_v2 events before a zwp_tablet_pad_ring_v2.frame event belong
+        /// logically together. For example, on termination of a finger interaction
+        /// on a ring the compositor will send a zwp_tablet_pad_ring_v2.source event,
+        /// a zwp_tablet_pad_ring_v2.stop event and a zwp_tablet_pad_ring_v2.frame event.
+        ///
+        /// A zwp_tablet_pad_ring_v2.frame event is sent for every logical event
+        /// group, even if the group only contains a single zwp_tablet_pad_ring_v2
+        /// event. Specifically, a client may get a sequence: angle, frame,
+        /// angle, frame, etc.
+        Frame {
+            /// Timestamp with millisecond granularity,
+            time: u32,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Source { source } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(source);
+                    raw
+                }
+                Angle { degrees } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.fixed(degrees);
+                    raw
+                }
+                Stop {} => {
+                    let mut raw = RawEvent::new(self.id(), 2, 0);
+                    raw
+                }
+                Frame { time } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.uint(time);
+                    raw
+                }
+            }
+        }
+    }
+    /// Ring axis source
+    ///
+    /// Describes the source types for ring events. This indicates to the
+    /// client how a ring event was physically generated; a client may
+    /// adjust the user interface accordingly. For example, events
+    /// from a "finger" source may trigger kinetic scrolling.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Source {
+        /// Finger,
+        Finger = 1,
+    }
+}
+
+/// Pad strip
+///
+/// A linear interaction area, such as the strips found in Wacom Cintiq
+/// models.
+///
+/// Events on a strip are logically grouped by the zwp_tablet_pad_strip_v2.frame
+/// event.
+pub mod zwp_tablet_pad_strip_v2 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2 {
+        const INTERFACE_NAME: &'static str = "zwp_tablet_pad_strip_v2";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwpTabletPadStripV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2
+    {
+        type Id = ZwpTabletPadStripV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Set compositor feedback
+        ///
+        /// Requests the compositor to use the provided feedback string
+        /// associated with this strip. This request should be issued immediately
+        /// after a zwp_tablet_pad_group_v2.mode_switch event from the corresponding
+        /// group is received, or whenever the strip is mapped to a different
+        /// action. See zwp_tablet_pad_group_v2.mode_switch for more details.
+        ///
+        /// Clients are encouraged to provide context-aware descriptions for
+        /// the actions associated with the strip, and compositors may use this
+        /// information to offer visual feedback about the button layout
+        /// (eg. on-screen displays).
+        ///
+        /// The provided string 'description' is a UTF-8 encoded string to be
+        /// associated with this ring, and is considered user-visible; general
+        /// internationalization rules apply.
+        ///
+        /// The serial argument will be that of the last
+        /// zwp_tablet_pad_group_v2.mode_switch event received for the group of this
+        /// strip. Requests providing other serials than the most recent one will be
+        /// ignored.
+        SetFeedback {
+            /// Strip description,
+            description: String,
+            /// Serial of the mode switch event,
+            serial: u32,
+        },
+        /// Destroy the strip object
+        ///
+        /// This destroys the client's resource for this strip object.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetFeedback { description: req.string()?, serial: req.uint()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Strip event source
+        ///
+        /// Source information for strip events.
+        ///
+        /// This event does not occur on its own. It is sent before a
+        /// zwp_tablet_pad_strip_v2.frame event and carries the source information
+        /// for all events within that frame.
+        ///
+        /// The source specifies how this event was generated. If the source is
+        /// zwp_tablet_pad_strip_v2.source.finger, a zwp_tablet_pad_strip_v2.stop event
+        /// will be sent when the user lifts their finger off the device.
+        ///
+        /// This event is optional. If the source is unknown for an interaction,
+        /// no event is sent.
+        Source {
+            /// The event source,
+            source: u32,
+        },
+        /// Position changed
+        ///
+        /// Sent whenever the position on a strip changes.
+        ///
+        /// The position is normalized to a range of [0, 65535], the 0-value
+        /// represents the top-most and/or left-most position of the strip in
+        /// the pad's current rotation.
+        Position {
+            /// The current position,
+            position: u32,
+        },
+        /// Interaction stopped
+        ///
+        /// Stop notification for strip events.
+        ///
+        /// For some zwp_tablet_pad_strip_v2.source types, a zwp_tablet_pad_strip_v2.stop
+        /// event is sent to notify a client that the interaction with the strip
+        /// has terminated. This enables the client to implement kinetic
+        /// scrolling. See the zwp_tablet_pad_strip_v2.source documentation for
+        /// information on when this event may be generated.
+        ///
+        /// Any zwp_tablet_pad_strip_v2.position events with the same source after this
+        /// event should be considered as the start of a new interaction.
+        Stop,
+        /// End of a strip event sequence
+        ///
+        /// Indicates the end of a set of events that represent one logical
+        /// hardware strip event. A client is expected to accumulate the data
+        /// in all events within the frame before proceeding.
+        ///
+        /// All zwp_tablet_pad_strip_v2 events before a zwp_tablet_pad_strip_v2.frame event belong
+        /// logically together. For example, on termination of a finger interaction
+        /// on a strip the compositor will send a zwp_tablet_pad_strip_v2.source event,
+        /// a zwp_tablet_pad_strip_v2.stop event and a zwp_tablet_pad_strip_v2.frame
+        /// event.
+        ///
+        /// A zwp_tablet_pad_strip_v2.frame event is sent for every logical event
+        /// group, even if the group only contains a single zwp_tablet_pad_strip_v2
+        /// event. Specifically, a client may get a sequence: position, frame,
+        /// position, frame, etc.
+        Frame {
+            /// Timestamp with millisecond granularity,
+            time: u32,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Source { source } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(source);
+                    raw
+                }
+                Position { position } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.uint(position);
+                    raw
+                }
+                Stop {} => {
+                    let mut raw = RawEvent::new(self.id(), 2, 0);
+                    raw
+                }
+                Frame { time } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.uint(time);
+                    raw
+                }
+            }
+        }
+    }
+    /// Strip axis source
+    ///
+    /// Describes the source types for strip events. This indicates to the
+    /// client how a strip event was physically generated; a client may
+    /// adjust the user interface accordingly. For example, events
+    /// from a "finger" source may trigger kinetic scrolling.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Source {
+        /// Finger,
+        Finger = 1,
+    }
+}
+
+/// A set of buttons, rings and strips
+///
+/// A pad group describes a distinct (sub)set of buttons, rings and strips
+/// present in the tablet. The criteria of this grouping is usually positional,
+/// eg. if a tablet has buttons on the left and right side, 2 groups will be
+/// presented. The physical arrangement of groups is undisclosed and may
+/// change on the fly.
+///
+/// Pad groups will announce their features during pad initialization. Between
+/// the corresponding zwp_tablet_pad_v2.group event and zwp_tablet_pad_group_v2.done, the
+/// pad group will announce the buttons, rings and strips contained in it,
+/// plus the number of supported modes.
+///
+/// Modes are a mechanism to allow multiple groups of actions for every element
+/// in the pad group. The number of groups and available modes in each is
+/// persistent across device plugs. The current mode is user-switchable, it
+/// will be announced through the zwp_tablet_pad_group_v2.mode_switch event both
+/// whenever it is switched, and after zwp_tablet_pad_v2.enter.
+///
+/// The current mode logically applies to all elements in the pad group,
+/// although it is at clients' discretion whether to actually perform different
+/// actions, and/or issue the respective .set_feedback requests to notify the
+/// compositor. See the zwp_tablet_pad_group_v2.mode_switch event for more details.
+pub mod zwp_tablet_pad_group_v2 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2 {
+        const INTERFACE_NAME: &'static str = "zwp_tablet_pad_group_v2";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwpTabletPadGroupV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2
+    {
+        type Id = ZwpTabletPadGroupV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the pad object
+        ///
+        /// Destroy the zwp_tablet_pad_group_v2 object. Objects created from this object
+        /// are unaffected and should be destroyed separately.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    /// Minimum interface version for the `dial` message (XML `since` / `version`).
+    pub const DIAL_SINCE: u32 = 2;
+    #[derive(Debug)]
+    pub enum Event {
+        /// Buttons announced
+        ///
+        /// Sent on zwp_tablet_pad_group_v2 initialization to announce the available
+        /// buttons in the group. Button indices start at 0, a button may only be
+        /// in one group at a time.
+        ///
+        /// This event is first sent in the initial burst of events before the
+        /// zwp_tablet_pad_group_v2.done event.
+        ///
+        /// Some buttons are reserved by the compositor. These buttons may not be
+        /// assigned to any zwp_tablet_pad_group_v2. Compositors may broadcast this
+        /// event in the case of changes to the mapping of these reserved buttons.
+        /// If the compositor happens to reserve all buttons in a group, this event
+        /// will be sent with an empty array.
+        Buttons {
+            /// Buttons in this group,
+            buttons: Array,
+        },
+        /// Ring announced
+        ///
+        /// Sent on zwp_tablet_pad_group_v2 initialization to announce available rings.
+        /// One event is sent for each ring available on this pad group.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_pad_group_v2.done event.
+        Ring { ring: ZwpTabletPadRingV2Id },
+        /// Strip announced
+        ///
+        /// Sent on zwp_tablet_pad_v2 initialization to announce available strips.
+        /// One event is sent for each strip available on this pad group.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_pad_group_v2.done event.
+        Strip { strip: ZwpTabletPadStripV2Id },
+        /// Mode-switch ability announced
+        ///
+        /// Sent on zwp_tablet_pad_group_v2 initialization to announce that the pad
+        /// group may switch between modes. A client may use a mode to store a
+        /// specific configuration for buttons, rings and strips and use the
+        /// zwp_tablet_pad_group_v2.mode_switch event to toggle between these
+        /// configurations. Mode indices start at 0.
+        ///
+        /// Switching modes is compositor-dependent. See the
+        /// zwp_tablet_pad_group_v2.mode_switch event for more details.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_pad_group_v2.done event. This event is only sent when
+        /// more than one mode is available.
+        Modes {
+            /// The number of modes,
+            modes: u32,
+        },
+        /// Tablet group description events sequence complete
+        ///
+        /// This event is sent immediately to signal the end of the initial
+        /// burst of descriptive events. A client may consider the static
+        /// description of the tablet to be complete and finalize initialization
+        /// of the tablet group.
+        Done,
+        /// Mode switch event
+        ///
+        /// Notification that the mode was switched.
+        ///
+        /// A mode applies to all buttons, rings, strips and dials in a group
+        /// simultaneously, but a client is not required to assign different actions
+        /// for each mode. For example, a client may have mode-specific button
+        /// mappings but map the ring to vertical scrolling in all modes. Mode
+        /// indices start at 0.
+        ///
+        /// Switching modes is compositor-dependent. The compositor may provide
+        /// visual cues to the user about the mode, e.g. by toggling LEDs on
+        /// the tablet device. Mode-switching may be software-controlled or
+        /// controlled by one or more physical buttons. For example, on a Wacom
+        /// Intuos Pro, the button inside the ring may be assigned to switch
+        /// between modes.
+        ///
+        /// The compositor will also send this event after zwp_tablet_pad_v2.enter on
+        /// each group in order to notify of the current mode. Groups that only
+        /// feature one mode will use mode=0 when emitting this event.
+        ///
+        /// If a button action in the new mode differs from the action in the
+        /// previous mode, the client should immediately issue a
+        /// zwp_tablet_pad_v2.set_feedback request for each changed button.
+        ///
+        /// If a ring, strip or dial action in the new mode differs from the action
+        /// in the previous mode, the client should immediately issue a
+        /// zwp_tablet_ring_v2.set_feedback, zwp_tablet_strip_v2.set_feedback or
+        /// zwp_tablet_dial_v2.set_feedback request for each changed ring, strip or dial.
+        ModeSwitch {
+            /// The time of the event with millisecond granularity,
+            time: u32,
+            serial: u32,
+            /// The new mode of the pad,
+            mode: u32,
+        },
+        /// Dial announced
+        ///
+        /// Sent on zwp_tablet_pad_v2 initialization to announce available dials.
+        /// One event is sent for each dial available on this pad group.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_pad_group_v2.done event.
+        Dial { dial: ZwpTabletPadDialV2Id },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Buttons { buttons } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.array(buttons);
+                    raw
+                }
+                Ring { ring } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.id(ring);
+                    raw
+                }
+                Strip { strip } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.id(strip);
+                    raw
+                }
+                Modes { modes } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.uint(modes);
+                    raw
+                }
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 4, 0);
+                    raw
+                }
+                ModeSwitch { time, serial, mode } => {
+                    let mut raw = RawEvent::new(self.id(), 5, 3);
+                    raw.uint(time);
+                    raw.uint(serial);
+                    raw.uint(mode);
+                    raw
+                }
+                Dial { dial } => {
+                    let mut raw = RawEvent::new(self.id(), 6, 1);
+                    raw.id(dial);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// A set of buttons, rings, strips and dials
+///
+/// A pad device is a set of buttons, rings, strips and dials
+/// usually physically present on the tablet device itself. Some
+/// exceptions exist where the pad device is physically detached, e.g. the
+/// Wacom ExpressKey Remote.
+///
+/// Pad devices have no axes that control the cursor and are generally
+/// auxiliary devices to the tool devices used on the tablet surface.
+///
+/// A pad device has a number of static characteristics, e.g. the number
+/// of rings. These capabilities are sent in an event sequence after the
+/// zwp_tablet_seat_v2.pad_added event before any actual events from this pad.
+/// This initial event sequence is terminated by a zwp_tablet_pad_v2.done
+/// event.
+///
+/// All pad features (buttons, rings, strips and dials) are logically divided into
+/// groups and all pads have at least one group. The available groups are
+/// notified through the zwp_tablet_pad_v2.group event; the compositor will
+/// emit one event per group before emitting zwp_tablet_pad_v2.done.
+///
+/// Groups may have multiple modes. Modes allow clients to map multiple
+/// actions to a single pad feature. Only one mode can be active per group,
+/// although different groups may have different active modes.
+pub mod zwp_tablet_pad_v2 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2 {
+        const INTERFACE_NAME: &'static str = "zwp_tablet_pad_v2";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwpTabletPadV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2 {
+        type Id = ZwpTabletPadV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Set compositor feedback
+        ///
+        /// Requests the compositor to use the provided feedback string
+        /// associated with this button. This request should be issued immediately
+        /// after a zwp_tablet_pad_group_v2.mode_switch event from the corresponding
+        /// group is received, or whenever a button is mapped to a different
+        /// action. See zwp_tablet_pad_group_v2.mode_switch for more details.
+        ///
+        /// Clients are encouraged to provide context-aware descriptions for
+        /// the actions associated with each button, and compositors may use
+        /// this information to offer visual feedback on the button layout
+        /// (e.g. on-screen displays).
+        ///
+        /// Button indices start at 0. Setting the feedback string on a button
+        /// that is reserved by the compositor (i.e. not belonging to any
+        /// zwp_tablet_pad_group_v2) does not generate an error but the compositor
+        /// is free to ignore the request.
+        ///
+        /// The provided string 'description' is a UTF-8 encoded string to be
+        /// associated with this ring, and is considered user-visible; general
+        /// internationalization rules apply.
+        ///
+        /// The serial argument will be that of the last
+        /// zwp_tablet_pad_group_v2.mode_switch event received for the group of this
+        /// button. Requests providing other serials than the most recent one will
+        /// be ignored.
+        SetFeedback {
+            /// Button index,
+            button: u32,
+            /// Button description,
+            description: String,
+            /// Serial of the mode switch event,
+            serial: u32,
+        },
+        /// Destroy the pad object
+        ///
+        /// Destroy the zwp_tablet_pad_v2 object. Objects created from this object
+        /// are unaffected and should be destroyed separately.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetFeedback {
+                    button: req.uint()?,
+                    description: req.string()?,
+                    serial: req.uint()?,
+                },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Group announced
+        ///
+        /// Sent on zwp_tablet_pad_v2 initialization to announce available groups.
+        /// One event is sent for each pad group available.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_pad_v2.done event. At least one group will be announced.
+        Group { pad_group: ZwpTabletPadGroupV2Id },
+        /// Path to the device
+        ///
+        /// A system-specific device path that indicates which device is behind
+        /// this zwp_tablet_pad_v2. This information may be used to gather additional
+        /// information about the device, e.g. through libwacom.
+        ///
+        /// The format of the path is unspecified, it may be a device node, a
+        /// sysfs path, or some other identifier. It is up to the client to
+        /// identify the string provided.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_pad_v2.done event.
+        Path {
+            /// Path to local device,
+            path: String,
+        },
+        /// Buttons announced
+        ///
+        /// Sent on zwp_tablet_pad_v2 initialization to announce the available
+        /// buttons.
+        ///
+        /// This event is sent in the initial burst of events before the
+        /// zwp_tablet_pad_v2.done event. This event is only sent when at least one
+        /// button is available.
+        Buttons {
+            /// The number of buttons,
+            buttons: u32,
+        },
+        /// Pad description event sequence complete
+        ///
+        /// This event signals the end of the initial burst of descriptive
+        /// events. A client may consider the static description of the pad to
+        /// be complete and finalize initialization of the pad.
+        Done,
+        /// Physical button state
+        ///
+        /// Sent whenever the physical state of a button changes.
+        Button {
+            /// The time of the event with millisecond granularity,
+            time: u32,
+            /// The index of the button that changed state,
+            button: u32,
+            state: u32,
+        },
+        /// Enter event
+        ///
+        /// Notification that this pad is focused on the specified surface.
+        Enter {
+            /// Serial number of the enter event,
+            serial: u32,
+            /// The tablet the pad is attached to,
+            tablet: ZwpTabletV2Id,
+            /// Surface the pad is focused on,
+            surface: WlSurfaceId,
+        },
+        /// Leave event
+        ///
+        /// Notification that this pad is no longer focused on the specified
+        /// surface.
+        Leave {
+            /// Serial number of the leave event,
+            serial: u32,
+            /// Surface the pad is no longer focused on,
+            surface: WlSurfaceId,
+        },
+        /// Pad removed event
+        ///
+        /// Sent when the pad has been removed from the system. When a tablet
+        /// is removed its pad(s) will be removed too.
+        ///
+        /// When this event is received, the client must destroy all rings, strips
+        /// and groups that were offered by this pad, and issue zwp_tablet_pad_v2.destroy
+        /// the pad itself.
+        Removed,
+    }
+    impl EventWriter for crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Group { pad_group } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(pad_group);
+                    raw
+                }
+                Path { path } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.string(path);
+                    raw
+                }
+                Buttons { buttons } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.uint(buttons);
+                    raw
+                }
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 3, 0);
+                    raw
+                }
+                Button { time, button, state } => {
+                    let mut raw = RawEvent::new(self.id(), 4, 3);
+                    raw.uint(time);
+                    raw.uint(button);
+                    raw.uint(state);
+                    raw
+                }
+                Enter { serial, tablet, surface } => {
+                    let mut raw = RawEvent::new(self.id(), 5, 3);
+                    raw.uint(serial);
+                    raw.id(tablet);
+                    raw.id(surface);
+                    raw
+                }
+                Leave { serial, surface } => {
+                    let mut raw = RawEvent::new(self.id(), 6, 2);
+                    raw.uint(serial);
+                    raw.id(surface);
+                    raw
+                }
+                Removed {} => {
+                    let mut raw = RawEvent::new(self.id(), 7, 0);
+                    raw
+                }
+            }
+        }
+    }
+    /// Physical button state
+    ///
+    /// Describes the physical state of a button that caused the button
+    /// event.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum ButtonState {
+        /// The button is not pressed,
+        Released = 0,
+        /// The button is pressed,
+        Pressed = 1,
+    }
+}
+
+/// Pad dial
+///
+/// A rotary control, e.g. a dial or a wheel.
+///
+/// Events on a dial are logically grouped by the zwp_tablet_pad_dial_v2.frame
+/// event.
+pub mod zwp_tablet_pad_dial_v2 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_tablet_pad_dial_v2::ZwpTabletPadDialV2 {
+        const INTERFACE_NAME: &'static str = "zwp_tablet_pad_dial_v2";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwpTabletPadDialV2Id {
+        type Object = crate::wayland_objects::zwp_tablet_pad_dial_v2::ZwpTabletPadDialV2;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_tablet_pad_dial_v2::ZwpTabletPadDialV2
+    {
+        type Id = ZwpTabletPadDialV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Set compositor feedback
+        ///
+        /// Requests the compositor to use the provided feedback string
+        /// associated with this dial. This request should be issued immediately
+        /// after a zwp_tablet_pad_group_v2.mode_switch event from the corresponding
+        /// group is received, or whenever the dial is mapped to a different
+        /// action. See zwp_tablet_pad_group_v2.mode_switch for more details.
+        ///
+        /// Clients are encouraged to provide context-aware descriptions for
+        /// the actions associated with the dial, and compositors may use this
+        /// information to offer visual feedback about the button layout
+        /// (eg. on-screen displays).
+        ///
+        /// The provided string 'description' is a UTF-8 encoded string to be
+        /// associated with this ring, and is considered user-visible; general
+        /// internationalization rules apply.
+        ///
+        /// The serial argument will be that of the last
+        /// zwp_tablet_pad_group_v2.mode_switch event received for the group of this
+        /// dial. Requests providing other serials than the most recent one will be
+        /// ignored.
+        SetFeedback {
+            /// Dial description,
+            description: String,
+            /// Serial of the mode switch event,
+            serial: u32,
+        },
+        /// Destroy the dial object
+        ///
+        /// This destroys the client's resource for this dial object.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_tablet_pad_dial_v2::ZwpTabletPadDialV2 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetFeedback { description: req.string()?, serial: req.uint()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Delta movement
+        ///
+        /// Sent whenever the position on a dial changes.
+        ///
+        /// This event carries the wheel delta as multiples or fractions
+        /// of 120 with each multiple of 120 representing one logical wheel detent.
+        /// For example, an axis_value120 of 30 is one quarter of
+        /// a logical wheel step in the positive direction, a value120 of
+        /// -240 are two logical wheel steps in the negative direction within the
+        /// same hardware event. See the wl_pointer.axis_value120 for more details.
+        ///
+        /// The value120 must not be zero.
+        Delta {
+            /// Rotation distance as fraction of 120,
+            value120: i32,
+        },
+        /// End of a dial event sequence
+        ///
+        /// Indicates the end of a set of events that represent one logical
+        /// hardware dial event. A client is expected to accumulate the data
+        /// in all events within the frame before proceeding.
+        ///
+        /// All zwp_tablet_pad_dial_v2 events before a zwp_tablet_pad_dial_v2.frame event belong
+        /// logically together.
+        ///
+        /// A zwp_tablet_pad_dial_v2.frame event is sent for every logical event
+        /// group, even if the group only contains a single zwp_tablet_pad_dial_v2
+        /// event. Specifically, a client may get a sequence: delta, frame,
+        /// delta, frame, etc.
+        Frame {
+            /// Timestamp with millisecond granularity,
+            time: u32,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_tablet_pad_dial_v2::ZwpTabletPadDialV2 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Delta { value120 } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.int(value120);
+                    raw
+                }
+                Frame { time } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.uint(time);
+                    raw
+                }
+            }
+        }
+    }
+}
+
 /// Timed presentation related wl_surface requests
 ///
 /// The main feature of this interface is accurate presentation
@@ -9736,771 +12357,6 @@ pub mod zwp_idle_inhibitor_v1 {
     }
 }
 
-/// Factory for creating dmabuf-based wl_buffers
-///
-/// Following the interfaces from:
-/// https://www.khronos.org/registry/egl/extensions/EXT/EGL_EXT_image_dma_buf_import.txt
-/// https://www.khronos.org/registry/EGL/extensions/EXT/EGL_EXT_image_dma_buf_import_modifiers.txt
-/// and the Linux DRM sub-system's AddFb2 ioctl.
-///
-/// This interface offers ways to create generic dmabuf-based wl_buffers.
-///
-/// Clients can use the get_surface_feedback request to get dmabuf feedback
-/// for a particular surface. If the client wants to retrieve feedback not
-/// tied to a surface, they can use the get_default_feedback request.
-///
-/// The following are required from clients:
-///
-/// - Clients must ensure that either all data in the dma-buf is
-/// coherent for all subsequent read access or that coherency is
-/// correctly handled by the underlying kernel-side dma-buf
-/// implementation.
-///
-/// - Don't make any more attachments after sending the buffer to the
-/// compositor. Making more attachments later increases the risk of
-/// the compositor not being able to use (re-import) an existing
-/// dmabuf-based wl_buffer.
-///
-/// The underlying graphics stack must ensure the following:
-///
-/// - The dmabuf file descriptors relayed to the server will stay valid
-/// for the whole lifetime of the wl_buffer. This means the server may
-/// at any time use those fds to import the dmabuf into any kernel
-/// sub-system that might accept it.
-///
-/// However, when the underlying graphics stack fails to deliver the
-/// promise, because of e.g. a device hot-unplug which raises internal
-/// errors, after the wl_buffer has been successfully created the
-/// compositor must not raise protocol errors to the client when dmabuf
-/// import later fails.
-///
-/// To create a wl_buffer from one or more dmabufs, a client creates a
-/// zwp_linux_dmabuf_params_v1 object with a zwp_linux_dmabuf_v1.create_params
-/// request. All planes required by the intended format are added with
-/// the 'add' request. Finally, a 'create' or 'create_immed' request is
-/// issued, which has the following outcome depending on the import success.
-///
-/// The 'create' request,
-/// - on success, triggers a 'created' event which provides the final
-/// wl_buffer to the client.
-/// - on failure, triggers a 'failed' event to convey that the server
-/// cannot use the dmabufs received from the client.
-///
-/// For the 'create_immed' request,
-/// - on success, the server immediately imports the added dmabufs to
-/// create a wl_buffer. No event is sent from the server in this case.
-/// - on failure, the server can choose to either:
-/// - terminate the client by raising a fatal error.
-/// - mark the wl_buffer as failed, and send a 'failed' event to the
-/// client. If the client uses a failed wl_buffer as an argument to any
-/// request, the behaviour is compositor implementation-defined.
-///
-/// For all DRM formats and unless specified in another protocol extension,
-/// pre-multiplied alpha is used for pixel values.
-///
-/// Unless specified otherwise in another protocol extension, implicit
-/// synchronization is used. In other words, compositors and clients must
-/// wait and signal fences implicitly passed via the DMA-BUF's reservation
-/// mechanism.
-///
-/// Disclaimer: This protocol extension has been marked stable. This copy is
-/// no longer used and only retained for backwards compatibility. The
-/// canonical version can be found in the stable/ directory.
-pub mod zwp_linux_dmabuf_v1 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 {
-        const INTERFACE_NAME: &'static str = "zwp_linux_dmabuf_v1";
-        const INTERFACE_VERSION: u32 = 5;
-    }
-    impl crate::object::IdToObject for ZwpLinuxDmabufV1Id {
-        type Object = crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
-    }
-    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 {
-        type Id = ZwpLinuxDmabufV1Id;
-    }
-    /// Minimum interface version for the `get_default_feedback` message (XML `since` / `version`).
-    pub const GET_DEFAULT_FEEDBACK_SINCE: u32 = 4;
-    /// Minimum interface version for the `get_surface_feedback` message (XML `since` / `version`).
-    pub const GET_SURFACE_FEEDBACK_SINCE: u32 = 4;
-    #[derive(Debug)]
-    pub enum Request {
-        /// Unbind the factory
-        ///
-        /// Objects created through this interface, especially wl_buffers, will
-        /// remain valid.
-        Destroy,
-        /// Create a temporary object for buffer parameters
-        ///
-        /// This temporary object is used to collect multiple dmabuf handles into
-        /// a single batch to create a wl_buffer. It can only be used once and
-        /// should be destroyed after a 'created' or 'failed' event has been
-        /// received.
-        CreateParams {
-            /// The new temporary,
-            params_id: ZwpLinuxBufferParamsV1Id,
-        },
-        /// Get default feedback
-        ///
-        /// This request creates a new wp_linux_dmabuf_feedback object not bound
-        /// to a particular surface. This object will deliver feedback about dmabuf
-        /// parameters to use if the client doesn't support per-surface feedback
-        /// (see get_surface_feedback).
-        GetDefaultFeedback { id: ZwpLinuxDmabufFeedbackV1Id },
-        /// Get feedback for a surface
-        ///
-        /// This request creates a new wp_linux_dmabuf_feedback object for the
-        /// specified wl_surface. This object will deliver feedback about dmabuf
-        /// parameters to use for buffers attached to this surface.
-        ///
-        /// If the surface is destroyed before the wp_linux_dmabuf_feedback object,
-        /// the feedback object becomes inert.
-        GetSurfaceFeedback { id: ZwpLinuxDmabufFeedbackV1Id, surface: WlSurfaceId },
-    }
-    impl Parser for crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => Destroy,
-                1 => CreateParams { params_id: req.id()? },
-                2 => GetDefaultFeedback { id: req.id()? },
-                3 => GetSurfaceFeedback { id: req.id()?, surface: req.id()? },
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    /// Minimum interface version for the `modifier` message (XML `since` / `version`).
-    pub const MODIFIER_SINCE: u32 = 3;
-    #[derive(Debug)]
-    pub enum Event {
-        /// Supported buffer format
-        ///
-        /// This event advertises one buffer format that the server supports.
-        /// All the supported formats are advertised once when the client
-        /// binds to this interface. A roundtrip after binding guarantees
-        /// that the client has received all supported formats.
-        ///
-        /// For the definition of the format codes, see the
-        /// zwp_linux_buffer_params_v1::create request.
-        ///
-        /// Starting version 4, the format event is deprecated and must not be
-        /// sent by compositors. Instead, use get_default_feedback or
-        /// get_surface_feedback.
-        Format {
-            /// DRM_FORMAT code,
-            format: u32,
-        },
-        /// Supported buffer format modifier
-        ///
-        /// This event advertises the formats that the server supports, along with
-        /// the modifiers supported for each format. All the supported modifiers
-        /// for all the supported formats are advertised once when the client
-        /// binds to this interface. A roundtrip after binding guarantees that
-        /// the client has received all supported format-modifier pairs.
-        ///
-        /// For legacy support, DRM_FORMAT_MOD_INVALID (that is, modifier_hi ==
-        /// 0x00ffffff and modifier_lo == 0xffffffff) is allowed in this event.
-        /// It indicates that the server can support the format with an implicit
-        /// modifier. When a plane has DRM_FORMAT_MOD_INVALID as its modifier, it
-        /// is as if no explicit modifier is specified. The effective modifier
-        /// will be derived from the dmabuf.
-        ///
-        /// A compositor that sends valid modifiers and DRM_FORMAT_MOD_INVALID for
-        /// a given format supports both explicit modifiers and implicit modifiers.
-        ///
-        /// For the definition of the format and modifier codes, see the
-        /// zwp_linux_buffer_params_v1::create and zwp_linux_buffer_params_v1::add
-        /// requests.
-        ///
-        /// Starting version 4, the modifier event is deprecated and must not be
-        /// sent by compositors. Instead, use get_default_feedback or
-        /// get_surface_feedback.
-        Modifier {
-            /// DRM_FORMAT code,
-            format: u32,
-            /// High 32 bits of layout modifier,
-            modifier_hi: u32,
-            /// Low 32 bits of layout modifier,
-            modifier_lo: u32,
-        },
-    }
-    impl EventWriter for crate::wayland_objects::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                Format { format } => {
-                    let mut raw = RawEvent::new(self.id(), 0, 1);
-                    raw.uint(format);
-                    raw
-                }
-                Modifier { format, modifier_hi, modifier_lo } => {
-                    let mut raw = RawEvent::new(self.id(), 1, 3);
-                    raw.uint(format);
-                    raw.uint(modifier_hi);
-                    raw.uint(modifier_lo);
-                    raw
-                }
-            }
-        }
-    }
-}
-
-/// Parameters for creating a dmabuf-based wl_buffer
-///
-/// This temporary object is a collection of dmabufs and other
-/// parameters that together form a single logical buffer. The temporary
-/// object may eventually create one wl_buffer unless cancelled by
-/// destroying it before requesting 'create'.
-///
-/// Single-planar formats only require one dmabuf, however
-/// multi-planar formats may require more than one dmabuf. For all
-/// formats, an 'add' request must be called once per plane (even if the
-/// underlying dmabuf fd is identical).
-///
-/// You must use consecutive plane indices ('plane_idx' argument for 'add')
-/// from zero to the number of planes used by the drm_fourcc format code.
-/// All planes required by the format must be given exactly once, but can
-/// be given in any order. Each plane index can be set only once.
-pub mod zwp_linux_buffer_params_v1 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1 {
-        const INTERFACE_NAME: &'static str = "zwp_linux_buffer_params_v1";
-        const INTERFACE_VERSION: u32 = 5;
-    }
-    impl crate::object::IdToObject for ZwpLinuxBufferParamsV1Id {
-        type Object = crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1;
-    }
-    impl crate::object::ObjectWithId
-        for crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1
-    {
-        type Id = ZwpLinuxBufferParamsV1Id;
-    }
-    /// Minimum interface version for the `create_immed` message (XML `since` / `version`).
-    pub const CREATE_IMMED_SINCE: u32 = 2;
-    #[derive(Debug)]
-    pub enum Request {
-        /// Delete this object, used or not
-        ///
-        /// Cleans up the temporary data sent to the server for dmabuf-based
-        /// wl_buffer creation.
-        Destroy,
-        /// Add a dmabuf to the temporary set
-        ///
-        /// This request adds one dmabuf to the set in this
-        /// zwp_linux_buffer_params_v1.
-        ///
-        /// The 64-bit unsigned value combined from modifier_hi and modifier_lo
-        /// is the dmabuf layout modifier. DRM AddFB2 ioctl calls this the
-        /// fb modifier, which is defined in drm_mode.h of Linux UAPI.
-        /// This is an opaque token. Drivers use this token to express tiling,
-        /// compression, etc. driver-specific modifications to the base format
-        /// defined by the DRM fourcc code.
-        ///
-        /// Starting from version 4, the invalid_format protocol error is sent if
-        /// the format + modifier pair was not advertised as supported.
-        ///
-        /// Starting from version 5, the invalid_format protocol error is sent if
-        /// all planes don't use the same modifier.
-        ///
-        /// This request raises the PLANE_IDX error if plane_idx is too large.
-        /// The error PLANE_SET is raised if attempting to set a plane that
-        /// was already set.
-        Add {
-            /// Dmabuf fd,
-            fd: RawFd,
-            /// Plane index,
-            plane_idx: u32,
-            /// Offset in bytes,
-            offset: u32,
-            /// Stride in bytes,
-            stride: u32,
-            /// High 32 bits of layout modifier,
-            modifier_hi: u32,
-            /// Low 32 bits of layout modifier,
-            modifier_lo: u32,
-        },
-        /// Create a wl_buffer from the given dmabufs
-        ///
-        /// This asks for creation of a wl_buffer from the added dmabuf
-        /// buffers. The wl_buffer is not created immediately but returned via
-        /// the 'created' event if the dmabuf sharing succeeds. The sharing
-        /// may fail at runtime for reasons a client cannot predict, in
-        /// which case the 'failed' event is triggered.
-        ///
-        /// The 'format' argument is a DRM_FORMAT code, as defined by the
-        /// libdrm's drm_fourcc.h. The Linux kernel's DRM sub-system is the
-        /// authoritative source on how the format codes should work.
-        ///
-        /// The 'flags' is a bitfield of the flags defined in enum "flags".
-        /// 'y_invert' means the that the image needs to be y-flipped.
-        ///
-        /// Flag 'interlaced' means that the frame in the buffer is not
-        /// progressive as usual, but interlaced. An interlaced buffer as
-        /// supported here must always contain both top and bottom fields.
-        /// The top field always begins on the first pixel row. The temporal
-        /// ordering between the two fields is top field first, unless
-        /// 'bottom_first' is specified. It is undefined whether 'bottom_first'
-        /// is ignored if 'interlaced' is not set.
-        ///
-        /// This protocol does not convey any information about field rate,
-        /// duration, or timing, other than the relative ordering between the
-        /// two fields in one buffer. A compositor may have to estimate the
-        /// intended field rate from the incoming buffer rate. It is undefined
-        /// whether the time of receiving wl_surface.commit with a new buffer
-        /// attached, applying the wl_surface state, wl_surface.frame callback
-        /// trigger, presentation, or any other point in the compositor cycle
-        /// is used to measure the frame or field times. There is no support
-        /// for detecting missed or late frames/fields/buffers either, and
-        /// there is no support whatsoever for cooperating with interlaced
-        /// compositor output.
-        ///
-        /// The composited image quality resulting from the use of interlaced
-        /// buffers is explicitly undefined. A compositor may use elaborate
-        /// hardware features or software to deinterlace and create progressive
-        /// output frames from a sequence of interlaced input buffers, or it
-        /// may produce substandard image quality. However, compositors that
-        /// cannot guarantee reasonable image quality in all cases are recommended
-        /// to just reject all interlaced buffers.
-        ///
-        /// Any argument errors, including non-positive width or height,
-        /// mismatch between the number of planes and the format, bad
-        /// format, bad offset or stride, may be indicated by fatal protocol
-        /// errors: INCOMPLETE, INVALID_FORMAT, INVALID_DIMENSIONS,
-        /// OUT_OF_BOUNDS.
-        ///
-        /// Dmabuf import errors in the server that are not obvious client
-        /// bugs are returned via the 'failed' event as non-fatal. This
-        /// allows attempting dmabuf sharing and falling back in the client
-        /// if it fails.
-        ///
-        /// This request can be sent only once in the object's lifetime, after
-        /// which the only legal request is destroy. This object should be
-        /// destroyed after issuing a 'create' request. Attempting to use this
-        /// object after issuing 'create' raises ALREADY_USED protocol error.
-        ///
-        /// It is not mandatory to issue 'create'. If a client wants to
-        /// cancel the buffer creation, it can just destroy this object.
-        Create {
-            /// Base plane width in pixels,
-            width: i32,
-            /// Base plane height in pixels,
-            height: i32,
-            /// DRM_FORMAT code,
-            format: u32,
-            /// See enum flags,
-            flags: u32,
-        },
-        /// Immediately create a wl_buffer from the given dmabufs
-        ///
-        /// This asks for immediate creation of a wl_buffer by importing the
-        /// added dmabufs.
-        ///
-        /// In case of import success, no event is sent from the server, and the
-        /// wl_buffer is ready to be used by the client.
-        ///
-        /// Upon import failure, either of the following may happen, as seen fit
-        /// by the implementation:
-        /// - the client is terminated with one of the following fatal protocol
-        /// errors:
-        /// - INCOMPLETE, INVALID_FORMAT, INVALID_DIMENSIONS, OUT_OF_BOUNDS,
-        /// in case of argument errors such as mismatch between the number
-        /// of planes and the format, bad format, non-positive width or
-        /// height, or bad offset or stride.
-        /// - INVALID_WL_BUFFER, in case the cause for failure is unknown or
-        /// platform specific.
-        /// - the server creates an invalid wl_buffer, marks it as failed and
-        /// sends a 'failed' event to the client. The result of using this
-        /// invalid wl_buffer as an argument in any request by the client is
-        /// defined by the compositor implementation.
-        ///
-        /// This takes the same arguments as a 'create' request, and obeys the
-        /// same restrictions.
-        CreateImmed {
-            /// Id for the newly created wl_buffer,
-            buffer_id: WlBufferId,
-            /// Base plane width in pixels,
-            width: i32,
-            /// Base plane height in pixels,
-            height: i32,
-            /// DRM_FORMAT code,
-            format: u32,
-            /// See enum flags,
-            flags: u32,
-        },
-    }
-    impl Parser for crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => Destroy,
-                1 => Add {
-                    fd: req.fd()?,
-                    plane_idx: req.uint()?,
-                    offset: req.uint()?,
-                    stride: req.uint()?,
-                    modifier_hi: req.uint()?,
-                    modifier_lo: req.uint()?,
-                },
-                2 => Create {
-                    width: req.int()?,
-                    height: req.int()?,
-                    format: req.uint()?,
-                    flags: req.uint()?,
-                },
-                3 => CreateImmed {
-                    buffer_id: req.id()?,
-                    width: req.int()?,
-                    height: req.int()?,
-                    format: req.uint()?,
-                    flags: req.uint()?,
-                },
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    #[derive(Debug)]
-    pub enum Event {
-        /// Buffer creation succeeded
-        ///
-        /// This event indicates that the attempted buffer creation was
-        /// successful. It provides the new wl_buffer referencing the dmabuf(s).
-        ///
-        /// Upon receiving this event, the client should destroy the
-        /// zwp_linux_buffer_params_v1 object.
-        Created {
-            /// The newly created wl_buffer,
-            buffer: WlBufferId,
-        },
-        /// Buffer creation failed
-        ///
-        /// This event indicates that the attempted buffer creation has
-        /// failed. It usually means that one of the dmabuf constraints
-        /// has not been fulfilled.
-        ///
-        /// Upon receiving this event, the client should destroy the
-        /// zwp_linux_buffer_params_v1 object.
-        Failed,
-    }
-    impl EventWriter for crate::wayland_objects::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1 {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                Created { buffer } => {
-                    let mut raw = RawEvent::new(self.id(), 0, 1);
-                    raw.id(buffer);
-                    raw
-                }
-                Failed {} => {
-                    let mut raw = RawEvent::new(self.id(), 1, 0);
-                    raw
-                }
-            }
-        }
-    }
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-    pub enum Error {
-        /// The dmabuf_batch object has already been used to create a wl_buffer,
-        AlreadyUsed = 0,
-        /// Plane index out of bounds,
-        PlaneIdx = 1,
-        /// The plane index was already set,
-        PlaneSet = 2,
-        /// Missing or too many planes to create a buffer,
-        Incomplete = 3,
-        /// Format not supported,
-        InvalidFormat = 4,
-        /// Invalid width or height,
-        InvalidDimensions = 5,
-        /// Offset + stride * height goes out of dmabuf bounds,
-        OutOfBounds = 6,
-        /// Invalid wl_buffer resulted from importing dmabufs via the create_immed request on given buffer_params,
-        InvalidWlBuffer = 7,
-    }
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-    pub enum Flags {
-        /// Contents are y-inverted,
-        YInvert = 1,
-        /// Content is interlaced,
-        Interlaced = 2,
-        /// Bottom field first,
-        BottomFirst = 4,
-    }
-}
-
-/// Dmabuf feedback
-///
-/// This object advertises dmabuf parameters feedback. This includes the
-/// preferred devices and the supported formats/modifiers.
-///
-/// The parameters are sent once when this object is created and whenever they
-/// change. The done event is always sent once after all parameters have been
-/// sent. When a single parameter changes, all parameters are re-sent by the
-/// compositor.
-///
-/// Compositors can re-send the parameters when the current client buffer
-/// allocations are sub-optimal. Compositors should not re-send the
-/// parameters if re-allocating the buffers would not result in a more optimal
-/// configuration. In particular, compositors should avoid sending the exact
-/// same parameters multiple times in a row.
-///
-/// The tranche_target_device and tranche_formats events are grouped by
-/// tranches of preference. For each tranche, a tranche_target_device, one
-/// tranche_flags and one or more tranche_formats events are sent, followed
-/// by a tranche_done event finishing the list. The tranches are sent in
-/// descending order of preference. All formats and modifiers in the same
-/// tranche have the same preference.
-///
-/// To send parameters, the compositor sends one main_device event, tranches
-/// (each consisting of one tranche_target_device event, one tranche_flags
-/// event, tranche_formats events and then a tranche_done event), then one
-/// done event.
-pub mod zwp_linux_dmabuf_feedback_v1 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 {
-        const INTERFACE_NAME: &'static str = "zwp_linux_dmabuf_feedback_v1";
-        const INTERFACE_VERSION: u32 = 5;
-    }
-    impl crate::object::IdToObject for ZwpLinuxDmabufFeedbackV1Id {
-        type Object =
-            crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1;
-    }
-    impl crate::object::ObjectWithId
-        for crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1
-    {
-        type Id = ZwpLinuxDmabufFeedbackV1Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Destroy the feedback object
-        ///
-        /// Using this request a client can tell the server that it is not going to
-        /// use the wp_linux_dmabuf_feedback object anymore.
-        Destroy,
-    }
-    impl Parser for crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => Destroy,
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    #[derive(Debug)]
-    pub enum Event {
-        /// All feedback has been sent
-        ///
-        /// This event is sent after all parameters of a wp_linux_dmabuf_feedback
-        /// object have been sent.
-        ///
-        /// This allows changes to the wp_linux_dmabuf_feedback parameters to be
-        /// seen as atomic, even if they happen via multiple events.
-        Done,
-        /// Format and modifier table
-        ///
-        /// This event provides a file descriptor which can be memory-mapped to
-        /// access the format and modifier table.
-        ///
-        /// The table contains a tightly packed array of consecutive format +
-        /// modifier pairs. Each pair is 16 bytes wide. It contains a format as a
-        /// 32-bit unsigned integer, followed by 4 bytes of unused padding, and a
-        /// modifier as a 64-bit unsigned integer. The native endianness is used.
-        ///
-        /// The client must map the file descriptor in read-only private mode.
-        ///
-        /// Compositors are not allowed to mutate the table file contents once this
-        /// event has been sent. Instead, compositors must create a new, separate
-        /// table file and re-send feedback parameters. Compositors are allowed to
-        /// store duplicate format + modifier pairs in the table.
-        FormatTable {
-            /// Table file descriptor,
-            fd: RawFd,
-            /// Table size, in bytes,
-            size: u32,
-        },
-        /// Preferred main device
-        ///
-        /// This event advertises the main device that the server prefers to use
-        /// when direct scan-out to the target device isn't possible. The
-        /// advertised main device may be different for each
-        /// wp_linux_dmabuf_feedback object, and may change over time.
-        ///
-        /// There is exactly one main device. The compositor must send at least
-        /// one preference tranche with tranche_target_device equal to main_device.
-        ///
-        /// Clients need to create buffers that the main device can import and
-        /// read from, otherwise creating the dmabuf wl_buffer will fail (see the
-        /// wp_linux_buffer_params.create and create_immed requests for details).
-        /// The main device will also likely be kept active by the compositor,
-        /// so clients can use it instead of waking up another device for power
-        /// savings.
-        ///
-        /// In general the device is a DRM node. The DRM node type (primary vs.
-        /// render) is unspecified. Clients must not rely on the compositor sending
-        /// a particular node type. Clients cannot check two devices for equality
-        /// by comparing the dev_t value.
-        ///
-        /// If explicit modifiers are not supported and the client performs buffer
-        /// allocations on a different device than the main device, then the client
-        /// must force the buffer to have a linear layout.
-        MainDevice {
-            /// Device dev_t value,
-            device: Array,
-        },
-        /// A preference tranche has been sent
-        ///
-        /// This event splits tranche_target_device and tranche_formats events in
-        /// preference tranches. It is sent after a set of tranche_target_device
-        /// and tranche_formats events; it represents the end of a tranche. The
-        /// next tranche will have a lower preference.
-        TrancheDone,
-        /// Target device
-        ///
-        /// This event advertises the target device that the server prefers to use
-        /// for a buffer created given this tranche. The advertised target device
-        /// may be different for each preference tranche, and may change over time.
-        ///
-        /// There is exactly one target device per tranche.
-        ///
-        /// The target device may be a scan-out device, for example if the
-        /// compositor prefers to directly scan-out a buffer created given this
-        /// tranche. The target device may be a rendering device, for example if
-        /// the compositor prefers to texture from said buffer.
-        ///
-        /// The client can use this hint to allocate the buffer in a way that makes
-        /// it accessible from the target device, ideally directly. The buffer must
-        /// still be accessible from the main device, either through direct import
-        /// or through a potentially more expensive fallback path. If the buffer
-        /// can't be directly imported from the main device then clients must be
-        /// prepared for the compositor changing the tranche priority or making
-        /// wl_buffer creation fail (see the wp_linux_buffer_params.create and
-        /// create_immed requests for details).
-        ///
-        /// If the device is a DRM node, the DRM node type (primary vs. render) is
-        /// unspecified. Clients must not rely on the compositor sending a
-        /// particular node type. Clients cannot check two devices for equality by
-        /// comparing the dev_t value.
-        ///
-        /// This event is tied to a preference tranche, see the tranche_done event.
-        TrancheTargetDevice {
-            /// Device dev_t value,
-            device: Array,
-        },
-        /// Supported buffer format modifier
-        ///
-        /// This event advertises the format + modifier combinations that the
-        /// compositor supports.
-        ///
-        /// It carries an array of indices, each referring to a format + modifier
-        /// pair in the last received format table (see the format_table event).
-        /// Each index is a 16-bit unsigned integer in native endianness.
-        ///
-        /// For legacy support, DRM_FORMAT_MOD_INVALID is an allowed modifier.
-        /// It indicates that the server can support the format with an implicit
-        /// modifier. When a buffer has DRM_FORMAT_MOD_INVALID as its modifier, it
-        /// is as if no explicit modifier is specified. The effective modifier
-        /// will be derived from the dmabuf.
-        ///
-        /// A compositor that sends valid modifiers and DRM_FORMAT_MOD_INVALID for
-        /// a given format supports both explicit modifiers and implicit modifiers.
-        ///
-        /// Compositors must not send duplicate format + modifier pairs within the
-        /// same tranche or across two different tranches with the same target
-        /// device and flags.
-        ///
-        /// This event is tied to a preference tranche, see the tranche_done event.
-        ///
-        /// For the definition of the format and modifier codes, see the
-        /// wp_linux_buffer_params.create request.
-        TrancheFormats {
-            /// Array of 16-bit indexes,
-            indices: Array,
-        },
-        /// Tranche flags
-        ///
-        /// This event sets tranche-specific flags.
-        ///
-        /// The scanout flag is a hint that direct scan-out may be attempted by the
-        /// compositor on the target device if the client appropriately allocates a
-        /// buffer. How to allocate a buffer that can be scanned out on the target
-        /// device is implementation-defined.
-        ///
-        /// This event is tied to a preference tranche, see the tranche_done event.
-        TrancheFlags {
-            /// Tranche flags,
-            flags: u32,
-        },
-    }
-    impl EventWriter
-        for crate::wayland_objects::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1
-    {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                Done {} => {
-                    let mut raw = RawEvent::new(self.id(), 0, 0);
-                    raw
-                }
-                FormatTable { fd, size } => {
-                    let mut raw = RawEvent::new(self.id(), 1, 2);
-                    raw.fd(fd);
-                    raw.uint(size);
-                    raw
-                }
-                MainDevice { device } => {
-                    let mut raw = RawEvent::new(self.id(), 2, 1);
-                    raw.array(device);
-                    raw
-                }
-                TrancheDone {} => {
-                    let mut raw = RawEvent::new(self.id(), 3, 0);
-                    raw
-                }
-                TrancheTargetDevice { device } => {
-                    let mut raw = RawEvent::new(self.id(), 4, 1);
-                    raw.array(device);
-                    raw
-                }
-                TrancheFormats { indices } => {
-                    let mut raw = RawEvent::new(self.id(), 5, 1);
-                    raw.array(indices);
-                    raw
-                }
-                TrancheFlags { flags } => {
-                    let mut raw = RawEvent::new(self.id(), 6, 1);
-                    raw.uint(flags);
-                    raw
-                }
-            }
-        }
-    }
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-    pub enum TrancheFlags {
-        /// Direct scan-out tranche,
-        Scanout = 1,
-    }
-}
-
 /// Protocol for providing explicit synchronization
 ///
 /// This global is a factory interface, allowing clients to request
@@ -11385,1644 +13241,6 @@ pub mod zwp_relative_pointer_v1 {
                 }
             }
         }
-    }
-}
-
-/// Controller object for graphic tablet devices
-///
-/// An object that provides access to the graphics tablets available on this
-/// system. All tablets are associated with a seat, to get access to the
-/// actual tablets, use wp_tablet_manager.get_tablet_seat.
-pub mod zwp_tablet_manager_v2 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_tablet_manager_v2::ZwpTabletManagerV2 {
-        const INTERFACE_NAME: &'static str = "zwp_tablet_manager_v2";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpTabletManagerV2Id {
-        type Object = crate::wayland_objects::zwp_tablet_manager_v2::ZwpTabletManagerV2;
-    }
-    impl crate::object::ObjectWithId
-        for crate::wayland_objects::zwp_tablet_manager_v2::ZwpTabletManagerV2
-    {
-        type Id = ZwpTabletManagerV2Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Get the tablet seat
-        ///
-        /// Get the wp_tablet_seat object for the given seat. This object
-        /// provides access to all graphics tablets in this seat.
-        GetTabletSeat {
-            tablet_seat: ZwpTabletSeatV2Id,
-            /// The wl_seat object to retrieve the tablets for,
-            seat: WlSeatId,
-        },
-        /// Release the memory for the tablet manager object
-        ///
-        /// Destroy the wp_tablet_manager object. Objects created from this
-        /// object are unaffected and should be destroyed separately.
-        Destroy,
-    }
-    impl Parser for crate::wayland_objects::zwp_tablet_manager_v2::ZwpTabletManagerV2 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => GetTabletSeat { tablet_seat: req.id()?, seat: req.id()? },
-                1 => Destroy,
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-}
-
-/// Controller object for graphic tablet devices of a seat
-///
-/// An object that provides access to the graphics tablets available on this
-/// seat. After binding to this interface, the compositor sends a set of
-/// wp_tablet_seat.tablet_added and wp_tablet_seat.tool_added events.
-pub mod zwp_tablet_seat_v2 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2 {
-        const INTERFACE_NAME: &'static str = "zwp_tablet_seat_v2";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpTabletSeatV2Id {
-        type Object = crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2;
-    }
-    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2 {
-        type Id = ZwpTabletSeatV2Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Release the memory for the tablet seat object
-        ///
-        /// Destroy the wp_tablet_seat object. Objects created from this
-        /// object are unaffected and should be destroyed separately.
-        Destroy,
-    }
-    impl Parser for crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => Destroy,
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    #[derive(Debug)]
-    pub enum Event {
-        /// New device notification
-        ///
-        /// This event is sent whenever a new tablet becomes available on this
-        /// seat. This event only provides the object id of the tablet, any
-        /// static information about the tablet (device name, vid/pid, etc.) is
-        /// sent through the wp_tablet interface.
-        TabletAdded {
-            /// The newly added graphics tablet,
-            id: ZwpTabletV2Id,
-        },
-        /// A new tool has been used with a tablet
-        ///
-        /// This event is sent whenever a tool that has not previously been used
-        /// with a tablet comes into use. This event only provides the object id
-        /// of the tool; any static information about the tool (capabilities,
-        /// type, etc.) is sent through the wp_tablet_tool interface.
-        ToolAdded {
-            /// The newly added tablet tool,
-            id: ZwpTabletToolV2Id,
-        },
-        /// New pad notification
-        ///
-        /// This event is sent whenever a new pad is known to the system. Typically,
-        /// pads are physically attached to tablets and a pad_added event is
-        /// sent immediately after the wp_tablet_seat.tablet_added.
-        /// However, some standalone pad devices logically attach to tablets at
-        /// runtime, and the client must wait for wp_tablet_pad.enter to know
-        /// the tablet a pad is attached to.
-        ///
-        /// This event only provides the object id of the pad. All further
-        /// features (buttons, strips, rings) are sent through the wp_tablet_pad
-        /// interface.
-        PadAdded {
-            /// The newly added pad,
-            id: ZwpTabletPadV2Id,
-        },
-    }
-    impl EventWriter for crate::wayland_objects::zwp_tablet_seat_v2::ZwpTabletSeatV2 {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                TabletAdded { id } => {
-                    let mut raw = RawEvent::new(self.id(), 0, 1);
-                    raw.id(id);
-                    raw
-                }
-                ToolAdded { id } => {
-                    let mut raw = RawEvent::new(self.id(), 1, 1);
-                    raw.id(id);
-                    raw
-                }
-                PadAdded { id } => {
-                    let mut raw = RawEvent::new(self.id(), 2, 1);
-                    raw.id(id);
-                    raw
-                }
-            }
-        }
-    }
-}
-
-/// A physical tablet tool
-///
-/// An object that represents a physical tool that has been, or is
-/// currently in use with a tablet in this seat. Each wp_tablet_tool
-/// object stays valid until the client destroys it; the compositor
-/// reuses the wp_tablet_tool object to indicate that the object's
-/// respective physical tool has come into proximity of a tablet again.
-///
-/// A wp_tablet_tool object's relation to a physical tool depends on the
-/// tablet's ability to report serial numbers. If the tablet supports
-/// this capability, then the object represents a specific physical tool
-/// and can be identified even when used on multiple tablets.
-///
-/// A tablet tool has a number of static characteristics, e.g. tool type,
-/// hardware_serial and capabilities. These capabilities are sent in an
-/// event sequence after the wp_tablet_seat.tool_added event before any
-/// actual events from this tool. This initial event sequence is
-/// terminated by a wp_tablet_tool.done event.
-///
-/// Tablet tool events are grouped by wp_tablet_tool.frame events.
-/// Any events received before a wp_tablet_tool.frame event should be
-/// considered part of the same hardware state change.
-pub mod zwp_tablet_tool_v2 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2 {
-        const INTERFACE_NAME: &'static str = "zwp_tablet_tool_v2";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpTabletToolV2Id {
-        type Object = crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2;
-    }
-    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2 {
-        type Id = ZwpTabletToolV2Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Set the tablet tool's surface
-        ///
-        /// Sets the surface of the cursor used for this tool on the given
-        /// tablet. This request only takes effect if the tool is in proximity
-        /// of one of the requesting client's surfaces or the surface parameter
-        /// is the current pointer surface. If there was a previous surface set
-        /// with this request it is replaced. If surface is NULL, the cursor
-        /// image is hidden.
-        ///
-        /// The parameters hotspot_x and hotspot_y define the position of the
-        /// pointer surface relative to the pointer location. Its top-left corner
-        /// is always at (x, y) - (hotspot_x, hotspot_y), where (x, y) are the
-        /// coordinates of the pointer location, in surface-local coordinates.
-        ///
-        /// On surface.attach requests to the pointer surface, hotspot_x and
-        /// hotspot_y are decremented by the x and y parameters passed to the
-        /// request. Attach must be confirmed by wl_surface.commit as usual.
-        ///
-        /// The hotspot can also be updated by passing the currently set pointer
-        /// surface to this request with new values for hotspot_x and hotspot_y.
-        ///
-        /// The current and pending input regions of the wl_surface are cleared,
-        /// and wl_surface.set_input_region is ignored until the wl_surface is no
-        /// longer used as the cursor. When the use as a cursor ends, the current
-        /// and pending input regions become undefined, and the wl_surface is
-        /// unmapped.
-        ///
-        /// This request gives the surface the role of a wp_tablet_tool cursor. A
-        /// surface may only ever be used as the cursor surface for one
-        /// wp_tablet_tool. If the surface already has another role or has
-        /// previously been used as cursor surface for a different tool, a
-        /// protocol error is raised.
-        SetCursor {
-            /// Serial of the proximity_in event,
-            serial: u32,
-            surface: WlSurfaceId,
-            /// Surface-local x coordinate,
-            hotspot_x: i32,
-            /// Surface-local y coordinate,
-            hotspot_y: i32,
-        },
-        /// Destroy the tool object
-        ///
-        /// This destroys the client's resource for this tool object.
-        Destroy,
-    }
-    impl Parser for crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => SetCursor {
-                    serial: req.uint()?,
-                    surface: req.id()?,
-                    hotspot_x: req.int()?,
-                    hotspot_y: req.int()?,
-                },
-                1 => Destroy,
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    #[derive(Debug)]
-    pub enum Event {
-        /// Tool type
-        ///
-        /// The tool type is the high-level type of the tool and usually decides
-        /// the interaction expected from this tool.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet_tool.done event.
-        Type {
-            /// The physical tool type,
-            tool_type: u32,
-        },
-        /// Unique hardware serial number of the tool
-        ///
-        /// If the physical tool can be identified by a unique 64-bit serial
-        /// number, this event notifies the client of this serial number.
-        ///
-        /// If multiple tablets are available in the same seat and the tool is
-        /// uniquely identifiable by the serial number, that tool may move
-        /// between tablets.
-        ///
-        /// Otherwise, if the tool has no serial number and this event is
-        /// missing, the tool is tied to the tablet it first comes into
-        /// proximity with. Even if the physical tool is used on multiple
-        /// tablets, separate wp_tablet_tool objects will be created, one per
-        /// tablet.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet_tool.done event.
-        HardwareSerial {
-            /// The unique serial number of the tool, most significant bits,
-            hardware_serial_hi: u32,
-            /// The unique serial number of the tool, least significant bits,
-            hardware_serial_lo: u32,
-        },
-        /// Hardware id notification in Wacom's format
-        ///
-        /// This event notifies the client of a hardware id available on this tool.
-        ///
-        /// The hardware id is a device-specific 64-bit id that provides extra
-        /// information about the tool in use, beyond the wl_tool.type
-        /// enumeration. The format of the id is specific to tablets made by
-        /// Wacom Inc. For example, the hardware id of a Wacom Grip
-        /// Pen (a stylus) is 0x802.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet_tool.done event.
-        HardwareIdWacom {
-            /// The hardware id, most significant bits,
-            hardware_id_hi: u32,
-            /// The hardware id, least significant bits,
-            hardware_id_lo: u32,
-        },
-        /// Tool capability notification
-        ///
-        /// This event notifies the client of any capabilities of this tool,
-        /// beyond the main set of x/y axes and tip up/down detection.
-        ///
-        /// One event is sent for each extra capability available on this tool.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet_tool.done event.
-        Capability {
-            /// The capability,
-            capability: u32,
-        },
-        /// Tool description events sequence complete
-        ///
-        /// This event signals the end of the initial burst of descriptive
-        /// events. A client may consider the static description of the tool to
-        /// be complete and finalize initialization of the tool.
-        Done,
-        /// Tool removed
-        ///
-        /// This event is sent when the tool is removed from the system and will
-        /// send no further events. Should the physical tool come back into
-        /// proximity later, a new wp_tablet_tool object will be created.
-        ///
-        /// It is compositor-dependent when a tool is removed. A compositor may
-        /// remove a tool on proximity out, tablet removal or any other reason.
-        /// A compositor may also keep a tool alive until shutdown.
-        ///
-        /// If the tool is currently in proximity, a proximity_out event will be
-        /// sent before the removed event. See wp_tablet_tool.proximity_out for
-        /// the handling of any buttons logically down.
-        ///
-        /// When this event is received, the client must wp_tablet_tool.destroy
-        /// the object.
-        Removed,
-        /// Proximity in event
-        ///
-        /// Notification that this tool is focused on a certain surface.
-        ///
-        /// This event can be received when the tool has moved from one surface to
-        /// another, or when the tool has come back into proximity above the
-        /// surface.
-        ///
-        /// If any button is logically down when the tool comes into proximity,
-        /// the respective button event is sent after the proximity_in event but
-        /// within the same frame as the proximity_in event.
-        ProximityIn {
-            serial: u32,
-            /// The tablet the tool is in proximity of,
-            tablet: ZwpTabletV2Id,
-            /// The current surface the tablet tool is over,
-            surface: WlSurfaceId,
-        },
-        /// Proximity out event
-        ///
-        /// Notification that this tool has either left proximity, or is no
-        /// longer focused on a certain surface.
-        ///
-        /// When the tablet tool leaves proximity of the tablet, button release
-        /// events are sent for each button that was held down at the time of
-        /// leaving proximity. These events are sent before the proximity_out
-        /// event but within the same wp_tablet.frame.
-        ///
-        /// If the tool stays within proximity of the tablet, but the focus
-        /// changes from one surface to another, a button release event may not
-        /// be sent until the button is actually released or the tool leaves the
-        /// proximity of the tablet.
-        ProximityOut,
-        /// Tablet tool is making contact
-        ///
-        /// Sent whenever the tablet tool comes in contact with the surface of the
-        /// tablet.
-        ///
-        /// If the tool is already in contact with the tablet when entering the
-        /// input region, the client owning said region will receive a
-        /// wp_tablet.proximity_in event, followed by a wp_tablet.down
-        /// event and a wp_tablet.frame event.
-        ///
-        /// Note that this event describes logical contact, not physical
-        /// contact. On some devices, a compositor may not consider a tool in
-        /// logical contact until a minimum physical pressure threshold is
-        /// exceeded.
-        Down { serial: u32 },
-        /// Tablet tool is no longer making contact
-        ///
-        /// Sent whenever the tablet tool stops making contact with the surface of
-        /// the tablet, or when the tablet tool moves out of the input region
-        /// and the compositor grab (if any) is dismissed.
-        ///
-        /// If the tablet tool moves out of the input region while in contact
-        /// with the surface of the tablet and the compositor does not have an
-        /// ongoing grab on the surface, the client owning said region will
-        /// receive a wp_tablet.up event, followed by a wp_tablet.proximity_out
-        /// event and a wp_tablet.frame event. If the compositor has an ongoing
-        /// grab on this device, this event sequence is sent whenever the grab
-        /// is dismissed in the future.
-        ///
-        /// Note that this event describes logical contact, not physical
-        /// contact. On some devices, a compositor may not consider a tool out
-        /// of logical contact until physical pressure falls below a specific
-        /// threshold.
-        Up,
-        /// Motion event
-        ///
-        /// Sent whenever a tablet tool moves.
-        Motion {
-            /// Surface-local x coordinate,
-            x: f32,
-            /// Surface-local y coordinate,
-            y: f32,
-        },
-        /// Pressure change event
-        ///
-        /// Sent whenever the pressure axis on a tool changes. The value of this
-        /// event is normalized to a value between 0 and 65535.
-        ///
-        /// Note that pressure may be nonzero even when a tool is not in logical
-        /// contact. See the down and up events for more details.
-        Pressure {
-            /// The current pressure value,
-            pressure: u32,
-        },
-        /// Distance change event
-        ///
-        /// Sent whenever the distance axis on a tool changes. The value of this
-        /// event is normalized to a value between 0 and 65535.
-        ///
-        /// Note that distance may be nonzero even when a tool is not in logical
-        /// contact. See the down and up events for more details.
-        Distance {
-            /// The current distance value,
-            distance: u32,
-        },
-        /// Tilt change event
-        ///
-        /// Sent whenever one or both of the tilt axes on a tool change. Each tilt
-        /// value is in degrees, relative to the z-axis of the tablet.
-        /// The angle is positive when the top of a tool tilts along the
-        /// positive x or y axis.
-        Tilt {
-            /// The current value of the X tilt axis,
-            tilt_x: f32,
-            /// The current value of the Y tilt axis,
-            tilt_y: f32,
-        },
-        /// Z-rotation change event
-        ///
-        /// Sent whenever the z-rotation axis on the tool changes. The
-        /// rotation value is in degrees clockwise from the tool's
-        /// logical neutral position.
-        Rotation {
-            /// The current rotation of the Z axis,
-            degrees: f32,
-        },
-        /// Slider position change event
-        ///
-        /// Sent whenever the slider position on the tool changes. The
-        /// value is normalized between -65535 and 65535, with 0 as the logical
-        /// neutral position of the slider.
-        ///
-        /// The slider is available on e.g. the Wacom Airbrush tool.
-        Slider {
-            /// The current position of slider,
-            position: i32,
-        },
-        /// Wheel delta event
-        ///
-        /// Sent whenever the wheel on the tool emits an event. This event
-        /// contains two values for the same axis change. The degrees value is
-        /// in the same orientation as the wl_pointer.vertical_scroll axis. The
-        /// clicks value is in discrete logical clicks of the mouse wheel. This
-        /// value may be zero if the movement of the wheel was less
-        /// than one logical click.
-        ///
-        /// Clients should choose either value and avoid mixing degrees and
-        /// clicks. The compositor may accumulate values smaller than a logical
-        /// click and emulate click events when a certain threshold is met.
-        /// Thus, wl_tablet_tool.wheel events with non-zero clicks values may
-        /// have different degrees values.
-        Wheel {
-            /// The wheel delta in degrees,
-            degrees: f32,
-            /// The wheel delta in discrete clicks,
-            clicks: i32,
-        },
-        /// Button event
-        ///
-        /// Sent whenever a button on the tool is pressed or released.
-        ///
-        /// If a button is held down when the tool moves in or out of proximity,
-        /// button events are generated by the compositor. See
-        /// wp_tablet_tool.proximity_in and wp_tablet_tool.proximity_out for
-        /// details.
-        Button {
-            serial: u32,
-            /// The button whose state has changed,
-            button: u32,
-            /// Whether the button was pressed or released,
-            state: u32,
-        },
-        /// Frame event
-        ///
-        /// Marks the end of a series of axis and/or button updates from the
-        /// tablet. The Wayland protocol requires axis updates to be sent
-        /// sequentially, however all events within a frame should be considered
-        /// one hardware event.
-        Frame {
-            /// The time of the event with millisecond granularity,
-            time: u32,
-        },
-    }
-    impl EventWriter for crate::wayland_objects::zwp_tablet_tool_v2::ZwpTabletToolV2 {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                Type { tool_type } => {
-                    let mut raw = RawEvent::new(self.id(), 0, 1);
-                    raw.uint(tool_type);
-                    raw
-                }
-                HardwareSerial { hardware_serial_hi, hardware_serial_lo } => {
-                    let mut raw = RawEvent::new(self.id(), 1, 2);
-                    raw.uint(hardware_serial_hi);
-                    raw.uint(hardware_serial_lo);
-                    raw
-                }
-                HardwareIdWacom { hardware_id_hi, hardware_id_lo } => {
-                    let mut raw = RawEvent::new(self.id(), 2, 2);
-                    raw.uint(hardware_id_hi);
-                    raw.uint(hardware_id_lo);
-                    raw
-                }
-                Capability { capability } => {
-                    let mut raw = RawEvent::new(self.id(), 3, 1);
-                    raw.uint(capability);
-                    raw
-                }
-                Done {} => {
-                    let mut raw = RawEvent::new(self.id(), 4, 0);
-                    raw
-                }
-                Removed {} => {
-                    let mut raw = RawEvent::new(self.id(), 5, 0);
-                    raw
-                }
-                ProximityIn { serial, tablet, surface } => {
-                    let mut raw = RawEvent::new(self.id(), 6, 3);
-                    raw.uint(serial);
-                    raw.id(tablet);
-                    raw.id(surface);
-                    raw
-                }
-                ProximityOut {} => {
-                    let mut raw = RawEvent::new(self.id(), 7, 0);
-                    raw
-                }
-                Down { serial } => {
-                    let mut raw = RawEvent::new(self.id(), 8, 1);
-                    raw.uint(serial);
-                    raw
-                }
-                Up {} => {
-                    let mut raw = RawEvent::new(self.id(), 9, 0);
-                    raw
-                }
-                Motion { x, y } => {
-                    let mut raw = RawEvent::new(self.id(), 10, 2);
-                    raw.fixed(x);
-                    raw.fixed(y);
-                    raw
-                }
-                Pressure { pressure } => {
-                    let mut raw = RawEvent::new(self.id(), 11, 1);
-                    raw.uint(pressure);
-                    raw
-                }
-                Distance { distance } => {
-                    let mut raw = RawEvent::new(self.id(), 12, 1);
-                    raw.uint(distance);
-                    raw
-                }
-                Tilt { tilt_x, tilt_y } => {
-                    let mut raw = RawEvent::new(self.id(), 13, 2);
-                    raw.fixed(tilt_x);
-                    raw.fixed(tilt_y);
-                    raw
-                }
-                Rotation { degrees } => {
-                    let mut raw = RawEvent::new(self.id(), 14, 1);
-                    raw.fixed(degrees);
-                    raw
-                }
-                Slider { position } => {
-                    let mut raw = RawEvent::new(self.id(), 15, 1);
-                    raw.int(position);
-                    raw
-                }
-                Wheel { degrees, clicks } => {
-                    let mut raw = RawEvent::new(self.id(), 16, 2);
-                    raw.fixed(degrees);
-                    raw.int(clicks);
-                    raw
-                }
-                Button { serial, button, state } => {
-                    let mut raw = RawEvent::new(self.id(), 17, 3);
-                    raw.uint(serial);
-                    raw.uint(button);
-                    raw.uint(state);
-                    raw
-                }
-                Frame { time } => {
-                    let mut raw = RawEvent::new(self.id(), 18, 1);
-                    raw.uint(time);
-                    raw
-                }
-            }
-        }
-    }
-    /// A physical tool type
-    ///
-    /// Describes the physical type of a tool. The physical type of a tool
-    /// generally defines its base usage.
-    ///
-    /// The mouse tool represents a mouse-shaped tool that is not a relative
-    /// device but bound to the tablet's surface, providing absolute
-    /// coordinates.
-    ///
-    /// The lens tool is a mouse-shaped tool with an attached lens to
-    /// provide precision focus.
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-    pub enum Type {
-        /// Pen,
-        Pen = 320,
-        /// Eraser,
-        Eraser = 321,
-        /// Brush,
-        Brush = 322,
-        /// Pencil,
-        Pencil = 323,
-        /// Airbrush,
-        Airbrush = 324,
-        /// Finger,
-        Finger = 325,
-        /// Mouse,
-        Mouse = 326,
-        /// Lens,
-        Lens = 327,
-    }
-    /// Capability flags for a tool
-    ///
-    /// Describes extra capabilities on a tablet.
-    ///
-    /// Any tool must provide x and y values, extra axes are
-    /// device-specific.
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-    pub enum Capability {
-        /// Tilt axes,
-        Tilt = 1,
-        /// Pressure axis,
-        Pressure = 2,
-        /// Distance axis,
-        Distance = 3,
-        /// Z-rotation axis,
-        Rotation = 4,
-        /// Slider axis,
-        Slider = 5,
-        /// Wheel axis,
-        Wheel = 6,
-    }
-    /// Physical button state
-    ///
-    /// Describes the physical state of a button that produced the button event.
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-    pub enum ButtonState {
-        /// Button is not pressed,
-        Released = 0,
-        /// Button is pressed,
-        Pressed = 1,
-    }
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-    pub enum Error {
-        /// Given wl_surface has another role,
-        Role = 0,
-    }
-}
-
-/// Graphics tablet device
-///
-/// The wp_tablet interface represents one graphics tablet device. The
-/// tablet interface itself does not generate events; all events are
-/// generated by wp_tablet_tool objects when in proximity above a tablet.
-///
-/// A tablet has a number of static characteristics, e.g. device name and
-/// pid/vid. These capabilities are sent in an event sequence after the
-/// wp_tablet_seat.tablet_added event. This initial event sequence is
-/// terminated by a wp_tablet.done event.
-pub mod zwp_tablet_v2 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2 {
-        const INTERFACE_NAME: &'static str = "zwp_tablet_v2";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpTabletV2Id {
-        type Object = crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2;
-    }
-    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2 {
-        type Id = ZwpTabletV2Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Destroy the tablet object
-        ///
-        /// This destroys the client's resource for this tablet object.
-        Destroy,
-    }
-    impl Parser for crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => Destroy,
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    #[derive(Debug)]
-    pub enum Event {
-        /// Tablet device name
-        ///
-        /// A descriptive name for the tablet device.
-        ///
-        /// If the device has no descriptive name, this event is not sent.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet.done event.
-        Name {
-            /// The device name,
-            name: String,
-        },
-        /// Tablet device USB vendor/product id
-        ///
-        /// The USB vendor and product IDs for the tablet device.
-        ///
-        /// If the device has no USB vendor/product ID, this event is not sent.
-        /// This can happen for virtual devices or non-USB devices, for instance.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet.done event.
-        Id {
-            /// USB vendor id,
-            vid: u32,
-            /// USB product id,
-            pid: u32,
-        },
-        /// Path to the device
-        ///
-        /// A system-specific device path that indicates which device is behind
-        /// this wp_tablet. This information may be used to gather additional
-        /// information about the device, e.g. through libwacom.
-        ///
-        /// A device may have more than one device path. If so, multiple
-        /// wp_tablet.path events are sent. A device may be emulated and not
-        /// have a device path, and in that case this event will not be sent.
-        ///
-        /// The format of the path is unspecified, it may be a device node, a
-        /// sysfs path, or some other identifier. It is up to the client to
-        /// identify the string provided.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet.done event.
-        Path {
-            /// Path to local device,
-            path: String,
-        },
-        /// Tablet description events sequence complete
-        ///
-        /// This event is sent immediately to signal the end of the initial
-        /// burst of descriptive events. A client may consider the static
-        /// description of the tablet to be complete and finalize initialization
-        /// of the tablet.
-        Done,
-        /// Tablet removed event
-        ///
-        /// Sent when the tablet has been removed from the system. When a tablet
-        /// is removed, some tools may be removed.
-        ///
-        /// When this event is received, the client must wp_tablet.destroy
-        /// the object.
-        Removed,
-    }
-    impl EventWriter for crate::wayland_objects::zwp_tablet_v2::ZwpTabletV2 {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                Name { name } => {
-                    let mut raw = RawEvent::new(self.id(), 0, 1);
-                    raw.string(name);
-                    raw
-                }
-                Id { vid, pid } => {
-                    let mut raw = RawEvent::new(self.id(), 1, 2);
-                    raw.uint(vid);
-                    raw.uint(pid);
-                    raw
-                }
-                Path { path } => {
-                    let mut raw = RawEvent::new(self.id(), 2, 1);
-                    raw.string(path);
-                    raw
-                }
-                Done {} => {
-                    let mut raw = RawEvent::new(self.id(), 3, 0);
-                    raw
-                }
-                Removed {} => {
-                    let mut raw = RawEvent::new(self.id(), 4, 0);
-                    raw
-                }
-            }
-        }
-    }
-}
-
-/// Pad ring
-///
-/// A circular interaction area, such as the touch ring on the Wacom Intuos
-/// Pro series tablets.
-///
-/// Events on a ring are logically grouped by the wl_tablet_pad_ring.frame
-/// event.
-pub mod zwp_tablet_pad_ring_v2 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2 {
-        const INTERFACE_NAME: &'static str = "zwp_tablet_pad_ring_v2";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpTabletPadRingV2Id {
-        type Object = crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2;
-    }
-    impl crate::object::ObjectWithId
-        for crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2
-    {
-        type Id = ZwpTabletPadRingV2Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Set compositor feedback
-        ///
-        /// Request that the compositor use the provided feedback string
-        /// associated with this ring. This request should be issued immediately
-        /// after a wp_tablet_pad_group.mode_switch event from the corresponding
-        /// group is received, or whenever the ring is mapped to a different
-        /// action. See wp_tablet_pad_group.mode_switch for more details.
-        ///
-        /// Clients are encouraged to provide context-aware descriptions for
-        /// the actions associated with the ring; compositors may use this
-        /// information to offer visual feedback about the button layout
-        /// (eg. on-screen displays).
-        ///
-        /// The provided string 'description' is a UTF-8 encoded string to be
-        /// associated with this ring, and is considered user-visible; general
-        /// internationalization rules apply.
-        ///
-        /// The serial argument will be that of the last
-        /// wp_tablet_pad_group.mode_switch event received for the group of this
-        /// ring. Requests providing other serials than the most recent one will be
-        /// ignored.
-        SetFeedback {
-            /// Ring description,
-            description: String,
-            /// Serial of the mode switch event,
-            serial: u32,
-        },
-        /// Destroy the ring object
-        ///
-        /// This destroys the client's resource for this ring object.
-        Destroy,
-    }
-    impl Parser for crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => SetFeedback { description: req.string()?, serial: req.uint()? },
-                1 => Destroy,
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    #[derive(Debug)]
-    pub enum Event {
-        /// Ring event source
-        ///
-        /// Source information for ring events.
-        ///
-        /// This event does not occur on its own. It is sent before a
-        /// wp_tablet_pad_ring.frame event and carries the source information
-        /// for all events within that frame.
-        ///
-        /// The source specifies how this event was generated. If the source is
-        /// wp_tablet_pad_ring.source.finger, a wp_tablet_pad_ring.stop event
-        /// will be sent when the user lifts the finger off the device.
-        ///
-        /// This event is optional. If the source is unknown for an interaction,
-        /// no event is sent.
-        Source {
-            /// The event source,
-            source: u32,
-        },
-        /// Angle changed
-        ///
-        /// Sent whenever the angle on a ring changes.
-        ///
-        /// The angle is provided in degrees clockwise from the logical
-        /// north of the ring in the pad's current rotation.
-        Angle {
-            /// The current angle in degrees,
-            degrees: f32,
-        },
-        /// Interaction stopped
-        ///
-        /// Stop notification for ring events.
-        ///
-        /// For some wp_tablet_pad_ring.source types, a wp_tablet_pad_ring.stop
-        /// event is sent to notify a client that the interaction with the ring
-        /// has terminated. This enables the client to implement kinetic scrolling.
-        /// See the wp_tablet_pad_ring.source documentation for information on
-        /// when this event may be generated.
-        ///
-        /// Any wp_tablet_pad_ring.angle events with the same source after this
-        /// event should be considered as the start of a new interaction.
-        Stop,
-        /// End of a ring event sequence
-        ///
-        /// Indicates the end of a set of ring events that logically belong
-        /// together. A client is expected to accumulate the data in all events
-        /// within the frame before proceeding.
-        ///
-        /// All wp_tablet_pad_ring events before a wp_tablet_pad_ring.frame event belong
-        /// logically together. For example, on termination of a finger interaction
-        /// on a ring the compositor will send a wp_tablet_pad_ring.source event,
-        /// a wp_tablet_pad_ring.stop event and a wp_tablet_pad_ring.frame event.
-        ///
-        /// A wp_tablet_pad_ring.frame event is sent for every logical event
-        /// group, even if the group only contains a single wp_tablet_pad_ring
-        /// event. Specifically, a client may get a sequence: angle, frame,
-        /// angle, frame, etc.
-        Frame {
-            /// Timestamp with millisecond granularity,
-            time: u32,
-        },
-    }
-    impl EventWriter for crate::wayland_objects::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2 {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                Source { source } => {
-                    let mut raw = RawEvent::new(self.id(), 0, 1);
-                    raw.uint(source);
-                    raw
-                }
-                Angle { degrees } => {
-                    let mut raw = RawEvent::new(self.id(), 1, 1);
-                    raw.fixed(degrees);
-                    raw
-                }
-                Stop {} => {
-                    let mut raw = RawEvent::new(self.id(), 2, 0);
-                    raw
-                }
-                Frame { time } => {
-                    let mut raw = RawEvent::new(self.id(), 3, 1);
-                    raw.uint(time);
-                    raw
-                }
-            }
-        }
-    }
-    /// Ring axis source
-    ///
-    /// Describes the source types for ring events. This indicates to the
-    /// client how a ring event was physically generated; a client may
-    /// adjust the user interface accordingly. For example, events
-    /// from a "finger" source may trigger kinetic scrolling.
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-    pub enum Source {
-        /// Finger,
-        Finger = 1,
-    }
-}
-
-/// Pad strip
-///
-/// A linear interaction area, such as the strips found in Wacom Cintiq
-/// models.
-///
-/// Events on a strip are logically grouped by the wl_tablet_pad_strip.frame
-/// event.
-pub mod zwp_tablet_pad_strip_v2 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2 {
-        const INTERFACE_NAME: &'static str = "zwp_tablet_pad_strip_v2";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpTabletPadStripV2Id {
-        type Object = crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2;
-    }
-    impl crate::object::ObjectWithId
-        for crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2
-    {
-        type Id = ZwpTabletPadStripV2Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Set compositor feedback
-        ///
-        /// Requests the compositor to use the provided feedback string
-        /// associated with this strip. This request should be issued immediately
-        /// after a wp_tablet_pad_group.mode_switch event from the corresponding
-        /// group is received, or whenever the strip is mapped to a different
-        /// action. See wp_tablet_pad_group.mode_switch for more details.
-        ///
-        /// Clients are encouraged to provide context-aware descriptions for
-        /// the actions associated with the strip, and compositors may use this
-        /// information to offer visual feedback about the button layout
-        /// (eg. on-screen displays).
-        ///
-        /// The provided string 'description' is a UTF-8 encoded string to be
-        /// associated with this ring, and is considered user-visible; general
-        /// internationalization rules apply.
-        ///
-        /// The serial argument will be that of the last
-        /// wp_tablet_pad_group.mode_switch event received for the group of this
-        /// strip. Requests providing other serials than the most recent one will be
-        /// ignored.
-        SetFeedback {
-            /// Strip description,
-            description: String,
-            /// Serial of the mode switch event,
-            serial: u32,
-        },
-        /// Destroy the strip object
-        ///
-        /// This destroys the client's resource for this strip object.
-        Destroy,
-    }
-    impl Parser for crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => SetFeedback { description: req.string()?, serial: req.uint()? },
-                1 => Destroy,
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    #[derive(Debug)]
-    pub enum Event {
-        /// Strip event source
-        ///
-        /// Source information for strip events.
-        ///
-        /// This event does not occur on its own. It is sent before a
-        /// wp_tablet_pad_strip.frame event and carries the source information
-        /// for all events within that frame.
-        ///
-        /// The source specifies how this event was generated. If the source is
-        /// wp_tablet_pad_strip.source.finger, a wp_tablet_pad_strip.stop event
-        /// will be sent when the user lifts their finger off the device.
-        ///
-        /// This event is optional. If the source is unknown for an interaction,
-        /// no event is sent.
-        Source {
-            /// The event source,
-            source: u32,
-        },
-        /// Position changed
-        ///
-        /// Sent whenever the position on a strip changes.
-        ///
-        /// The position is normalized to a range of [0, 65535], the 0-value
-        /// represents the top-most and/or left-most position of the strip in
-        /// the pad's current rotation.
-        Position {
-            /// The current position,
-            position: u32,
-        },
-        /// Interaction stopped
-        ///
-        /// Stop notification for strip events.
-        ///
-        /// For some wp_tablet_pad_strip.source types, a wp_tablet_pad_strip.stop
-        /// event is sent to notify a client that the interaction with the strip
-        /// has terminated. This enables the client to implement kinetic
-        /// scrolling. See the wp_tablet_pad_strip.source documentation for
-        /// information on when this event may be generated.
-        ///
-        /// Any wp_tablet_pad_strip.position events with the same source after this
-        /// event should be considered as the start of a new interaction.
-        Stop,
-        /// End of a strip event sequence
-        ///
-        /// Indicates the end of a set of events that represent one logical
-        /// hardware strip event. A client is expected to accumulate the data
-        /// in all events within the frame before proceeding.
-        ///
-        /// All wp_tablet_pad_strip events before a wp_tablet_pad_strip.frame event belong
-        /// logically together. For example, on termination of a finger interaction
-        /// on a strip the compositor will send a wp_tablet_pad_strip.source event,
-        /// a wp_tablet_pad_strip.stop event and a wp_tablet_pad_strip.frame
-        /// event.
-        ///
-        /// A wp_tablet_pad_strip.frame event is sent for every logical event
-        /// group, even if the group only contains a single wp_tablet_pad_strip
-        /// event. Specifically, a client may get a sequence: position, frame,
-        /// position, frame, etc.
-        Frame {
-            /// Timestamp with millisecond granularity,
-            time: u32,
-        },
-    }
-    impl EventWriter for crate::wayland_objects::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2 {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                Source { source } => {
-                    let mut raw = RawEvent::new(self.id(), 0, 1);
-                    raw.uint(source);
-                    raw
-                }
-                Position { position } => {
-                    let mut raw = RawEvent::new(self.id(), 1, 1);
-                    raw.uint(position);
-                    raw
-                }
-                Stop {} => {
-                    let mut raw = RawEvent::new(self.id(), 2, 0);
-                    raw
-                }
-                Frame { time } => {
-                    let mut raw = RawEvent::new(self.id(), 3, 1);
-                    raw.uint(time);
-                    raw
-                }
-            }
-        }
-    }
-    /// Strip axis source
-    ///
-    /// Describes the source types for strip events. This indicates to the
-    /// client how a strip event was physically generated; a client may
-    /// adjust the user interface accordingly. For example, events
-    /// from a "finger" source may trigger kinetic scrolling.
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-    pub enum Source {
-        /// Finger,
-        Finger = 1,
-    }
-}
-
-/// A set of buttons, rings and strips
-///
-/// A pad group describes a distinct (sub)set of buttons, rings and strips
-/// present in the tablet. The criteria of this grouping is usually positional,
-/// eg. if a tablet has buttons on the left and right side, 2 groups will be
-/// presented. The physical arrangement of groups is undisclosed and may
-/// change on the fly.
-///
-/// Pad groups will announce their features during pad initialization. Between
-/// the corresponding wp_tablet_pad.group event and wp_tablet_pad_group.done, the
-/// pad group will announce the buttons, rings and strips contained in it,
-/// plus the number of supported modes.
-///
-/// Modes are a mechanism to allow multiple groups of actions for every element
-/// in the pad group. The number of groups and available modes in each is
-/// persistent across device plugs. The current mode is user-switchable, it
-/// will be announced through the wp_tablet_pad_group.mode_switch event both
-/// whenever it is switched, and after wp_tablet_pad.enter.
-///
-/// The current mode logically applies to all elements in the pad group,
-/// although it is at clients' discretion whether to actually perform different
-/// actions, and/or issue the respective .set_feedback requests to notify the
-/// compositor. See the wp_tablet_pad_group.mode_switch event for more details.
-pub mod zwp_tablet_pad_group_v2 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2 {
-        const INTERFACE_NAME: &'static str = "zwp_tablet_pad_group_v2";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpTabletPadGroupV2Id {
-        type Object = crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2;
-    }
-    impl crate::object::ObjectWithId
-        for crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2
-    {
-        type Id = ZwpTabletPadGroupV2Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Destroy the pad object
-        ///
-        /// Destroy the wp_tablet_pad_group object. Objects created from this object
-        /// are unaffected and should be destroyed separately.
-        Destroy,
-    }
-    impl Parser for crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => Destroy,
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    #[derive(Debug)]
-    pub enum Event {
-        /// Buttons announced
-        ///
-        /// Sent on wp_tablet_pad_group initialization to announce the available
-        /// buttons in the group. Button indices start at 0, a button may only be
-        /// in one group at a time.
-        ///
-        /// This event is first sent in the initial burst of events before the
-        /// wp_tablet_pad_group.done event.
-        ///
-        /// Some buttons are reserved by the compositor. These buttons may not be
-        /// assigned to any wp_tablet_pad_group. Compositors may broadcast this
-        /// event in the case of changes to the mapping of these reserved buttons.
-        /// If the compositor happens to reserve all buttons in a group, this event
-        /// will be sent with an empty array.
-        Buttons {
-            /// Buttons in this group,
-            buttons: Array,
-        },
-        /// Ring announced
-        ///
-        /// Sent on wp_tablet_pad_group initialization to announce available rings.
-        /// One event is sent for each ring available on this pad group.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet_pad_group.done event.
-        Ring { ring: ZwpTabletPadRingV2Id },
-        /// Strip announced
-        ///
-        /// Sent on wp_tablet_pad initialization to announce available strips.
-        /// One event is sent for each strip available on this pad group.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet_pad_group.done event.
-        Strip { strip: ZwpTabletPadStripV2Id },
-        /// Mode-switch ability announced
-        ///
-        /// Sent on wp_tablet_pad_group initialization to announce that the pad
-        /// group may switch between modes. A client may use a mode to store a
-        /// specific configuration for buttons, rings and strips and use the
-        /// wl_tablet_pad_group.mode_switch event to toggle between these
-        /// configurations. Mode indices start at 0.
-        ///
-        /// Switching modes is compositor-dependent. See the
-        /// wp_tablet_pad_group.mode_switch event for more details.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet_pad_group.done event. This event is only sent when more than
-        /// more than one mode is available.
-        Modes {
-            /// The number of modes,
-            modes: u32,
-        },
-        /// Tablet group description events sequence complete
-        ///
-        /// This event is sent immediately to signal the end of the initial
-        /// burst of descriptive events. A client may consider the static
-        /// description of the tablet to be complete and finalize initialization
-        /// of the tablet group.
-        Done,
-        /// Mode switch event
-        ///
-        /// Notification that the mode was switched.
-        ///
-        /// A mode applies to all buttons, rings and strips in a group
-        /// simultaneously, but a client is not required to assign different actions
-        /// for each mode. For example, a client may have mode-specific button
-        /// mappings but map the ring to vertical scrolling in all modes. Mode
-        /// indices start at 0.
-        ///
-        /// Switching modes is compositor-dependent. The compositor may provide
-        /// visual cues to the client about the mode, e.g. by toggling LEDs on
-        /// the tablet device. Mode-switching may be software-controlled or
-        /// controlled by one or more physical buttons. For example, on a Wacom
-        /// Intuos Pro, the button inside the ring may be assigned to switch
-        /// between modes.
-        ///
-        /// The compositor will also send this event after wp_tablet_pad.enter on
-        /// each group in order to notify of the current mode. Groups that only
-        /// feature one mode will use mode=0 when emitting this event.
-        ///
-        /// If a button action in the new mode differs from the action in the
-        /// previous mode, the client should immediately issue a
-        /// wp_tablet_pad.set_feedback request for each changed button.
-        ///
-        /// If a ring or strip action in the new mode differs from the action
-        /// in the previous mode, the client should immediately issue a
-        /// wp_tablet_ring.set_feedback or wp_tablet_strip.set_feedback request
-        /// for each changed ring or strip.
-        ModeSwitch {
-            /// The time of the event with millisecond granularity,
-            time: u32,
-            serial: u32,
-            /// The new mode of the pad,
-            mode: u32,
-        },
-    }
-    impl EventWriter for crate::wayland_objects::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2 {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                Buttons { buttons } => {
-                    let mut raw = RawEvent::new(self.id(), 0, 1);
-                    raw.array(buttons);
-                    raw
-                }
-                Ring { ring } => {
-                    let mut raw = RawEvent::new(self.id(), 1, 1);
-                    raw.id(ring);
-                    raw
-                }
-                Strip { strip } => {
-                    let mut raw = RawEvent::new(self.id(), 2, 1);
-                    raw.id(strip);
-                    raw
-                }
-                Modes { modes } => {
-                    let mut raw = RawEvent::new(self.id(), 3, 1);
-                    raw.uint(modes);
-                    raw
-                }
-                Done {} => {
-                    let mut raw = RawEvent::new(self.id(), 4, 0);
-                    raw
-                }
-                ModeSwitch { time, serial, mode } => {
-                    let mut raw = RawEvent::new(self.id(), 5, 3);
-                    raw.uint(time);
-                    raw.uint(serial);
-                    raw.uint(mode);
-                    raw
-                }
-            }
-        }
-    }
-}
-
-/// A set of buttons, rings and strips
-///
-/// A pad device is a set of buttons, rings and strips
-/// usually physically present on the tablet device itself. Some
-/// exceptions exist where the pad device is physically detached, e.g. the
-/// Wacom ExpressKey Remote.
-///
-/// Pad devices have no axes that control the cursor and are generally
-/// auxiliary devices to the tool devices used on the tablet surface.
-///
-/// A pad device has a number of static characteristics, e.g. the number
-/// of rings. These capabilities are sent in an event sequence after the
-/// wp_tablet_seat.pad_added event before any actual events from this pad.
-/// This initial event sequence is terminated by a wp_tablet_pad.done
-/// event.
-///
-/// All pad features (buttons, rings and strips) are logically divided into
-/// groups and all pads have at least one group. The available groups are
-/// notified through the wp_tablet_pad.group event; the compositor will
-/// emit one event per group before emitting wp_tablet_pad.done.
-///
-/// Groups may have multiple modes. Modes allow clients to map multiple
-/// actions to a single pad feature. Only one mode can be active per group,
-/// although different groups may have different active modes.
-pub mod zwp_tablet_pad_v2 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2 {
-        const INTERFACE_NAME: &'static str = "zwp_tablet_pad_v2";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpTabletPadV2Id {
-        type Object = crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2;
-    }
-    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2 {
-        type Id = ZwpTabletPadV2Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Set compositor feedback
-        ///
-        /// Requests the compositor to use the provided feedback string
-        /// associated with this button. This request should be issued immediately
-        /// after a wp_tablet_pad_group.mode_switch event from the corresponding
-        /// group is received, or whenever a button is mapped to a different
-        /// action. See wp_tablet_pad_group.mode_switch for more details.
-        ///
-        /// Clients are encouraged to provide context-aware descriptions for
-        /// the actions associated with each button, and compositors may use
-        /// this information to offer visual feedback on the button layout
-        /// (e.g. on-screen displays).
-        ///
-        /// Button indices start at 0. Setting the feedback string on a button
-        /// that is reserved by the compositor (i.e. not belonging to any
-        /// wp_tablet_pad_group) does not generate an error but the compositor
-        /// is free to ignore the request.
-        ///
-        /// The provided string 'description' is a UTF-8 encoded string to be
-        /// associated with this ring, and is considered user-visible; general
-        /// internationalization rules apply.
-        ///
-        /// The serial argument will be that of the last
-        /// wp_tablet_pad_group.mode_switch event received for the group of this
-        /// button. Requests providing other serials than the most recent one will
-        /// be ignored.
-        SetFeedback {
-            /// Button index,
-            button: u32,
-            /// Button description,
-            description: String,
-            /// Serial of the mode switch event,
-            serial: u32,
-        },
-        /// Destroy the pad object
-        ///
-        /// Destroy the wp_tablet_pad object. Objects created from this object
-        /// are unaffected and should be destroyed separately.
-        Destroy,
-    }
-    impl Parser for crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => SetFeedback {
-                    button: req.uint()?,
-                    description: req.string()?,
-                    serial: req.uint()?,
-                },
-                1 => Destroy,
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    #[derive(Debug)]
-    pub enum Event {
-        /// Group announced
-        ///
-        /// Sent on wp_tablet_pad initialization to announce available groups.
-        /// One event is sent for each pad group available.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet_pad.done event. At least one group will be announced.
-        Group { pad_group: ZwpTabletPadGroupV2Id },
-        /// Path to the device
-        ///
-        /// A system-specific device path that indicates which device is behind
-        /// this wp_tablet_pad. This information may be used to gather additional
-        /// information about the device, e.g. through libwacom.
-        ///
-        /// The format of the path is unspecified, it may be a device node, a
-        /// sysfs path, or some other identifier. It is up to the client to
-        /// identify the string provided.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet_pad.done event.
-        Path {
-            /// Path to local device,
-            path: String,
-        },
-        /// Buttons announced
-        ///
-        /// Sent on wp_tablet_pad initialization to announce the available
-        /// buttons.
-        ///
-        /// This event is sent in the initial burst of events before the
-        /// wp_tablet_pad.done event. This event is only sent when at least one
-        /// button is available.
-        Buttons {
-            /// The number of buttons,
-            buttons: u32,
-        },
-        /// Pad description event sequence complete
-        ///
-        /// This event signals the end of the initial burst of descriptive
-        /// events. A client may consider the static description of the pad to
-        /// be complete and finalize initialization of the pad.
-        Done,
-        /// Physical button state
-        ///
-        /// Sent whenever the physical state of a button changes.
-        Button {
-            /// The time of the event with millisecond granularity,
-            time: u32,
-            /// The index of the button that changed state,
-            button: u32,
-            state: u32,
-        },
-        /// Enter event
-        ///
-        /// Notification that this pad is focused on the specified surface.
-        Enter {
-            /// Serial number of the enter event,
-            serial: u32,
-            /// The tablet the pad is attached to,
-            tablet: ZwpTabletV2Id,
-            /// Surface the pad is focused on,
-            surface: WlSurfaceId,
-        },
-        /// Leave event
-        ///
-        /// Notification that this pad is no longer focused on the specified
-        /// surface.
-        Leave {
-            /// Serial number of the leave event,
-            serial: u32,
-            /// Surface the pad is no longer focused on,
-            surface: WlSurfaceId,
-        },
-        /// Pad removed event
-        ///
-        /// Sent when the pad has been removed from the system. When a tablet
-        /// is removed its pad(s) will be removed too.
-        ///
-        /// When this event is received, the client must destroy all rings, strips
-        /// and groups that were offered by this pad, and issue wp_tablet_pad.destroy
-        /// the pad itself.
-        Removed,
-    }
-    impl EventWriter for crate::wayland_objects::zwp_tablet_pad_v2::ZwpTabletPadV2 {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                Group { pad_group } => {
-                    let mut raw = RawEvent::new(self.id(), 0, 1);
-                    raw.id(pad_group);
-                    raw
-                }
-                Path { path } => {
-                    let mut raw = RawEvent::new(self.id(), 1, 1);
-                    raw.string(path);
-                    raw
-                }
-                Buttons { buttons } => {
-                    let mut raw = RawEvent::new(self.id(), 2, 1);
-                    raw.uint(buttons);
-                    raw
-                }
-                Done {} => {
-                    let mut raw = RawEvent::new(self.id(), 3, 0);
-                    raw
-                }
-                Button { time, button, state } => {
-                    let mut raw = RawEvent::new(self.id(), 4, 3);
-                    raw.uint(time);
-                    raw.uint(button);
-                    raw.uint(state);
-                    raw
-                }
-                Enter { serial, tablet, surface } => {
-                    let mut raw = RawEvent::new(self.id(), 5, 3);
-                    raw.uint(serial);
-                    raw.id(tablet);
-                    raw.id(surface);
-                    raw
-                }
-                Leave { serial, surface } => {
-                    let mut raw = RawEvent::new(self.id(), 6, 2);
-                    raw.uint(serial);
-                    raw.id(surface);
-                    raw
-                }
-                Removed {} => {
-                    let mut raw = RawEvent::new(self.id(), 7, 0);
-                    raw
-                }
-            }
-        }
-    }
-    /// Physical button state
-    ///
-    /// Describes the physical state of a button that caused the button
-    /// event.
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-    pub enum ButtonState {
-        /// The button is not pressed,
-        Released = 0,
-        /// The button is pressed,
-        Pressed = 1,
     }
 }
 

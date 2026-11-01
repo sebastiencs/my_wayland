@@ -8,7 +8,9 @@ use crate::{
     dmabuf::{DmaBuf, DmaBufId, DmaBufPlane},
     drm::{Modifier, FORMATS_MAP},
     object::{Object, Parser, RequestResult},
-    protocol_generated::{zwp_linux_buffer_params_v1, WaylandId, ZwpLinuxBufferParamsV1Id},
+    protocol_generated::{
+        wl_display, zwp_linux_buffer_params_v1, WaylandId, ZwpLinuxBufferParamsV1Id,
+    },
     state::{GrabbedObject, State},
     wayland_objects::wl_buffer::{NewDmabufWlBufferParams, WlBuffer},
 };
@@ -213,6 +215,13 @@ impl Object for ZwpLinuxBufferParamsV1 {
                         self.send_error(dispatcher, error as u32, "invalid dma-buf params")
                     }
                 }
+            }
+            SetSamplingDevice { .. } => {
+                self.send_error(
+                    dispatcher,
+                    wl_display::Error::InvalidMethod as u32,
+                    "linux-dmabuf sampling device is not advertised by this compositor version",
+                );
             }
         }
         Ok(())

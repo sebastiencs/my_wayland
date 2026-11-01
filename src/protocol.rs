@@ -348,10 +348,8 @@ pub fn gen() -> std::io::Result<()> {
     // dnf install wayland-protocols-devel wlr-protocols-devel hyprland-protocols-devel
     let paths = [
         "/usr/share/wayland/wayland.xml",
-        // use unstable for now
-        // "/usr/share/wayland-protocols/stable/linux-dmabuf/linux-dmabuf-v1.xml",
-        // use unstable for now
-        // "/usr/share/wayland-protocols/stable/tablet/tablet-v2.xml",
+        "/usr/share/wayland-protocols/stable/linux-dmabuf/linux-dmabuf-v1.xml",
+        "/usr/share/wayland-protocols/stable/tablet/tablet-v2.xml",
         "/usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml",
         "/usr/share/wayland-protocols/stable/viewporter/viewporter.xml",
         "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml",
@@ -389,14 +387,12 @@ pub fn gen() -> std::io::Result<()> {
         // "/usr/share/wayland-protocols/unstable/input-method/input-method-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/input-timestamps/input-timestamps-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/keyboard-shortcuts-inhibit/keyboard-shortcuts-inhibit-unstable-v1.xml",
-        "/usr/share/wayland-protocols/unstable/linux-dmabuf/linux-dmabuf-unstable-v1.xml",
         "/usr/share/wayland-protocols/unstable/linux-explicit-synchronization/linux-explicit-synchronization-unstable-v1.xml",
         "/usr/share/wayland-protocols/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/pointer-gestures/pointer-gestures-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/primary-selection/primary-selection-unstable-v1.xml",
         "/usr/share/wayland-protocols/unstable/relative-pointer/relative-pointer-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/tablet/tablet-unstable-v1.xml",
-        "/usr/share/wayland-protocols/unstable/tablet/tablet-unstable-v2.xml",
         // "/usr/share/wayland-protocols/unstable/text-input/text-input-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/text-input/text-input-unstable-v3.xml",
         "/usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml",
