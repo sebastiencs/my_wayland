@@ -12,8 +12,7 @@ use crate::{
     wayland_objects::{wl_display::WlDisplay, zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1},
 };
 
-/// Present so a later phase can publish the global. `Globals::initialize` does
-/// not insert it: inhibition is not honored until visibility policy exists.
+/// Advertised at version 1 once inhibitor visibility and cleanup are in place.
 #[derive(Debug)]
 pub struct ZwpIdleInhibitManagerV1Global;
 
@@ -162,10 +161,10 @@ mod tests {
     }
 
     #[test]
-    fn the_inhibit_global_stays_unpublished() {
+    fn the_inhibit_global_is_advertised_at_version_one() {
         let mut globals = Globals::new();
         globals.initialize();
-        assert!(!globals.contains_interface(ZwpIdleInhibitManagerV1::INTERFACE_NAME));
+        assert!(globals.contains_interface(ZwpIdleInhibitManagerV1::INTERFACE_NAME));
 
         let mut state = state_for_tests();
         let (mut client, mut dispatcher) = test_client_and_dispatcher(1);
@@ -242,6 +241,7 @@ mod tests {
             .client
             .contains_object(ZwpIdleInhibitorV1Id::from(7), &fixture.state));
         assert_eq!(fixture.surface.rref(&fixture.state).idle_inhibitors().len(), 1);
+        assert_eq!(fixture.state.idle_inhibitors.len(), 1);
         assert!(!closed(&fixture));
     }
 
@@ -256,12 +256,15 @@ mod tests {
                 .grab_object::<WlSurface>(fixture.surface.object_id());
             let mut client_dispatcher = fixture.client.test_dispatcher(&mut fixture.dispatcher);
             surface.delete_self(&mut fixture.client, &mut fixture.state, &mut client_dispatcher);
+            client_dispatcher.drain_post_actions(&mut fixture.client, &mut fixture.state);
         }
         let inhibitor = fixture
             .client
             .resolve(ZwpIdleInhibitorV1Id::from(7), &fixture.state)
             .expect("inhibitor stays until the client destroys it");
         assert!(inhibitor.rref(&fixture.state).surface().is_none());
+        assert_eq!(fixture.state.idle_inhibitors.len(), 1);
+        assert!(!fixture.state.idle_inhibitors_honored);
         let inhibitor = fixture
             .client
             .resolve(ZwpIdleInhibitorV1Id::from(7), &fixture.state)
@@ -271,6 +274,7 @@ mod tests {
         assert!(!fixture
             .client
             .contains_object(ZwpIdleInhibitorV1Id::from(7), &fixture.state));
+        assert!(fixture.state.idle_inhibitors.is_empty());
         assert!(!closed(&fixture));
     }
 
@@ -300,6 +304,7 @@ mod tests {
             .rref(&fixture.state)
             .idle_inhibitors()
             .is_empty());
+        assert!(fixture.state.idle_inhibitors.is_empty());
 
         fixture
             .client

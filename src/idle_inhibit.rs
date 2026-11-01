@@ -159,7 +159,8 @@ mod tests {
     use crate::{
         clients::{Client, ClientAction, ClientId, Resolved},
         protocol_generated::{
-            WlSeatId, WlSurfaceId, ZwlrLayerShellV1Id, ZwlrLayerSurfaceV1Id, ZwpIdleInhibitorV1Id,
+            WlSeatId, WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgWmBaseId, ZwlrLayerShellV1Id,
+            ZwlrLayerSurfaceV1Id, ZwpIdleInhibitorV1Id,
         },
         runner::Dispatcher,
         state::{BackendOutputRef, DrmId, ObjectId, State},
@@ -168,12 +169,15 @@ mod tests {
             ext_idle_notification_v1::{self, IdleNotice},
             wl_seat::WlSeat,
             wl_surface::WlSurface,
+            xdg_popup::XdgPopup,
+            xdg_positioner::PositionerState,
+            xdg_surface::XdgSurface,
             zwlr_layer_surface_v1::{LayerShellLayer, ZwlrLayerSurfaceV1},
-            zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
+            zwp_idle_inhibitor_v1::{detach_destroyed_surface, ZwpIdleInhibitorV1},
         },
     };
 
-    use super::{inhibitor_is_honored, refresh, register_inhibitor};
+    use super::{inhibitor_is_honored, refresh, register_inhibitor, unregister_inhibitor};
 
     fn output_and_root(state: &mut State, raw: u32) -> Resolved<WlSurfaceId> {
         let backend = BackendOutputRef::new(DrmId::from(0usize));
@@ -476,5 +480,170 @@ mod tests {
         let released_at = during + Duration::from_secs(2);
         refresh(&mut fixture.state, &mut fixture.dispatcher, released_at);
         assert_eq!(notices(&clock(&fixture)), vec![IdleNotice::Idled]);
+    }
+
+    fn attach_popup(
+        state: &mut State,
+        parent: Resolved<WlSurfaceId>,
+        raw: u32,
+    ) -> Resolved<WlSurfaceId> {
+        let client = ClientId::from_raw(1);
+        let (_, parent_xdg_id) = state.insert_object(XdgSurface::new(
+            XdgSurfaceId::from(raw + 100),
+            Resolved::new(client, XdgWmBaseId::from(1), ObjectId::from(1usize)),
+            parent,
+            7,
+        ));
+        let parent_xdg = Resolved::new(client, XdgSurfaceId::from(raw + 100), parent_xdg_id);
+        let (_, popup_surface_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(raw), client, 6));
+        let popup_surface = Resolved::new(client, WlSurfaceId::from(raw), popup_surface_id);
+        let (_, popup_xdg_id) = state.insert_object(XdgSurface::new(
+            XdgSurfaceId::from(raw + 1),
+            Resolved::new(client, XdgWmBaseId::from(1), ObjectId::from(1usize)),
+            popup_surface,
+            7,
+        ));
+        let popup_xdg = Resolved::new(client, XdgSurfaceId::from(raw + 1), popup_xdg_id);
+        state
+            .objects
+            .get_mut(popup_surface_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_xdg_surface_impl(popup_xdg);
+        let (_, popup_id) = state.insert_object(XdgPopup::new(
+            XdgPopupId::from(raw + 2),
+            popup_xdg,
+            Some(parent_xdg),
+            PositionerState::default(),
+            7,
+        ));
+        let popup = Resolved::new(client, XdgPopupId::from(raw + 2), popup_id);
+        state
+            .objects
+            .get_mut(popup_xdg_id)
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_popup_role(popup);
+        popup_surface
+    }
+
+    #[test]
+    fn a_popup_inherits_the_root_it_is_attached_to() {
+        let mut state = state_for_tests();
+        let covered = output_and_root(&mut state, 15);
+        let fullscreen = output_and_root(&mut state, 16);
+        map_root(&mut state, covered);
+        map_root(&mut state, fullscreen);
+        let workspace_id = state.root_surface_workspace(covered).unwrap();
+        state
+            .workspaces
+            .try_get_mut(workspace_id)
+            .unwrap()
+            .layout
+            .set_fullscreen(Some(fullscreen));
+
+        let covered_popup = attach_popup(&mut state, covered, 17);
+        let fullscreen_popup = attach_popup(&mut state, fullscreen, 21);
+        assert!(!inhibitor_is_honored(&state, covered_popup));
+        assert!(inhibitor_is_honored(&state, fullscreen_popup));
+    }
+
+    #[test]
+    fn a_disabled_output_does_not_honor_an_inhibitor() {
+        let mut state = state_for_tests();
+        let root = output_and_root(&mut state, 18);
+        map_root(&mut state, root);
+        track_inhibitor(&mut state, root, 42);
+        assert!(inhibitor_is_honored(&state, root));
+        let workspace = state.root_surface_workspace(root).unwrap();
+        let output_id = state.workspace_output_ids(workspace)[0];
+        state.outputs.try_get_mut(output_id).unwrap().enabled = false;
+        assert!(!inhibitor_is_honored(&state, root));
+    }
+
+    #[test]
+    fn destroying_the_surface_restarts_the_timeout_and_keeps_an_inert_inhibitor() {
+        let mut fixture = notify_fixture();
+        let created = Instant::now();
+        create_notice(&mut fixture, 7, 5_000, true, created);
+        let idle_at = created + Duration::from_millis(5_000);
+        ext_idle_notification_v1::evaluate(&mut fixture.state, &mut fixture.dispatcher, idle_at);
+        let root = output_and_root(&mut fixture.state, 31);
+        map_root(&mut fixture.state, root);
+        let inhibitor = track_inhibitor(&mut fixture.state, root, 41);
+        let resumed_at = idle_at + Duration::from_secs(1);
+        refresh(&mut fixture.state, &mut fixture.dispatcher, resumed_at);
+        assert!(fixture.state.idle_inhibitors_honored);
+
+        let inhibitors = root
+            .try_ref(&fixture.state)
+            .unwrap()
+            .idle_inhibitors()
+            .to_vec();
+        {
+            let surface = root.try_ref_mut(&mut fixture.state).unwrap();
+            for id in &inhibitors {
+                surface.remove_idle_inhibitor(*id);
+            }
+        }
+        detach_destroyed_surface(inhibitors, &mut fixture.state);
+        let released_at = resumed_at + Duration::from_secs(3);
+        refresh(&mut fixture.state, &mut fixture.dispatcher, released_at);
+        assert!(!fixture.state.idle_inhibitors_honored);
+        assert!(fixture.state.idle_inhibitors.contains(&inhibitor));
+        let aware = fixture
+            .client
+            .resolve(crate::protocol_generated::ExtIdleNotificationV1Id::from(7), &fixture.state)
+            .unwrap()
+            .rref(&fixture.state);
+        assert_eq!(aware.deadline(), Some(released_at + Duration::from_millis(5_000)));
+        assert_eq!(notices(&clock(&fixture)), vec![IdleNotice::Idled, IdleNotice::Resumed]);
+
+        unregister_inhibitor(&mut fixture.state, inhibitor);
+        assert!(!fixture.state.idle_inhibitors.contains(&inhibitor));
+    }
+
+    #[test]
+    fn repeated_inhibit_cycles_resume_once_each_time() {
+        let mut fixture = notify_fixture();
+        let created = Instant::now();
+        create_notice(&mut fixture, 7, 1_000, true, created);
+        create_notice(&mut fixture, 8, 1_000, false, created);
+        let idle_at = created + Duration::from_millis(1_000);
+        ext_idle_notification_v1::evaluate(&mut fixture.state, &mut fixture.dispatcher, idle_at);
+        let root = output_and_root(&mut fixture.state, 31);
+        map_root(&mut fixture.state, root);
+        track_inhibitor(&mut fixture.state, root, 41);
+
+        let first_resume = idle_at + Duration::from_secs(1);
+        refresh(&mut fixture.state, &mut fixture.dispatcher, first_resume);
+        fixture
+            .state
+            .managed_root_surfaces
+            .get_mut(&root)
+            .unwrap()
+            .mapped = false;
+        let released = first_resume + Duration::from_secs(2);
+        refresh(&mut fixture.state, &mut fixture.dispatcher, released);
+        let second_idle = released + Duration::from_millis(1_000);
+        ext_idle_notification_v1::evaluate(
+            &mut fixture.state,
+            &mut fixture.dispatcher,
+            second_idle,
+        );
+        map_root(&mut fixture.state, root);
+        refresh(&mut fixture.state, &mut fixture.dispatcher, second_idle + Duration::from_secs(1));
+
+        assert_eq!(
+            notices(&clock(&fixture)),
+            vec![
+                IdleNotice::Idled,
+                IdleNotice::Idled,
+                IdleNotice::Resumed,
+                IdleNotice::Idled,
+                IdleNotice::Resumed,
+            ]
+        );
     }
 }

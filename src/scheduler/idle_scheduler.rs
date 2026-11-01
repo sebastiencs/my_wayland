@@ -463,10 +463,10 @@ mod tests {
     }
 
     #[test]
-    fn ext_idle_notifier_is_advertised_without_idle_inhibit() {
+    fn ext_idle_notifier_and_idle_inhibit_are_advertised() {
         let state = state_for_tests();
         assert!(state.globals.contains_interface("ext_idle_notifier_v1"));
-        assert!(!state
+        assert!(state
             .globals
             .contains_interface("zwp_idle_inhibit_manager_v1"));
     }

@@ -212,7 +212,7 @@ mod tests {
             .unwrap();
         assert_eq!(name, "ext_idle_notifier_v1");
         assert_eq!(version, 2);
-        assert!(!globals.contains_interface("zwp_idle_inhibit_manager_v1"));
+        assert!(globals.contains_interface("zwp_idle_inhibit_manager_v1"));
     }
 
     #[test]
