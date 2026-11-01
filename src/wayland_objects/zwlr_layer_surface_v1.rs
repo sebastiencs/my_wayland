@@ -167,29 +167,31 @@ struct ComputedLayerLayout {
 #[derive(Clone, Copy, Debug)]
 pub struct LayerLayoutObjectSnapshot<'a> {
     pub root_surface: Resolved<WlSurfaceId>,
-    pub surface: &'a WlSurface,
     pub resolved_layer_surface: Option<Resolved<ZwlrLayerSurfaceV1Id>>,
     pub layer_surface: Option<&'a ZwlrLayerSurfaceV1>,
 }
 
-impl<'a> LayerLayoutObjectSnapshot<'a> {
-    pub fn for_surface(root_surface: Resolved<WlSurfaceId>, surface: &'a WlSurface) -> Self {
+impl LayerLayoutObjectSnapshot<'static> {
+    pub fn for_surface(root_surface: Resolved<WlSurfaceId>) -> Self {
         Self {
             root_surface,
-            surface,
             resolved_layer_surface: None,
             layer_surface: None,
         }
     }
+}
 
-    pub fn with_layer_surface(
-        mut self,
+impl<'a> LayerLayoutObjectSnapshot<'a> {
+    pub fn with_layer_surface<'b>(
+        self,
         resolved_layer_surface: Resolved<ZwlrLayerSurfaceV1Id>,
-        layer_surface: &'a ZwlrLayerSurfaceV1,
-    ) -> Self {
-        self.resolved_layer_surface = Some(resolved_layer_surface);
-        self.layer_surface = Some(layer_surface);
-        self
+        layer_surface: &'b ZwlrLayerSurfaceV1,
+    ) -> LayerLayoutObjectSnapshot<'b> {
+        LayerLayoutObjectSnapshot {
+            root_surface: self.root_surface,
+            resolved_layer_surface: Some(resolved_layer_surface),
+            layer_surface: Some(layer_surface),
+        }
     }
 }
 
@@ -535,7 +537,6 @@ impl ZwlrLayerSurfaceV1 {
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        surface: &WlSurface,
         has_pending_buffer_attach: bool,
         is_null_buffer_commit: bool,
     ) -> bool {
@@ -569,7 +570,7 @@ impl ZwlrLayerSurfaceV1 {
                 was_layer,
                 self,
             ) {
-                let layout_snapshot = LayerLayoutObjectSnapshot::for_surface(self.surface, surface)
+                let layout_snapshot = LayerLayoutObjectSnapshot::for_surface(self.surface)
                     .with_layer_surface(
                         Resolved::new(self.client_id(), self.id, client.object_id(self.id)),
                         self,
@@ -604,7 +605,7 @@ impl ZwlrLayerSurfaceV1 {
             was_layer,
             self,
         ) {
-            let layout_snapshot = LayerLayoutObjectSnapshot::for_surface(self.surface, surface)
+            let layout_snapshot = LayerLayoutObjectSnapshot::for_surface(self.surface)
                 .with_layer_surface(
                     Resolved::new(self.client_id(), self.id, client.object_id(self.id)),
                     self,
@@ -982,15 +983,11 @@ fn compute_output_layout(
     output_layout
 }
 
-pub(crate) fn lookup_snapshot_surface<'a>(
+fn lookup_snapshot_surface<'a>(
     state: &'a State,
-    snapshot: Option<LayerLayoutObjectSnapshot<'a>>,
     root_surface: Resolved<WlSurfaceId>,
 ) -> Option<&'a WlSurface> {
-    snapshot
-        .filter(|snapshot| snapshot.root_surface == root_surface)
-        .map(|snapshot| snapshot.surface)
-        .or_else(|| root_surface.try_ref(state))
+    root_surface.try_ref(state)
 }
 
 fn snapshot_layer_surface<'a>(
@@ -1021,7 +1018,7 @@ fn compute_layer_layout(
     let mut snapshots_by_output = BTreeMap::<OutputId, Vec<LayerSnapshot>>::new();
 
     for root_surface in live_root_ids.iter().copied() {
-        let Some(surface) = lookup_snapshot_surface(state, snapshot, root_surface) else {
+        let Some(surface) = lookup_snapshot_surface(state, root_surface) else {
             continue;
         };
         let Some(layer_surface_id) = surface.layer_surface() else {
@@ -1123,7 +1120,7 @@ pub fn layer_surface_keyboard_focus_with_snapshot(
     root_surface: Resolved<WlSurfaceId>,
     snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
 ) -> Option<LayerKeyboardFocus> {
-    let surface = lookup_snapshot_surface(state, snapshot, root_surface)?;
+    let surface = lookup_snapshot_surface(state, root_surface)?;
     let Some(layer_surface_id) = surface.layer_surface() else {
         return popup_parent_layer_surface_keyboard_focus(state, surface);
     };
@@ -1346,6 +1343,7 @@ mod tests {
         crate::{
             clients::{Client, ClientId, ClientManagerAction, RawEvent},
             io_uring::model::IoUringAction,
+            object::Object,
             runner::Dispatcher,
             state::{GrabbedObject, State},
             test_support::{
@@ -1864,11 +1862,6 @@ mod tests {
         state.register_layer_surface_object(top_layer_resolved);
         state.register_layer_surface_object(overlay_layer_resolved);
 
-        let mut overlay_snapshot_surface =
-            WlSurface::new(WlSurfaceId::from(52u32), ClientId::from_raw(1), 6);
-        overlay_snapshot_surface.set_layer_surface_impl(overlay_layer_resolved);
-        overlay_snapshot_surface.test_map(ObjectId::from(253usize), 0, 0, 220, 50);
-
         let mut overlay_snapshot_layer = ZwlrLayerSurfaceV1::new(
             ZwlrLayerSurfaceV1Id::from(62u32),
             fake_layer_manager(2),
@@ -1884,9 +1877,8 @@ mod tests {
         overlay_snapshot_layer.current.keyboard_interactivity =
             zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive as u32;
 
-        let snapshot =
-            LayerLayoutObjectSnapshot::for_surface(overlay_root, &overlay_snapshot_surface)
-                .with_layer_surface(overlay_layer_resolved, &overlay_snapshot_layer);
+        let snapshot = LayerLayoutObjectSnapshot::for_surface(overlay_root)
+            .with_layer_surface(overlay_layer_resolved, &overlay_snapshot_layer);
 
         crate::input::refresh_keyboard_focus_with_snapshot(
             &mut state,
@@ -1897,6 +1889,105 @@ mod tests {
         assert_eq!(
             state.seat.keyboard_focus(),
             Some(crate::input::SurfaceFocus::new(overlay_root))
+        );
+    }
+
+    #[test]
+    fn mapping_an_exclusive_overlay_refreshes_focus_while_its_layer_surface_is_grabbed() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_drm1_crtc(1, 0, 0, 1280, 800));
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let surface_id = WlSurfaceId::from(3u32);
+        let (surface_resolved, _) =
+            client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
+        state.register_root_surface(surface_resolved);
+
+        let layer_id = ZwlrLayerSurfaceV1Id::from(10u32);
+        let mut layer = ZwlrLayerSurfaceV1::new(
+            layer_id,
+            fake_layer_manager(2),
+            4,
+            surface_resolved,
+            Some(output_id),
+            LayerShellLayer::Overlay,
+            "selection".to_string(),
+        );
+        layer.assigned_output_id = Some(output_id);
+        layer.initial_commit_complete = true;
+        layer.current.anchor = ANCHOR_MASK;
+        layer.current.keyboard_interactivity =
+            zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive as u32;
+        layer.current.exclusive_zone = -1;
+        layer.last_acked = Some(LayerConfigure { serial: 1, width: 1280, height: 800 });
+        let (layer_resolved, _) = client.insert_object(&mut state, layer);
+        state.register_layer_surface_object(layer_resolved);
+        {
+            let mut surface = surface_resolved.ref_mut(&mut state);
+            surface
+                .set_role(
+                    crate::wayland_objects::wl_surface::Role::LayerSurface,
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+            surface.set_layer_surface_impl(layer_resolved);
+        }
+
+        let pixels = vec![0u8; 16];
+        let (buffer, _) = client.insert_object(
+            &mut state,
+            crate::wayland_objects::wl_buffer::WlBuffer::new(
+                crate::wayland_objects::wl_buffer::NewWlBufferParams {
+                    id: crate::protocol_generated::WlBufferId::from(17u32),
+                    owner_client_id: client.client_id(),
+                    offset: 0,
+                    width: 2,
+                    height: 2,
+                    stride: 8,
+                    format: &crate::drm::ARGB8888,
+                    mem: crate::wayland_objects::wl_shm_pool::shared_memory_from_bytes(&pixels),
+                },
+            )
+            .unwrap(),
+        );
+        let mut attach = RawEvent::new(surface_id.into(), 1, 3);
+        attach.id(buffer.wayland_id());
+        attach.int(0);
+        attach.int(0);
+        {
+            let mut surface = client.grab_object(surface_id, &mut state);
+            surface
+                .on(
+                    &mut client,
+                    &mut state,
+                    crate::test_support::raw_request_from_event(attach),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        {
+            let mut surface = client.grab_object(surface_id, &mut state);
+            surface
+                .on(
+                    &mut client,
+                    &mut state,
+                    crate::test_support::raw_request_from_event(RawEvent::new(
+                        surface_id.into(),
+                        6,
+                        0,
+                    )),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+
+        assert!(!dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::Close { .. })
+        }));
+        assert_eq!(
+            state.seat.keyboard_focus(),
+            Some(crate::input::SurfaceFocus::new(surface_resolved))
         );
     }
 

@@ -1986,7 +1986,7 @@ impl WlSurface {
                     let (this, configure_bounds) = client.with_ungrabbed(this, state, |state| {
                         let this = resolved_surface.rref(state);
                         let layout_snapshot =
-                            LayerLayoutObjectSnapshot::for_surface(resolved_surface, this);
+                            LayerLayoutObjectSnapshot::for_surface(resolved_surface);
                         state.configure_bounds_for_surface_with_ref(
                             resolved_surface,
                             this,
@@ -2017,15 +2017,20 @@ impl WlSurface {
                     resolved_surface.grab(state)
                 }
                 ShellSurfaceObject::LayerSurface(layer_surface_id) => {
-                    let mut layer_surface = layer_surface_id.grab(state);
-                    if !layer_surface.on_commit(
-                        client,
-                        state,
-                        dispatcher,
-                        &this,
-                        this.has_pending_buffer_attach(),
-                        matches!(this.pending.buffer, Some(None)),
-                    ) {
+                    let has_pending_buffer_attach = this.has_pending_buffer_attach();
+                    let is_null_buffer_commit = matches!(this.pending.buffer, Some(None));
+                    let (mut this, accepted) =
+                        client.with_ungrabbed_mut(this, state, |state, client| {
+                            let mut layer_surface = layer_surface_id.grab(state);
+                            layer_surface.on_commit(
+                                client,
+                                state,
+                                dispatcher,
+                                has_pending_buffer_attach,
+                                is_null_buffer_commit,
+                            )
+                        });
+                    if !accepted {
                         this.clear_failed_surface_commit();
                         return;
                     }

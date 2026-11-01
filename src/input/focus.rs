@@ -23,7 +23,16 @@ pub(crate) fn set_keyboard_focus(
     dispatcher: &mut Dispatcher,
     new_focus: Option<SurfaceFocus>,
 ) {
-    let new_focus = normalize_keyboard_focus(state, new_focus);
+    set_keyboard_focus_with_snapshot(state, dispatcher, new_focus, None);
+}
+
+fn set_keyboard_focus_with_snapshot(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    new_focus: Option<SurfaceFocus>,
+    snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
+) {
+    let new_focus = normalize_keyboard_focus_with_snapshot(state, new_focus, snapshot);
     if state.seat.keyboard_focus == new_focus {
         return;
     }
@@ -140,7 +149,7 @@ pub(crate) fn refresh_keyboard_focus_with_snapshot(
     let preferred_focus =
         popup_keyboard_focus(state).or_else(|| state.seat.pointer_focus.map(|focus| focus.target));
     let new_focus = normalize_keyboard_focus_with_snapshot(state, preferred_focus, snapshot);
-    set_keyboard_focus(state, dispatcher, new_focus);
+    set_keyboard_focus_with_snapshot(state, dispatcher, new_focus, snapshot);
 }
 
 pub(crate) fn refresh_scene_focus(state: &mut State, dispatcher: &mut Dispatcher) {
