@@ -15,6 +15,7 @@ use crate::{
         wp_viewport, xdg_wm_base, WaylandId, WlBufferId, WlCallbackId, WlOutputId, WlRegionId,
         WlSubsurfaceId, WlSurfaceId, WpFractionalScaleV1Id, WpLinuxDrmSyncobjSurfaceV1Id,
         WpPresentationFeedbackId, WpViewportId, XdgSurfaceId, ZwlrLayerSurfaceV1Id,
+        ZwpIdleInhibitorV1Id,
     },
     region::{DamageRegion, RectI, RegionValue},
     scene::visibility::root_participates_in_input,
@@ -30,6 +31,7 @@ use crate::{
         zwlr_layer_surface_v1::{
             output_usable_bounds, LayerLayoutObjectSnapshot, ZwlrLayerSurfaceV1,
         },
+        zwp_idle_inhibitor_v1::detach_destroyed_surface,
         zwp_pointer_constraints_v1::{apply_pointer_constraint_commit, defunct_pointer_constraint},
     },
     ENABLE_DAMAGE,
@@ -192,6 +194,7 @@ pub struct WlSurface {
     preferred_buffer_scale_sent: Option<i32>,
     preferred_buffer_transform_sent: Option<u32>,
     pointer_constraint: Option<SurfacePointerConstraint>,
+    idle_inhibitors: Vec<Resolved<ZwpIdleInhibitorV1Id>>,
 }
 
 #[derive(Clone, Debug)]
@@ -424,7 +427,25 @@ impl WlSurface {
             preferred_buffer_scale_sent: None,
             preferred_buffer_transform_sent: None,
             pointer_constraint: None,
+            idle_inhibitors: Vec::new(),
         }
+    }
+
+    pub(crate) fn add_idle_inhibitor(&mut self, inhibitor: Resolved<ZwpIdleInhibitorV1Id>) {
+        self.idle_inhibitors.push(inhibitor);
+    }
+
+    pub(crate) fn remove_idle_inhibitor(&mut self, inhibitor: Resolved<ZwpIdleInhibitorV1Id>) {
+        self.idle_inhibitors
+            .retain(|existing| *existing != inhibitor);
+    }
+
+    pub(crate) fn idle_inhibitors(&self) -> &[Resolved<ZwpIdleInhibitorV1Id>] {
+        &self.idle_inhibitors
+    }
+
+    fn release_idle_inhibitors(&mut self, state: &mut State) {
+        detach_destroyed_surface(std::mem::take(&mut self.idle_inhibitors), state);
     }
 
     pub(crate) fn pointer_constraint(&self) -> Option<SurfacePointerConstraint> {
@@ -2665,6 +2686,7 @@ impl WlSurface {
         let geometry = self.pointer_lock_warp_geometry();
         let constraint = self.pointer_constraint.take();
         defunct_pointer_constraint(constraint, state, dispatcher, true, Some(geometry));
+        self.release_idle_inhibitors(state);
         self.discard_all_presentation_feedbacks(client, state, dispatcher);
         for child_surface in self.child_surface_ids() {
             Self::detach_subsurface_tree(child_surface, client, state, dispatcher);
@@ -2828,6 +2850,7 @@ impl Object for WlSurface {
         }
         let constraint = self.pointer_constraint.take();
         defunct_pointer_constraint(constraint, state, dispatcher, false, None);
+        self.release_idle_inhibitors(state);
         if let Some(waiter_id) = self.blocked_waiter_id.take() {
             dispatcher.stop_model(waiter_id);
         }

@@ -49,6 +49,8 @@ pub mod zwlr_gamma_control_v1;
 pub mod zwlr_layer_shell_v1;
 pub mod zwlr_layer_surface_v1;
 pub mod zwp_confined_pointer_v1;
+pub mod zwp_idle_inhibit_manager_v1;
+pub mod zwp_idle_inhibitor_v1;
 pub mod zwp_linux_buffer_params_v1;
 pub mod zwp_linux_dmabuf_v1;
 pub mod zwp_locked_pointer_v1;

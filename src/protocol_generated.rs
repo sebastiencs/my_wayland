@@ -88,6 +88,8 @@ wayland_id! {
   WpLinuxDrmSyncobjManagerV1Id,
   WpLinuxDrmSyncobjTimelineV1Id,
   WpLinuxDrmSyncobjSurfaceV1Id,
+  ZwpIdleInhibitManagerV1Id,
+  ZwpIdleInhibitorV1Id,
   ZwpLinuxDmabufV1Id,
   ZwpLinuxBufferParamsV1Id,
   ZwpLinuxDmabufFeedbackV1Id,
@@ -9396,6 +9398,111 @@ pub mod wp_linux_drm_syncobj_surface_v1 {
         NoReleasePoint = 5,
         /// Acquire and release timeline points are in conflict,
         ConflictingPoints = 6,
+    }
+}
+
+/// Control behavior when display idles
+///
+/// This interface permits inhibiting the idle behavior such as screen
+/// blanking, locking, and screensaving.  The client binds the idle manager
+/// globally, then creates idle-inhibitor objects for each surface.
+///
+/// Warning! The protocol described in this file is experimental and
+/// backward incompatible changes may be made. Backward compatible changes
+/// may be added together with the corresponding interface version bump.
+/// Backward incompatible changes are done by bumping the version number in
+/// the protocol and interface names and resetting the interface version.
+/// Once the protocol is to be declared stable, the 'z' prefix and the
+/// version number in the protocol and interface names are removed and the
+/// interface version number is reset.
+pub mod zwp_idle_inhibit_manager_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1 {
+        const INTERFACE_NAME: &'static str = "zwp_idle_inhibit_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpIdleInhibitManagerV1Id {
+        type Object = crate::wayland_objects::zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1
+    {
+        type Id = ZwpIdleInhibitManagerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the idle inhibitor object
+        ///
+        /// Destroy the inhibit manager.
+        Destroy,
+        /// Create a new inhibitor object
+        ///
+        /// Create a new inhibitor object associated with the given surface.
+        CreateInhibitor {
+            id: ZwpIdleInhibitorV1Id,
+            /// The surface that inhibits the idle behavior,
+            surface: WlSurfaceId,
+        },
+    }
+    impl Parser for crate::wayland_objects::zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => CreateInhibitor { id: req.id()?, surface: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
+/// Context object for inhibiting idle behavior
+///
+/// An idle inhibitor prevents the output that the associated surface is
+/// visible on from being set to a state where it is not visually usable due
+/// to lack of user interaction (e.g. blanked, dimmed, locked, set to power
+/// save, etc.)  Any screensaver processes are also blocked from displaying.
+///
+/// If the surface is destroyed, unmapped, becomes occluded, loses
+/// visibility, or otherwise becomes not visually relevant for the user, the
+/// idle inhibitor will not be honored by the compositor; if the surface
+/// subsequently regains visibility the inhibitor takes effect once again.
+/// Likewise, the inhibitor isn't honored if the system was already idled at
+/// the time the inhibitor was established, although if the system later
+/// de-idles and re-idles the inhibitor will take effect.
+pub mod zwp_idle_inhibitor_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1 {
+        const INTERFACE_NAME: &'static str = "zwp_idle_inhibitor_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpIdleInhibitorV1Id {
+        type Object = crate::wayland_objects::zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1
+    {
+        type Id = ZwpIdleInhibitorV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the idle inhibitor object
+        ///
+        /// Remove the inhibitor effect from the associated wl_surface.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
     }
 }
 

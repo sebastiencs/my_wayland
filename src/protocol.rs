@@ -363,7 +363,7 @@ pub fn gen() -> std::io::Result<()> {
         "/usr/share/wayland-protocols/staging/cursor-shape/cursor-shape-v1.xml",
         "/usr/share/wayland-protocols/staging/linux-drm-syncobj/linux-drm-syncobj-v1.xml",
         // "/usr/share/wayland-protocols/unstable/fullscreen-shell/fullscreen-shell-unstable-v1.xml",
-        // "/usr/share/wayland-protocols/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml",
+        "/usr/share/wayland-protocols/unstable/idle-inhibit/idle-inhibit-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/input-method/input-method-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/input-timestamps/input-timestamps-unstable-v1.xml",
         // "/usr/share/wayland-protocols/unstable/keyboard-shortcuts-inhibit/keyboard-shortcuts-inhibit-unstable-v1.xml",
