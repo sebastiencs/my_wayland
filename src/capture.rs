@@ -1,9 +1,9 @@
-//! Shared lifecycle for `zwlr_screencopy_v1` and `ext-image-copy-capture-v1`.
+//! Shared lifecycle and SHM capture queue for both screenshot protocols.
 //!
-//! Pixel copy, damage, and cursor compositing land in later phases. This registry only tracks
-//! which protocol objects must stop when an output, toplevel, or pointer disappears, matching
-//! wlroots screencopy/ext-image-copy source teardown. Globals stay unpublished until those
-//! later phases pass. Hyprland's screencopy permission prompt is intentionally not copied.
+//! Scene sampling, damage, and cursor pixels land in later phases. This registry tracks which
+//! protocol objects must stop when an output, toplevel, or pointer disappears, and completes each
+//! queued copy once. Globals stay unpublished until those later phases pass. Hyprland's screencopy
+//! permission prompt is intentionally not copied.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,7 +11,8 @@ use crate::{
     clients::{Client, ClientAction, ClientDispatcher, ClientId, Resolved},
     protocol_generated::{
         ExtForeignToplevelHandleV1Id, ExtForeignToplevelListV1Id, ExtImageCopyCaptureFrameV1Id,
-        ExtImageCopyCaptureSessionV1Id, WlPointerId, XdgToplevelId, ZwlrScreencopyFrameV1Id,
+        ExtImageCopyCaptureSessionV1Id, WlBufferId, WlPointerId, XdgToplevelId,
+        ZwlrScreencopyFrameV1Id,
     },
     runner::Dispatcher,
     state::{OutputId, State},
@@ -33,6 +34,44 @@ impl ToplevelKey {
 pub enum CaptureTarget {
     Output(OutputId),
     Toplevel(ToplevelKey),
+}
+
+/// Cursor inclusion is recorded per job so later phases can paint one consumer without changing
+/// another. This phase does not sample cursor pixels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptureCursor {
+    Hidden,
+    Painted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct CaptureJobId(u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CaptureJobRequest {
+    pub target: CaptureTarget,
+    pub buffer: Resolved<WlBufferId>,
+    pub width: i32,
+    pub height: i32,
+    pub cursor: CaptureCursor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureJobStatus {
+    Queued,
+    Written,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+struct CaptureJob {
+    buffer: Resolved<WlBufferId>,
+    target: CaptureTarget,
+    width: i32,
+    height: i32,
+    cursor: CaptureCursor,
+    outputs: Vec<OutputId>,
+    status: CaptureJobStatus,
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +127,8 @@ pub struct CaptureRegistry {
     lists: Vec<Resolved<ExtForeignToplevelListV1Id>>,
     handles: Vec<(Resolved<ExtForeignToplevelHandleV1Id>, ToplevelKey)>,
     pending: BTreeMap<ClientId, Vec<Pending>>,
+    next_job: u64,
+    jobs: BTreeMap<CaptureJobId, CaptureJob>,
 }
 
 impl CaptureRegistry {
@@ -168,6 +209,8 @@ impl CaptureRegistry {
             .retain(|(handle, _)| handle.client_id() != client_id);
         self.announced
             .retain(|(list, _)| list.client_id() != client_id);
+        self.jobs
+            .retain(|_, job| job.buffer.client_id() != client_id);
         self.pending.remove(&client_id);
     }
 
@@ -205,6 +248,187 @@ pub(crate) fn target_is_live(state: &State, target: CaptureTarget) -> bool {
         CaptureTarget::Output(output_id) => state.outputs.try_get(output_id).is_some(),
         CaptureTarget::Toplevel(key) => state.capture.toplevel_is_open(key),
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptureQueueError {
+    SourceGone,
+    Buffer(crate::wayland_objects::wl_buffer::CaptureBufferError),
+    BufferBusy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptureFinish {
+    Written,
+    Failed,
+    AlreadyFinished,
+}
+
+/// Queue one capture, check its destination, and ask the relevant output for a frame.
+///
+/// Completion writes the supplied top-left pixels once. A missing source, a second completion, or
+/// a buffer that no longer matches fails without writing again.
+pub(crate) fn submit_capture(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    request: CaptureJobRequest,
+) -> Result<CaptureJobId, CaptureQueueError> {
+    if !target_is_live(state, request.target) {
+        return Err(CaptureQueueError::SourceGone);
+    }
+    if state
+        .capture
+        .jobs
+        .values()
+        .any(|job| job.status == CaptureJobStatus::Queued && job.buffer == request.buffer)
+    {
+        return Err(CaptureQueueError::BufferBusy);
+    }
+    let Some(buffer) = request.buffer.try_ref(state) else {
+        return Err(CaptureQueueError::Buffer(
+            crate::wayland_objects::wl_buffer::CaptureBufferError::Destroyed,
+        ));
+    };
+    buffer
+        .begin_capture_write(request.width, request.height)
+        .map_err(CaptureQueueError::Buffer)?;
+    let outputs = schedule_capture(state, dispatcher, request.target);
+    state.capture.next_job = state.capture.next_job.saturating_add(1);
+    let id = CaptureJobId(state.capture.next_job);
+    state.capture.jobs.insert(
+        id,
+        CaptureJob {
+            buffer: request.buffer,
+            target: request.target,
+            width: request.width,
+            height: request.height,
+            cursor: request.cursor,
+            outputs,
+            status: CaptureJobStatus::Queued,
+        },
+    );
+    Ok(id)
+}
+
+pub(crate) fn capture_job_cursor(state: &State, job_id: CaptureJobId) -> Option<CaptureCursor> {
+    state.capture.jobs.get(&job_id).map(|job| job.cursor)
+}
+
+pub(crate) fn queued_jobs_for_output(state: &State, output_id: OutputId) -> Vec<CaptureJobId> {
+    state
+        .capture
+        .jobs
+        .iter()
+        .filter(|(_, job)| {
+            job.status == CaptureJobStatus::Queued && job.outputs.contains(&output_id)
+        })
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+pub(crate) fn complete_capture(
+    state: &mut State,
+    job_id: CaptureJobId,
+    src: &[u8],
+    src_stride: usize,
+) -> CaptureFinish {
+    let Some(job) = state.capture.jobs.get(&job_id) else {
+        return CaptureFinish::AlreadyFinished;
+    };
+    if job.status != CaptureJobStatus::Queued {
+        return CaptureFinish::AlreadyFinished;
+    }
+    let buffer = job.buffer;
+    let width = job.width;
+    let height = job.height;
+    let target = job.target;
+    if !target_is_live(state, target) {
+        if let Some(job) = state.capture.jobs.get_mut(&job_id) {
+            job.status = CaptureJobStatus::Failed;
+        }
+        return CaptureFinish::Failed;
+    }
+    let written = buffer.try_ref(state).is_some_and(|buffer| {
+        buffer
+            .begin_capture_write(width, height)
+            .and_then(|write| write.write_top_left(src, src_stride))
+            .is_ok()
+    });
+    if let Some(job) = state.capture.jobs.get_mut(&job_id) {
+        job.status = if written { CaptureJobStatus::Written } else { CaptureJobStatus::Failed };
+    }
+    if written {
+        CaptureFinish::Written
+    } else {
+        CaptureFinish::Failed
+    }
+}
+
+pub(crate) fn fail_capture(state: &mut State, job_id: CaptureJobId) -> CaptureFinish {
+    let Some(job) = state.capture.jobs.get_mut(&job_id) else {
+        return CaptureFinish::AlreadyFinished;
+    };
+    if job.status != CaptureJobStatus::Queued {
+        return CaptureFinish::AlreadyFinished;
+    }
+    job.status = CaptureJobStatus::Failed;
+    CaptureFinish::Failed
+}
+
+fn fail_queued_jobs(state: &mut State, target: CaptureTarget) {
+    for job in state.capture.jobs.values_mut() {
+        if job.status == CaptureJobStatus::Queued && job.target == target {
+            job.status = CaptureJobStatus::Failed;
+        }
+    }
+}
+
+fn schedule_capture(
+    state: &State,
+    dispatcher: &mut Dispatcher,
+    target: CaptureTarget,
+) -> Vec<OutputId> {
+    match target {
+        CaptureTarget::Output(output_id) => {
+            crate::drm::request_outputs(state, [output_id], dispatcher);
+            vec![output_id]
+        }
+        CaptureTarget::Toplevel(key) => {
+            let outputs = outputs_for_toplevel(state, key);
+            if outputs.is_empty() {
+                crate::drm::request_active_output(state, dispatcher);
+            } else {
+                crate::drm::request_outputs(state, outputs.iter().copied(), dispatcher);
+            }
+            outputs
+        }
+    }
+}
+
+fn outputs_for_toplevel(state: &State, key: ToplevelKey) -> Vec<OutputId> {
+    let Some(toplevel) = state
+        .capture
+        .by_xdg
+        .iter()
+        .find(|(_, candidate)| **candidate == key)
+        .map(|(toplevel, _)| *toplevel)
+    else {
+        return Vec::new();
+    };
+    let Some(surface) = toplevel
+        .try_ref(state)
+        .and_then(|toplevel| toplevel.xdg_surface().try_ref(state))
+        .map(|xdg_surface| xdg_surface.wl_surface())
+    else {
+        return Vec::new();
+    };
+    let Some(bounds) = surface
+        .try_ref(state)
+        .and_then(|surface| surface.global_logical_bounds())
+    else {
+        return Vec::new();
+    };
+    state.outputs_intersecting_rect(bounds)
 }
 
 pub(crate) fn output_removed(state: &mut State, dispatcher: &mut Dispatcher, output_id: OutputId) {
@@ -263,6 +487,7 @@ pub(crate) fn output_removed(state: &mut State, dispatcher: &mut Dispatcher, out
         .capture
         .screencopy
         .retain(|slot| slot.output_id != output_id);
+    fail_queued_jobs(state, target);
     dispatch_deliver(dispatcher, clients);
 }
 
@@ -375,6 +600,7 @@ pub(crate) fn close_toplevel(state: &mut State, dispatcher: &mut Dispatcher, key
         .capture
         .by_xdg
         .retain(|_, announced| *announced != key);
+    fail_queued_jobs(state, CaptureTarget::Toplevel(key));
 
     let mut clients = BTreeSet::new();
     let handles = state.capture.handles_for(key);
@@ -1648,5 +1874,246 @@ mod tests {
         assert!(client
             .resolve(ExtImageCaptureSourceV1Id::from(31), &state)
             .is_some());
+    }
+
+    fn shm_capture_buffer(
+        client: &mut crate::clients::Client,
+        state: &mut State,
+        id: u32,
+        width: i32,
+        height: i32,
+        stride: i32,
+        pixels: Vec<u8>,
+        format: &'static crate::drm::Format,
+    ) -> Resolved<crate::protocol_generated::WlBufferId> {
+        client
+            .insert_object(
+                state,
+                WlBuffer::new(NewWlBufferParams {
+                    id: crate::protocol_generated::WlBufferId::from(id),
+                    owner_client_id: client.client_id(),
+                    offset: 0,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    mem: crate::wayland_objects::wl_shm_pool::shared_memory_from_bytes(&pixels),
+                })
+                .unwrap(),
+            )
+            .0
+    }
+
+    #[test]
+    fn capture_shm_rejects_a_buffer_that_cannot_hold_the_image() {
+        let (mut client, _, mut state) = client_state();
+        let tight = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            70,
+            2,
+            2,
+            8,
+            vec![0; 32],
+            crate::drm::ARGB8888,
+        );
+        assert_eq!(
+            tight.rref(&state).begin_capture_write(1, 2).unwrap_err(),
+            crate::wayland_objects::wl_buffer::CaptureBufferError::Size
+        );
+        let short_stride = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            71,
+            2,
+            1,
+            4,
+            vec![0; 4],
+            crate::drm::ARGB8888,
+        );
+        assert_eq!(
+            short_stride
+                .rref(&state)
+                .begin_capture_write(2, 1)
+                .unwrap_err(),
+            crate::wayland_objects::wl_buffer::CaptureBufferError::Stride
+        );
+        let overflow = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            72,
+            2,
+            2,
+            16,
+            vec![0; 16],
+            crate::drm::XRGB8888,
+        );
+        assert_eq!(
+            overflow.rref(&state).begin_capture_write(2, 2).unwrap_err(),
+            crate::wayland_objects::wl_buffer::CaptureBufferError::Overflow
+        );
+        tight.ref_mut(&mut state).mark_destroyed();
+        assert_eq!(
+            tight.rref(&state).begin_capture_write(2, 2).unwrap_err(),
+            crate::wayland_objects::wl_buffer::CaptureBufferError::Destroyed
+        );
+        let format = Box::leak(Box::new(crate::drm::Format {
+            drm: drm::buffer::DrmFourcc::Abgr8888,
+            ..*crate::drm::ARGB8888
+        }));
+        let foreign = shm_capture_buffer(&mut client, &mut state, 73, 1, 1, 4, vec![0; 4], format);
+        assert_eq!(
+            foreign.rref(&state).begin_capture_write(1, 1).unwrap_err(),
+            crate::wayland_objects::wl_buffer::CaptureBufferError::Format
+        );
+    }
+
+    #[test]
+    fn a_queued_capture_writes_top_left_rows_once_and_stops_with_its_source() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let output_id = insert_output(&mut client, &mut state);
+        let buffer = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            80,
+            2,
+            1,
+            16,
+            vec![0xAB; 16],
+            crate::drm::ARGB8888,
+        );
+        let other = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            81,
+            2,
+            1,
+            8,
+            vec![0xCD; 8],
+            crate::drm::XRGB8888,
+        );
+        let hidden = submit_capture(
+            &mut state,
+            &mut dispatcher,
+            CaptureJobRequest {
+                target: CaptureTarget::Output(output_id),
+                buffer,
+                width: 2,
+                height: 1,
+                cursor: CaptureCursor::Hidden,
+            },
+        )
+        .unwrap();
+        let painted = submit_capture(
+            &mut state,
+            &mut dispatcher,
+            CaptureJobRequest {
+                target: CaptureTarget::Output(output_id),
+                buffer: other,
+                width: 2,
+                height: 1,
+                cursor: CaptureCursor::Painted,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            submit_capture(
+                &mut state,
+                &mut dispatcher,
+                CaptureJobRequest {
+                    target: CaptureTarget::Output(output_id),
+                    buffer,
+                    width: 2,
+                    height: 1,
+                    cursor: CaptureCursor::Hidden,
+                },
+            ),
+            Err(CaptureQueueError::BufferBusy)
+        );
+        assert_eq!(queued_jobs_for_output(&state, output_id), vec![hidden, painted]);
+        assert_eq!(capture_job_cursor(&state, painted), Some(CaptureCursor::Painted));
+        assert!(dispatcher
+            .test_has_queued_action::<crate::scheduler::output_scheduler::OutputSchedulerAction>(
+                |action| matches!(
+                    action,
+                    crate::scheduler::output_scheduler::OutputSchedulerAction::RequestFrame { .. }
+                ),
+            ));
+        let pixels = [1, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(complete_capture(&mut state, hidden, &pixels, 8), CaptureFinish::Written);
+        assert_eq!(
+            buffer
+                .rref(&state)
+                .begin_capture_write(2, 1)
+                .unwrap()
+                .as_slice(),
+            &[1, 2, 3, 4, 5, 6, 7, 8, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB]
+        );
+        assert_eq!(
+            complete_capture(&mut state, hidden, &[9; 8], 8),
+            CaptureFinish::AlreadyFinished
+        );
+        assert_eq!(
+            buffer
+                .rref(&state)
+                .begin_capture_write(2, 1)
+                .unwrap()
+                .as_slice()[0],
+            1
+        );
+        assert_eq!(capture_job_cursor(&state, painted), Some(CaptureCursor::Painted));
+        output_removed(&mut state, &mut dispatcher, output_id);
+        assert_eq!(
+            complete_capture(&mut state, painted, &[9; 8], 8),
+            CaptureFinish::AlreadyFinished
+        );
+        assert_eq!(
+            other
+                .rref(&state)
+                .begin_capture_write(2, 1)
+                .unwrap()
+                .as_slice(),
+            &[0xCD; 8]
+        );
+
+        let key = announce_toplevel(&mut state, &mut dispatcher, "Terminal", "app");
+        let toplevel_buffer = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            82,
+            1,
+            1,
+            4,
+            vec![0; 4],
+            crate::drm::ARGB8888,
+        );
+        let toplevel_job = submit_capture(
+            &mut state,
+            &mut dispatcher,
+            CaptureJobRequest {
+                target: CaptureTarget::Toplevel(key),
+                buffer: toplevel_buffer,
+                width: 1,
+                height: 1,
+                cursor: CaptureCursor::Hidden,
+            },
+        )
+        .unwrap();
+        close_toplevel(&mut state, &mut dispatcher, key);
+        assert_eq!(fail_capture(&mut state, toplevel_job), CaptureFinish::AlreadyFinished);
+        assert_eq!(
+            submit_capture(
+                &mut state,
+                &mut dispatcher,
+                CaptureJobRequest {
+                    target: CaptureTarget::Toplevel(key),
+                    buffer: toplevel_buffer,
+                    width: 1,
+                    height: 1,
+                    cursor: CaptureCursor::Hidden,
+                },
+            ),
+            Err(CaptureQueueError::SourceGone)
+        );
     }
 }

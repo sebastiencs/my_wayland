@@ -222,6 +222,28 @@ impl SharedMemory {
         self.slice_at(0, length)
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.length
+    }
+
+    pub(crate) fn bytes_at(&self, offset: usize, length: usize) -> &[u8] {
+        assert!(offset
+            .checked_add(length)
+            .is_some_and(|end| end <= self.length));
+        unsafe {
+            std::ptr::NonNull::slice_from_raw_parts(self.ptr.byte_add(offset), length).as_ref()
+        }
+    }
+
+    pub(crate) fn bytes_at_mut(&self, offset: usize, length: usize) -> &mut [u8] {
+        assert!(offset
+            .checked_add(length)
+            .is_some_and(|end| end <= self.length));
+        unsafe {
+            std::ptr::NonNull::slice_from_raw_parts(self.ptr.byte_add(offset), length).as_mut()
+        }
+    }
+
     pub fn slice_at(self: Rc<Self>, offset: usize, length: usize) -> SliceSharedMemory {
         assert!(offset
             .checked_add(length)

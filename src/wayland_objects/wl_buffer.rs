@@ -72,6 +72,60 @@ pub enum WlBufferError {
     InvalidParams,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptureBufferError {
+    Destroyed,
+    NotShm,
+    Format,
+    Size,
+    Stride,
+    Overflow,
+}
+
+/// A checked writable view of one SHM buffer. Padding past each row's pixels stays untouched.
+#[derive(Debug)]
+pub struct CaptureShmWrite {
+    mem: Rc<SharedMemory>,
+    offset: usize,
+    width: usize,
+    height: usize,
+    stride: usize,
+}
+
+impl CaptureShmWrite {
+    pub(crate) fn write_top_left(
+        &self,
+        src: &[u8],
+        src_stride: usize,
+    ) -> Result<(), CaptureBufferError> {
+        let row_bytes = self.width.saturating_mul(4);
+        if src_stride < row_bytes {
+            return Err(CaptureBufferError::Stride);
+        }
+        let src_bytes = src_stride
+            .checked_mul(self.height)
+            .ok_or(CaptureBufferError::Overflow)?;
+        if src.len() < src_bytes {
+            return Err(CaptureBufferError::Overflow);
+        }
+        let length = self.stride.saturating_mul(self.height);
+        let dst = self.mem.bytes_at_mut(self.offset, length);
+        for row in 0..self.height {
+            let src_start = row.saturating_mul(src_stride);
+            let dst_start = row.saturating_mul(self.stride);
+            dst[dst_start..dst_start + row_bytes]
+                .copy_from_slice(&src[src_start..src_start + row_bytes]);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        let length = self.stride.saturating_mul(self.height);
+        self.mem.bytes_at(self.offset, length)
+    }
+}
+
 impl WlBuffer {
     pub fn new(params: NewWlBufferParams) -> Result<Self, WlBufferError> {
         let NewWlBufferParams {
@@ -228,6 +282,62 @@ impl WlBuffer {
                 Some(texture.as_ref()?.texture_id())
             }
         }
+    }
+
+    /// Accept an SHM `XRGB8888` or `ARGB8888` destination for one capture.
+    ///
+    /// The buffer size must match the capture, the stride must hold each row, and the mapped
+    /// pool must contain `stride * height` bytes from the buffer offset.
+    pub fn begin_capture_write(
+        &self,
+        width: i32,
+        height: i32,
+    ) -> Result<CaptureShmWrite, CaptureBufferError> {
+        if self.destroyed {
+            return Err(CaptureBufferError::Destroyed);
+        }
+        let BufferBacking::Shm {
+            offset,
+            width: buffer_width,
+            height: buffer_height,
+            stride,
+            format,
+            mem,
+            ..
+        } = &self.backing
+        else {
+            return Err(CaptureBufferError::NotShm);
+        };
+        if format.drm != ARGB8888.drm && format.drm != crate::drm::XRGB8888.drm {
+            return Err(CaptureBufferError::Format);
+        }
+        if width <= 0
+            || height <= 0
+            || *buffer_width != width as usize
+            || *buffer_height != height as usize
+        {
+            return Err(CaptureBufferError::Size);
+        }
+        let row_bytes = buffer_width.saturating_mul(4);
+        if *stride < row_bytes || stride % 4 != 0 {
+            return Err(CaptureBufferError::Stride);
+        }
+        let bytes = stride
+            .checked_mul(*buffer_height)
+            .ok_or(CaptureBufferError::Overflow)?;
+        let end = offset
+            .checked_add(bytes)
+            .ok_or(CaptureBufferError::Overflow)?;
+        if end > mem.len() {
+            return Err(CaptureBufferError::Overflow);
+        }
+        Ok(CaptureShmWrite {
+            mem: mem.clone(),
+            offset: *offset,
+            width: *buffer_width,
+            height: *buffer_height,
+            stride: *stride,
+        })
     }
 
     pub fn shm_cursor_argb8888(&self) -> Option<CursorShmBuffer> {
