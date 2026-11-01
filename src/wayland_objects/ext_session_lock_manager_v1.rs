@@ -1,11 +1,12 @@
-//! `ext_session_lock_manager_v1`. The global stays unpublished until the later phases pass.
+//! `ext_session_lock_manager_v1`. Advertised at version 1.
 
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
+    globals::Global,
     object::{Object, Parser, RequestResult},
     protocol_generated::{
         ext_session_lock_manager_v1, Constants, ExtSessionLockManagerV1Id, ExtSessionLockV1Id,
-        WaylandId,
+        NewId, WaylandId,
     },
     state::{GrabbedObject, State},
     wayland_objects::{ext_session_lock_v1::ExtSessionLockV1, wl_display::WlDisplay},
@@ -53,6 +54,37 @@ impl Object for ExtSessionLockManagerV1 {
             }
         }
         Ok(())
+    }
+}
+
+/// Version 1 matches the published session-lock protocol. Sway, wlroots, and Jay
+/// advertise this same version; live lock cycles stay with the later validation.
+#[derive(Debug)]
+pub struct ExtSessionLockManagerV1Global;
+
+impl ExtSessionLockManagerV1Global {
+    pub fn new() -> Box<dyn Global> {
+        Box::new(Self)
+    }
+}
+
+impl Global for ExtSessionLockManagerV1Global {
+    fn interface(&self) -> (&'static str, u32) {
+        (ExtSessionLockManagerV1::INTERFACE_NAME, ExtSessionLockManagerV1::INTERFACE_VERSION)
+    }
+
+    fn bind(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        id: NewId,
+        _version: u32,
+        _dispatcher: &mut ClientDispatcher,
+    ) {
+        client.insert_object(
+            state,
+            ExtSessionLockManagerV1::new(ExtSessionLockManagerV1Id::from(id)),
+        );
     }
 }
 
@@ -164,12 +196,18 @@ mod tests {
     }
 
     #[test]
-    fn the_manager_is_not_advertised() {
+    fn the_manager_is_advertised_at_version_one() {
         let state = state_for_tests();
-        assert!(state
+        let name = state
             .globals
             .name_for_interface(ExtSessionLockManagerV1::INTERFACE_NAME)
-            .is_none());
+            .expect("session lock manager");
+        let version = state
+            .globals
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|(_, global)| global.interface().1);
+        assert_eq!(version, Some(ExtSessionLockManagerV1::INTERFACE_VERSION));
     }
 
     #[test]
@@ -684,6 +722,24 @@ mod tests {
 
         on_protected_frame_presented(&mut state, first, &mut dispatcher);
         assert_eq!(state.session_lock.phase(), SessionLockPhase::Locked);
+    }
+
+    #[test]
+    fn dropping_an_unpresented_output_does_not_release_the_barrier() {
+        let mut state = state_for_tests();
+        let first = state.insert_output(test_output_drm1(0, 0, 640, 480));
+        let second = state.insert_output(test_output_drm1(640, 0, 640, 480));
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        let mut dispatcher = Dispatcher::default();
+        insert_manager(&mut client, &mut state);
+        lock(&mut client, &mut state, &mut dispatcher, LOCK_ID);
+
+        on_protected_frame_presented(&mut state, first, &mut dispatcher);
+        assert!(state.session_lock.detach_output(second).is_none());
+        assert_eq!(state.session_lock.phase(), SessionLockPhase::Locking);
+        assert!(!dispatcher.test_has_queued_action::<ClientAction>(|action| {
+            matches!(action, ClientAction::SendSessionLockLocked)
+        }));
     }
 
     #[test]

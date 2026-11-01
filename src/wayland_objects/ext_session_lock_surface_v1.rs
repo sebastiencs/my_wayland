@@ -216,7 +216,7 @@ mod tests {
             object::IdToObject,
             protocol_generated::{
                 ExtSessionLockManagerV1Id, ExtSessionLockV1Id, WaylandId, WlBufferId, WlOutputId,
-                WlSurfaceId, XdgPopupId,
+                WlSurfaceId, XdgPopupId, XdgToplevelId,
             },
             runner::{Dispatcher, Model},
             session_lock::SessionLockPhase,
@@ -742,5 +742,121 @@ mod tests {
                 .paint_order(&fixture.state, fixture.output_id),
             vec![fixture.surface]
         );
+    }
+
+    #[test]
+    fn the_protected_plan_keeps_the_desktop_hidden_across_resume() {
+        let mut fixture = fixture();
+        let desktop = fixture
+            .client
+            .insert_object(
+                &mut fixture.state,
+                WlSurface::new(WlSurfaceId::from(50), fixture.client.client_id(), 6),
+            )
+            .0;
+        fixture.state.register_root_surface(desktop);
+        desktop.ref_mut(&mut fixture.state).test_map(
+            crate::state::ObjectId::from(41usize),
+            0,
+            0,
+            100,
+            80,
+        );
+
+        ack(&mut fixture, 1);
+        let buffer = insert_buffer(&mut fixture, 40, 640, 480);
+        attach(&mut fixture, buffer);
+        commit(&mut fixture);
+
+        assert_eq!(
+            fixture
+                .state
+                .session_lock
+                .paint_order(&fixture.state, fixture.output_id),
+            vec![fixture.surface]
+        );
+        fixture.state.session_lock.note_session_resumed();
+        assert_eq!(fixture.state.session_lock.blank(), Some(crate::session_lock::LockBlank::Black));
+        assert_eq!(fixture.state.session_lock.phase(), SessionLockPhase::Locking);
+        assert_eq!(
+            fixture
+                .state
+                .session_lock
+                .paint_order(&fixture.state, fixture.output_id),
+            vec![fixture.surface]
+        );
+    }
+
+    #[test]
+    fn locked_input_cannot_leave_the_locker() {
+        let mut fixture = fixture();
+        ack(&mut fixture, 1);
+        let buffer = insert_buffer(&mut fixture, 40, 640, 480);
+        attach(&mut fixture, buffer);
+        commit(&mut fixture);
+
+        let mut other = Client::new_for_tests(ClientId::from_raw(2));
+        let other_surface = other
+            .insert_object(
+                &mut fixture.state,
+                WlSurface::new(WlSurfaceId::from(31), other.client_id(), 6),
+            )
+            .0;
+        other_surface.ref_mut(&mut fixture.state).test_map(
+            crate::state::ObjectId::from(42usize),
+            0,
+            0,
+            40,
+            40,
+        );
+        crate::input::focus::set_keyboard_focus_from_surface(
+            &mut fixture.state,
+            &mut fixture.dispatcher,
+            Some(crate::input::SurfaceFocus::new(other_surface)),
+        );
+        assert_eq!(
+            fixture
+                .state
+                .seat
+                .keyboard_focus()
+                .map(|focus| focus.surface),
+            Some(fixture.surface)
+        );
+        assert!(!crate::seat::request_toplevel_move(
+            &mut fixture.state,
+            &mut fixture.dispatcher,
+            other.client_id(),
+            other_surface,
+            1,
+            other_surface,
+            Resolved::new(other.client_id(), XdgToplevelId::from(50), other_surface.object_id(),),
+            crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode::ClientSide,
+            false,
+            false,
+        ));
+
+        crate::seat::handle_keyboard_key(&mut fixture.state, &mut fixture.dispatcher, 30, 1, 0);
+        let mut other_actions = 0;
+        fixture
+            .dispatcher
+            .test_matching_actions_for::<crate::clients::ClientAction, _>(
+                other.client_id(),
+                |_| other_actions += 1,
+            );
+        assert_eq!(other_actions, 0);
+
+        let mut locker_offers = 0;
+        fixture
+            .dispatcher
+            .test_matching_actions_for::<crate::clients::ClientAction, _>(
+                fixture.client.client_id(),
+                |action| {
+                    if matches!(action, crate::clients::ClientAction::RefreshDataDeviceSelection) {
+                        locker_offers += 1;
+                    }
+                },
+            );
+        assert_eq!(locker_offers, 1);
+        assert!(fixture.state.seat.selection_source().is_none());
     }
 }

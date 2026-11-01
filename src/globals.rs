@@ -4,6 +4,7 @@ use crate::{
     state::{Grab, IndexMap, State},
     wayland_objects::{
         ext_idle_notifier_v1::ExtIdleNotifierV1Global,
+        ext_session_lock_manager_v1::ExtSessionLockManagerV1Global,
         ext_workspace_manager_v1::ExtWorkspaceManagerV1Global, wl_compositor::WlCompositorGlobal,
         wl_data_device_manager::WlDataDeviceManagerGlobal, wl_fixes::WlFixesGlobal,
         wl_seat::WlSeatGlobal, wl_shm::WlShmGlobal, wl_subcompositor::WlSubcompositorGlobal,
@@ -101,6 +102,7 @@ impl Globals {
             ZwpRelativePointerManagerV1Global::new,
             ZwpPointerConstraintsV1Global::new,
             ExtIdleNotifierV1Global::new,
+            ExtSessionLockManagerV1Global::new,
             ZwpIdleInhibitManagerV1Global::new,
             XdgActivationV1Global::new,
             XdgWmBaseGlobal::new,
