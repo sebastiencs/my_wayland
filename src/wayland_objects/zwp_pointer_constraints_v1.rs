@@ -325,10 +325,10 @@ mod tests {
     }
 
     #[test]
-    fn pointer_constraints_global_stays_unpublished() {
+    fn pointer_constraints_global_is_advertised() {
         let mut globals = Globals::new();
         globals.initialize();
-        assert!(!globals.contains_interface(ZwpPointerConstraintsV1::INTERFACE_NAME));
+        assert!(globals.contains_interface(ZwpPointerConstraintsV1::INTERFACE_NAME));
         assert!(globals.contains_interface(
             crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1::INTERFACE_NAME,
         ));

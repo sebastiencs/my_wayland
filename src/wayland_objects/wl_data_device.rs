@@ -270,6 +270,7 @@ fn start_drag(
         seat::cancel_active_drag(state, dispatcher, None);
     }
 
+    crate::input::pointer_lock::release_pointer_capture(state, dispatcher);
     let client_id = client.client_id();
     state.seat.set_active_drag(DragState {
         source: source

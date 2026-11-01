@@ -71,6 +71,7 @@ fn should_focus_new_toplevel_on_map(state: &State, root_surface: Resolved<WlSurf
 
 enum PostWlSurface {
     FocusNewToplevel { root_surface: Resolved<WlSurfaceId> },
+    ClearFocusAfterDestroy,
 }
 
 impl PostAction for PostWlSurface {
@@ -89,6 +90,9 @@ impl PostAction for PostWlSurface {
                         Some(SurfaceFocus::new(root_surface)),
                     );
                 }
+            }
+            PostWlSurface::ClearFocusAfterDestroy => {
+                crate::seat::refresh_scene_focus(state, dispatcher);
             }
         }
     }
@@ -2672,6 +2676,7 @@ impl WlSurface {
         }
         self.cleanup_extension_objects();
         state.unregister_root_surface(object);
+        dispatcher.dispatch_post_action(PostWlSurface::ClearFocusAfterDestroy);
         use crate::wayland_objects::wl_display::WlDisplay;
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
         if let Some(bounds) = scene_bounds {

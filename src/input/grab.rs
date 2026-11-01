@@ -401,6 +401,7 @@ fn start_interactive_tiled_resize(
 }
 
 fn clear_pointer_focus_for_compositor_grab(state: &mut State, dispatcher: &mut Dispatcher) {
+    crate::input::pointer_lock::release_pointer_capture(state, dispatcher);
     let Some(old_focus) = state.seat.pointer_focus.take() else {
         state.seat.clear_pointer_enter();
         return;

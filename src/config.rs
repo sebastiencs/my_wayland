@@ -1499,6 +1499,9 @@ fn cycle_focused_workspace(state: &mut State, dispatcher: &mut Dispatcher, cycle
         }
         workspace.layout.focus_surface(target);
     }
+    if state.seat.keyboard_focus().map(|focus| focus.surface) != Some(target) {
+        crate::input::pointer_lock::release_pointer_capture(state, dispatcher);
+    }
     let outputs = state.workspace_output_ids(workspace_id);
     if !outputs.is_empty() {
         request_outputs(state, outputs, dispatcher);
@@ -1543,7 +1546,9 @@ fn finish_root_mode_change(
     }
     // A keybinding keeps the focused window. `refresh_scene_focus` would replace keyboard
     // focus with whatever is under the pointer.
+    crate::input::pointer_lock::release_pointer_capture(state, dispatcher);
     dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
+    crate::input::pointer_lock::recheck_pointer_capture(state, dispatcher);
 }
 
 fn publish_workspace_group(
@@ -1582,6 +1587,7 @@ fn select_workspace_index(state: &mut State, dispatcher: &mut Dispatcher, index:
         return;
     }
     log::info!("workspace index {index} on group {group_id:?}");
+    crate::input::pointer_lock::release_pointer_capture(state, dispatcher);
     publish_workspace_group(state, dispatcher, group_id);
 }
 
@@ -1602,6 +1608,7 @@ fn move_focused_window_to_workspace(state: &mut State, dispatcher: &mut Dispatch
     if already_there && !activated {
         return;
     }
+    crate::input::pointer_lock::release_pointer_capture(state, dispatcher);
     // Sway's `move container to workspace` can leave the seat on the source workspace.
     // This binding follows the window, then puts keyboard focus back after publication.
     // Publication refreshes focus from the pointer, so the moved window is focused last.
@@ -1617,6 +1624,7 @@ fn move_focused_window_to_workspace(state: &mut State, dispatcher: &mut Dispatch
         dispatcher,
         Some(crate::input::SurfaceFocus::new(root)),
     );
+    crate::input::pointer_lock::recheck_pointer_capture(state, dispatcher);
 }
 
 fn activate_adjacent_workspace(
@@ -1629,6 +1637,7 @@ fn activate_adjacent_workspace(
         return;
     };
     log::info!("workspace {direction:?} on group {group_id:?}");
+    crate::input::pointer_lock::release_pointer_capture(state, dispatcher);
     publish_workspace_group(state, dispatcher, group_id);
 }
 

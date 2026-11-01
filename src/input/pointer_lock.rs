@@ -71,7 +71,10 @@ impl PostAction for RecheckPointerLock {
 }
 
 pub(crate) fn maybe_activate_pointer_lock(state: &mut State, dispatcher: &mut Dispatcher) {
-    if state.seat.active_pointer_lock.is_some() || state.seat.active_pointer_confine.is_some() {
+    if compositor_blocks_pointer_capture(state)
+        || state.seat.active_pointer_lock.is_some()
+        || state.seat.active_pointer_confine.is_some()
+    {
         return;
     }
     let Some(pointer_focus) = state.seat.pointer_focus else {
@@ -137,6 +140,26 @@ pub(crate) fn maybe_activate_pointer_lock(state: &mut State, dispatcher: &mut Di
 
 pub(crate) fn release_active_pointer_lock(state: &mut State, dispatcher: &mut Dispatcher) {
     release_pointer_lock_unless_surface(state, dispatcher, None);
+}
+
+/// Drop whichever constraint is active before a compositor action takes the pointer
+/// or changes focus. One-shot constraints become terminal. Persistent ones can
+/// activate again once the action is finished and both focuses are back inside
+/// the effective region.
+pub(crate) fn release_pointer_capture(state: &mut State, dispatcher: &mut Dispatcher) {
+    release_active_pointer_lock(state, dispatcher);
+    crate::input::pointer_confine::release_active_pointer_confine(state, dispatcher);
+}
+
+pub(crate) fn recheck_pointer_capture(state: &mut State, dispatcher: &mut Dispatcher) {
+    maybe_activate_pointer_lock(state, dispatcher);
+    crate::input::pointer_confine::recheck_pointer_confinement(state, dispatcher);
+}
+
+pub(crate) fn compositor_blocks_pointer_capture(state: &State) -> bool {
+    state.seat.pointer_interactive_grab.is_some()
+        || state.seat.popup_grab_client().is_some()
+        || state.seat.active_drag().is_some()
 }
 
 pub(crate) fn release_pointer_lock_unless_surface(
@@ -688,7 +711,9 @@ mod tests {
     fn session_pause_unlocks_and_later_motion_moves_the_pointer() {
         let mut setup = prepare(ConstraintLifetime::Oneshot, None, (10.0, 10.0));
         focus_keyboard(&mut setup);
+        setup.state.seat.clear_cursor();
         quiesce_for_session_pause(&mut setup.state, &mut setup.dispatcher);
+        assert!(setup.state.seat.cursor_is_visible());
         assert!(setup.state.seat.active_pointer_lock.is_none());
         assert_eq!(lock_events(&setup.dispatcher, false), 1);
         assert_eq!(setup.lock.try_ref(&setup.state).unwrap().status(), ConstraintStatus::Terminal);
@@ -708,13 +733,18 @@ mod tests {
         focus_keyboard(&mut setup);
         {
             let mut client_dispatcher = setup.client.test_dispatcher(&mut setup.dispatcher);
-            let mut surface = setup
-                .state
-                .objects
-                .grab_object::<WlSurface>(setup.surface.object_id());
-            surface.delete_self(&mut setup.client, &mut setup.state, &mut client_dispatcher);
+            {
+                let mut surface = setup
+                    .state
+                    .objects
+                    .grab_object::<WlSurface>(setup.surface.object_id());
+                surface.delete_self(&mut setup.client, &mut setup.state, &mut client_dispatcher);
+            }
+            client_dispatcher.drain_post_actions(&mut setup.client, &mut setup.state);
         }
         assert!(setup.state.seat.active_pointer_lock.is_none());
+        assert!(setup.state.seat.pointer_focus.is_none());
+        assert!(setup.state.seat.keyboard_focus().is_none());
         assert_eq!(lock_events(&setup.dispatcher, false), 1);
         assert_eq!(setup.state.seat.pointer_pos, (4.0, 4.0));
         handle_pointer_motion(&mut setup.state, &mut setup.dispatcher, 2.0, 0.0, 2.0, 0.0, 30, 30);
@@ -769,5 +799,69 @@ mod tests {
         assert!(setup.state.seat.active_pointer_lock.is_none());
         assert_eq!(setup.state.seat.pointer_pos, (6.0, 7.0));
         assert_eq!(lock_events(&setup.dispatcher, false), 0);
+    }
+
+    fn move_target(surface: Resolved<WlSurfaceId>) -> crate::input::WindowTarget {
+        crate::input::WindowTarget {
+            root_surface: surface,
+            role: crate::input::WindowRoleSnapshot::Unsupported,
+            geometry: crate::root_geometry::WindowTargetGeometry {
+                root_pos: (0, 0),
+                resize_size: (100, 80),
+                target_rect: RectI::new(0, 0, 100, 80).unwrap(),
+                binding_rect: RectI::new(0, 0, 100, 80).unwrap(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_move_grab_unlocks_before_it_takes_the_pointer() {
+        let mut setup = prepare(ConstraintLifetime::Oneshot, None, (10.0, 10.0));
+        focus_keyboard(&mut setup);
+        assert!(crate::input::apply_interaction_intent(
+            &mut setup.state,
+            &mut setup.dispatcher,
+            crate::input::InteractionIntent::StartMove(move_target(setup.surface)),
+            crate::input::PROTOCOL_INTERACTION_START_OPTIONS,
+        ));
+        assert!(setup.state.seat.active_pointer_lock.is_none());
+        assert_eq!(setup.lock.try_ref(&setup.state).unwrap().status(), ConstraintStatus::Terminal);
+        assert_eq!(lock_events(&setup.dispatcher, false), 1);
+        handle_pointer_motion(&mut setup.state, &mut setup.dispatcher, 8.0, 0.0, 8.0, 0.0, 40, 40);
+        assert_eq!(setup.state.seat.pointer_pos.0, 18.0);
+        crate::input::finish_pointer_interactive_grab(&mut setup.state, &mut setup.dispatcher, 50);
+        handle_pointer_motion(&mut setup.state, &mut setup.dispatcher, 4.0, 0.0, 4.0, 0.0, 60, 60);
+        assert_eq!(setup.state.seat.pointer_pos.0, 22.0);
+        assert!(setup.state.seat.active_pointer_lock.is_none());
+    }
+
+    #[test]
+    fn a_popup_grab_unlocks_and_a_persistent_lock_returns_when_it_ends() {
+        let mut setup = prepare(ConstraintLifetime::Persistent, None, (10.0, 10.0));
+        focus_keyboard(&mut setup);
+        let popup = Resolved::new(
+            ClientId::from_raw(3),
+            crate::protocol_generated::XdgPopupId::from(40),
+            ObjectId::from(90usize),
+        );
+        crate::seat::begin_popup_grab(
+            &mut setup.state,
+            &mut setup.dispatcher,
+            ClientId::from_raw(3),
+            popup,
+            setup.surface,
+        );
+        assert!(setup.state.seat.active_pointer_lock.is_none());
+        assert_eq!(setup.lock.try_ref(&setup.state).unwrap().status(), ConstraintStatus::Inactive);
+        maybe_activate_pointer_lock(&mut setup.state, &mut setup.dispatcher);
+        assert!(setup.state.seat.active_pointer_lock.is_none());
+        crate::seat::remove_popup_grab(
+            &mut setup.state,
+            &mut setup.dispatcher,
+            popup,
+            Some(SurfaceFocus::new(setup.surface)),
+        );
+        assert_eq!(setup.state.seat.active_pointer_lock, Some(setup.lock));
+        assert_eq!(lock_events(&setup.dispatcher, true), 2);
     }
 }

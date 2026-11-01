@@ -31,7 +31,10 @@ struct ConfineFields {
 }
 
 pub(crate) fn maybe_activate_pointer_confine(state: &mut State, dispatcher: &mut Dispatcher) {
-    if state.seat.active_pointer_lock.is_some() || state.seat.active_pointer_confine.is_some() {
+    if crate::input::pointer_lock::compositor_blocks_pointer_capture(state)
+        || state.seat.active_pointer_lock.is_some()
+        || state.seat.active_pointer_confine.is_some()
+    {
         return;
     }
     let Some(pointer_focus) = state.seat.pointer_focus else {
@@ -646,5 +649,47 @@ mod tests {
             20,
         );
         assert_eq!(inner.state.seat.pointer_pos.0, 49.0);
+    }
+
+    #[test]
+    fn a_move_grab_unconfines_before_the_pointer_moves() {
+        let mut setup = prepare(
+            ConstraintLifetime::Oneshot,
+            Some(rect_region(0, 0, 20, 20)),
+            (10.0, 10.0),
+            (100, 80),
+        );
+        focus_keyboard(&mut setup);
+        assert!(crate::input::apply_interaction_intent(
+            &mut setup.state,
+            &mut setup.dispatcher,
+            crate::input::InteractionIntent::StartMove(crate::input::WindowTarget {
+                root_surface: setup.surface,
+                role: crate::input::WindowRoleSnapshot::Unsupported,
+                geometry: crate::root_geometry::WindowTargetGeometry {
+                    root_pos: (0, 0),
+                    resize_size: (100, 80),
+                    target_rect: RectI::new(0, 0, 100, 80).unwrap(),
+                    binding_rect: RectI::new(0, 0, 100, 80).unwrap(),
+                },
+            }),
+            crate::input::PROTOCOL_INTERACTION_START_OPTIONS,
+        ));
+        assert!(setup.state.seat.active_pointer_confine.is_none());
+        assert_eq!(
+            setup.confine.try_ref(&setup.state).unwrap().status(),
+            ConstraintStatus::Terminal
+        );
+        handle_pointer_motion(
+            &mut setup.state,
+            &mut setup.dispatcher,
+            30.0,
+            0.0,
+            30.0,
+            0.0,
+            40,
+            40,
+        );
+        assert_eq!(setup.state.seat.pointer_pos.0, 40.0);
     }
 }

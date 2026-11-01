@@ -1369,6 +1369,9 @@ pub fn quiesce_for_session_pause(state: &mut State, dispatcher: &mut Dispatcher)
     }
     set_keyboard_focus(state, dispatcher, None);
     clear_pointer_focus(state, dispatcher);
+    if !state.seat.cursor_is_visible() {
+        state.seat.set_default_cursor();
+    }
     state.seat.pointer_button_count = 0;
     state.seat.pressed_buttons.clear();
     state.seat.last_pointer_press = None;
@@ -1536,6 +1539,7 @@ pub fn finish_active_drag(state: &mut State, dispatcher: &mut Dispatcher) {
     if let Some(target) = drag.target {
         dispatcher.dispatch_to(target.client_id(), ClientAction::DataDeviceDragLeave);
     }
+    crate::input::pointer_lock::recheck_pointer_capture(state, dispatcher);
 }
 
 pub fn cancel_active_drag(
@@ -1567,6 +1571,7 @@ pub fn cancel_active_drag(
             },
         );
     }
+    crate::input::pointer_lock::recheck_pointer_capture(state, dispatcher);
 }
 
 fn apply_pointer_interactive_grab(state: &mut State, dispatcher: &mut Dispatcher) -> bool {
@@ -1779,6 +1784,7 @@ pub fn begin_popup_grab(
     popup: Resolved<XdgPopupId>,
     popup_surface: Resolved<WlSurfaceId>,
 ) {
+    crate::input::pointer_lock::release_pointer_capture(state, dispatcher);
     state.seat.start_popup_grab(client_id, popup, popup_surface);
     if let Some(focus) = popup_keyboard_focus(state) {
         set_keyboard_focus(state, dispatcher, Some(focus));
@@ -1817,6 +1823,7 @@ pub fn remove_popup_grab(
             fallback_focus.or_else(|| state.seat.pointer_focus.map(|focus| focus.target)),
         );
     }
+    crate::input::pointer_lock::recheck_pointer_capture(state, dispatcher);
 }
 
 pub fn request_toplevel_move(
