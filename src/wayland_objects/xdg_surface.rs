@@ -1542,6 +1542,7 @@ pub mod xdg_toplevel {
                         self.decoration_object = None;
                     }
                     if let Some(toplevel) = client.resolve(self.id, state) {
+                        crate::capture::unmap_xdg_toplevel(state, dispatcher, toplevel);
                         state.unregister_xdg_toplevel_role(self.xdg_surface, toplevel);
                     }
                     let mut xdg_surface = self.xdg_surface.grab(state);
@@ -1569,9 +1570,25 @@ pub mod xdg_toplevel {
                 }
                 SetTitle { title } => {
                     self.title = title;
+                    if let Some(toplevel) = client.resolve(self.id, state) {
+                        crate::capture::retitle_xdg_toplevel(
+                            state,
+                            dispatcher,
+                            toplevel,
+                            self.title.clone(),
+                        );
+                    }
                 }
                 SetAppId { app_id } => {
                     self.app_id = app_id;
+                    if let Some(toplevel) = client.resolve(self.id, state) {
+                        crate::capture::reapp_xdg_toplevel(
+                            state,
+                            dispatcher,
+                            toplevel,
+                            self.app_id.clone(),
+                        );
+                    }
                 }
                 ShowWindowMenu { seat: _, serial: _, x: _, y: _ } => {
                     log::debug!("xdg_toplevel.show_window_menu is not integrated yet");
@@ -1733,6 +1750,17 @@ pub mod xdg_toplevel {
                 }
             }
             Ok(())
+        }
+
+        fn on_client_disconnect(
+            &mut self,
+            client: &mut Client,
+            state: &mut State,
+            dispatcher: &mut ClientDispatcher,
+        ) {
+            if let Some(toplevel) = client.resolve(self.id, state) {
+                crate::capture::unmap_xdg_toplevel(state, dispatcher, toplevel);
+            }
         }
     }
 

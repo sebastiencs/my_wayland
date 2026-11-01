@@ -11,7 +11,7 @@ use crate::{
     clients::{Client, ClientAction, ClientDispatcher, ClientId, Resolved},
     protocol_generated::{
         ExtForeignToplevelHandleV1Id, ExtForeignToplevelListV1Id, ExtImageCopyCaptureFrameV1Id,
-        ExtImageCopyCaptureSessionV1Id, WlPointerId, ZwlrScreencopyFrameV1Id,
+        ExtImageCopyCaptureSessionV1Id, WlPointerId, XdgToplevelId, ZwlrScreencopyFrameV1Id,
     },
     runner::Dispatcher,
     state::{OutputId, State},
@@ -38,6 +38,8 @@ pub enum CaptureTarget {
 #[derive(Clone, Debug)]
 struct ToplevelRecord {
     closed: bool,
+    title: String,
+    app_id: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -67,12 +69,19 @@ enum Pending {
     FailScreencopy(Resolved<ZwlrScreencopyFrameV1Id>),
     CloseHandle(Resolved<ExtForeignToplevelHandleV1Id>),
     Announce { key: ToplevelKey, title: String, app_id: String },
+    Retitle { key: ToplevelKey, title: String },
+    Reapp { key: ToplevelKey, app_id: String },
 }
 
 #[derive(Debug, Default)]
 pub struct CaptureRegistry {
     next_toplevel: u64,
     toplevels: BTreeMap<ToplevelKey, ToplevelRecord>,
+    /// Mapped XDG toplevels. A new map after unmap gets a new [`ToplevelKey`].
+    by_xdg: BTreeMap<Resolved<XdgToplevelId>, ToplevelKey>,
+    /// Lists that already received a handle for a key. Destroying that handle does not create
+    /// another one until the toplevel is unmapped and mapped again.
+    announced: BTreeSet<(Resolved<ExtForeignToplevelListV1Id>, ToplevelKey)>,
     sessions: Vec<SessionSlot>,
     ext_frames: Vec<ExtFrameSlot>,
     screencopy: Vec<ScreencopySlot>,
@@ -138,6 +147,7 @@ impl CaptureRegistry {
 
     pub(crate) fn forget_list(&mut self, list: Resolved<ExtForeignToplevelListV1Id>) {
         self.lists.retain(|candidate| *candidate != list);
+        self.announced.retain(|(candidate, _)| *candidate != list);
     }
 
     pub(crate) fn forget_handle(&mut self, handle: Resolved<ExtForeignToplevelHandleV1Id>) {
@@ -156,6 +166,8 @@ impl CaptureRegistry {
         self.lists.retain(|list| list.client_id() != client_id);
         self.handles
             .retain(|(handle, _)| handle.client_id() != client_id);
+        self.announced
+            .retain(|(list, _)| list.client_id() != client_id);
         self.pending.remove(&client_id);
     }
 
@@ -316,10 +328,10 @@ pub(crate) fn announce_toplevel(
         .identifier()
         .bytes()
         .all(|byte| byte.is_ascii() && !byte.is_ascii_control()));
-    state
-        .capture
-        .toplevels
-        .insert(key, ToplevelRecord { closed: false });
+    state.capture.toplevels.insert(
+        key,
+        ToplevelRecord { closed: false, title: title.clone(), app_id: app_id.clone() },
+    );
     let lists = state.capture.lists.clone();
     let mut clients = BTreeSet::new();
     for list in lists {
@@ -349,9 +361,20 @@ pub(crate) fn close_toplevel(state: &mut State, dispatcher: &mut Dispatcher, key
     if already_closed {
         return;
     }
-    state.capture.retain_pending(
-        |item| !matches!(item, Pending::Announce { key: announced, .. } if *announced == key),
-    );
+    state.capture.retain_pending(|item| match item {
+        Pending::Announce { key: announced, .. }
+        | Pending::Retitle { key: announced, .. }
+        | Pending::Reapp { key: announced, .. } => *announced != key,
+        _ => true,
+    });
+    state
+        .capture
+        .announced
+        .retain(|(_, announced)| *announced != key);
+    state
+        .capture
+        .by_xdg
+        .retain(|_, announced| *announced != key);
 
     let mut clients = BTreeSet::new();
     let handles = state.capture.handles_for(key);
@@ -427,6 +450,20 @@ pub fn deliver(client: &mut Client, state: &mut State, dispatcher: &mut ClientDi
                     announce_to_client(client, state, dispatcher, key, &title, &app_id);
                 }
             }
+            Pending::Retitle { key, title } => {
+                for handle in state.capture.handles_for(key) {
+                    if let Some(handle) = handle.try_ref_mut(state) {
+                        handle.send_title(&title, dispatcher);
+                    }
+                }
+            }
+            Pending::Reapp { key, app_id } => {
+                for handle in state.capture.handles_for(key) {
+                    if let Some(handle) = handle.try_ref_mut(state) {
+                        handle.send_app_id(&app_id, dispatcher);
+                    }
+                }
+            }
         }
     }
 }
@@ -447,7 +484,10 @@ fn announce_to_client(
         .filter(|list| list.client_id() == client.client_id())
         .filter(|list| list.try_ref(state).is_some_and(|list| !list.is_finished()))
         .collect();
-    let identifier = key.identifier();
+    let lists: Vec<_> = lists
+        .into_iter()
+        .filter(|list| !state.capture.announced.contains(&(*list, key)))
+        .collect();
     for list in lists {
         let handle_id = client.allocate_server_object_id::<ExtForeignToplevelHandleV1Id>();
         let (handle, _) = client.insert_object(
@@ -455,9 +495,127 @@ fn announce_to_client(
             ExtForeignToplevelHandleV1::new(handle_id, key, title.to_string(), app_id.to_string()),
         );
         state.capture.track_handle(handle, key);
+        state.capture.announced.insert((list, key));
         list.rref(state).send_toplevel(handle_id, dispatcher);
-        handle.rref(state).send_initial(&identifier, dispatcher);
+        handle.rref(state).send_initial(dispatcher);
     }
+}
+
+/// Publish one mapped XDG toplevel. A later map of the same toplevel gets a new identifier.
+pub(crate) fn map_xdg_toplevel(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    toplevel: Resolved<XdgToplevelId>,
+    title: impl Into<String>,
+    app_id: impl Into<String>,
+) {
+    if state.capture.by_xdg.contains_key(&toplevel) {
+        return;
+    }
+    let key = announce_toplevel(state, dispatcher, title, app_id);
+    state.capture.by_xdg.insert(toplevel, key);
+}
+
+/// Stop listing and capturing an XDG toplevel that unmapped or was destroyed.
+pub(crate) fn unmap_xdg_toplevel(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    toplevel: Resolved<XdgToplevelId>,
+) {
+    let Some(key) = state.capture.by_xdg.remove(&toplevel) else {
+        return;
+    };
+    close_toplevel(state, dispatcher, key);
+}
+
+pub(crate) fn retitle_xdg_toplevel(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    toplevel: Resolved<XdgToplevelId>,
+    title: String,
+) {
+    update_xdg_detail(state, dispatcher, toplevel, true, title);
+}
+
+pub(crate) fn reapp_xdg_toplevel(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    toplevel: Resolved<XdgToplevelId>,
+    app_id: String,
+) {
+    update_xdg_detail(state, dispatcher, toplevel, false, app_id);
+}
+
+fn update_xdg_detail(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    toplevel: Resolved<XdgToplevelId>,
+    title: bool,
+    value: String,
+) {
+    let Some(key) = state.capture.by_xdg.get(&toplevel).copied() else {
+        return;
+    };
+    let Some(record) = state.capture.toplevels.get_mut(&key) else {
+        return;
+    };
+    if record.closed {
+        return;
+    }
+    if title {
+        if record.title == value {
+            return;
+        }
+        record.title = value.clone();
+    } else {
+        if record.app_id == value {
+            return;
+        }
+        record.app_id = value.clone();
+    }
+    let clients: BTreeSet<_> = state
+        .capture
+        .handles_for(key)
+        .into_iter()
+        .map(|handle| handle.client_id())
+        .collect();
+    for client_id in clients.iter().copied() {
+        let item = if title {
+            Pending::Retitle { key, title: value.clone() }
+        } else {
+            Pending::Reapp { key, app_id: value.clone() }
+        };
+        state.capture.enqueue(client_id, item);
+    }
+    dispatch_deliver(dispatcher, clients);
+}
+
+/// Send every currently mapped toplevel to a list that just bound.
+pub(crate) fn sync_mapped_toplevels(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    list: Resolved<ExtForeignToplevelListV1Id>,
+) {
+    if list.try_ref(state).is_none_or(|list| list.is_finished()) {
+        return;
+    }
+    let open: Vec<_> = state
+        .capture
+        .toplevels
+        .iter()
+        .filter(|(_, record)| !record.closed)
+        .map(|(key, record)| (*key, record.title.clone(), record.app_id.clone()))
+        .collect();
+    if open.is_empty() {
+        return;
+    }
+    let client_id = list.client_id();
+    for (key, title, app_id) in open {
+        state
+            .capture
+            .enqueue(client_id, Pending::Announce { key, title, app_id });
+    }
+    dispatch_deliver(dispatcher, BTreeSet::from([client_id]));
 }
 
 fn dispatch_deliver(dispatcher: &mut Dispatcher, clients: BTreeSet<ClientId>) {
@@ -1219,6 +1377,7 @@ mod tests {
         ExtForeignToplevelListV1::attach(
             &mut client,
             &mut state,
+            &mut dispatcher,
             ExtForeignToplevelListV1Id::from(50),
         );
         let key = announce_toplevel(&mut state, &mut dispatcher, "Terminal", "app");
@@ -1308,6 +1467,7 @@ mod tests {
         ExtForeignToplevelListV1::attach(
             &mut client,
             &mut state,
+            &mut dispatcher,
             ExtForeignToplevelListV1Id::from(50),
         );
         test_dispatch(
@@ -1328,5 +1488,165 @@ mod tests {
         let key = announce_toplevel(&mut state, &mut dispatcher, "Hidden", "app");
         test_deliver(&mut client, &mut state, &mut dispatcher);
         assert!(state.capture.handles_for(key).is_empty());
+    }
+
+    fn insert_toplevel(
+        client: &mut crate::clients::Client,
+        state: &mut State,
+    ) -> Resolved<crate::protocol_generated::XdgToplevelId> {
+        client
+            .insert_object(
+                state,
+                crate::wayland_objects::xdg_toplevel::XdgToplevel::new(
+                    crate::protocol_generated::XdgToplevelId::from(60),
+                    Resolved::new(
+                        client.client_id(),
+                        crate::protocol_generated::XdgSurfaceId::from(1),
+                        crate::state::ObjectId::from(1usize),
+                    ),
+                    7,
+                ),
+            )
+            .0
+    }
+
+    #[test]
+    fn mapping_a_toplevel_publishes_its_identity_and_unmap_stops_capture() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let toplevel = insert_toplevel(&mut client, &mut state);
+        ExtForeignToplevelListV1::attach(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtForeignToplevelListV1Id::from(50),
+        );
+        map_xdg_toplevel(&mut state, &mut dispatcher, toplevel, "Terminal", "app");
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        let key = state.capture.by_xdg[&toplevel];
+        let handle = state.capture.handles_for(key)[0];
+        let handle_id: u32 = handle.wayland_id().into();
+        assert_eq!(handle.rref(&state).title(), "Terminal");
+        assert_eq!(handle.rref(&state).identifier(), key.identifier());
+        assert!(test_sent(&dispatcher, handle_id, 4));
+        assert!(test_sent(&dispatcher, handle_id, 1));
+
+        let mut event = test_request(60, 2, 1);
+        event.string("Next");
+        test_dispatch(&mut client, &mut state, &mut dispatcher, toplevel.wayland_id(), event);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        assert_eq!(handle.rref(&state).title(), "Next");
+        retitle_xdg_toplevel(&mut state, &mut dispatcher, toplevel, "Next".to_string());
+        assert!(state.capture.pending.get(&client.client_id()).is_none());
+
+        client.insert_object(
+            &mut state,
+            ExtForeignToplevelImageCaptureSourceManagerV1::new(
+                ExtForeignToplevelImageCaptureSourceManagerV1Id::from(51),
+            ),
+        );
+        let mut event = test_request(51, 0, 2);
+        event.id(ExtImageCaptureSourceV1Id::from(52));
+        event.id(handle.wayland_id());
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtForeignToplevelImageCaptureSourceManagerV1Id::from(51),
+            event,
+        );
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtForeignToplevelImageCaptureSourceManagerV1Id::from(51),
+            test_request(51, 1, 0),
+        );
+        assert!(client
+            .resolve(ExtImageCaptureSourceV1Id::from(52), &state)
+            .is_some());
+        client.insert_object(
+            &mut state,
+            ExtImageCopyCaptureManagerV1::new(ExtImageCopyCaptureManagerV1Id::from(53)),
+        );
+        let mut event = test_request(53, 0, 3);
+        event.id(ExtImageCopyCaptureSessionV1Id::from(54));
+        event.id(ExtImageCaptureSourceV1Id::from(52));
+        event.uint(0);
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureManagerV1Id::from(53),
+            event,
+        );
+        let first_identifier = handle.rref(&state).identifier().to_string();
+        unmap_xdg_toplevel(&mut state, &mut dispatcher, toplevel);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        assert!(handle.rref(&state).is_closed());
+        assert!(test_sent(&dispatcher, 54, 5));
+
+        map_xdg_toplevel(&mut state, &mut dispatcher, toplevel, "Next", "app");
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        let remapped = state.capture.by_xdg[&toplevel];
+        let again = state.capture.handles_for(remapped)[0];
+        assert_ne!(again.rref(&state).identifier(), first_identifier);
+        assert_ne!(remapped, key);
+    }
+
+    #[test]
+    fn a_later_list_receives_mapped_toplevels_without_replacing_old_handles() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let toplevel = insert_toplevel(&mut client, &mut state);
+        map_xdg_toplevel(&mut state, &mut dispatcher, toplevel, "Terminal", "app");
+        let first = ExtForeignToplevelListV1::attach(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtForeignToplevelListV1Id::from(50),
+        );
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        let key = state.capture.by_xdg[&toplevel];
+        assert_eq!(state.capture.handles_for(key).len(), 1);
+        let original = state.capture.handles_for(key)[0];
+        ExtForeignToplevelListV1::attach(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtForeignToplevelListV1Id::from(61),
+        );
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        assert_eq!(state.capture.handles_for(key).len(), 2);
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            original.wayland_id(),
+            test_request(original.wayland_id().into(), 0, 0),
+        );
+        assert_eq!(state.capture.handles_for(key).len(), 1);
+        sync_mapped_toplevels(&mut state, &mut dispatcher, first);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        assert_eq!(state.capture.handles_for(key).len(), 1);
+        assert!(test_sent(&dispatcher, 50, 0));
+        assert!(test_sent(&dispatcher, 61, 0));
+    }
+
+    #[test]
+    fn destroying_an_output_source_manager_leaves_the_source() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        output_source(&mut client, &mut state, &mut dispatcher);
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtOutputImageCaptureSourceManagerV1Id::from(30),
+            test_request(30, 1, 0),
+        );
+        assert!(client
+            .resolve(ExtOutputImageCaptureSourceManagerV1Id::from(30), &state)
+            .is_none());
+        assert!(client
+            .resolve(ExtImageCaptureSourceV1Id::from(31), &state)
+            .is_some());
     }
 }

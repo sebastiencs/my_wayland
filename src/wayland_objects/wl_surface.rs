@@ -2182,6 +2182,24 @@ impl WlSurface {
                             root_surface: resolved_surface,
                         });
                     }
+                    if let Some(toplevel) = xdg_surface_id
+                        .try_ref(state)
+                        .and_then(XdgSurface::toplevel_role)
+                    {
+                        if is_mapped {
+                            let (title, app_id) = toplevel
+                                .try_ref(state)
+                                .map(|toplevel| {
+                                    (toplevel.title().to_string(), toplevel.app_id().to_string())
+                                })
+                                .unwrap_or_default();
+                            crate::capture::map_xdg_toplevel(
+                                state, dispatcher, toplevel, title, app_id,
+                            );
+                        } else {
+                            crate::capture::unmap_xdg_toplevel(state, dispatcher, toplevel);
+                        }
+                    }
                     dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
                 }
             }

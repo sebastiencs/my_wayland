@@ -1,4 +1,4 @@
-//! `ext_foreign_toplevel_list_v1`. Mapped toplevels are announced by a later phase.
+//! `ext_foreign_toplevel_list_v1`. Binding sends the toplevels that are already mapped.
 //! `stop` ends the stream with one `finished` event. The global stays unpublished.
 
 use crate::{
@@ -33,9 +33,14 @@ impl Global for ExtForeignToplevelListV1Global {
         state: &mut State,
         id: NewId,
         _version: u32,
-        _dispatcher: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) {
-        ExtForeignToplevelListV1::attach(client, state, ExtForeignToplevelListV1Id::from(id));
+        ExtForeignToplevelListV1::attach(
+            client,
+            state,
+            dispatcher,
+            ExtForeignToplevelListV1Id::from(id),
+        );
     }
 }
 
@@ -49,10 +54,12 @@ impl ExtForeignToplevelListV1 {
     pub fn attach(
         client: &mut Client,
         state: &mut State,
+        dispatcher: &mut crate::runner::Dispatcher,
         id: ExtForeignToplevelListV1Id,
     ) -> Resolved<ExtForeignToplevelListV1Id> {
         let (resolved, _) = client.insert_object(state, Self { id, finished: false });
         state.capture.track_list(resolved);
+        crate::capture::sync_mapped_toplevels(state, dispatcher, resolved);
         resolved
     }
 
