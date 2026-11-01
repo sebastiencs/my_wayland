@@ -9,8 +9,9 @@ use crate::{
     libinput::Input,
     object::Object,
     protocol_generated::{
-        HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId, WlDataSourceId, WlSeatId,
-        WlSurfaceId, XdgSurfaceId, XdgToplevelId, ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id,
+        ExtIdleNotificationV1Id, HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId,
+        WlDataSourceId, WlSeatId, WlSurfaceId, XdgSurfaceId, XdgToplevelId, ZwlrGammaControlV1Id,
+        ZwlrLayerSurfaceV1Id,
     },
     region::RectI,
     render::{
@@ -854,6 +855,8 @@ pub struct State {
     pub next_workspace_serial: u32,
     pub backend_syncobj_globals: BTreeMap<DrmId, GlobalName>,
     pub session_active: bool,
+    /// Live `ext_idle_notification_v1` objects. Destroying the manager does not clear this.
+    pub idle_notifications: Vec<Resolved<ExtIdleNotificationV1Id>>,
     #[cfg(test)]
     pub realize_closing_snapshots_in_tests: bool,
     pub frame_scheduler: BTreeMap<OutputId, OutputSchedulerSnapshot>,

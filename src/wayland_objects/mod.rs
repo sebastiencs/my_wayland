@@ -1,5 +1,7 @@
 #![allow(unused)]
 
+pub mod ext_idle_notification_v1;
+pub mod ext_idle_notifier_v1;
 pub mod ext_workspace_group_handle_v1;
 pub mod ext_workspace_handle_v1;
 pub mod ext_workspace_manager_v1;
@@ -112,8 +114,6 @@ fake_obj! {
     { wp_drm_lease_connector_v1, WpDrmLeaseConnectorV1 },
     { wp_drm_lease_request_v1, WpDrmLeaseRequestV1 },
     { wp_drm_lease_v1, WpDrmLeaseV1 },
-    { ext_idle_notifier_v1, ExtIdleNotifierV1 },
-    { ext_idle_notification_v1, ExtIdleNotificationV1 },
     { ext_session_lock_manager_v1, ExtSessionLockManagerV1 },
     { ext_session_lock_v1, ExtSessionLockV1 },
     { wp_single_pixel_buffer_manager_v1, WpSinglePixelBufferManagerV1 },

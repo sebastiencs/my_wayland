@@ -3,6 +3,7 @@ use crate::{
     protocol_generated::NewId,
     state::{Grab, IndexMap, State},
     wayland_objects::{
+        ext_idle_notifier_v1::ExtIdleNotifierV1Global,
         ext_workspace_manager_v1::ExtWorkspaceManagerV1Global, wl_compositor::WlCompositorGlobal,
         wl_data_device_manager::WlDataDeviceManagerGlobal, wl_seat::WlSeatGlobal,
         wl_shm::WlShmGlobal, wl_subcompositor::WlSubcompositorGlobal,
@@ -75,6 +76,7 @@ impl Globals {
             WpCursorShapeManagerV1Global::new,
             ZwpRelativePointerManagerV1Global::new,
             ZwpPointerConstraintsV1Global::new,
+            ExtIdleNotifierV1Global::new,
             XdgActivationV1Global::new,
             XdgWmBaseGlobal::new,
             ZxdgDecorationManagerV1Global::new,

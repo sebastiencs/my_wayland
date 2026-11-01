@@ -316,6 +316,7 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
         next_workspace_serial: 1,
         backend_syncobj_globals: Default::default(),
         session_active: true,
+        idle_notifications: Vec::new(),
         #[cfg(test)]
         realize_closing_snapshots_in_tests: false,
         frame_scheduler: Default::default(),

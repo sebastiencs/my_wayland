@@ -209,8 +209,10 @@ impl From<std::io::Result<PollCompleted>> for LibinputAction {
     }
 }
 
-fn record_real_input(state: &mut State) {
-    state.seat.note_real_input(Instant::now());
+fn record_real_input(state: &mut State, dispatcher: &mut Dispatcher) {
+    let now = Instant::now();
+    state.seat.note_real_input(now);
+    crate::wayland_objects::ext_idle_notification_v1::on_activity(state, dispatcher, now);
 }
 
 impl Model for Libinput {
@@ -251,7 +253,7 @@ impl Model for Libinput {
                     match event {
                         input::Event::Pointer(pointer) => match pointer {
                             PointerEvent::Motion(motion) => {
-                                record_real_input(state);
+                                record_real_input(state, dispatcher);
                                 log::debug!(
                                     "libinput pointer motion dx={} dy={} time={}",
                                     motion.dx(),
@@ -270,7 +272,7 @@ impl Model for Libinput {
                                 )
                             }
                             PointerEvent::MotionAbsolute(motion) => {
-                                record_real_input(state);
+                                record_real_input(state, dispatcher);
                                 let Some(bounds) = current_output_layout_bounds(state) else {
                                     continue;
                                 };
@@ -300,7 +302,7 @@ impl Model for Libinput {
                                 );
                             }
                             PointerEvent::Button(button) => {
-                                record_real_input(state);
+                                record_real_input(state, dispatcher);
                                 let button_state = match button.button_state() {
                                     ButtonState::Pressed => 1,
                                     ButtonState::Released => 0,
@@ -320,11 +322,11 @@ impl Model for Libinput {
                                 );
                             }
                             PointerEvent::ScrollWheel(wheel) => {
-                                record_real_input(state);
+                                record_real_input(state, dispatcher);
                                 deliver_wheel_scroll(state, dispatcher, &wheel)
                             }
                             PointerEvent::ScrollFinger(finger) => {
-                                record_real_input(state);
+                                record_real_input(state, dispatcher);
                                 deliver_smooth_scroll(
                                     state,
                                     dispatcher,
@@ -333,7 +335,7 @@ impl Model for Libinput {
                                 );
                             }
                             PointerEvent::ScrollContinuous(continuous) => {
-                                record_real_input(state);
+                                record_real_input(state, dispatcher);
                                 deliver_smooth_scroll(
                                     state,
                                     dispatcher,
@@ -349,7 +351,7 @@ impl Model for Libinput {
                         },
                         input::Event::Keyboard(keyboard) => match keyboard {
                             KeyboardEvent::Key(key) => {
-                                record_real_input(state);
+                                record_real_input(state, dispatcher);
                                 let key_state = match key.key_state() {
                                     KeyState::Pressed => 1,
                                     KeyState::Released => 0,

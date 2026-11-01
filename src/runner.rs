@@ -327,6 +327,19 @@ impl Dispatcher {
             .any(predicate)
     }
 
+    pub(crate) fn test_matching_actions_for<T: 'static, I: ModelInstanceId>(
+        &self,
+        id: I,
+        mut visit: impl FnMut(&T),
+    ) {
+        let id = Some(id.into_raw());
+        for action in self.queue.iter().filter(|action| action.id.specifier == id) {
+            if let Some(action) = action.ptr.downcast_ref::<T>() {
+                visit(action);
+            }
+        }
+    }
+
     pub(crate) fn test_has_queued_action_for<T: 'static, I: ModelInstanceId>(
         &self,
         id: I,

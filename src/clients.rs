@@ -521,6 +521,10 @@ pub enum ClientAction {
         resizing: bool,
     },
     Close,
+    IdleNotification {
+        id: crate::protocol_generated::ExtIdleNotificationV1Id,
+        notice: crate::wayland_objects::ext_idle_notification_v1::IdleNotice,
+    },
 }
 
 #[derive(Debug)]
@@ -2474,6 +2478,13 @@ impl Model for Client {
 
                 dispatcher.requester_object_id = None;
                 self.pending_fds = pending_fds;
+            }
+            IdleNotification { id, notice } => {
+                if let Some(notification) = self.resolve(id, state) {
+                    notification
+                        .rref(state)
+                        .send_notice(notice, &mut dispatcher);
+                }
             }
             Close => {
                 log::info!("client_id={:?} closed", self.id);

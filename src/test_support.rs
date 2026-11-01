@@ -56,6 +56,7 @@ pub fn state_for_tests_with_config(config: RuntimeConfig) -> State {
         next_workspace_serial: 1,
         backend_syncobj_globals: Default::default(),
         session_active: true,
+        idle_notifications: Vec::new(),
         frame_scheduler: Default::default(),
         presentation: Default::default(),
         globals,

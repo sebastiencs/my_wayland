@@ -177,7 +177,7 @@ impl Model for IdleScheduler {
 
     fn process(
         &mut self,
-        _state: &mut State,
+        state: &mut State,
         action: Self::Action,
         dispatcher: &mut Dispatcher,
     ) -> std::result::Result<(), crate::runner::ModelFailure> {
@@ -186,6 +186,11 @@ impl Model for IdleScheduler {
             IdleSchedulerAction::SetDeadline { id, at } => {
                 self.deadlines.insert(id, at);
                 self.arm(dispatcher);
+                crate::wayland_objects::ext_idle_notification_v1::evaluate(
+                    state,
+                    dispatcher,
+                    Instant::now(),
+                );
             }
             IdleSchedulerAction::ClearDeadline { id } => {
                 self.deadlines.remove(&id);
@@ -194,11 +199,14 @@ impl Model for IdleScheduler {
             IdleSchedulerAction::Evaluate { now } => {
                 self.expire(now);
                 self.arm(dispatcher);
+                crate::wayland_objects::ext_idle_notification_v1::evaluate(state, dispatcher, now);
             }
             IdleSchedulerAction::Fired => {
                 self.read_op_id = None;
-                self.expire(Instant::now());
+                let now = Instant::now();
+                self.expire(now);
                 self.arm(dispatcher);
+                crate::wayland_objects::ext_idle_notification_v1::evaluate(state, dispatcher, now);
             }
             IdleSchedulerAction::Failed { error } => {
                 self.read_op_id = None;
@@ -455,9 +463,9 @@ mod tests {
     }
 
     #[test]
-    fn idle_protocols_stay_unpublished() {
+    fn ext_idle_notifier_is_advertised_without_idle_inhibit() {
         let state = state_for_tests();
-        assert!(!state.globals.contains_interface("ext_idle_notifier_v1"));
+        assert!(state.globals.contains_interface("ext_idle_notifier_v1"));
         assert!(!state
             .globals
             .contains_interface("zwp_idle_inhibit_manager_v1"));
