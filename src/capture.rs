@@ -1,7 +1,7 @@
 //! Shared lifecycle and SHM capture queue for both screenshot protocols.
 //!
-//! Output and toplevel copies record pixels, damage, and completion here. Cursor pixels and the
-//! protocol events that publish them land in later phases. This registry also tracks which
+//! Output and toplevel copies record pixels, damage, and completion here. A painted screencopy
+//! can blend the cursor into its own buffer. This registry also tracks which
 //! protocol objects must stop when an output, toplevel, or pointer disappears, and completes each
 //! queued copy once. Globals stay unpublished until those later phases pass. Hyprland's screencopy
 //! permission prompt is intentionally not copied.
@@ -38,8 +38,8 @@ pub enum CaptureTarget {
     Toplevel(ToplevelKey),
 }
 
-/// Cursor inclusion is recorded per job so later phases can paint one consumer without changing
-/// another. This phase does not sample cursor pixels.
+/// Cursor inclusion is recorded per job. A painted copy can receive the cursor in its own
+/// buffer; a hidden copy and the scanout image stay unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum CaptureCursor {
     Hidden,
@@ -132,6 +132,8 @@ struct ExtFrameSlot {
 struct ScreencopySlot {
     frame: Resolved<ZwlrScreencopyFrameV1Id>,
     output_id: OutputId,
+    job: Option<CaptureJobId>,
+    reported: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -139,6 +141,7 @@ enum Pending {
     StopSession(Resolved<ExtImageCopyCaptureSessionV1Id>),
     FailExtFrame(Resolved<ExtImageCopyCaptureFrameV1Id>),
     FailScreencopy(Resolved<ZwlrScreencopyFrameV1Id>),
+    FinishScreencopy { frame: Resolved<ZwlrScreencopyFrameV1Id>, job: CaptureJobId },
     CloseHandle(Resolved<ExtForeignToplevelHandleV1Id>),
     Announce { key: ToplevelKey, title: String, app_id: String },
     Retitle { key: ToplevelKey, title: String },
@@ -200,7 +203,22 @@ impl CaptureRegistry {
         frame: Resolved<ZwlrScreencopyFrameV1Id>,
         output_id: OutputId,
     ) {
-        self.screencopy.push(ScreencopySlot { frame, output_id });
+        self.screencopy
+            .push(ScreencopySlot { frame, output_id, job: None, reported: false });
+    }
+
+    pub(crate) fn bind_screencopy_job(
+        &mut self,
+        frame: ZwlrScreencopyFrameV1Id,
+        job: CaptureJobId,
+    ) {
+        if let Some(slot) = self
+            .screencopy
+            .iter_mut()
+            .find(|slot| slot.frame.wayland_id() == frame)
+        {
+            slot.job = Some(job);
+        }
     }
 
     pub(crate) fn track_list(&mut self, list: Resolved<ExtForeignToplevelListV1Id>) {
@@ -542,11 +560,215 @@ pub(crate) fn capture_sample(state: &State, job_id: CaptureJobId) -> Option<&Cap
     state.capture.samples.get(&job_id)
 }
 
+/// Send `flags`, `damage`, and `ready` — or `failed` — for screencopy jobs that already finished.
+pub(crate) fn publish_screencopy(state: &mut State, dispatcher: &mut Dispatcher) {
+    let finished: Vec<_> = state
+        .capture
+        .screencopy
+        .iter()
+        .filter_map(|slot| {
+            if slot.reported {
+                return None;
+            }
+            let job = slot.job?;
+            let status = state.capture.jobs.get(&job)?.status;
+            if status == CaptureJobStatus::Queued {
+                return None;
+            }
+            Some((slot.frame, job))
+        })
+        .collect();
+    let mut clients = BTreeSet::new();
+    for (frame, job) in finished {
+        if let Some(slot) = state
+            .capture
+            .screencopy
+            .iter_mut()
+            .find(|slot| slot.frame == frame)
+        {
+            slot.reported = true;
+        }
+        let client_id = frame.client_id();
+        state
+            .capture
+            .enqueue(client_id, Pending::FinishScreencopy { frame, job });
+        clients.insert(client_id);
+    }
+    dispatch_deliver(dispatcher, clients);
+}
+
+/// Blend `cursor` over one capture image. The destination is premultiplied BGRA from the
+/// framebuffer read. The cursor stays out of every other buffer, including scanout.
+pub(crate) fn blend_cursor_into_copy(
+    bytes: &mut [u8],
+    dst_stride: usize,
+    rect: CapturePixelRect,
+    cursor: &CaptureCursorImage,
+) {
+    let Some(oriented) = orient_cursor(cursor) else {
+        return;
+    };
+    let Some(place) = cursor_buffer_rect(cursor) else {
+        return;
+    };
+    if place.width <= 0 || place.height <= 0 || rect.width <= 0 || rect.height <= 0 {
+        return;
+    }
+    for row in 0..rect.height {
+        for column in 0..rect.width {
+            let buffer_x = rect.x.saturating_add(column);
+            let buffer_y = rect.y.saturating_add(row);
+            if buffer_x < place.x
+                || buffer_y < place.y
+                || buffer_x >= place.x.saturating_add(place.width)
+                || buffer_y >= place.y.saturating_add(place.height)
+            {
+                continue;
+            }
+            let src_x = (i64::from(buffer_x - place.x) * i64::from(oriented.width))
+                .div_euclid(i64::from(place.width));
+            let src_y = (i64::from(buffer_y - place.y) * i64::from(oriented.height))
+                .div_euclid(i64::from(place.height));
+            if src_x < 0
+                || src_y < 0
+                || src_x >= i64::from(oriented.width)
+                || src_y >= i64::from(oriented.height)
+            {
+                continue;
+            }
+            let src_index = (src_y as usize)
+                .saturating_mul(oriented.stride)
+                .saturating_add((src_x as usize).saturating_mul(4));
+            let dst_index = (row as usize)
+                .saturating_mul(dst_stride)
+                .saturating_add((column as usize).saturating_mul(4));
+            let Some(src) = oriented.argb.get(src_index..src_index + 4) else {
+                continue;
+            };
+            let Some(dst) = bytes.get_mut(dst_index..dst_index + 4) else {
+                continue;
+            };
+            blend_premultiplied(dst, src);
+        }
+    }
+}
+
+struct OrientedCursor {
+    width: i32,
+    height: i32,
+    stride: usize,
+    argb: Vec<u8>,
+}
+
+fn orient_cursor(cursor: &CaptureCursorImage) -> Option<OrientedCursor> {
+    if cursor.width <= 0 || cursor.height <= 0 {
+        return None;
+    }
+    let width = cursor.width as usize;
+    let height = cursor.height as usize;
+    let needed = cursor.stride.saturating_mul(height);
+    if cursor.argb.len() < needed || cursor.stride < width.saturating_mul(4) {
+        return None;
+    }
+    let inverted = invert_output_transform(cursor.transform);
+    let (dest_width, dest_height) = if inverted % 2 == 0 {
+        (cursor.width, cursor.height)
+    } else {
+        (cursor.height, cursor.width)
+    };
+    let dest_stride = (dest_width as usize).saturating_mul(4);
+    let mut argb = vec![0u8; dest_stride.saturating_mul(dest_height as usize)];
+    for sy in 0..cursor.height {
+        for sx in 0..cursor.width {
+            let (dx, dy, _, _) =
+                transform_output_box(sx, sy, 1, 1, inverted, cursor.width, cursor.height)?;
+            if dx < 0 || dy < 0 || dx >= dest_width || dy >= dest_height {
+                continue;
+            }
+            let src_index = (sy as usize)
+                .saturating_mul(cursor.stride)
+                .saturating_add((sx as usize).saturating_mul(4));
+            let dst_index = (dy as usize)
+                .saturating_mul(dest_stride)
+                .saturating_add((dx as usize).saturating_mul(4));
+            argb[dst_index..dst_index + 4].copy_from_slice(&cursor.argb[src_index..src_index + 4]);
+        }
+    }
+    Some(OrientedCursor {
+        width: dest_width,
+        height: dest_height,
+        stride: dest_stride,
+        argb,
+    })
+}
+
+fn cursor_buffer_rect(cursor: &CaptureCursorImage) -> Option<CapturePixelRect> {
+    if cursor.mode_width <= 0 || cursor.mode_height <= 0 {
+        return None;
+    }
+    let wayland = crate::transform::BufferTransform::from_wayland(cursor.transform)
+        .unwrap_or(crate::transform::BufferTransform::Normal);
+    let (buffer_width, buffer_height) = wayland.maybe_swap((cursor.mode_width, cursor.mode_height));
+    let logical_width = cursor.scale.logical_length(buffer_width);
+    let logical_height = cursor.scale.logical_length(buffer_height);
+    let (x, y, width, height) = transform_output_box(
+        cursor.local_x,
+        cursor.local_y,
+        cursor.width,
+        cursor.height,
+        invert_output_transform(cursor.transform),
+        logical_width,
+        logical_height,
+    )?;
+    let x1 = scale_logical_to_buffer(x, cursor.scale);
+    let y1 = scale_logical_to_buffer(y, cursor.scale);
+    let x2 = scale_logical_to_buffer(x.saturating_add(width), cursor.scale);
+    let y2 = scale_logical_to_buffer(y.saturating_add(height), cursor.scale);
+    if x2 <= x1 || y2 <= y1 {
+        return None;
+    }
+    Some(CapturePixelRect { x: x1, y: y1, width: x2 - x1, height: y2 - y1 })
+}
+
+fn blend_premultiplied(dst: &mut [u8], src: &[u8]) {
+    let src_a = u32::from(src[3]);
+    if src_a == 0 {
+        return;
+    }
+    if src_a == 255 {
+        dst.copy_from_slice(&src[..4]);
+        return;
+    }
+    let inv = 255 - src_a;
+    for channel in 0..3 {
+        dst[channel] =
+            ((u32::from(src[channel]) * src_a + u32::from(dst[channel]) * inv + 127) / 255) as u8;
+    }
+    dst[3] = ((src_a * 255 + u32::from(dst[3]) * inv + 127) / 255) as u8;
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct OutputCopySpec {
     pub job_id: CaptureJobId,
     pub rect: CapturePixelRect,
     pub stride: usize,
+    pub cursor: CaptureCursor,
+}
+
+/// Cursor image in output-local logical coordinates. `argb` is little-endian BGRA, matching
+/// the SHM capture buffer.
+#[derive(Clone, Debug)]
+pub(crate) struct CaptureCursorImage {
+    pub local_x: i32,
+    pub local_y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub stride: usize,
+    pub argb: Vec<u8>,
+    pub mode_width: i32,
+    pub mode_height: i32,
+    pub scale: crate::state::FractionalScale,
+    pub transform: i32,
 }
 
 pub(crate) fn output_copy_specs(
@@ -571,7 +793,12 @@ pub(crate) fn output_copy_specs(
         let Ok(write) = buffer.begin_capture_write(rect.width, rect.height) else {
             continue;
         };
-        specs.push(OutputCopySpec { job_id: *job_id, rect, stride: write.stride_bytes() });
+        specs.push(OutputCopySpec {
+            job_id: *job_id,
+            rect,
+            stride: write.stride_bytes(),
+            cursor: job.cursor,
+        });
     }
     specs
 }
@@ -1424,6 +1651,17 @@ pub fn deliver(client: &mut Client, state: &mut State, dispatcher: &mut ClientDi
                     frame.fail(dispatcher);
                 }
             }
+            Pending::FinishScreencopy { frame, job } => {
+                let status = state.capture.jobs.get(&job).map(|job| job.status);
+                let sample = state.capture.samples.get(&job).cloned();
+                if let Some(frame) = frame.try_ref_mut(state) {
+                    if let (Some(CaptureJobStatus::Written), Some(sample)) = (status, sample) {
+                        frame.ready(&sample, dispatcher);
+                    } else {
+                        frame.fail(dispatcher);
+                    }
+                }
+            }
             Pending::CloseHandle(handle) => {
                 if let Some(handle) = handle.try_ref_mut(state) {
                     handle.send_closed(dispatcher);
@@ -1779,10 +2017,14 @@ mod tests {
             &mut state,
             ZwlrScreencopyManagerV1::new(ZwlrScreencopyManagerV1Id::from(8), 3),
         );
-        let mut event = test_request(8, 0, 3);
+        let mut event = test_request(8, 1, 7);
         event.id(ZwlrScreencopyFrameV1Id::from(9));
         event.int(1);
         event.id(WlOutputId::from(OUTPUT_OBJECT));
+        event.int(0);
+        event.int(0);
+        event.int(2);
+        event.int(2);
         test_dispatch(
             &mut client,
             &mut state,
@@ -1795,7 +2037,7 @@ mod tests {
             .unwrap()
             .rref(&state);
         assert!(frame.overlay_cursor());
-        assert!(frame.region().is_none());
+        assert_eq!(frame.region(), Some((0, 0, 2, 2)));
         test_dispatch(
             &mut client,
             &mut state,
@@ -1924,6 +2166,202 @@ mod tests {
             copy,
         );
         assert!(test_closed(&dispatcher, &client));
+    }
+
+    #[test]
+    fn screencopy_advertises_shm_and_completes_in_protocol_order() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let output_id = insert_output(&mut client, &mut state);
+        insert_buffer(&mut client, &mut state);
+        client.insert_object(
+            &mut state,
+            ZwlrScreencopyManagerV1::new(ZwlrScreencopyManagerV1Id::from(8), 3),
+        );
+        let mut event = test_request(8, 1, 7);
+        event.id(ZwlrScreencopyFrameV1Id::from(9));
+        event.int(0);
+        event.id(WlOutputId::from(OUTPUT_OBJECT));
+        event.int(0);
+        event.int(0);
+        event.int(2);
+        event.int(2);
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ZwlrScreencopyManagerV1Id::from(8),
+            event,
+        );
+        assert!(test_sent_arg(&dispatcher, 9, 0, 0));
+        assert!(test_sent_arg(&dispatcher, 9, 0, 1));
+        assert!(test_sent(&dispatcher, 9, 6));
+        assert!(!test_sent(&dispatcher, 9, 5));
+        let copy = with_id(test_request(9, 2, 1), WlBufferId::from(BUFFER));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ZwlrScreencopyFrameV1Id::from(9),
+            copy,
+        );
+        assert!(!test_closed(&dispatcher, &client));
+        let specs = output_copy_specs(&state.capture, &state.objects, output_id);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].rect, CapturePixelRect { x: 0, y: 0, width: 2, height: 2 });
+        let pixels = vec![9u8; specs[0].stride * 2];
+        apply_rendered_output(
+            &mut state.capture,
+            &state.objects,
+            output_id,
+            640,
+            480,
+            crate::state::FractionalScale::ONE,
+            0,
+            &[CapturePixelRect { x: 0, y: 0, width: 2, height: 2 }],
+            vec![RenderedOutputCopy {
+                job_id: specs[0].job_id,
+                bytes: pixels,
+                stride: specs[0].stride,
+                read_ok: true,
+            }],
+            CaptureTimestamp { sec: 5, nsec: 7 },
+        );
+        publish_screencopy(&mut state, &mut dispatcher);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        assert!(test_sent_arg(&dispatcher, 9, 1, 0));
+        assert!(test_sent_arg(&dispatcher, 9, 4, 0));
+        assert!(test_sent(&dispatcher, 9, 2));
+        let stored = client
+            .resolve(WlBufferId::from(BUFFER), &state)
+            .unwrap()
+            .rref(&state)
+            .begin_capture_write(2, 2)
+            .unwrap();
+        assert_eq!(stored.as_slice()[..8], [9, 9, 9, 9, 9, 9, 9, 9]);
+
+        let mut again = test_request(8, 1, 7);
+        again.id(ZwlrScreencopyFrameV1Id::from(11));
+        again.int(0);
+        again.id(WlOutputId::from(OUTPUT_OBJECT));
+        again.int(0);
+        again.int(0);
+        again.int(2);
+        again.int(2);
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ZwlrScreencopyManagerV1Id::from(8),
+            again,
+        );
+        let copy = with_id(test_request(11, 2, 1), WlBufferId::from(BUFFER));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ZwlrScreencopyFrameV1Id::from(11),
+            copy,
+        );
+        let specs = output_copy_specs(&state.capture, &state.objects, output_id);
+        assert_eq!(specs.len(), 1);
+        apply_rendered_output(
+            &mut state.capture,
+            &state.objects,
+            output_id,
+            640,
+            480,
+            crate::state::FractionalScale::ONE,
+            0,
+            &[CapturePixelRect { x: 1, y: 0, width: 1, height: 1 }],
+            vec![RenderedOutputCopy {
+                job_id: specs[0].job_id,
+                bytes: vec![0; specs[0].stride * 2],
+                stride: specs[0].stride,
+                read_ok: true,
+            }],
+            CaptureTimestamp { sec: 6, nsec: 1 },
+        );
+        publish_screencopy(&mut state, &mut dispatcher);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        assert!(test_sent_arg(&dispatcher, 11, 4, 1));
+        assert!(!test_sent_arg(&dispatcher, 11, 4, 0));
+    }
+
+    #[test]
+    fn screencopy_rejects_a_mismatched_buffer_and_fails_an_empty_region() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        insert_output(&mut client, &mut state);
+        insert_buffer(&mut client, &mut state);
+        client.insert_object(
+            &mut state,
+            ZwlrScreencopyManagerV1::new(ZwlrScreencopyManagerV1Id::from(8), 3),
+        );
+        let mut event = test_request(8, 0, 3);
+        event.id(ZwlrScreencopyFrameV1Id::from(9));
+        event.int(0);
+        event.id(WlOutputId::from(OUTPUT_OBJECT));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ZwlrScreencopyManagerV1Id::from(8),
+            event,
+        );
+        let copy = with_id(test_request(9, 0, 1), WlBufferId::from(BUFFER));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ZwlrScreencopyFrameV1Id::from(9),
+            copy,
+        );
+        assert!(test_closed(&dispatcher, &client));
+
+        let (mut client, mut dispatcher, mut state) = client_state();
+        insert_output(&mut client, &mut state);
+        client.insert_object(
+            &mut state,
+            ZwlrScreencopyManagerV1::new(ZwlrScreencopyManagerV1Id::from(8), 3),
+        );
+        let mut event = test_request(8, 1, 7);
+        event.id(ZwlrScreencopyFrameV1Id::from(9));
+        event.int(0);
+        event.id(WlOutputId::from(OUTPUT_OBJECT));
+        event.int(0);
+        event.int(0);
+        event.int(0);
+        event.int(2);
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ZwlrScreencopyManagerV1Id::from(8),
+            event,
+        );
+        assert!(test_sent(&dispatcher, 9, 3));
+        assert!(!test_sent(&dispatcher, 9, 0));
+    }
+
+    #[test]
+    fn a_painted_capture_blends_the_cursor_without_changing_a_hidden_copy() {
+        let cursor = CaptureCursorImage {
+            local_x: 1,
+            local_y: 0,
+            width: 1,
+            height: 1,
+            stride: 4,
+            argb: vec![10, 20, 30, 255],
+            mode_width: 4,
+            mode_height: 2,
+            scale: crate::state::FractionalScale::ONE,
+            transform: 0,
+        };
+        let rect = CapturePixelRect { x: 0, y: 0, width: 2, height: 1 };
+        let hidden = vec![1, 1, 1, 255, 2, 2, 2, 255];
+        let mut painted = hidden.clone();
+        blend_cursor_into_copy(&mut painted, 8, rect, &cursor);
+        assert_eq!(hidden, [1, 1, 1, 255, 2, 2, 2, 255]);
+        assert_eq!(painted, [1, 1, 1, 255, 10, 20, 30, 255]);
     }
 
     #[test]

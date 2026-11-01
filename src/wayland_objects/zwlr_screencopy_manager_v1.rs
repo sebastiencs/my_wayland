@@ -1,5 +1,5 @@
-//! `zwlr_screencopy_manager_v1`. Unpublished until capture pixels and security tests pass.
-//! Buffer parameters and `ready` are sent by a later phase; this object only creates frames.
+//! `zwlr_screencopy_manager_v1`. Unpublished until capture security tests pass.
+//! A new frame advertises SHM buffers immediately. `ready` follows the shared capture queue.
 
 use crate::{
     capture::{self, CaptureTarget},
@@ -117,6 +117,23 @@ fn start_frame(
         ZwlrScreencopyFrameV1::new(frame, manager.version, output_id, overlay_cursor != 0, region),
     );
     state.capture.track_screencopy(resolved, output_id);
+    let rect = state.outputs.try_get(output_id).and_then(|output| {
+        capture::output_capture_rect(
+            output.current_mode.width,
+            output.current_mode.height,
+            output.scale,
+            output.transform,
+            region,
+        )
+    });
+    let Some(frame) = resolved.try_ref_mut(state) else {
+        return;
+    };
+    if let Some(rect) = rect {
+        frame.advertise(rect.width, rect.height, dispatcher);
+    } else {
+        frame.fail(dispatcher);
+    }
 }
 
 pub(crate) fn live_output(

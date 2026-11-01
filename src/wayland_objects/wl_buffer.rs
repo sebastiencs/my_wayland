@@ -49,6 +49,20 @@ pub struct CursorShmBuffer {
     stride: usize,
 }
 
+impl CursorShmBuffer {
+    pub(crate) fn stride(&self) -> usize {
+        self.stride
+    }
+
+    pub(crate) fn argb_bytes(&self) -> Vec<u8> {
+        let len = self.stride.saturating_mul(self.height);
+        if self.offset.saturating_add(len) > self.mem.len() {
+            return Vec::new();
+        }
+        self.mem.bytes_at(self.offset, len).to_vec()
+    }
+}
+
 pub struct NewWlBufferParams {
     pub id: WlBufferId,
     pub owner_client_id: ClientId,

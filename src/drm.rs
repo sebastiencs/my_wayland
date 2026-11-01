@@ -3878,6 +3878,7 @@ fn read_output_capture_copies(
     drm: &Drm,
     drm_crtc_id: u32,
     specs: Vec<crate::capture::OutputCopySpec>,
+    cursor: Option<&crate::capture::CaptureCursorImage>,
 ) -> Vec<crate::capture::RenderedOutputCopy> {
     let Some(output) = drm.output(drm_crtc_id) else {
         return Vec::new();
@@ -3896,6 +3897,16 @@ fn read_output_capture_copies(
                 spec.stride,
                 &mut bytes,
             );
+            if read_ok && spec.cursor == crate::capture::CaptureCursor::Painted {
+                if let Some(cursor) = cursor {
+                    crate::capture::blend_cursor_into_copy(
+                        &mut bytes,
+                        spec.stride,
+                        spec.rect,
+                        cursor,
+                    );
+                }
+            }
             crate::capture::RenderedOutputCopy {
                 job_id: spec.job_id,
                 bytes,
@@ -4175,6 +4186,15 @@ impl DrmOutputModel {
             if crate::capture::output_capture_pending(state, self.output_id) {
                 direct_scanout = None;
             }
+            // The cursor is blended into a painted SHM copy only. A protected frame has no
+            // desktop cursor in its composition, so it does not receive one here either.
+            let capture_cursor = if protected {
+                None
+            } else if crate::capture::output_capture_pending(state, self.output_id) {
+                capture_cursor_overlay(state, self.output_id)
+            } else {
+                None
+            };
             let drm = state.drm.get_mut(self.drm_id);
             let target_vrr_enabled =
                 matches!(decision.mode, crate::scheduler::frame_clock::FrameClockMode::Variable)
@@ -4323,7 +4343,12 @@ impl DrmOutputModel {
                         &state.objects,
                         self.output_id,
                     );
-                    let copies = read_output_capture_copies(drm, drm_crtc_id, specs);
+                    let copies = read_output_capture_copies(
+                        drm,
+                        drm_crtc_id,
+                        specs,
+                        capture_cursor.as_ref(),
+                    );
                     crate::capture::apply_rendered_output(
                         &mut state.capture,
                         &state.objects,
@@ -4594,6 +4619,7 @@ impl DrmOutputModel {
             }
         }
         sample_pending_toplevel_captures(state, self.drm_id, drm_crtc_id, self.output_id);
+        crate::capture::publish_screencopy(state, dispatcher);
     }
 
     fn handle_flip_complete(
@@ -5263,6 +5289,46 @@ fn collect_submission_metadata(
         ));
     }
     (scene, frame_callback_surfaces, presentation_feedbacks)
+}
+
+fn capture_cursor_overlay(
+    state: &crate::state::State,
+    output_id: OutputId,
+) -> Option<crate::capture::CaptureCursorImage> {
+    let output = state.outputs.try_get(output_id)?;
+    let request = build_cursor_plane_request(state, monotonic_time_msec())?;
+    let (argb, stride) = match &request.upload {
+        CursorPlaneUploadSource::Named { image } => {
+            let image = unsafe { image.as_ref() }?;
+            let width = image.width.max(0) as usize;
+            let height = image.height.max(0) as usize;
+            if width == 0 || height == 0 {
+                return None;
+            }
+            let stride = width.saturating_mul(4);
+            let argb = rgba_to_drm_argb8888(&image.pixels_rgba, width, height, stride, height);
+            (argb, stride)
+        }
+        CursorPlaneUploadSource::SurfaceShm { buffer } => {
+            let argb = buffer.argb_bytes();
+            if argb.is_empty() {
+                return None;
+            }
+            (argb, buffer.stride())
+        }
+    };
+    Some(crate::capture::CaptureCursorImage {
+        local_x: request.x.saturating_sub(output.x),
+        local_y: request.y.saturating_sub(output.y),
+        width: request.width,
+        height: request.height,
+        stride,
+        argb,
+        mode_width: output.current_mode.width,
+        mode_height: output.current_mode.height,
+        scale: output.scale,
+        transform: output.transform,
+    })
 }
 
 fn rgba_to_drm_argb8888(
