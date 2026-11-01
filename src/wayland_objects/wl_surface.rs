@@ -3114,9 +3114,9 @@ mod tests {
             },
             sync::SurfaceSyncState,
             test_support::{
-                get_toplevel_request, insert_test_shm_buffer, raw_request_from_event,
-                resolved_wl_surface as root, state_for_tests, test_client_and_dispatcher,
-                test_output_with_crtc_name,
+                focus_for_surface, get_toplevel_request, insert_test_shm_buffer,
+                raw_request_from_event, resolved_wl_surface as root, state_for_tests,
+                test_client_and_dispatcher, test_output_with_crtc_name,
             },
             transform::{self, BufferTransform, SizeI, SurfaceViewport},
             visual_animation::WindowLifecycleAnim,
@@ -3941,6 +3941,27 @@ mod tests {
             surface.on_client_disconnect(&mut client, &mut state, &mut client_dispatcher);
         }
         assert_eq!(state.closing_snapshots.len(), 1);
+    }
+
+    #[test]
+    fn client_disconnect_captures_the_keyboard_focused_toplevel() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(5usize));
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+        let surface_object_id =
+            map_closing_candidate(&mut state, &mut client, &mut dispatcher, 231);
+        let focused = root(&state, surface_object_id);
+        state.seat.keyboard_focus =
+            Some(focus_for_surface(focused.client_id(), focused.wayland_id(), surface_object_id));
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_client_disconnect(&mut client, &mut state, &mut client_dispatcher);
+        }
+        assert_eq!(state.closing_snapshots.len(), 1);
+        assert_eq!(state.closing_snapshots[0].source(), focused);
     }
 
     #[test]

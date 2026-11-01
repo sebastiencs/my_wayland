@@ -2275,6 +2275,11 @@ impl State {
         mut surface: Resolved<WlSurfaceId>,
     ) -> Option<Resolved<WlSurfaceId>> {
         loop {
+            // A managed toplevel is its own root. Close snapshots run while that
+            // surface is grabbed, and popup_parent_surface would try_ref it.
+            if self.managed_root_surfaces.contains_key(&surface) {
+                return Some(surface);
+            }
             if let Some(parent_surface) = self.popup_parent_surface(surface) {
                 surface = parent_surface;
                 continue;
