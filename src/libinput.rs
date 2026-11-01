@@ -409,6 +409,7 @@ impl Model for Libinput {
                 // so logind still sees an open fd when the release is written.
                 dispatcher.dispatch(LibinputAction::CloseSessionFds);
                 crate::input::pointer_lock::release_active_pointer_lock(state, dispatcher);
+                crate::input::pointer_confine::release_active_pointer_confine(state, dispatcher);
                 state.seat.clear_device_state();
             }
             CloseSessionFds => {

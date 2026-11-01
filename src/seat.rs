@@ -12,7 +12,8 @@ use crate::{
     },
     protocol_generated::{
         Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlKeyboardId, WlPointerId, WlSeatId,
-        WlSurfaceId, XdgPopupId, XdgToplevelId, ZwpLockedPointerV1Id, ZwpRelativePointerV1Id,
+        WlSurfaceId, XdgPopupId, XdgToplevelId, ZwpConfinedPointerV1Id, ZwpLockedPointerV1Id,
+        ZwpRelativePointerV1Id,
     },
     root_geometry::WindowTargetGeometry,
     runner::Dispatcher,
@@ -74,6 +75,12 @@ pub enum SeatClientEvent {
     },
     PointerLockUnlocked {
         lock: Resolved<ZwpLockedPointerV1Id>,
+    },
+    PointerConfineConfined {
+        confine: Resolved<ZwpConfinedPointerV1Id>,
+    },
+    PointerConfineUnconfined {
+        confine: Resolved<ZwpConfinedPointerV1Id>,
     },
     /// Unclipped relative motion for `zwp_relative_pointer_v1` resources of the focused client.
     RelativePointerMotion {
@@ -302,6 +309,7 @@ pub struct SeatState {
     pointer_resources: BTreeMap<ClientId, Vec<Resolved<WlPointerId>>>,
     relative_pointers: BTreeMap<Resolved<WlPointerId>, Vec<Resolved<ZwpRelativePointerV1Id>>>,
     pub(crate) active_pointer_lock: Option<Resolved<ZwpLockedPointerV1Id>>,
+    pub(crate) active_pointer_confine: Option<Resolved<ZwpConfinedPointerV1Id>>,
     keyboard_resources: BTreeMap<ClientId, Vec<Resolved<WlKeyboardId>>>,
     intercepted_keyboard_keys: BTreeSet<u32>,
     intercepted_pointer_buttons: BTreeSet<u32>,
@@ -333,6 +341,7 @@ impl Default for SeatState {
             pointer_resources: BTreeMap::default(),
             relative_pointers: BTreeMap::default(),
             active_pointer_lock: None,
+            active_pointer_confine: None,
             keyboard_resources: BTreeMap::default(),
             intercepted_keyboard_keys: BTreeSet::default(),
             intercepted_pointer_buttons: BTreeSet::default(),
@@ -354,6 +363,7 @@ impl SeatState {
         self.pointer_focus = None;
         self.keyboard_focus = None;
         self.active_pointer_lock = None;
+        self.active_pointer_confine = None;
         self.keyboard_focus_history.clear();
         self.last_pointer_enter = None;
         self.active_drag = None;
@@ -753,6 +763,12 @@ impl SeatState {
         {
             self.active_pointer_lock = None;
         }
+        if self
+            .active_pointer_confine
+            .is_some_and(|confine| confine.client_id() == client_id)
+        {
+            self.active_pointer_confine = None;
+        }
         self.keyboard_resources.remove(&client_id);
         if self
             .selection_source
@@ -1141,6 +1157,7 @@ pub fn handle_pointer_motion(
     let seat = &mut state.seat;
     seat.pointer_pos.0 += dx;
     seat.pointer_pos.1 += dy;
+    crate::input::pointer_confine::confine_pointer_motion(state, old_pointer_pos);
     clamp_pointer_to_outputs(state);
     let new_pointer_pos = state.seat.pointer_position();
     log::debug!(
@@ -1304,6 +1321,7 @@ pub fn handle_pointer_motion_absolute(
     }
     let old_pointer_pos = state.seat.pointer_position();
     state.seat.pointer_pos = (x, y);
+    crate::input::pointer_confine::confine_pointer_motion(state, old_pointer_pos);
     clamp_pointer_to_outputs(state);
     let new_pointer_pos = state.seat.pointer_position();
     // log::debug!(
@@ -1360,6 +1378,7 @@ pub fn quiesce_for_session_pause(state: &mut State, dispatcher: &mut Dispatcher)
 
 fn clear_pointer_focus(state: &mut State, dispatcher: &mut Dispatcher) {
     crate::input::pointer_lock::release_pointer_lock_unless_surface(state, dispatcher, None);
+    crate::input::pointer_confine::release_pointer_confine_unless_surface(state, dispatcher, None);
     let Some(old_focus) = state.seat.pointer_focus.take() else {
         state.seat.clear_pointer_enter();
         return;

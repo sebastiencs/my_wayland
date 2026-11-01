@@ -972,6 +972,16 @@ impl Client {
                     lock.send_unlocked(dispatcher);
                 }
             }
+            SeatClientEvent::PointerConfineConfined { confine } => {
+                if let Some(confine) = confine.try_ref(state) {
+                    confine.send_confined(dispatcher);
+                }
+            }
+            SeatClientEvent::PointerConfineUnconfined { confine } => {
+                if let Some(confine) = confine.try_ref(state) {
+                    confine.send_unconfined(dispatcher);
+                }
+            }
             SeatClientEvent::PointerFrame => {
                 for pointer in state.seat.pointer_resources(self.id) {
                     if !pointer.exists(state) {

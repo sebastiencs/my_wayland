@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, RawRequest, Resolved},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
     protocol_generated::{
         zwp_confined_pointer_v1, WaylandId, WlPointerId, WlRegionId, WlSurfaceId,
@@ -39,6 +39,10 @@ impl ZwpConfinedPointerV1 {
         &mut self.core
     }
 
+    pub(crate) fn surface(&self) -> Resolved<WlSurfaceId> {
+        self.core.surface
+    }
+
     pub(crate) fn region(&self) -> Option<&RegionValue> {
         self.core.region.as_ref()
     }
@@ -49,6 +53,18 @@ impl ZwpConfinedPointerV1 {
 
     pub(crate) fn status(&self) -> ConstraintStatus {
         self.core.status
+    }
+
+    pub(crate) fn set_status(&mut self, status: ConstraintStatus) {
+        self.core.set_status(status);
+    }
+
+    pub(crate) fn send_confined(&self, dispatcher: &mut ClientDispatcher) {
+        self.send_event(zwp_confined_pointer_v1::Event::Confined, dispatcher);
+    }
+
+    pub(crate) fn send_unconfined(&self, dispatcher: &mut ClientDispatcher) {
+        self.send_event(zwp_confined_pointer_v1::Event::Unconfined, dispatcher);
     }
 
     fn snapshot_region(
@@ -83,6 +99,9 @@ impl Object for ZwpConfinedPointerV1 {
         match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
                 if let Some(resolved) = client.resolve(self.id, state) {
+                    crate::input::pointer_confine::release_grabbed_pointer_confine(
+                        &self, resolved, state, dispatcher, false,
+                    );
                     if let Some(mut surface) = self.core.surface.try_ref_mut(state) {
                         surface
                             .clear_pointer_constraint(SurfacePointerConstraint::Confine(resolved));
@@ -110,6 +129,13 @@ impl Object for ZwpConfinedPointerV1 {
         _dispatcher: &mut ClientDispatcher,
     ) {
         if let Some(resolved) = client.resolve(self.id, state) {
+            crate::input::pointer_confine::release_grabbed_pointer_confine(
+                self,
+                resolved,
+                state,
+                _dispatcher,
+                false,
+            );
             if let Some(mut surface) = self.core.surface.try_ref_mut(state) {
                 surface.clear_pointer_constraint(SurfacePointerConstraint::Confine(resolved));
             }

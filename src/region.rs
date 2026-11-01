@@ -397,6 +397,74 @@ impl RegionValue {
         matches!(self, Self::Empty)
     }
 
+    /// Constraint region intersected with the surface input region. A null constraint
+    /// region means the input region itself.
+    pub fn effective(constraint: Option<&Self>, input: &Self) -> Self {
+        match constraint {
+            None => input.clone(),
+            Some(constraint) => constraint.intersection(input),
+        }
+    }
+
+    pub fn intersection(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::Empty, _) | (_, Self::Empty) => Self::Empty,
+            (Self::Infinite, other) => other.clone(),
+            (this, Self::Infinite) => this.clone(),
+            (Self::Spec(this), Self::Spec(other)) => {
+                let mut region = this.to_region();
+                region.intersect_region(&other.to_region());
+                Self::from_damage(&region)
+            }
+        }
+    }
+
+    /// Slide `from` toward `to` without leaving the region. The result stays on the
+    /// reachable side of a boundary instead of discarding the whole movement.
+    /// An empty region stays put. An infinite region accepts `to`.
+    pub fn confine_motion(&self, from: (f64, f64), to: (f64, f64)) -> (f64, f64) {
+        match self {
+            Self::Empty => from,
+            Self::Infinite => to,
+            Self::Spec(spec) => {
+                let boxes = spec.to_region();
+                confine_boxes(boxes.rects(), from, to, 0)
+                    .unwrap_or_else(|| self.nearest_point(from).unwrap_or(from))
+            }
+        }
+    }
+
+    /// Closest point that `contains` accepts. Empty has none. Infinite returns `point`.
+    pub fn nearest_point(&self, point: (f64, f64)) -> Option<(f64, f64)> {
+        match self {
+            Self::Empty => None,
+            Self::Infinite => Some(point),
+            Self::Spec(spec) => {
+                let boxes = spec.to_region();
+                let mut best: Option<(f64, f64, f64)> = None;
+                for rect in boxes.rects() {
+                    let closest = closest_point_in_rect(*rect, point);
+                    let distance = (closest.0 - point.0).powi(2) + (closest.1 - point.1).powi(2);
+                    if best.is_none_or(|(_, _, best_distance)| distance < best_distance) {
+                        best = Some((closest.0, closest.1, distance));
+                    }
+                }
+                best.map(|(x, y, _)| (x, y))
+            }
+        }
+    }
+
+    fn from_damage(region: &DamageRegion) -> Self {
+        if region.is_empty() {
+            return Self::Empty;
+        }
+        let mut spec = RegionSpec::default();
+        for rect in region.rects() {
+            spec.add_rect(*rect);
+        }
+        Self::from_spec(spec)
+    }
+
     pub fn to_region_clipped(&self, clip: RectI) -> DamageRegion {
         if clip.is_empty() {
             return DamageRegion::new();
@@ -413,6 +481,124 @@ impl RegionValue {
     }
 }
 
+fn closest_point_in_rect(rect: RectI, point: (f64, f64)) -> (f64, f64) {
+    (
+        clamp_half_open(point.0, rect.x as f64, rect.x2() as f64),
+        clamp_half_open(point.1, rect.y as f64, rect.y2() as f64),
+    )
+}
+
+/// Closest value in `[start, end)`. `end` itself is outside a half-open span.
+fn clamp_half_open(value: f64, start: f64, end: f64) -> f64 {
+    if end <= start {
+        return start;
+    }
+    if value < start {
+        start
+    } else if value >= end {
+        end.next_down().max(start)
+    } else {
+        value
+    }
+}
+
+fn box_containing(boxes: &[RectI], x: f64, y: f64) -> Option<RectI> {
+    let ix = x.floor() as i32;
+    let iy = y.floor() as i32;
+    boxes.iter().copied().find(|rect| rect.contains(ix, iy))
+}
+
+/// wlroots `wlr_region_confine`: follow the segment, then slide along the box edge
+/// into an adjacent box when one is present.
+fn confine_boxes(
+    boxes: &[RectI],
+    from: (f64, f64),
+    to: (f64, f64),
+    depth: u32,
+) -> Option<(f64, f64)> {
+    if depth > 32 {
+        return Some(from);
+    }
+    let box_rect = box_containing(boxes, from.0, from.1)?;
+    Some(confine_in_box(boxes, from, to, box_rect, depth))
+}
+
+fn confine_in_box(
+    boxes: &[RectI],
+    from: (f64, f64),
+    to: (f64, f64),
+    box_rect: RectI,
+    depth: u32,
+) -> (f64, f64) {
+    let (x1, y1) = from;
+    let (x2, y2) = to;
+    let min_x = box_rect.x as f64;
+    let min_y = box_rect.y as f64;
+    let max_x = (box_rect.x2() - 1) as f64;
+    let max_y = (box_rect.y2() - 1) as f64;
+    let x_clamped = x2.clamp(min_x, max_x);
+    let y_clamped = y2.clamp(min_y, max_y);
+    if x_clamped.floor() == x2.floor() && y_clamped.floor() == y2.floor() {
+        return (x2, y2);
+    }
+
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let x_ratio = if dx == 0.0 { f64::INFINITY } else { (x_clamped - x1).abs() / dx.abs() };
+    let y_ratio = if dy == 0.0 { f64::INFINITY } else { (y_clamped - y1).abs() / dy.abs() };
+    let delta = x_ratio.min(y_ratio);
+    if !delta.is_finite() {
+        return (x1, y1);
+    }
+    let x = (delta * dx + x1).clamp(min_x, max_x);
+    let y = (delta * dy + y1).clamp(min_y, max_y);
+    let x_ext = x.floor() as i32
+        + if dx == 0.0 {
+            0
+        } else if dx > 0.0 {
+            1
+        } else {
+            -1
+        };
+    let y_ext = y.floor() as i32
+        + if dy == 0.0 {
+            0
+        } else if dy > 0.0 {
+            1
+        } else {
+            -1
+        };
+
+    if let Some(next_box) = boxes
+        .iter()
+        .copied()
+        .find(|rect| rect.contains(x_ext, y_ext))
+    {
+        return confine_in_box(boxes, (x, y), to, next_box, depth + 1);
+    }
+    if dx == 0.0 || dy == 0.0 {
+        return (x, y);
+    }
+
+    let bordering_x = x == min_x || x == max_x;
+    let bordering_y = y == min_y || y == max_y;
+    if bordering_x == bordering_y {
+        let along_y = confine_in_box(boxes, (x, y), (x, y2), box_rect, depth + 1);
+        let along_x = confine_in_box(boxes, (x, y), (x2, y), box_rect, depth + 1);
+        if (along_x.0 - x).abs() > (along_y.1 - y).abs() {
+            (along_x.0, y)
+        } else {
+            (x, along_y.1)
+        }
+    } else if bordering_x {
+        confine_in_box(boxes, (x, y), (x, y2), box_rect, depth + 1)
+    } else if bordering_y {
+        confine_in_box(boxes, (x, y), (x2, y), box_rect, depth + 1)
+    } else {
+        (x, y)
+    }
+}
+
 impl Default for RegionValue {
     fn default() -> Self {
         Self::Empty
@@ -425,6 +611,12 @@ mod tests {
         super::{DamageRegion, RectI, RegionSpec, RegionValue},
         crate::transform::RectF,
     };
+
+    fn region_at(x: i32, y: i32, width: i32, height: i32) -> RegionValue {
+        let mut spec = RegionSpec::default();
+        spec.add_rect(RectI::new(x, y, width, height).unwrap());
+        RegionValue::from_spec(spec)
+    }
 
     #[test]
     fn region_contains_replays_add_then_subtract_order() {
@@ -515,6 +707,47 @@ mod tests {
 
         assert!(region.intersects_rect(RectI::new(0, 0, 1, 1).unwrap()));
         assert!(!region.intersects_rect(RectI::new(3, 3, 1, 1).unwrap()));
+    }
+
+    #[test]
+    fn effective_region_intersects_constraint_with_input() {
+        let constraint = region_at(0, 0, 40, 40);
+        let input = region_at(10, 10, 10, 10);
+        let effective = RegionValue::effective(Some(&constraint), &input);
+        assert!(effective.contains(12, 12));
+        assert!(!effective.contains(2, 2));
+        assert!(RegionValue::effective(None, &input).contains(12, 12));
+        assert!(RegionValue::effective(Some(&RegionValue::empty()), &input).is_empty());
+    }
+
+    #[test]
+    fn confinement_slides_along_an_edge_and_stops_at_a_hole() {
+        let bounds = region_at(0, 0, 100, 50);
+        let slid = bounds.confine_motion((90.0, 40.0), (120.0, 10.0));
+        assert_eq!(slid.0, 99.0);
+        assert_eq!(slid.1, 10.0);
+
+        let mut holed = RegionSpec::default();
+        holed.add_rect(RectI::new(0, 0, 40, 40).unwrap());
+        holed.subtract_rect(RectI::new(10, 10, 20, 20).unwrap());
+        let holed = RegionValue::from_spec(holed);
+        let stopped = holed.confine_motion((5.0, 20.0), (20.0, 20.0));
+        assert!(stopped.0 < 10.0);
+        assert_eq!(stopped.1, 20.0);
+        assert!(holed.contains(stopped.0.floor() as i32, stopped.1.floor() as i32));
+    }
+
+    #[test]
+    fn confinement_stops_at_the_source_of_a_disjoint_region() {
+        let mut spec = RegionSpec::default();
+        spec.add_rect(RectI::new(0, 0, 10, 10).unwrap());
+        spec.add_rect(RectI::new(30, 0, 10, 10).unwrap());
+        let region = RegionValue::from_spec(spec);
+        let stopped = region.confine_motion((5.0, 5.0), (35.0, 5.0));
+        assert!(stopped.0 < 10.0);
+        assert!(region.contains(stopped.0.floor() as i32, stopped.1.floor() as i32));
+        let nearest = region.nearest_point((20.0, 5.0)).unwrap();
+        assert!(nearest.0 < 10.0 || nearest.0 >= 30.0);
     }
 
     #[test]

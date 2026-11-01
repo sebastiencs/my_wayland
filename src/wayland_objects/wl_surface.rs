@@ -1572,6 +1572,9 @@ impl WlSurface {
                             warp: true,
                         },
                     );
+                    crate::input::pointer_confine::release_pointer_confine_for_surface(
+                        state, dispatcher, resolved, true,
+                    );
                 }
             }
             Some(Some(buffer_object_id)) => {
@@ -2354,6 +2357,9 @@ impl WlSurface {
                     apply_lifetime: true,
                     warp: true,
                 },
+            );
+            crate::input::pointer_confine::release_pointer_confine_for_surface(
+                state, dispatcher, resolved, true,
             );
         }
         dispatcher

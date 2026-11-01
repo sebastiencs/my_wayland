@@ -150,9 +150,8 @@ impl Object for ZwpPointerConstraintsV1 {
             }
         };
         surface.ref_mut(state).set_pointer_constraint(slot);
-        if matches!(slot, SurfacePointerConstraint::Lock(_)) {
-            crate::input::pointer_lock::maybe_activate_pointer_lock(state, dispatcher);
-        }
+        crate::input::pointer_lock::maybe_activate_pointer_lock(state, dispatcher);
+        crate::input::pointer_confine::maybe_activate_pointer_confine(state, dispatcher);
         Ok(())
     }
 }
@@ -217,6 +216,15 @@ pub(crate) fn defunct_pointer_constraint(
             }
         }
         Some(SurfacePointerConstraint::Confine(id)) => {
+            let Some(surface) = id.try_ref(state).map(|confine| confine.surface()) else {
+                return;
+            };
+            crate::input::pointer_confine::release_pointer_confine_for_surface(
+                state,
+                dispatcher,
+                surface,
+                notify_client,
+            );
             if let Some(mut confine) = id.try_ref_mut(state) {
                 confine.core_mut().mark_terminal();
             }

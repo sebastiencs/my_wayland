@@ -66,11 +66,12 @@ impl PostAction for RecheckPointerLock {
         dispatcher: &mut crate::clients::ClientDispatcher,
     ) {
         maybe_activate_pointer_lock(state, dispatcher);
+        crate::input::pointer_confine::recheck_pointer_confinement(state, dispatcher);
     }
 }
 
 pub(crate) fn maybe_activate_pointer_lock(state: &mut State, dispatcher: &mut Dispatcher) {
-    if state.seat.active_pointer_lock.is_some() {
+    if state.seat.active_pointer_lock.is_some() || state.seat.active_pointer_confine.is_some() {
         return;
     }
     let Some(pointer_focus) = state.seat.pointer_focus else {

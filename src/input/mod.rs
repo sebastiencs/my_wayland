@@ -2,6 +2,7 @@ pub(crate) mod focus;
 pub(crate) mod grab;
 pub(crate) mod interaction;
 pub(crate) mod pick;
+pub(crate) mod pointer_confine;
 pub(crate) mod pointer_lock;
 pub(crate) mod types;
 
