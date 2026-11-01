@@ -100,7 +100,7 @@ impl Object for ZwpConfinedPointerV1 {
             Destroy => {
                 if let Some(resolved) = client.resolve(self.id, state) {
                     crate::input::pointer_confine::release_grabbed_pointer_confine(
-                        &self, resolved, state, dispatcher, false,
+                        &mut self, resolved, state, dispatcher, false,
                     );
                     if let Some(mut surface) = self.core.surface.try_ref_mut(state) {
                         surface

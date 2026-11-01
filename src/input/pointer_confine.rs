@@ -133,7 +133,7 @@ pub(crate) fn release_pointer_confine_unless_surface(
     if kept == Some(fields.surface) {
         return;
     }
-    end_confine(state, dispatcher, fields, true);
+    end_confine(state, dispatcher, fields, true, true);
 }
 
 pub(crate) fn release_pointer_confine_for_surface(
@@ -152,11 +152,11 @@ pub(crate) fn release_pointer_confine_for_surface(
     if fields.surface != surface {
         return;
     }
-    end_confine(state, dispatcher, fields, send_unconfined);
+    end_confine(state, dispatcher, fields, send_unconfined, true);
 }
 
 pub(crate) fn release_grabbed_pointer_confine(
-    confine: &ZwpConfinedPointerV1,
+    confine: &mut ZwpConfinedPointerV1,
     id: Resolved<ZwpConfinedPointerV1Id>,
     state: &mut State,
     dispatcher: &mut Dispatcher,
@@ -171,7 +171,15 @@ pub(crate) fn release_grabbed_pointer_confine(
         lifetime: confine.lifetime(),
         region: confine.region().cloned(),
     };
-    end_confine(state, dispatcher, fields, send_unconfined);
+    // The confine object is already grabbed by its request or disconnect handler.
+    // Updating it through the object map would trip the grab invariant, so the
+    // lifetime is applied on this reference. A later `mark_terminal` still wins
+    // when the client is going away.
+    confine.set_status(match fields.lifetime {
+        ConstraintLifetime::Oneshot => ConstraintStatus::Terminal,
+        ConstraintLifetime::Persistent => ConstraintStatus::Inactive,
+    });
+    end_confine(state, dispatcher, fields, send_unconfined, false);
 }
 
 fn warp_active_confine_into_region(state: &mut State, dispatcher: &mut Dispatcher) {
@@ -198,7 +206,7 @@ fn warp_active_confine_into_region(state: &mut State, dispatcher: &mut Dispatche
         return;
     }
     let Some(point) = placed.effective.nearest_point(local) else {
-        end_confine(state, dispatcher, fields, true);
+        end_confine(state, dispatcher, fields, true, true);
         return;
     };
     warp_pointer(state, dispatcher, pointer_focus, point);
@@ -209,17 +217,20 @@ fn end_confine(
     dispatcher: &mut Dispatcher,
     fields: ConfineFields,
     send_unconfined: bool,
+    update_object: bool,
 ) {
     if state.seat.active_pointer_confine != Some(fields.id) {
         return;
     }
     state.seat.active_pointer_confine = None;
-    if let Some(confine) = fields.id.try_ref_mut(state) {
-        let status = match fields.lifetime {
-            ConstraintLifetime::Oneshot => ConstraintStatus::Terminal,
-            ConstraintLifetime::Persistent => ConstraintStatus::Inactive,
-        };
-        confine.set_status(status);
+    if update_object {
+        if let Some(confine) = fields.id.try_ref_mut(state) {
+            let status = match fields.lifetime {
+                ConstraintLifetime::Oneshot => ConstraintStatus::Terminal,
+                ConstraintLifetime::Persistent => ConstraintStatus::Inactive,
+            };
+            confine.set_status(status);
+        }
     }
     if send_unconfined {
         dispatch_client_event(
@@ -313,6 +324,7 @@ mod tests {
     use crate::{
         clients::{Client, ClientAction, ClientId, Resolved},
         input::{set_keyboard_focus, SurfaceFocus, SurfaceFocusPick, SurfaceRect},
+        object::Object,
         protocol_generated::{WlPointerId, WlSurfaceId, ZwpConfinedPointerV1Id},
         region::{RectI, RegionSpec, RegionValue},
         runner::Dispatcher,
@@ -691,5 +703,61 @@ mod tests {
             40,
         );
         assert_eq!(setup.state.seat.pointer_pos.0, 40.0);
+    }
+
+    #[test]
+    fn client_disconnect_clears_confinement_without_an_unconfined_event() {
+        let mut setup = prepare(ConstraintLifetime::Persistent, None, (10.0, 10.0), (100, 80));
+        focus_keyboard(&mut setup);
+        {
+            let mut client_dispatcher = setup.client.test_dispatcher(&mut setup.dispatcher);
+            let mut confine = setup
+                .state
+                .objects
+                .grab_object::<ZwpConfinedPointerV1>(setup.confine.object_id());
+            confine.on_client_disconnect(
+                &mut setup.client,
+                &mut setup.state,
+                &mut client_dispatcher,
+            );
+        }
+        assert!(setup.state.seat.active_pointer_confine.is_none());
+        assert_eq!(confine_events(&setup.dispatcher, false), 0);
+        assert_eq!(
+            setup.confine.try_ref(&setup.state).unwrap().status(),
+            ConstraintStatus::Terminal
+        );
+        handle_pointer_motion(
+            &mut setup.state,
+            &mut setup.dispatcher,
+            30.0,
+            0.0,
+            30.0,
+            0.0,
+            30,
+            30,
+        );
+        assert_eq!(setup.state.seat.pointer_pos.0, 40.0);
+    }
+
+    #[test]
+    fn persistent_confinement_returns_when_focus_is_restored_after_session_pause() {
+        let mut setup = prepare(ConstraintLifetime::Persistent, None, (10.0, 10.0), (100, 80));
+        focus_keyboard(&mut setup);
+        quiesce_for_session_pause(&mut setup.state, &mut setup.dispatcher);
+        assert!(setup.state.seat.active_pointer_confine.is_none());
+        assert_eq!(
+            setup.confine.try_ref(&setup.state).unwrap().status(),
+            ConstraintStatus::Inactive
+        );
+        assert_eq!(confine_events(&setup.dispatcher, false), 1);
+
+        setup.state.seat.pointer_focus = Some(SurfaceFocusPick {
+            target: SurfaceFocus::new(setup.surface),
+            rect: SurfaceRect { x: 0, y: 0, width: 100, height: 80 },
+        });
+        focus_keyboard(&mut setup);
+        assert_eq!(setup.state.seat.active_pointer_confine, Some(setup.confine));
+        assert_eq!(confine_events(&setup.dispatcher, true), 2);
     }
 }

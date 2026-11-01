@@ -642,6 +642,71 @@ mod tests {
     }
 
     #[test]
+    fn each_locked_motion_sends_one_relative_event_and_no_absolute_motion() {
+        let mut setup = prepare(ConstraintLifetime::Oneshot, None, (10.0, 12.0));
+        let pointer = setup.lock.try_ref(&setup.state).unwrap().pointer();
+        let (relative, _) = setup.client.insert_object(
+            &mut setup.state,
+            crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1::new(
+                crate::protocol_generated::ZwpRelativePointerV1Id::from(8),
+                pointer,
+            ),
+        );
+        setup
+            .state
+            .seat
+            .register_relative_pointer(pointer, relative);
+        focus_keyboard(&mut setup);
+        let absolute_before = setup
+            .dispatcher
+            .test_count_queued_action::<ClientAction>(|action| {
+                matches!(
+                    action,
+                    ClientAction::SeatEvent { event: SeatClientEvent::PointerMotion { .. } }
+                )
+            });
+
+        handle_pointer_motion(&mut setup.state, &mut setup.dispatcher, 4.0, 1.0, 2.0, 1.0, 20, 20);
+        handle_pointer_motion(
+            &mut setup.state,
+            &mut setup.dispatcher,
+            5.0,
+            -2.0,
+            5.0,
+            -2.0,
+            21,
+            21,
+        );
+
+        assert_eq!(setup.state.seat.pointer_pos, (10.0, 12.0));
+        assert_eq!(
+            setup
+                .dispatcher
+                .test_count_queued_action::<ClientAction>(|action| {
+                    matches!(
+                        action,
+                        ClientAction::SeatEvent {
+                            event: SeatClientEvent::RelativePointerMotion { .. }
+                        }
+                    )
+                }),
+            2
+        );
+        assert_eq!(
+            setup
+                .dispatcher
+                .test_count_queued_action::<ClientAction>(|action| {
+                    matches!(
+                        action,
+                        ClientAction::SeatEvent { event: SeatClientEvent::PointerMotion { .. } }
+                    )
+                }),
+            absolute_before
+        );
+        assert_eq!(lock_events(&setup.dispatcher, true), 1);
+    }
+
+    #[test]
     fn unlock_warps_to_a_valid_hint_and_oneshot_stays_terminal() {
         let mut setup = prepare(ConstraintLifetime::Oneshot, None, (10.0, 12.0));
         setup
@@ -719,6 +784,38 @@ mod tests {
         assert_eq!(setup.lock.try_ref(&setup.state).unwrap().status(), ConstraintStatus::Terminal);
         handle_pointer_motion(&mut setup.state, &mut setup.dispatcher, 5.0, 0.0, 5.0, 0.0, 30, 30);
         assert_eq!(setup.state.seat.pointer_pos.0, 15.0);
+    }
+
+    #[test]
+    fn persistent_lock_returns_when_focus_is_restored_after_session_pause() {
+        let mut setup = prepare(ConstraintLifetime::Persistent, None, (10.0, 10.0));
+        focus_keyboard(&mut setup);
+        quiesce_for_session_pause(&mut setup.state, &mut setup.dispatcher);
+        assert!(setup.state.seat.active_pointer_lock.is_none());
+        assert_eq!(setup.lock.try_ref(&setup.state).unwrap().status(), ConstraintStatus::Inactive);
+        assert_eq!(lock_events(&setup.dispatcher, false), 1);
+
+        setup.state.seat.pointer_focus = Some(SurfaceFocusPick {
+            target: SurfaceFocus::new(setup.surface),
+            rect: SurfaceRect { x: 0, y: 0, width: 100, height: 80 },
+        });
+        focus_keyboard(&mut setup);
+        assert_eq!(setup.state.seat.active_pointer_lock, Some(setup.lock));
+        assert_eq!(lock_events(&setup.dispatcher, true), 2);
+    }
+
+    #[test]
+    fn a_workspace_switch_with_nowhere_to_go_keeps_the_lock() {
+        let mut setup = prepare(ConstraintLifetime::Oneshot, None, (10.0, 10.0));
+        focus_keyboard(&mut setup);
+        crate::config::execute_action(
+            &mut setup.state,
+            &mut setup.dispatcher,
+            crate::config::CompositorAction::WorkspaceNext,
+        );
+        assert_eq!(setup.state.seat.active_pointer_lock, Some(setup.lock));
+        assert_eq!(lock_events(&setup.dispatcher, true), 1);
+        assert_eq!(lock_events(&setup.dispatcher, false), 0);
     }
 
     #[test]
