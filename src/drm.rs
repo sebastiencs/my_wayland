@@ -3874,6 +3874,38 @@ impl Model for DrmOutputModel {
     }
 }
 
+fn read_output_capture_copies(
+    drm: &Drm,
+    drm_crtc_id: u32,
+    specs: Vec<crate::capture::OutputCopySpec>,
+) -> Vec<crate::capture::RenderedOutputCopy> {
+    let Some(output) = drm.output(drm_crtc_id) else {
+        return Vec::new();
+    };
+    let framebuffer = &output.render_buffer().gl_framebuffer;
+    specs
+        .into_iter()
+        .map(|spec| {
+            let len = spec.stride.saturating_mul(spec.rect.height.max(0) as usize);
+            let mut bytes = vec![0u8; len];
+            let read_ok = framebuffer.read_top_left(
+                spec.rect.x,
+                spec.rect.y,
+                spec.rect.width,
+                spec.rect.height,
+                spec.stride,
+                &mut bytes,
+            );
+            crate::capture::RenderedOutputCopy {
+                job_id: spec.job_id,
+                bytes,
+                stride: spec.stride,
+                read_ok,
+            }
+        })
+        .collect()
+}
+
 impl DrmOutputModel {
     fn model_id(&self) -> OutputId {
         self.output_id
@@ -3918,6 +3950,14 @@ impl DrmOutputModel {
             );
             let planner_started_at = Instant::now();
             let watchdog_deadline = flip_watchdog_deadline_for_output(state, self.output_id);
+            if crate::capture::output_capture_pending(state, self.output_id) {
+                let drm = state.drm.get_mut(self.drm_id);
+                if let Some(output) = drm.output_mut(drm_crtc_id) {
+                    // A capture reads this frame's back buffer, so buffer age must not leave
+                    // stale pixels outside the damaged area.
+                    output.pipeline.set_force_full_redraw(true);
+                }
+            }
             let scene = state.build_scene_model();
             let output_render_plan = render_planner::collect_output_render_plan(
                 state,
@@ -3943,11 +3983,14 @@ impl DrmOutputModel {
                 mut frame_callback_surfaces,
                 mut presentation_feedbacks,
                 mut damage,
-                direct_scanout,
+                mut direct_scanout,
                 mut cursor_plane,
                 mut preserve_contents,
                 protected,
             } = frame;
+            if crate::capture::output_capture_pending(state, self.output_id) {
+                direct_scanout = None;
+            }
             let drm = state.drm.get_mut(self.drm_id);
             let target_vrr_enabled =
                 matches!(decision.mode, crate::scheduler::frame_clock::FrameClockMode::Variable)
@@ -4062,6 +4105,48 @@ impl DrmOutputModel {
                 let render_started_at = Instant::now();
                 let render_completion =
                     drm.render_output(drm_crtc_id, &recipe, &damage, preserve_contents);
+                if crate::capture::output_sample_pending(&state.capture, self.output_id) {
+                    let (mode_width, mode_height, scale, transform) = state
+                        .outputs
+                        .try_get(self.output_id)
+                        .map(|output| {
+                            (
+                                output.current_mode.width,
+                                output.current_mode.height,
+                                output.scale,
+                                output.transform,
+                            )
+                        })
+                        .unwrap_or((0, 0, crate::state::FractionalScale::ONE, 0));
+                    let frame_damage: Vec<_> = damage
+                        .rects()
+                        .iter()
+                        .map(|rect| crate::capture::CapturePixelRect {
+                            x: rect.x,
+                            y: rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                        })
+                        .collect();
+                    let specs = crate::capture::output_copy_specs(
+                        &state.capture,
+                        &state.objects,
+                        self.output_id,
+                    );
+                    let copies = read_output_capture_copies(drm, drm_crtc_id, specs);
+                    crate::capture::apply_rendered_output(
+                        &mut state.capture,
+                        &state.objects,
+                        self.output_id,
+                        mode_width,
+                        mode_height,
+                        scale,
+                        transform,
+                        &frame_damage,
+                        copies,
+                        crate::capture::capture_timestamp_now(),
+                    );
+                }
                 let submit_had_cursor_plane = cursor_plane.is_some();
                 if submit_had_cursor_plane && crate::logger::ENABLE_NOISY_LOG {
                     log::debug!("Submitting DRM frame with cursor plane enabled");

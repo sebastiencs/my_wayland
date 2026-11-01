@@ -38,10 +38,37 @@ pub enum CaptureTarget {
 
 /// Cursor inclusion is recorded per job so later phases can paint one consumer without changing
 /// another. This phase does not sample cursor pixels.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum CaptureCursor {
     Hidden,
     Painted,
+}
+
+/// Pixels inside the output framebuffer. Region captures are translated to this space.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapturePixelRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// What a finished output copy recorded for a later protocol event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaptureSample {
+    pub rect: CapturePixelRect,
+    pub stride: usize,
+    pub flags: u32,
+    pub tv_sec_hi: u32,
+    pub tv_sec_lo: u32,
+    pub tv_nsec: u32,
+    pub damage: Vec<CapturePixelRect>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CaptureTimestamp {
+    pub sec: u64,
+    pub nsec: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -72,6 +99,10 @@ struct CaptureJob {
     cursor: CaptureCursor,
     outputs: Vec<OutputId>,
     status: CaptureJobStatus,
+    /// Output framebuffer rect. Absent for a copy that the renderer does not sample.
+    pixel_rect: Option<CapturePixelRect>,
+    logical_region: Option<(i32, i32, i32, i32)>,
+    with_damage: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -129,6 +160,15 @@ pub struct CaptureRegistry {
     pending: BTreeMap<ClientId, Vec<Pending>>,
     next_job: u64,
     jobs: BTreeMap<CaptureJobId, CaptureJob>,
+    samples: BTreeMap<CaptureJobId, CaptureSample>,
+    /// Damage since the previous `with_damage` copy, keyed by client, output, and cursor mode.
+    damage: BTreeMap<(ClientId, OutputId, CaptureCursor), ConsumerDamage>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ConsumerDamage {
+    started: bool,
+    rects: Vec<CapturePixelRect>,
 }
 
 impl CaptureRegistry {
@@ -211,6 +251,8 @@ impl CaptureRegistry {
             .retain(|(list, _)| list.client_id() != client_id);
         self.jobs
             .retain(|_, job| job.buffer.client_id() != client_id);
+        self.samples.retain(|id, _| self.jobs.contains_key(id));
+        self.damage.retain(|(client, _, _), _| *client != client_id);
         self.pending.remove(&client_id);
     }
 
@@ -255,6 +297,7 @@ pub enum CaptureQueueError {
     SourceGone,
     Buffer(crate::wayland_objects::wl_buffer::CaptureBufferError),
     BufferBusy,
+    EmptyRegion,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -305,6 +348,9 @@ pub(crate) fn submit_capture(
             cursor: request.cursor,
             outputs,
             status: CaptureJobStatus::Queued,
+            pixel_rect: None,
+            logical_region: None,
+            with_damage: false,
         },
     );
     Ok(id)
@@ -431,6 +477,364 @@ fn outputs_for_toplevel(state: &State, key: ToplevelKey) -> Vec<OutputId> {
     state.outputs_intersecting_rect(bounds)
 }
 
+pub(crate) fn output_sample_pending(capture: &CaptureRegistry, output_id: OutputId) -> bool {
+    capture.jobs.values().any(|job| {
+        job.status == CaptureJobStatus::Queued
+            && job.target == CaptureTarget::Output(output_id)
+            && job.pixel_rect.is_some()
+    })
+}
+
+pub(crate) fn output_capture_pending(state: &State, output_id: OutputId) -> bool {
+    output_sample_pending(&state.capture, output_id)
+}
+
+/// Queue an output copy whose size is the mode buffer, or the clipped logical region in buffer pixels.
+pub(crate) fn submit_output_capture(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    output_id: OutputId,
+    buffer: Resolved<WlBufferId>,
+    cursor: CaptureCursor,
+    region: Option<(i32, i32, i32, i32)>,
+    with_damage: bool,
+) -> Result<CaptureJobId, CaptureQueueError> {
+    let Some(output) = state.outputs.try_get(output_id) else {
+        return Err(CaptureQueueError::SourceGone);
+    };
+    let Some(rect) = output_capture_rect(
+        output.current_mode.width,
+        output.current_mode.height,
+        output.scale,
+        output.transform,
+        region,
+    ) else {
+        return Err(CaptureQueueError::EmptyRegion);
+    };
+    let id = submit_capture(
+        state,
+        dispatcher,
+        CaptureJobRequest {
+            target: CaptureTarget::Output(output_id),
+            buffer,
+            width: rect.width,
+            height: rect.height,
+            cursor,
+        },
+    )?;
+    if let Some(job) = state.capture.jobs.get_mut(&id) {
+        job.pixel_rect = Some(rect);
+        job.logical_region = region;
+        job.with_damage = with_damage;
+    }
+    Ok(id)
+}
+
+pub(crate) fn capture_sample(state: &State, job_id: CaptureJobId) -> Option<&CaptureSample> {
+    state.capture.samples.get(&job_id)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OutputCopySpec {
+    pub job_id: CaptureJobId,
+    pub rect: CapturePixelRect,
+    pub stride: usize,
+}
+
+pub(crate) fn output_copy_specs(
+    capture: &CaptureRegistry,
+    objects: &crate::indexmap::IndexMap<crate::state::ObjectId, Box<dyn crate::object::Object>>,
+    output_id: OutputId,
+) -> Vec<OutputCopySpec> {
+    let mut specs = Vec::new();
+    for (job_id, job) in &capture.jobs {
+        if job.status != CaptureJobStatus::Queued || job.target != CaptureTarget::Output(output_id)
+        {
+            continue;
+        }
+        let Some(rect) = job.pixel_rect else {
+            continue;
+        };
+        let Some(buffer) = objects
+            .try_ref_object::<crate::wayland_objects::wl_buffer::WlBuffer>(job.buffer.object_id())
+        else {
+            continue;
+        };
+        let Ok(write) = buffer.begin_capture_write(rect.width, rect.height) else {
+            continue;
+        };
+        specs.push(OutputCopySpec { job_id: *job_id, rect, stride: write.stride_bytes() });
+    }
+    specs
+}
+
+pub(crate) struct RenderedOutputCopy {
+    pub job_id: CaptureJobId,
+    pub bytes: Vec<u8>,
+    pub stride: usize,
+    pub read_ok: bool,
+}
+
+/// Write copies taken from the composed framebuffer. Each job finishes once.
+pub(crate) fn apply_rendered_output(
+    capture: &mut CaptureRegistry,
+    objects: &crate::indexmap::IndexMap<crate::state::ObjectId, Box<dyn crate::object::Object>>,
+    output_id: OutputId,
+    mode_width: i32,
+    mode_height: i32,
+    scale: crate::state::FractionalScale,
+    transform: i32,
+    frame_damage: &[CapturePixelRect],
+    copies: Vec<RenderedOutputCopy>,
+    timestamp: CaptureTimestamp,
+) {
+    let touched: BTreeSet<_> = copies.iter().map(|copy| copy.job_id).collect();
+    for copy in copies {
+        let Some(job) = capture.jobs.get(&copy.job_id) else {
+            continue;
+        };
+        if job.status != CaptureJobStatus::Queued || job.target != CaptureTarget::Output(output_id)
+        {
+            continue;
+        }
+        let stored = job.pixel_rect;
+        let region = job.logical_region;
+        let with_damage = job.with_damage;
+        let cursor = job.cursor;
+        let client_id = job.buffer.client_id();
+        let buffer = job.buffer;
+        let Some(stored) = stored else {
+            continue;
+        };
+        let current = output_capture_rect(mode_width, mode_height, scale, transform, region);
+        if current != Some(stored) || !copy.read_ok {
+            if let Some(job) = capture.jobs.get_mut(&copy.job_id) {
+                job.status = CaptureJobStatus::Failed;
+            }
+            continue;
+        }
+        let Some(buffer) = objects
+            .try_ref_object::<crate::wayland_objects::wl_buffer::WlBuffer>(buffer.object_id())
+        else {
+            if let Some(job) = capture.jobs.get_mut(&copy.job_id) {
+                job.status = CaptureJobStatus::Failed;
+            }
+            continue;
+        };
+        let written = buffer
+            .begin_capture_write(stored.width, stored.height)
+            .and_then(|write| write.write_top_left(&copy.bytes, copy.stride))
+            .is_ok();
+        if !written {
+            if let Some(job) = capture.jobs.get_mut(&copy.job_id) {
+                job.status = CaptureJobStatus::Failed;
+            }
+            continue;
+        }
+        let damage = take_capture_damage(
+            capture,
+            client_id,
+            output_id,
+            cursor,
+            stored,
+            with_damage,
+            frame_damage,
+        );
+        if let Some(job) = capture.jobs.get_mut(&copy.job_id) {
+            job.status = CaptureJobStatus::Written;
+        }
+        capture.samples.insert(
+            copy.job_id,
+            CaptureSample {
+                rect: stored,
+                stride: copy.stride,
+                flags: 0,
+                tv_sec_hi: (timestamp.sec >> 32) as u32,
+                tv_sec_lo: timestamp.sec as u32,
+                tv_nsec: timestamp.nsec,
+                damage,
+            },
+        );
+    }
+    let leftovers: Vec<_> = capture
+        .jobs
+        .iter()
+        .filter(|(id, job)| {
+            !touched.contains(id)
+                && job.status == CaptureJobStatus::Queued
+                && job.target == CaptureTarget::Output(output_id)
+                && job.pixel_rect.is_some()
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for job_id in leftovers {
+        if let Some(job) = capture.jobs.get_mut(&job_id) {
+            job.status = CaptureJobStatus::Failed;
+        }
+    }
+}
+
+pub(crate) fn capture_timestamp_now() -> CaptureTimestamp {
+    let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } != 0 {
+        return CaptureTimestamp { sec: 0, nsec: 0 };
+    }
+    CaptureTimestamp { sec: time.tv_sec as u64, nsec: time.tv_nsec as u32 }
+}
+
+fn take_capture_damage(
+    capture: &mut CaptureRegistry,
+    client_id: ClientId,
+    output_id: OutputId,
+    cursor: CaptureCursor,
+    rect: CapturePixelRect,
+    with_damage: bool,
+    frame_damage: &[CapturePixelRect],
+) -> Vec<CapturePixelRect> {
+    let entry = capture
+        .damage
+        .entry((client_id, output_id, cursor))
+        .or_default();
+    if entry.started {
+        entry.rects.extend(frame_damage.iter().copied());
+    }
+    if !with_damage {
+        return Vec::new();
+    }
+    let damage = if entry.started {
+        clip_damage_to_capture(&entry.rects, rect)
+    } else {
+        vec![CapturePixelRect { x: 0, y: 0, width: rect.width, height: rect.height }]
+    };
+    entry.started = true;
+    entry.rects.clear();
+    damage
+}
+
+fn clip_damage_to_capture(
+    rects: &[CapturePixelRect],
+    capture: CapturePixelRect,
+) -> Vec<CapturePixelRect> {
+    rects
+        .iter()
+        .filter_map(|rect| {
+            let x1 = rect.x.max(capture.x);
+            let y1 = rect.y.max(capture.y);
+            let x2 = rect
+                .x
+                .saturating_add(rect.width)
+                .min(capture.x.saturating_add(capture.width));
+            let y2 = rect
+                .y
+                .saturating_add(rect.height)
+                .min(capture.y.saturating_add(capture.height));
+            if x2 <= x1 || y2 <= y1 {
+                return None;
+            }
+            Some(CapturePixelRect {
+                x: x1 - capture.x,
+                y: y1 - capture.y,
+                width: x2 - x1,
+                height: y2 - y1,
+            })
+        })
+        .collect()
+}
+
+/// Clip a logical output region and map it into mode-buffer pixels.
+///
+/// The transform step follows wlroots `wlr_box_transform` with the inverted output transform.
+/// Edges are then scaled like Jay, rounding each edge so a fractional scale does not leave a gap.
+pub(crate) fn output_capture_rect(
+    mode_width: i32,
+    mode_height: i32,
+    scale: crate::state::FractionalScale,
+    transform: i32,
+    region: Option<(i32, i32, i32, i32)>,
+) -> Option<CapturePixelRect> {
+    if mode_width <= 0 || mode_height <= 0 {
+        return None;
+    }
+    let wayland = crate::transform::BufferTransform::from_wayland(transform)
+        .unwrap_or(crate::transform::BufferTransform::Normal);
+    let (buffer_width, buffer_height) = wayland.maybe_swap((mode_width, mode_height));
+    let logical_width = scale.logical_length(buffer_width);
+    let logical_height = scale.logical_length(buffer_height);
+    let logical = region.unwrap_or((0, 0, logical_width, logical_height));
+    let full = crate::region::RectI::new(0, 0, logical_width, logical_height)?;
+    let requested = crate::region::RectI::new(logical.0, logical.1, logical.2, logical.3)?;
+    let clipped = requested.intersection(full)?;
+    if clipped.width <= 0 || clipped.height <= 0 {
+        return None;
+    }
+    let transformed = transform_output_box(
+        clipped.x,
+        clipped.y,
+        clipped.width,
+        clipped.height,
+        invert_output_transform(transform),
+        logical_width,
+        logical_height,
+    )?;
+    let x1 = scale_logical_to_buffer(transformed.0, scale);
+    let y1 = scale_logical_to_buffer(transformed.1, scale);
+    let x2 = scale_logical_to_buffer(transformed.0.saturating_add(transformed.2), scale);
+    let y2 = scale_logical_to_buffer(transformed.1.saturating_add(transformed.3), scale);
+    let mode = crate::region::RectI::new(0, 0, mode_width, mode_height)?;
+    let scaled = crate::region::RectI::new(x1, y1, x2.saturating_sub(x1), y2.saturating_sub(y1))?;
+    let hit = scaled.intersection(mode)?;
+    if hit.width <= 0 || hit.height <= 0 {
+        return None;
+    }
+    Some(CapturePixelRect { x: hit.x, y: hit.y, width: hit.width, height: hit.height })
+}
+
+fn scale_logical_to_buffer(logical: i32, scale: crate::state::FractionalScale) -> i32 {
+    let logical = i64::from(logical);
+    let numerator = i64::from(scale.as_v120());
+    let denominator = i64::from(crate::state::FractionalScale::DENOMINATOR);
+    ((logical * numerator) + (denominator / 2)).div_euclid(denominator) as i32
+}
+
+fn invert_output_transform(transform: i32) -> i32 {
+    if transform & 1 != 0 && transform & 4 == 0 {
+        transform ^ 2
+    } else {
+        transform
+    }
+}
+
+fn transform_output_box(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    transform: i32,
+    bounds_width: i32,
+    bounds_height: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    let (dest_width, dest_height) =
+        if transform % 2 == 0 { (width, height) } else { (height, width) };
+    let (dest_x, dest_y) = match transform {
+        0 => (x, y),
+        1 => (bounds_height.saturating_sub(y).saturating_sub(height), x),
+        2 => (
+            bounds_width.saturating_sub(x).saturating_sub(width),
+            bounds_height.saturating_sub(y).saturating_sub(height),
+        ),
+        3 => (y, bounds_width.saturating_sub(x).saturating_sub(width)),
+        4 => (bounds_width.saturating_sub(x).saturating_sub(width), y),
+        5 => (y, x),
+        6 => (x, bounds_height.saturating_sub(y).saturating_sub(height)),
+        7 => (
+            bounds_height.saturating_sub(y).saturating_sub(height),
+            bounds_width.saturating_sub(x).saturating_sub(width),
+        ),
+        _ => return None,
+    };
+    Some((dest_x, dest_y, dest_width, dest_height))
+}
+
 pub(crate) fn output_removed(state: &mut State, dispatcher: &mut Dispatcher, output_id: OutputId) {
     let target = CaptureTarget::Output(output_id);
     let mut clients = BTreeSet::new();
@@ -488,6 +892,10 @@ pub(crate) fn output_removed(state: &mut State, dispatcher: &mut Dispatcher, out
         .screencopy
         .retain(|slot| slot.output_id != output_id);
     fail_queued_jobs(state, target);
+    state
+        .capture
+        .damage
+        .retain(|(_, damaged, _), _| *damaged != output_id);
     dispatch_deliver(dispatcher, clients);
 }
 
@@ -2115,5 +2523,191 @@ mod tests {
             ),
             Err(CaptureQueueError::SourceGone)
         );
+    }
+
+    #[test]
+    fn an_output_region_becomes_buffer_pixels() {
+        let scale = crate::state::FractionalScale::ONE;
+        assert_eq!(
+            output_capture_rect(200, 100, scale, 0, Some((10, 20, 30, 40))),
+            Some(CapturePixelRect { x: 10, y: 20, width: 30, height: 40 })
+        );
+        assert_eq!(
+            output_capture_rect(4, 2, scale, 0, Some((3, 1, 8, 8))),
+            Some(CapturePixelRect { x: 3, y: 1, width: 1, height: 1 })
+        );
+        assert_eq!(output_capture_rect(4, 2, scale, 0, Some((10, 0, 1, 1))), None);
+        assert_eq!(
+            output_capture_rect(8, 4, crate::state::FractionalScale::TWO, 0, Some((1, 1, 2, 1))),
+            Some(CapturePixelRect { x: 2, y: 2, width: 4, height: 2 })
+        );
+        assert_eq!(
+            output_capture_rect(8, 4, scale, 1, None),
+            Some(CapturePixelRect { x: 0, y: 0, width: 8, height: 4 })
+        );
+    }
+
+    #[test]
+    fn output_capture_records_damage_without_sharing_cursor_modes() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let output_id = state.insert_output(test_output_drm1(0, 0, 4, 2));
+        let hidden = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            70,
+            4,
+            2,
+            16,
+            vec![0xAB; 32],
+            crate::drm::ARGB8888,
+        );
+        let painted = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            71,
+            4,
+            2,
+            16,
+            vec![0xCD; 32],
+            crate::drm::ARGB8888,
+        );
+        let too_small = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            72,
+            2,
+            2,
+            8,
+            vec![0; 16],
+            crate::drm::ARGB8888,
+        );
+        assert!(matches!(
+            submit_output_capture(
+                &mut state,
+                &mut dispatcher,
+                output_id,
+                too_small,
+                CaptureCursor::Hidden,
+                None,
+                false,
+            ),
+            Err(CaptureQueueError::Buffer(_))
+        ));
+        assert_eq!(
+            submit_output_capture(
+                &mut state,
+                &mut dispatcher,
+                output_id,
+                hidden,
+                CaptureCursor::Hidden,
+                Some((10, 0, 1, 1)),
+                false,
+            ),
+            Err(CaptureQueueError::EmptyRegion)
+        );
+        let hidden_job = submit_output_capture(
+            &mut state,
+            &mut dispatcher,
+            output_id,
+            hidden,
+            CaptureCursor::Hidden,
+            None,
+            true,
+        )
+        .unwrap();
+        let painted_job = submit_output_capture(
+            &mut state,
+            &mut dispatcher,
+            output_id,
+            painted,
+            CaptureCursor::Painted,
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(output_capture_pending(&state, output_id));
+        let bytes = vec![0x11; 32];
+        apply_rendered_output(
+            &mut state.capture,
+            &state.objects,
+            output_id,
+            4,
+            2,
+            crate::state::FractionalScale::ONE,
+            0,
+            &[CapturePixelRect { x: 1, y: 0, width: 2, height: 1 }],
+            vec![
+                RenderedOutputCopy {
+                    job_id: hidden_job,
+                    bytes: bytes.clone(),
+                    stride: 16,
+                    read_ok: true,
+                },
+                RenderedOutputCopy {
+                    job_id: painted_job,
+                    bytes: bytes.clone(),
+                    stride: 16,
+                    read_ok: true,
+                },
+            ],
+            CaptureTimestamp { sec: 5, nsec: 7 },
+        );
+        let hidden_sample = capture_sample(&state, hidden_job).unwrap();
+        assert_eq!(hidden_sample.flags, 0);
+        assert_eq!(hidden_sample.tv_sec_lo, 5);
+        assert_eq!(hidden_sample.tv_nsec, 7);
+        assert_eq!(
+            hidden_sample.damage,
+            vec![CapturePixelRect { x: 0, y: 0, width: 4, height: 2 }]
+        );
+        assert_eq!(
+            capture_sample(&state, painted_job).unwrap().damage,
+            vec![CapturePixelRect { x: 0, y: 0, width: 4, height: 2 }]
+        );
+        assert_eq!(
+            hidden
+                .rref(&state)
+                .begin_capture_write(4, 2)
+                .unwrap()
+                .as_slice()[..4],
+            [0x11, 0x11, 0x11, 0x11]
+        );
+        let again = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            73,
+            4,
+            2,
+            16,
+            vec![0; 32],
+            crate::drm::ARGB8888,
+        );
+        let later = submit_output_capture(
+            &mut state,
+            &mut dispatcher,
+            output_id,
+            again,
+            CaptureCursor::Hidden,
+            None,
+            true,
+        )
+        .unwrap();
+        apply_rendered_output(
+            &mut state.capture,
+            &state.objects,
+            output_id,
+            4,
+            2,
+            crate::state::FractionalScale::ONE,
+            0,
+            &[CapturePixelRect { x: 1, y: 0, width: 2, height: 1 }],
+            vec![RenderedOutputCopy { job_id: later, bytes, stride: 16, read_ok: true }],
+            CaptureTimestamp { sec: 6, nsec: 0 },
+        );
+        assert_eq!(
+            capture_sample(&state, later).unwrap().damage,
+            vec![CapturePixelRect { x: 1, y: 0, width: 2, height: 1 }]
+        );
+        assert!(!output_capture_pending(&state, output_id));
     }
 }

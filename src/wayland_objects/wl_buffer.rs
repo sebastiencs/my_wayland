@@ -119,6 +119,10 @@ impl CaptureShmWrite {
         Ok(())
     }
 
+    pub(crate) fn stride_bytes(&self) -> usize {
+        self.stride
+    }
+
     #[cfg(test)]
     pub(crate) fn as_slice(&self) -> &[u8] {
         let length = self.stride.saturating_mul(self.height);
