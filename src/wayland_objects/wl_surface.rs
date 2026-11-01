@@ -2855,11 +2855,11 @@ impl WlSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let (grandchildren, subsurface_object_id) = {
+        let grandchildren = {
             let Some(child_surface_ref) = child_surface.try_ref(state) else {
                 return;
             };
-            (child_surface_ref.child_surface_ids(), child_surface_ref.subsurface_object())
+            child_surface_ref.child_surface_ids()
         };
 
         for grandchild_surface in grandchildren {
@@ -2871,19 +2871,9 @@ impl WlSurface {
                 return;
             };
             child_surface_ref.unmap_due_to_parent_loss(client, state, dispatcher);
+            // The wl_subsurface protocol object stays. The client destroys it
+            // afterward; deleting it here makes that request invalid_object.
             child_surface_ref.destroy_subsurface_role();
-        }
-
-        if let Some(subsurface_object_id) = subsurface_object_id {
-            use crate::wayland_objects::wl_display::WlDisplay;
-            if subsurface_object_id.exists(state) {
-                client.delete_id(
-                    &WlDisplay::default(),
-                    state,
-                    dispatcher,
-                    subsurface_object_id.wayland_id().into(),
-                );
-            }
         }
 
         state.register_root_surface(child_surface);
@@ -5358,6 +5348,44 @@ mod tests {
         assert!(grandchild.subsurface_object().is_none());
         assert!(child.render_state().is_none());
         assert!(grandchild.render_state().is_none());
+        assert!(client.contains_object(WlSubsurfaceId::from(61), &state));
+        assert!(client.contains_object(WlSubsurfaceId::from(62), &state));
+
+        {
+            let mut subsurface = client.grab_object(WlSubsurfaceId::from(61), &mut state);
+            let mut event = RawEvent::new(WlSubsurfaceId::from(61).into(), 1, 2);
+            event.int(3);
+            event.int(4);
+            subsurface
+                .on(&mut client, &mut state, raw_request_from_event(event), &mut dispatcher)
+                .unwrap();
+        }
+        {
+            let mut subsurface = client.grab_object(WlSubsurfaceId::from(61), &mut state);
+            subsurface
+                .on(
+                    &mut client,
+                    &mut state,
+                    raw_request_from_event(RawEvent::new(WlSubsurfaceId::from(61).into(), 0, 0)),
+                    &mut dispatcher,
+                )
+                .unwrap();
+        }
+        {
+            let mut subsurface = client.grab_object(WlSubsurfaceId::from(62), &mut state);
+            subsurface
+                .on(
+                    &mut client,
+                    &mut state,
+                    raw_request_from_event(RawEvent::new(WlSubsurfaceId::from(62).into(), 0, 0)),
+                    &mut dispatcher,
+                )
+                .unwrap();
+        }
+
+        assert!(!dispatcher.test_has_queued_action::<ClientManagerAction>(|action| {
+            matches!(action, ClientManagerAction::Close { .. })
+        }));
         assert!(!client.contains_object(WlSubsurfaceId::from(61), &state));
         assert!(!client.contains_object(WlSubsurfaceId::from(62), &state));
     }

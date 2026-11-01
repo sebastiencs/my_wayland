@@ -53,6 +53,15 @@ impl WlSubsurface {
             message,
         );
     }
+
+    /// The child still has this object as its subsurface role. Parent destruction
+    /// clears that role and leaves this protocol object until the client destroys it.
+    fn role_is_live(&self, state: &State) -> bool {
+        self.surface
+            .try_ref(state)
+            .and_then(|surface| surface.subsurface_object())
+            .is_some_and(|object| object.wayland_id() == self.id)
+    }
 }
 
 impl Object for WlSubsurface {
@@ -69,7 +78,14 @@ impl Object for WlSubsurface {
     ) -> RequestResult {
         use wl_subsurface::Request::*;
 
-        match client.parse::<Self>(req, dispatcher)? {
+        let request = client.parse::<Self>(req, dispatcher)?;
+        // Parent destruction unmaps the child and clears the role, then the client
+        // still sends destroy (and sometimes position) for this object. Those
+        // requests stay valid; only destroy removes the protocol object.
+        if !matches!(request, Destroy) && !self.role_is_live(state) {
+            return Ok(());
+        }
+        match request {
             Destroy => {
                 let old_root_surface = state.root_surface_for_surface(self.parent);
                 if let Some(mut surface) = self.surface.try_grab(state) {
