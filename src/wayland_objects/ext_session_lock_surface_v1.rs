@@ -688,7 +688,10 @@ mod tests {
     #[test]
     fn removing_the_output_makes_the_lock_surface_inert() {
         let mut fixture = fixture();
-        assert!(fixture.state.remove_output(fixture.output_id).is_some());
+        assert!(fixture
+            .state
+            .remove_output(fixture.output_id, &mut fixture.dispatcher)
+            .is_some());
         assert!(fixture
             .client
             .resolve(ExtSessionLockSurfaceV1Id::from(LOCK_SURFACE_ID), &fixture.state)

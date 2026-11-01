@@ -81,8 +81,17 @@ wayland_id! {
   WpDrmLeaseConnectorV1Id,
   WpDrmLeaseRequestV1Id,
   WpDrmLeaseV1Id,
+  ExtForeignToplevelListV1Id,
+  ExtForeignToplevelHandleV1Id,
   ExtIdleNotifierV1Id,
   ExtIdleNotificationV1Id,
+  ExtImageCaptureSourceV1Id,
+  ExtOutputImageCaptureSourceManagerV1Id,
+  ExtForeignToplevelImageCaptureSourceManagerV1Id,
+  ExtImageCopyCaptureManagerV1Id,
+  ExtImageCopyCaptureSessionV1Id,
+  ExtImageCopyCaptureFrameV1Id,
+  ExtImageCopyCaptureCursorSessionV1Id,
   ExtSessionLockManagerV1Id,
   ExtSessionLockV1Id,
   ExtSessionLockSurfaceV1Id,
@@ -117,6 +126,8 @@ wayland_id! {
   ExtWorkspaceManagerV1Id,
   ExtWorkspaceGroupHandleV1Id,
   ExtWorkspaceHandleV1Id,
+  ZwlrScreencopyManagerV1Id,
+  ZwlrScreencopyFrameV1Id,
   ZwlrGammaControlManagerV1Id,
   ZwlrGammaControlV1Id,
   ZwlrLayerShellV1Id,
@@ -10455,6 +10466,273 @@ pub mod wp_drm_lease_v1 {
     }
 }
 
+/// List toplevels
+///
+/// A toplevel is defined as a surface with a role similar to xdg_toplevel.
+/// XWayland surfaces may be treated like toplevels in this protocol.
+///
+/// After a client binds the ext_foreign_toplevel_list_v1, each mapped
+/// toplevel window will be sent using the ext_foreign_toplevel_list_v1.toplevel
+/// event.
+///
+/// Clients which only care about the current state can perform a roundtrip after
+/// binding this global.
+///
+/// For each instance of ext_foreign_toplevel_list_v1, the compositor must
+/// create a new ext_foreign_toplevel_handle_v1 object for each mapped toplevel.
+///
+/// If a compositor implementation sends the ext_foreign_toplevel_list_v1.finished
+/// event after the global is bound, the compositor must not send any
+/// ext_foreign_toplevel_list_v1.toplevel events.
+pub mod ext_foreign_toplevel_list_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1 {
+        const INTERFACE_NAME: &'static str = "ext_foreign_toplevel_list_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtForeignToplevelListV1Id {
+        type Object =
+            crate::wayland_objects::ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1
+    {
+        type Id = ExtForeignToplevelListV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Stop sending events
+        ///
+        /// This request indicates that the client no longer wishes to receive
+        /// events for new toplevels.
+        ///
+        /// The Wayland protocol is asynchronous, meaning the compositor may send
+        /// further toplevel events until the stop request is processed.
+        /// The client should wait for a ext_foreign_toplevel_list_v1.finished
+        /// event before destroying this object.
+        Stop,
+        /// Destroy the ext_foreign_toplevel_list_v1 object
+        ///
+        /// This request should be called either when the client will no longer
+        /// use the ext_foreign_toplevel_list_v1 or after the finished event
+        /// has been received to allow destruction of the object.
+        ///
+        /// If a client wishes to destroy this object it should send a
+        /// ext_foreign_toplevel_list_v1.stop request and wait for a ext_foreign_toplevel_list_v1.finished
+        /// event, then destroy the handles and then this object.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Stop,
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// A toplevel has been created
+        ///
+        /// This event is emitted whenever a new toplevel window is created. It is
+        /// emitted for all toplevels, regardless of the app that has created them.
+        ///
+        /// All initial properties of the toplevel (identifier, title, app_id) will be sent
+        /// immediately after this event using the corresponding events for
+        /// ext_foreign_toplevel_handle_v1. The compositor will use the
+        /// ext_foreign_toplevel_handle_v1.done event to indicate when all data has
+        /// been sent.
+        Toplevel { toplevel: ExtForeignToplevelHandleV1Id },
+        /// The compositor has finished with the toplevel manager
+        ///
+        /// This event indicates that the compositor is done sending events
+        /// to this object. The client should destroy the object.
+        /// See ext_foreign_toplevel_list_v1.destroy for more information.
+        ///
+        /// The compositor must not send any more toplevel events after this event.
+        Finished,
+    }
+    impl EventWriter
+        for crate::wayland_objects::ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Toplevel { toplevel } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(toplevel);
+                    raw
+                }
+                Finished {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// A mapped toplevel
+///
+/// A ext_foreign_toplevel_handle_v1 object represents a mapped toplevel
+/// window. A single app may have multiple mapped toplevels.
+pub mod ext_foreign_toplevel_handle_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1
+    {
+        const INTERFACE_NAME: &'static str = "ext_foreign_toplevel_handle_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtForeignToplevelHandleV1Id {
+        type Object =
+            crate::wayland_objects::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1
+    {
+        type Id = ExtForeignToplevelHandleV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the ext_foreign_toplevel_handle_v1 object
+        ///
+        /// This request should be used when the client will no longer use the handle
+        /// or after the closed event has been received to allow destruction of the
+        /// object.
+        ///
+        /// When a handle is destroyed, a new handle may not be created by the server
+        /// until the toplevel is unmapped and then remapped. Destroying a toplevel handle
+        /// is not recommended unless the client is cleaning up child objects
+        /// before destroying the ext_foreign_toplevel_list_v1 object, the toplevel
+        /// was closed or the toplevel handle will not be used in the future.
+        ///
+        /// Other protocols which extend the ext_foreign_toplevel_handle_v1
+        /// interface should require destructors for extension interfaces be
+        /// called before allowing the toplevel handle to be destroyed.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// The toplevel has been closed
+        ///
+        /// The server will emit no further events on the ext_foreign_toplevel_handle_v1
+        /// after this event. Any requests received aside from the destroy request must
+        /// be ignored. Upon receiving this event, the client should destroy the handle.
+        ///
+        /// Other protocols which extend the ext_foreign_toplevel_handle_v1
+        /// interface must also ignore requests other than destructors.
+        Closed,
+        /// All information about the toplevel has been sent
+        ///
+        /// This event is sent after all changes in the toplevel state have
+        /// been sent.
+        ///
+        /// This allows changes to the ext_foreign_toplevel_handle_v1 properties
+        /// to be atomically applied. Other protocols which extend the
+        /// ext_foreign_toplevel_handle_v1 interface may use this event to also
+        /// atomically apply any pending state.
+        ///
+        /// This event must not be sent after the ext_foreign_toplevel_handle_v1.closed
+        /// event.
+        Done,
+        /// Title change
+        ///
+        /// The title of the toplevel has changed.
+        ///
+        /// The configured state must not be applied immediately. See
+        /// ext_foreign_toplevel_handle_v1.done for details.
+        Title { title: String },
+        /// App_id change
+        ///
+        /// The app id of the toplevel has changed.
+        ///
+        /// The configured state must not be applied immediately. See
+        /// ext_foreign_toplevel_handle_v1.done for details.
+        AppId { app_id: String },
+        /// A stable identifier for a toplevel
+        ///
+        /// This identifier is used to check if two or more toplevel handles belong
+        /// to the same toplevel.
+        ///
+        /// The identifier is useful for command line tools or privileged clients
+        /// which may need to reference an exact toplevel across processes or
+        /// instances of the ext_foreign_toplevel_list_v1 global.
+        ///
+        /// The compositor must only send this event when the handle is created.
+        ///
+        /// The identifier must be unique per toplevel and its handles. Two different
+        /// toplevels must not have the same identifier. The identifier is only valid
+        /// as long as the toplevel is mapped. If the toplevel is unmapped the identifier
+        /// must not be reused. An identifier must not be reused by the compositor to
+        /// ensure there are no races when sharing identifiers between processes.
+        ///
+        /// An identifier is a string that contains up to 32 printable ASCII bytes.
+        /// An identifier must not be an empty string. It is recommended that a
+        /// compositor includes an opaque generation value in identifiers. How the
+        /// generation value is used when generating the identifier is implementation
+        /// dependent.
+        Identifier { identifier: String },
+    }
+    impl EventWriter
+        for crate::wayland_objects::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Closed {} => {
+                    let mut raw = RawEvent::new(self.id(), 0, 0);
+                    raw
+                }
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+                Title { title } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.string(title);
+                    raw
+                }
+                AppId { app_id } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.string(app_id);
+                    raw
+                }
+                Identifier { identifier } => {
+                    let mut raw = RawEvent::new(self.id(), 4, 1);
+                    raw.string(identifier);
+                    raw
+                }
+            }
+        }
+    }
+}
+
 /// Idle notification manager
 ///
 /// This interface allows clients to monitor user idle status.
@@ -10631,6 +10909,811 @@ pub mod ext_idle_notification_v1 {
                 }
             }
         }
+    }
+}
+
+/// Opaque image capture source object
+///
+/// The image capture source object is an opaque descriptor for a capturable
+/// resource.  This resource may be any sort of entity from which an image
+/// may be derived.
+///
+/// Note, because ext_image_capture_source_v1 objects are created from multiple
+/// independent factory interfaces, the ext_image_capture_source_v1 interface is
+/// frozen at version 1.
+pub mod ext_image_capture_source_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::ext_image_capture_source_v1::ExtImageCaptureSourceV1 {
+        const INTERFACE_NAME: &'static str = "ext_image_capture_source_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtImageCaptureSourceV1Id {
+        type Object = crate::wayland_objects::ext_image_capture_source_v1::ExtImageCaptureSourceV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_image_capture_source_v1::ExtImageCaptureSourceV1
+    {
+        type Id = ExtImageCaptureSourceV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Delete this object
+        ///
+        /// Destroys the image capture source. This request may be sent at any time
+        /// by the client.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::ext_image_capture_source_v1::ExtImageCaptureSourceV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
+/// Image capture source manager for outputs
+///
+/// A manager for creating image capture source objects for wl_output objects.
+pub mod ext_output_image_capture_source_manager_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1 {
+    const INTERFACE_NAME: &'static str = "ext_output_image_capture_source_manager_v1";
+    const INTERFACE_VERSION: u32 = 1;
+  }
+    impl crate::object::IdToObject for ExtOutputImageCaptureSourceManagerV1Id {
+        type Object = crate::wayland_objects::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1 {
+    type Id = ExtOutputImageCaptureSourceManagerV1Id;
+  }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Create source object for output
+        ///
+        /// Creates a source object for an output. Images captured from this source
+        /// will show the same content as the output. Some elements may be omitted,
+        /// such as cursors and overlays that have been marked as transparent to
+        /// capturing.
+        CreateSource { source: ExtImageCaptureSourceV1Id, output: WlOutputId },
+        /// Delete this object
+        ///
+        /// Destroys the manager. This request may be sent at any time by the client
+        /// and objects created by the manager will remain valid after its
+        /// destruction.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1 {
+    type Request = Request;
+    fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+      use Request::*;
+      let request = match req.request_id {
+        0 => CreateSource {
+          source: req.id()?,
+          output: req.id()?,
+        },
+        1 => Destroy,
+        _ => return Err(ParserError::InvalidRequest),
+      };
+      Ok(request)
+    }
+  }
+}
+
+/// Image capture source manager for foreign toplevels
+///
+/// A manager for creating image capture source objects for
+/// ext_foreign_toplevel_handle_v1 objects.
+pub mod ext_foreign_toplevel_image_capture_source_manager_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1 {
+    const INTERFACE_NAME: &'static str = "ext_foreign_toplevel_image_capture_source_manager_v1";
+    const INTERFACE_VERSION: u32 = 1;
+  }
+    impl crate::object::IdToObject for ExtForeignToplevelImageCaptureSourceManagerV1Id {
+        type Object = crate::wayland_objects::ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1 {
+    type Id = ExtForeignToplevelImageCaptureSourceManagerV1Id;
+  }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Create source object for foreign toplevel
+        ///
+        /// Creates a source object for a foreign toplevel handle. Images captured
+        /// from this source will show the same content as the toplevel.
+        CreateSource {
+            source: ExtImageCaptureSourceV1Id,
+            toplevel_handle: ExtForeignToplevelHandleV1Id,
+        },
+        /// Delete this object
+        ///
+        /// Destroys the manager. This request may be sent at any time by the client
+        /// and objects created by the manager will remain valid after its
+        /// destruction.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1 {
+    type Request = Request;
+    fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+      use Request::*;
+      let request = match req.request_id {
+        0 => CreateSource {
+          source: req.id()?,
+          toplevel_handle: req.id()?,
+        },
+        1 => Destroy,
+        _ => return Err(ParserError::InvalidRequest),
+      };
+      Ok(request)
+    }
+  }
+}
+
+/// Manager to inform clients and begin capturing
+///
+/// This object is a manager which offers requests to start capturing from a
+/// source.
+pub mod ext_image_copy_capture_manager_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1
+    {
+        const INTERFACE_NAME: &'static str = "ext_image_copy_capture_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtImageCopyCaptureManagerV1Id {
+        type Object =
+            crate::wayland_objects::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1
+    {
+        type Id = ExtImageCopyCaptureManagerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Capture an image capture source
+        ///
+        /// Create a capturing session for an image capture source.
+        ///
+        /// If the paint_cursors option is set, cursors shall be composited onto
+        /// the captured frame. The cursor must not be composited onto the frame
+        /// if this flag is not set.
+        ///
+        /// If the options bitfield is invalid, the invalid_option protocol error
+        /// is sent.
+        CreateSession {
+            session: ExtImageCopyCaptureSessionV1Id,
+            source: ExtImageCaptureSourceV1Id,
+            options: u32,
+        },
+        /// Capture the pointer cursor of an image capture source
+        ///
+        /// Create a cursor capturing session for the pointer of an image capture
+        /// source.
+        CreatePointerCursorSession {
+            session: ExtImageCopyCaptureCursorSessionV1Id,
+            source: ExtImageCaptureSourceV1Id,
+            pointer: WlPointerId,
+        },
+        /// Destroy the manager
+        ///
+        /// Destroy the manager object.
+        ///
+        /// Other objects created via this interface are unaffected.
+        Destroy,
+    }
+    impl Parser
+        for crate::wayland_objects::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => CreateSession { session: req.id()?, source: req.id()?, options: req.uint()? },
+                1 => CreatePointerCursorSession {
+                    session: req.id()?,
+                    source: req.id()?,
+                    pointer: req.id()?,
+                },
+                2 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Invalid option flag,
+        InvalidOption = 1,
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Options {
+        /// Paint cursors onto captured frames,
+        PaintCursors = 1,
+    }
+}
+
+/// Image copy capture session
+///
+/// This object represents an active image copy capture session.
+///
+/// After a capture session is created, buffer constraint events will be
+/// emitted from the compositor to tell the client which buffer types and
+/// formats are supported for reading from the session. The compositor may
+/// re-send buffer constraint events whenever they change.
+///
+/// To advertise buffer constraints, the compositor must send in no
+/// particular order: zero or more shm_format and dmabuf_format events, zero
+/// or one dmabuf_device event, and exactly one buffer_size event. Then the
+/// compositor must send a done event.
+///
+/// When the client has received all the buffer constraints, it can create a
+/// buffer accordingly, attach it to the capture session using the
+/// attach_buffer request, set the buffer damage using the damage_buffer
+/// request and then send the capture request.
+pub mod ext_image_copy_capture_session_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1
+    {
+        const INTERFACE_NAME: &'static str = "ext_image_copy_capture_session_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtImageCopyCaptureSessionV1Id {
+        type Object =
+            crate::wayland_objects::ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1
+    {
+        type Id = ExtImageCopyCaptureSessionV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Create a frame
+        ///
+        /// Create a capture frame for this session.
+        ///
+        /// At most one frame object can exist for a given session at any time. If
+        /// a client sends a create_frame request before a previous frame object
+        /// has been destroyed, the duplicate_frame protocol error is raised.
+        CreateFrame { frame: ExtImageCopyCaptureFrameV1Id },
+        /// Delete this object
+        ///
+        /// Destroys the session. This request can be sent at any time by the
+        /// client.
+        ///
+        /// This request doesn't affect ext_image_copy_capture_frame_v1 objects created by
+        /// this object.
+        Destroy,
+    }
+    impl Parser
+        for crate::wayland_objects::ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => CreateFrame { frame: req.id()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Image capture source dimensions
+        ///
+        /// Provides the dimensions of the source image in buffer pixel coordinates.
+        ///
+        /// The client must attach buffers that match this size.
+        BufferSize {
+            /// Buffer width,
+            width: u32,
+            /// Buffer height,
+            height: u32,
+        },
+        /// Shm buffer format
+        ///
+        /// Provides the format that must be used for shared-memory buffers.
+        ///
+        /// This event may be emitted multiple times, in which case the client may
+        /// choose any given format.
+        ShmFormat {
+            /// Shm format,
+            format: u32,
+        },
+        /// Dma-buf device
+        ///
+        /// This event advertises the device buffers must be allocated on for
+        /// dma-buf buffers.
+        ///
+        /// In general the device is a DRM node. The DRM node type (primary vs.
+        /// render) is unspecified. Clients must not rely on the compositor sending
+        /// a particular node type. Clients cannot check two devices for equality
+        /// by comparing the dev_t value.
+        DmabufDevice {
+            /// Device dev_t value,
+            device: Array,
+        },
+        /// Dma-buf format
+        ///
+        /// Provides the format that must be used for dma-buf buffers.
+        ///
+        /// The client may choose any of the modifiers advertised in the array of
+        /// 64-bit unsigned integers.
+        ///
+        /// This event may be emitted multiple times, in which case the client may
+        /// choose any given format.
+        DmabufFormat {
+            /// Drm format code,
+            format: u32,
+            /// Drm format modifiers,
+            modifiers: Array,
+        },
+        /// All constraints have been sent
+        ///
+        /// This event is sent once when all buffer constraint events have been
+        /// sent.
+        ///
+        /// The compositor must always end a batch of buffer constraint events with
+        /// this event, regardless of whether it sends the initial constraints or
+        /// an update.
+        Done,
+        /// Session is no longer available
+        ///
+        /// This event indicates that the capture session has stopped and is no
+        /// longer available. This can happen in a number of cases, e.g. when the
+        /// underlying source is destroyed, if the user decides to end the image
+        /// capture, or if an unrecoverable runtime error has occurred.
+        ///
+        /// The client should destroy the session after receiving this event.
+        Stopped,
+    }
+    impl EventWriter
+        for crate::wayland_objects::ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                BufferSize { width, height } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 2);
+                    raw.uint(width);
+                    raw.uint(height);
+                    raw
+                }
+                ShmFormat { format } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.uint(format);
+                    raw
+                }
+                DmabufDevice { device } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.array(device);
+                    raw
+                }
+                DmabufFormat { format, modifiers } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 2);
+                    raw.uint(format);
+                    raw.array(modifiers);
+                    raw
+                }
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 4, 0);
+                    raw
+                }
+                Stopped {} => {
+                    let mut raw = RawEvent::new(self.id(), 5, 0);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Create_frame sent before destroying previous frame,
+        DuplicateFrame = 1,
+    }
+}
+
+/// Image capture frame
+///
+/// This object represents an image capture frame.
+///
+/// The client should attach a buffer, damage the buffer, and then send a
+/// capture request.
+///
+/// If the capture is successful, the compositor must send the frame metadata
+/// (transform, damage, presentation_time in any order) followed by the ready
+/// event.
+///
+/// If the capture fails, the compositor must send the failed event.
+pub mod ext_image_copy_capture_frame_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1
+    {
+        const INTERFACE_NAME: &'static str = "ext_image_copy_capture_frame_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtImageCopyCaptureFrameV1Id {
+        type Object =
+            crate::wayland_objects::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1
+    {
+        type Id = ExtImageCopyCaptureFrameV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy this object
+        ///
+        /// Destroys the frame. This request can be sent at any time by the
+        /// client.
+        Destroy,
+        /// Attach buffer to session
+        ///
+        /// Attach a buffer to the session.
+        ///
+        /// The wl_buffer.release request is unused.
+        ///
+        /// The new buffer replaces any previously attached buffer.
+        ///
+        /// This request must not be sent after capture, or else the
+        /// already_captured protocol error is raised.
+        AttachBuffer { buffer: WlBufferId },
+        /// Damage buffer
+        ///
+        /// Apply damage to the buffer which is to be captured next. This request
+        /// may be sent multiple times to describe a region.
+        ///
+        /// The client indicates the accumulated damage since this wl_buffer was
+        /// last captured. During capture, the compositor will update the buffer
+        /// with at least the union of the region passed by the client and the
+        /// region advertised by ext_image_copy_capture_frame_v1.damage.
+        ///
+        /// When a wl_buffer is captured for the first time, or when the client
+        /// doesn't track damage, the client must damage the whole buffer.
+        ///
+        /// This is for optimisation purposes. The compositor may use this
+        /// information to reduce copying.
+        ///
+        /// These coordinates originate from the upper left corner of the buffer.
+        ///
+        /// If x or y are strictly negative, or if width or height are negative or
+        /// zero, the invalid_buffer_damage protocol error is raised.
+        ///
+        /// This request must not be sent after capture, or else the
+        /// already_captured protocol error is raised.
+        DamageBuffer {
+            /// Region x coordinate,
+            x: i32,
+            /// Region y coordinate,
+            y: i32,
+            /// Region width,
+            width: i32,
+            /// Region height,
+            height: i32,
+        },
+        /// Capture a frame
+        ///
+        /// Capture a frame.
+        ///
+        /// Unless this is the first successful captured frame performed in this
+        /// session, the compositor may wait an indefinite amount of time for the
+        /// source content to change before performing the copy.
+        ///
+        /// This request may only be sent once, or else the already_captured
+        /// protocol error is raised. A buffer must be attached before this request
+        /// is sent, or else the no_buffer protocol error is raised.
+        Capture,
+    }
+    impl Parser
+        for crate::wayland_objects::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => AttachBuffer { buffer: req.id()? },
+                2 => DamageBuffer {
+                    x: req.int()?,
+                    y: req.int()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                3 => Capture,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Buffer transform
+        ///
+        /// This event is sent before the ready event and holds the transform that
+        /// the compositor has applied to the buffer contents.
+        Transform { transform: u32 },
+        /// Buffer damaged region
+        ///
+        /// This event is sent before the ready event. It may be generated multiple
+        /// times to describe a region.
+        ///
+        /// The first captured frame in a session will always carry full damage.
+        /// Subsequent frames' damaged regions describe which parts of the buffer
+        /// have changed since the last ready event.
+        ///
+        /// These coordinates originate in the upper left corner of the buffer.
+        Damage {
+            /// Damage x coordinate,
+            x: i32,
+            /// Damage y coordinate,
+            y: i32,
+            /// Damage width,
+            width: i32,
+            /// Damage height,
+            height: i32,
+        },
+        /// Presentation time of the frame
+        ///
+        /// This event indicates the time at which the frame is presented to the
+        /// output in system monotonic time. This event is sent before the ready
+        /// event.
+        ///
+        /// The timestamp is expressed as tv_sec_hi, tv_sec_lo, tv_nsec triples,
+        /// each component being an unsigned 32-bit value. Whole seconds are in
+        /// tv_sec which is a 64-bit value combined from tv_sec_hi and tv_sec_lo,
+        /// and the additional fractional part in tv_nsec as nanoseconds. Hence,
+        /// for valid timestamps tv_nsec must be in [0, 999999999].
+        PresentationTime {
+            /// High 32 bits of the seconds part of the timestamp,
+            tv_sec_hi: u32,
+            /// Low 32 bits of the seconds part of the timestamp,
+            tv_sec_lo: u32,
+            /// Nanoseconds part of the timestamp,
+            tv_nsec: u32,
+        },
+        /// Frame is available for reading
+        ///
+        /// Called as soon as the frame is copied, indicating it is available
+        /// for reading.
+        ///
+        /// The buffer may be re-used by the client after this event.
+        ///
+        /// After receiving this event, the client must destroy the object.
+        Ready,
+        /// Capture failed
+        ///
+        /// This event indicates that the attempted frame copy has failed.
+        ///
+        /// After receiving this event, the client must destroy the object.
+        Failed { reason: u32 },
+    }
+    impl EventWriter
+        for crate::wayland_objects::ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Transform { transform } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.uint(transform);
+                    raw
+                }
+                Damage { x, y, width, height } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 4);
+                    raw.int(x);
+                    raw.int(y);
+                    raw.int(width);
+                    raw.int(height);
+                    raw
+                }
+                PresentationTime { tv_sec_hi, tv_sec_lo, tv_nsec } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 3);
+                    raw.uint(tv_sec_hi);
+                    raw.uint(tv_sec_lo);
+                    raw.uint(tv_nsec);
+                    raw
+                }
+                Ready {} => {
+                    let mut raw = RawEvent::new(self.id(), 3, 0);
+                    raw
+                }
+                Failed { reason } => {
+                    let mut raw = RawEvent::new(self.id(), 4, 1);
+                    raw.uint(reason);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Capture sent without attach_buffer,
+        NoBuffer = 1,
+        /// Invalid buffer damage,
+        InvalidBufferDamage = 2,
+        /// Capture request has been sent,
+        AlreadyCaptured = 3,
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum FailureReason {
+        /// Unknown runtime error
+        ///
+        /// An unspecified runtime error has occurred. The client may retry.
+        Unknown = 0,
+        /// Buffer constraints mismatch
+        ///
+        /// The buffer submitted by the client doesn't match the latest session
+        /// constraints. The client should re-allocate its buffers and retry.
+        BufferConstraints = 1,
+        /// Session is no longer available
+        ///
+        /// The session has stopped. See ext_image_copy_capture_session_v1.stopped.
+        Stopped = 2,
+    }
+}
+
+/// Cursor capture session
+///
+/// This object represents a cursor capture session. It extends the base
+/// capture session with cursor-specific metadata.
+pub mod ext_image_copy_capture_cursor_session_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::ext_image_copy_capture_cursor_session_v1::ExtImageCopyCaptureCursorSessionV1 {
+    const INTERFACE_NAME: &'static str = "ext_image_copy_capture_cursor_session_v1";
+    const INTERFACE_VERSION: u32 = 1;
+  }
+    impl crate::object::IdToObject for ExtImageCopyCaptureCursorSessionV1Id {
+        type Object = crate::wayland_objects::ext_image_copy_capture_cursor_session_v1::ExtImageCopyCaptureCursorSessionV1;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::ext_image_copy_capture_cursor_session_v1::ExtImageCopyCaptureCursorSessionV1 {
+    type Id = ExtImageCopyCaptureCursorSessionV1Id;
+  }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Delete this object
+        ///
+        /// Destroys the session. This request can be sent at any time by the
+        /// client.
+        ///
+        /// This request doesn't affect ext_image_copy_capture_frame_v1 objects created by
+        /// this object.
+        Destroy,
+        /// Get image copy capturer session
+        ///
+        /// Gets the image copy capture session for this cursor session.
+        ///
+        /// The session will produce frames of the cursor image. The compositor may
+        /// pause the session when the cursor leaves the captured area.
+        ///
+        /// This request must not be sent more than once, or else the
+        /// duplicate_session protocol error is raised.
+        GetCaptureSession { session: ExtImageCopyCaptureSessionV1Id },
+    }
+    impl Parser for crate::wayland_objects::ext_image_copy_capture_cursor_session_v1::ExtImageCopyCaptureCursorSessionV1 {
+    type Request = Request;
+    fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+      use Request::*;
+      let request = match req.request_id {
+        0 => Destroy,
+        1 => GetCaptureSession {
+          session: req.id()?,
+        },
+        _ => return Err(ParserError::InvalidRequest),
+      };
+      Ok(request)
+    }
+  }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Cursor entered captured area
+        ///
+        /// Sent when a cursor enters the captured area. It shall be generated
+        /// before the "position" and "hotspot" events when and only when a cursor
+        /// enters the area.
+        ///
+        /// The cursor enters the captured area when the cursor image intersects
+        /// with the captured area. Note, this is different from e.g.
+        /// wl_pointer.enter.
+        Enter,
+        /// Cursor left captured area
+        ///
+        /// Sent when a cursor leaves the captured area. No "position" or "hotspot"
+        /// event is generated for the cursor until the cursor enters the captured
+        /// area again.
+        Leave,
+        /// Position changed
+        ///
+        /// Cursors outside the image capture source do not get captured and no
+        /// event will be generated for them.
+        ///
+        /// The given position is the position of the cursor's hotspot and it is
+        /// relative to the main buffer's top left corner in transformed buffer
+        /// pixel coordinates. The coordinates may be negative or greater than the
+        /// main buffer size.
+        Position {
+            /// Position x coordinates,
+            x: i32,
+            /// Position y coordinates,
+            y: i32,
+        },
+        /// Hotspot changed
+        ///
+        /// The hotspot describes the offset between the cursor image and the
+        /// position of the input device.
+        ///
+        /// The given coordinates are the hotspot's offset from the origin in
+        /// buffer coordinates.
+        ///
+        /// Clients should not apply the hotspot immediately: the hotspot becomes
+        /// effective when the next ext_image_copy_capture_frame_v1.ready event is received.
+        ///
+        /// Compositors may delay this event until the client captures a new frame.
+        Hotspot {
+            /// Hotspot x coordinates,
+            x: i32,
+            /// Hotspot y coordinates,
+            y: i32,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::ext_image_copy_capture_cursor_session_v1::ExtImageCopyCaptureCursorSessionV1 {
+    type Event = Event;
+    fn object_id(&self) -> WaylandId {
+      use crate::object::Object;
+      self.id()
+    }
+    fn to_raw_event(&self, event: Event) -> RawEvent {
+      use Event::*;
+      use crate::object::Object;
+      match event {
+        Enter {  } => {
+          let mut raw = RawEvent::new(self.id(), 0, 0);
+        raw
+        },
+        Leave {  } => {
+          let mut raw = RawEvent::new(self.id(), 1, 0);
+        raw
+        },
+        Position { x,y } => {
+          let mut raw = RawEvent::new(self.id(), 2, 2);
+          raw.int(x);
+          raw.int(y);
+        raw
+        },
+        Hotspot { x,y } => {
+          let mut raw = RawEvent::new(self.id(), 3, 2);
+          raw.int(x);
+          raw.int(y);
+        raw
+        },
+      }
+    }
+  }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Get_capture_session sent twice,
+        DuplicateSession = 1,
     }
 }
 
@@ -14261,6 +15344,323 @@ pub mod ext_workspace_handle_v1 {
         Remove = 4,
         /// Assign request is available,
         Assign = 8,
+    }
+}
+
+/// Manager to inform clients and begin capturing
+///
+/// This object is a manager which offers requests to start capturing from a
+/// source.
+pub mod zwlr_screencopy_manager_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1 {
+        const INTERFACE_NAME: &'static str = "zwlr_screencopy_manager_v1";
+        const INTERFACE_VERSION: u32 = 3;
+    }
+    impl crate::object::IdToObject for ZwlrScreencopyManagerV1Id {
+        type Object = crate::wayland_objects::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1
+    {
+        type Id = ZwlrScreencopyManagerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Capture an output
+        ///
+        /// Capture the next frame of an entire output.
+        CaptureOutput {
+            frame: ZwlrScreencopyFrameV1Id,
+            /// Composite cursor onto the frame,
+            overlay_cursor: i32,
+            output: WlOutputId,
+        },
+        /// Capture an output's region
+        ///
+        /// Capture the next frame of an output's region.
+        ///
+        /// The region is given in output logical coordinates, see
+        /// xdg_output.logical_size. The region will be clipped to the output's
+        /// extents.
+        CaptureOutputRegion {
+            frame: ZwlrScreencopyFrameV1Id,
+            /// Composite cursor onto the frame,
+            overlay_cursor: i32,
+            output: WlOutputId,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+        },
+        /// Destroy the manager
+        ///
+        /// All objects created by the manager will still remain valid, until their
+        /// appropriate destroy request has been called.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => CaptureOutput {
+                    frame: req.id()?,
+                    overlay_cursor: req.int()?,
+                    output: req.id()?,
+                },
+                1 => CaptureOutputRegion {
+                    frame: req.id()?,
+                    overlay_cursor: req.int()?,
+                    output: req.id()?,
+                    x: req.int()?,
+                    y: req.int()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                2 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
+/// A frame ready for copy
+///
+/// This object represents a single frame.
+///
+/// When created, a series of buffer events will be sent, each representing a
+/// supported buffer type. The "buffer_done" event is sent afterwards to
+/// indicate that all supported buffer types have been enumerated. The client
+/// will then be able to send a "copy" request. If the capture is successful,
+/// the compositor will send a "flags" event followed by a "ready" event.
+///
+/// For objects version 2 or lower, wl_shm buffers are always supported, ie.
+/// the "buffer" event is guaranteed to be sent.
+///
+/// If the capture failed, the "failed" event is sent. This can happen anytime
+/// before the "ready" event.
+///
+/// Once either a "ready" or a "failed" event is received, the client should
+/// destroy the frame.
+pub mod zwlr_screencopy_frame_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1 {
+        const INTERFACE_NAME: &'static str = "zwlr_screencopy_frame_v1";
+        const INTERFACE_VERSION: u32 = 3;
+    }
+    impl crate::object::IdToObject for ZwlrScreencopyFrameV1Id {
+        type Object = crate::wayland_objects::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1
+    {
+        type Id = ZwlrScreencopyFrameV1Id;
+    }
+    /// Minimum interface version for the `copy_with_damage` message (XML `since` / `version`).
+    pub const COPY_WITH_DAMAGE_SINCE: u32 = 2;
+    #[derive(Debug)]
+    pub enum Request {
+        /// Copy the frame
+        ///
+        /// Copy the frame to the supplied buffer. The buffer must have the
+        /// correct size, see zwlr_screencopy_frame_v1.buffer and
+        /// zwlr_screencopy_frame_v1.linux_dmabuf. The buffer needs to have a
+        /// supported format.
+        ///
+        /// If the frame is successfully copied, "flags" and "ready" events are
+        /// sent. Otherwise, a "failed" event is sent.
+        Copy { buffer: WlBufferId },
+        /// Delete this object, used or not
+        ///
+        /// Destroys the frame. This request can be sent at any time by the client.
+        Destroy,
+        /// Copy the frame when it's damaged
+        ///
+        /// Same as copy, except it waits until there is damage to copy.
+        CopyWithDamage { buffer: WlBufferId },
+    }
+    impl Parser for crate::wayland_objects::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Copy { buffer: req.id()? },
+                1 => Destroy,
+                2 => CopyWithDamage { buffer: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    /// Minimum interface version for the `damage` message (XML `since` / `version`).
+    pub const DAMAGE_SINCE: u32 = 2;
+    /// Minimum interface version for the `linux_dmabuf` message (XML `since` / `version`).
+    pub const LINUX_DMABUF_SINCE: u32 = 3;
+    /// Minimum interface version for the `buffer_done` message (XML `since` / `version`).
+    pub const BUFFER_DONE_SINCE: u32 = 3;
+    #[derive(Debug)]
+    pub enum Event {
+        /// Wl_shm buffer information
+        ///
+        /// Provides information about wl_shm buffer parameters that need to be
+        /// used for this frame. This event is sent once after the frame is created
+        /// if wl_shm buffers are supported.
+        Buffer {
+            /// Buffer format,
+            format: u32,
+            /// Buffer width,
+            width: u32,
+            /// Buffer height,
+            height: u32,
+            /// Buffer stride,
+            stride: u32,
+        },
+        /// Frame flags
+        ///
+        /// Provides flags about the frame. This event is sent once before the
+        /// "ready" event.
+        Flags {
+            /// Frame flags,
+            flags: u32,
+        },
+        /// Indicates frame is available for reading
+        ///
+        /// Called as soon as the frame is copied, indicating it is available
+        /// for reading. This event includes the time at which the presentation took place.
+        ///
+        /// The timestamp is expressed as tv_sec_hi, tv_sec_lo, tv_nsec triples,
+        /// each component being an unsigned 32-bit value. Whole seconds are in
+        /// tv_sec which is a 64-bit value combined from tv_sec_hi and tv_sec_lo,
+        /// and the additional fractional part in tv_nsec as nanoseconds. Hence,
+        /// for valid timestamps tv_nsec must be in [0, 999999999]. The seconds part
+        /// may have an arbitrary offset at start.
+        ///
+        /// After receiving this event, the client should destroy the object.
+        Ready {
+            /// High 32 bits of the seconds part of the timestamp,
+            tv_sec_hi: u32,
+            /// Low 32 bits of the seconds part of the timestamp,
+            tv_sec_lo: u32,
+            /// Nanoseconds part of the timestamp,
+            tv_nsec: u32,
+        },
+        /// Frame copy failed
+        ///
+        /// This event indicates that the attempted frame copy has failed.
+        ///
+        /// After receiving this event, the client should destroy the object.
+        Failed,
+        /// Carries the coordinates of the damaged region
+        ///
+        /// This event is sent right before the ready event when copy_with_damage is
+        /// requested. It may be generated multiple times for each copy_with_damage
+        /// request.
+        ///
+        /// The arguments describe a box around an area that has changed since the
+        /// last copy request that was derived from the current screencopy manager
+        /// instance.
+        ///
+        /// The union of all regions received between the call to copy_with_damage
+        /// and a ready event is the total damage since the prior ready event.
+        Damage {
+            /// Damaged x coordinates,
+            x: u32,
+            /// Damaged y coordinates,
+            y: u32,
+            /// Current width,
+            width: u32,
+            /// Current height,
+            height: u32,
+        },
+        /// Linux-dmabuf buffer information
+        ///
+        /// Provides information about linux-dmabuf buffer parameters that need to
+        /// be used for this frame. This event is sent once after the frame is
+        /// created if linux-dmabuf buffers are supported.
+        LinuxDmabuf {
+            /// Fourcc pixel format,
+            format: u32,
+            /// Buffer width,
+            width: u32,
+            /// Buffer height,
+            height: u32,
+        },
+        /// All buffer types reported
+        ///
+        /// This event is sent once after all buffer events have been sent.
+        ///
+        /// The client should proceed to create a buffer of one of the supported
+        /// types, and send a "copy" request.
+        BufferDone,
+    }
+    impl EventWriter for crate::wayland_objects::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Buffer { format, width, height, stride } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 4);
+                    raw.uint(format);
+                    raw.uint(width);
+                    raw.uint(height);
+                    raw.uint(stride);
+                    raw
+                }
+                Flags { flags } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.uint(flags);
+                    raw
+                }
+                Ready { tv_sec_hi, tv_sec_lo, tv_nsec } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 3);
+                    raw.uint(tv_sec_hi);
+                    raw.uint(tv_sec_lo);
+                    raw.uint(tv_nsec);
+                    raw
+                }
+                Failed {} => {
+                    let mut raw = RawEvent::new(self.id(), 3, 0);
+                    raw
+                }
+                Damage { x, y, width, height } => {
+                    let mut raw = RawEvent::new(self.id(), 4, 4);
+                    raw.uint(x);
+                    raw.uint(y);
+                    raw.uint(width);
+                    raw.uint(height);
+                    raw
+                }
+                LinuxDmabuf { format, width, height } => {
+                    let mut raw = RawEvent::new(self.id(), 5, 3);
+                    raw.uint(format);
+                    raw.uint(width);
+                    raw.uint(height);
+                    raw
+                }
+                BufferDone {} => {
+                    let mut raw = RawEvent::new(self.id(), 6, 0);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// The object has already been used to copy a wl_buffer,
+        AlreadyUsed = 0,
+        /// Buffer attributes are invalid,
+        InvalidBuffer = 1,
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Flags {
+        /// Contents are y-inverted,
+        YInvert = 1,
     }
 }
 

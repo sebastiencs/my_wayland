@@ -163,6 +163,7 @@ use crate::{
     udev::Udev,
 };
 
+mod capture;
 mod clients;
 mod config;
 mod cursor;
@@ -322,6 +323,7 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
         idle_inhibitors: Vec::new(),
         idle_inhibitors_honored: false,
         session_lock: Default::default(),
+        capture: Default::default(),
         #[cfg(test)]
         realize_closing_snapshots_in_tests: false,
         frame_scheduler: Default::default(),

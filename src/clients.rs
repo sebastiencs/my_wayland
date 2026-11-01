@@ -534,6 +534,9 @@ pub enum ClientAction {
         resizing: bool,
     },
     Close,
+    /// Send capture `stopped`, `failed`, `closed`, or foreign-toplevel announcements queued for
+    /// this client.
+    DeliverCaptureEvents,
     IdleNotification {
         id: crate::protocol_generated::ExtIdleNotificationV1Id,
         notice: crate::wayland_objects::ext_idle_notification_v1::IdleNotice,
@@ -2568,8 +2571,12 @@ impl Model for Client {
                         .send_notice(notice, &mut dispatcher);
                 }
             }
+            DeliverCaptureEvents => {
+                crate::capture::deliver(self, state, &mut dispatcher);
+            }
             Close => {
                 log::info!("client_id={:?} closed", self.id);
+                state.capture.drop_client(self.id);
                 if let Some(id) = self.reader_id.take() {
                     dispatcher.stop_model(id);
                 };

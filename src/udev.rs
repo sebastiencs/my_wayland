@@ -843,7 +843,7 @@ impl Udev {
                 name: global_name.as_u32(),
             });
         }
-        let _ = state.remove_output(output_id);
+        let _ = state.remove_output(output_id, dispatcher);
     }
 
     fn place_output_automatically(&self, output_id: OutputId, state: &mut State) {

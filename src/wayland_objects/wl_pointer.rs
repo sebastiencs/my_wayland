@@ -194,6 +194,7 @@ impl Object for WlPointer {
             Release => {
                 if let Some(pointer) = client.resolve(self.id, state) {
                     state.seat.unregister_pointer(pointer);
+                    crate::capture::pointer_released(state, dispatcher, pointer);
                 }
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }

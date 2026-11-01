@@ -1,7 +1,16 @@
 #![allow(unused)]
 
+pub mod ext_foreign_toplevel_handle_v1;
+pub mod ext_foreign_toplevel_image_capture_source_manager_v1;
+pub mod ext_foreign_toplevel_list_v1;
 pub mod ext_idle_notification_v1;
 pub mod ext_idle_notifier_v1;
+pub mod ext_image_capture_source_v1;
+pub mod ext_image_copy_capture_cursor_session_v1;
+pub mod ext_image_copy_capture_frame_v1;
+pub mod ext_image_copy_capture_manager_v1;
+pub mod ext_image_copy_capture_session_v1;
+pub mod ext_output_image_capture_source_manager_v1;
 pub mod ext_session_lock_manager_v1;
 pub mod ext_session_lock_surface_v1;
 pub mod ext_session_lock_v1;
@@ -52,6 +61,8 @@ pub mod zwlr_gamma_control_manager_v1;
 pub mod zwlr_gamma_control_v1;
 pub mod zwlr_layer_shell_v1;
 pub mod zwlr_layer_surface_v1;
+pub mod zwlr_screencopy_frame_v1;
+pub mod zwlr_screencopy_manager_v1;
 pub mod zwp_confined_pointer_v1;
 pub mod zwp_idle_inhibit_manager_v1;
 pub mod zwp_idle_inhibitor_v1;

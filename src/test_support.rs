@@ -60,6 +60,7 @@ pub fn state_for_tests_with_config(config: RuntimeConfig) -> State {
         idle_inhibitors: Vec::new(),
         idle_inhibitors_honored: false,
         session_lock: Default::default(),
+        capture: Default::default(),
         frame_scheduler: Default::default(),
         presentation: Default::default(),
         globals,

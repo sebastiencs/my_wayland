@@ -863,6 +863,8 @@ pub struct State {
     pub idle_inhibitors_honored: bool,
     /// Secure lock. `locked` stays unsent until a later phase presents every active output.
     pub session_lock: crate::session_lock::SessionLock,
+    /// Live screenshot protocol objects. Globals stay unpublished until capture is validated.
+    pub capture: crate::capture::CaptureRegistry,
     #[cfg(test)]
     pub realize_closing_snapshots_in_tests: bool,
     pub frame_scheduler: BTreeMap<OutputId, OutputSchedulerSnapshot>,
@@ -2985,8 +2987,13 @@ impl State {
         output_id
     }
 
-    pub fn remove_output(&mut self, output_id: OutputId) -> Option<Output> {
+    pub fn remove_output(
+        &mut self,
+        output_id: OutputId,
+        dispatcher: &mut crate::runner::Dispatcher,
+    ) -> Option<Output> {
         let removed = self.outputs.remove(output_id)?;
+        crate::capture::output_removed(self, dispatcher, output_id);
         if let Some(lock_surface) = self.session_lock.detach_output(output_id) {
             if let Some(lock_surface) = lock_surface.try_ref_mut(self) {
                 lock_surface.make_inert();
