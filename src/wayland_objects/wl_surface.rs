@@ -184,6 +184,7 @@ pub struct WlSurface {
     retired_buffers: Vec<RetiredBufferCandidate>,
     /// `wl_surface.frame` callbacks to complete on the next `commit`.
     pending_frame_callbacks: Vec<Resolved<WlCallbackId>>,
+    pending_release_callbacks: Vec<Resolved<WlCallbackId>>,
     pending_presentation_feedbacks: Vec<SurfacePresentationFeedback>,
     cached_commit: Option<CachedCommit>,
     subsurface: Option<SubsurfaceState>,
@@ -246,6 +247,7 @@ struct SurfaceCommitPayload {
     damage_buffer: Vec<DamageRect>,
     input_region: RegionValue,
     opaque_region: RegionValue,
+    release_callbacks: Vec<Resolved<WlCallbackId>>,
 }
 
 #[derive(Clone, Debug)]
@@ -265,6 +267,7 @@ struct OnScreen {
     presentation_feedbacks: Vec<SurfacePresentationFeedback>,
     input_region: RegionValue,
     opaque_region: RegionValue,
+    release_callbacks: Vec<Resolved<WlCallbackId>>,
 }
 
 impl Default for OnScreen {
@@ -285,6 +288,7 @@ impl Default for OnScreen {
             presentation_feedbacks: Vec::new(),
             input_region: RegionValue::infinite(),
             opaque_region: RegionValue::empty(),
+            release_callbacks: Vec::new(),
         }
     }
 }
@@ -321,6 +325,7 @@ struct BlockedSurfaceState {
     viewport: SurfaceViewport,
     input_region: RegionValue,
     opaque_region: RegionValue,
+    release_callbacks: Vec<Resolved<WlCallbackId>>,
 }
 
 struct SurfaceChanges {
@@ -417,6 +422,7 @@ impl WlSurface {
             viewport_object: None,
             retired_buffers: Vec::new(),
             pending_frame_callbacks: Vec::new(),
+            pending_release_callbacks: Vec::new(),
             pending_presentation_feedbacks: Vec::new(),
             cached_commit: None,
             subsurface: None,
@@ -1181,6 +1187,7 @@ impl WlSurface {
             presentation_feedbacks: Vec::new(),
             input_region: self.on_screen.input_region.clone(),
             opaque_region: self.on_screen.opaque_region.clone(),
+            release_callbacks: Vec::new(),
         };
     }
 
@@ -1204,6 +1211,7 @@ impl WlSurface {
                 .opaque_region
                 .take()
                 .unwrap_or_else(|| self.on_screen.opaque_region.clone()),
+            release_callbacks: std::mem::take(&mut self.pending_release_callbacks),
         }
     }
 
@@ -1218,9 +1226,31 @@ impl WlSurface {
         match self.cached_commit.as_mut() {
             Some(cached) => {
                 if payload.buffer.is_some() {
+                    if let Some(Some(old_buffer)) = cached.payload.buffer {
+                        if Some(old_buffer) != payload.buffer.flatten() {
+                            let old_callbacks =
+                                std::mem::take(&mut cached.payload.release_callbacks);
+                            if !old_callbacks.is_empty() {
+                                self.retired_buffers.push(RetiredBufferCandidate {
+                                    buffer: old_buffer,
+                                    sync: cached.payload.sync.clone(),
+                                    release_callbacks: old_callbacks,
+                                });
+                            }
+                        }
+                    }
                     cached.payload.buffer = payload.buffer;
                     cached.payload.offset = payload.offset;
                     cached.payload.sync = payload.sync;
+                    cached
+                        .payload
+                        .release_callbacks
+                        .extend(payload.release_callbacks);
+                } else {
+                    cached
+                        .payload
+                        .release_callbacks
+                        .extend(payload.release_callbacks);
                 }
                 cached.payload.buffer_transform = payload.buffer_transform;
                 cached.payload.buffer_scale = payload.buffer_scale;
@@ -1245,6 +1275,57 @@ impl WlSurface {
 
     fn clear_failed_surface_commit(&mut self) {
         self.pending = Pending::default();
+    }
+
+    fn reject_release_callbacks_without_buffer(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) -> bool {
+        if self.pending_release_callbacks.is_empty() || matches!(self.pending.buffer, Some(Some(_)))
+        {
+            return false;
+        }
+        client.send_protocol_error(
+            dispatcher,
+            self.id.into(),
+            wl_surface::Error::NoBuffer as u32,
+            "wl_surface.get_release requires a non-null buffer in the same commit",
+        );
+        let callbacks = std::mem::take(&mut self.pending_release_callbacks);
+        self.clear_failed_surface_commit();
+        use crate::wayland_objects::wl_display::WlDisplay;
+        let display = WlDisplay::default();
+        for callback in callbacks {
+            client.delete_id(&display, state, dispatcher, callback.wayland_id().into());
+        }
+        true
+    }
+
+    fn complete_release_callbacks_now(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let mut callbacks = std::mem::take(&mut self.pending_release_callbacks);
+        callbacks.extend(std::mem::take(&mut self.on_screen.release_callbacks));
+        if let Some(blocked) = self.blocked.as_mut() {
+            callbacks.extend(std::mem::take(&mut blocked.release_callbacks));
+        }
+        if let Some(cached) = self.cached_commit.as_mut() {
+            callbacks.extend(std::mem::take(&mut cached.payload.release_callbacks));
+        }
+        use crate::wayland_objects::wl_display::WlDisplay;
+        let display = WlDisplay::default();
+        for callback in callbacks {
+            if !callback.exists(state) {
+                continue;
+            }
+            callback.rref(state).done(0, dispatcher);
+            client.delete_id(&display, state, dispatcher, callback.wayland_id().into());
+        }
     }
 
     fn get_changes_for_payload(&self, payload: &SurfaceCommitPayload) -> SurfaceChanges {
@@ -1366,6 +1447,7 @@ impl WlSurface {
             viewport: payload.viewport,
             input_region: payload.input_region.clone(),
             opaque_region: payload.opaque_region.clone(),
+            release_callbacks: payload.release_callbacks.clone(),
         })
     }
 
@@ -1584,6 +1666,7 @@ impl WlSurface {
                     presentation_feedbacks: Vec::new(),
                     input_region: payload.input_region.clone(),
                     opaque_region: payload.opaque_region.clone(),
+                    release_callbacks: Vec::new(),
                 };
                 if let Some(resolved) = resolved {
                     crate::input::pointer_lock::release_pointer_lock_for_surface(
@@ -1660,6 +1743,7 @@ impl WlSurface {
                     damage_buffer: Vec::new(),
                     input_region: self.on_screen.input_region.clone(),
                     opaque_region: self.on_screen.opaque_region.clone(),
+                    release_callbacks: Vec::new(),
                 },
             ) else {
                 log::warn!("failed to recompute mapped state for current surface {:?}", self.id);
@@ -1799,6 +1883,14 @@ impl WlSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
+        if self.reject_release_callbacks_without_buffer(client, state, dispatcher) {
+            return;
+        }
+        crate::wayland_objects::zxdg_toplevel_decoration_v1::queue_deferred_decoration_revert(
+            self.xdg_surface(),
+            state,
+            dispatcher,
+        );
         let was_mapped = self.global_logical_bounds().is_some();
         let resolved_surface = client.resolve_this(&self, state);
         let mut pending_xdg_role_changes = None;
@@ -2475,6 +2567,7 @@ impl WlSurface {
             presentation_feedbacks: Vec::new(),
             input_region: RegionValue::infinite(),
             opaque_region: RegionValue::empty(),
+            release_callbacks: Vec::new(),
         };
     }
 
@@ -2550,6 +2643,7 @@ impl WlSurface {
             presentation_feedbacks: next.presentation_feedbacks,
             input_region: next.input_region,
             opaque_region: next.opaque_region,
+            release_callbacks: next.release_callbacks,
         };
     }
 
@@ -2558,6 +2652,7 @@ impl WlSurface {
             self.retired_buffers.push(RetiredBufferCandidate {
                 buffer: buffer_object_id,
                 sync: self.on_screen.sync.clone(),
+                release_callbacks: std::mem::take(&mut self.on_screen.release_callbacks),
             });
         }
         self.on_screen.sync = SurfaceSyncState::default();
@@ -2591,7 +2686,11 @@ impl WlSurface {
         sync::resolve_unused_candidate_immediately(
             state,
             dispatcher,
-            RetiredBufferCandidate { buffer: blocked.buffer_object_id, sync: blocked.sync },
+            RetiredBufferCandidate {
+                buffer: blocked.buffer_object_id,
+                sync: blocked.sync,
+                release_callbacks: blocked.release_callbacks,
+            },
         );
     }
 
@@ -2679,6 +2778,7 @@ impl WlSurface {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
+        self.complete_release_callbacks_now(client, state, dispatcher);
         let object = client.resolve(self.id, state).unwrap();
         begin_managed_toplevel_close_surface(state, object, self, dispatcher);
         let scene_bounds = state.surface_scene_bounds_with_ref(object, self);
@@ -2822,6 +2922,20 @@ impl Object for WlSurface {
                     .damage_buffer
                     .push(DamageRect { x, y, width, height });
             }
+            GetRelease { callback } => {
+                if self.version < wl_surface::GET_RELEASE_SINCE {
+                    client.protocol_violation_disconnect(
+                        dispatcher,
+                        self.id.into(),
+                        wl_display::Error::InvalidMethod as u32,
+                        "wl_surface.get_release requires wl_surface version >= 7",
+                    );
+                    return Ok(());
+                }
+                client.insert_object(state, WlCallback::new(callback));
+                self.pending_release_callbacks
+                    .push(client.resolve(callback, state).unwrap());
+            }
             Offset { x, y } => {
                 if self.version < wl_surface::OFFSET_SINCE {
                     client.protocol_violation_disconnect(
@@ -2921,6 +3035,7 @@ mod tests {
             presentation_feedbacks: Vec::new(),
             input_region: RegionValue::infinite(),
             opaque_region: RegionValue::empty(),
+            release_callbacks: Vec::new(),
         };
         surface
     }
@@ -4916,6 +5031,7 @@ mod tests {
                 damage_buffer: vec![],
                 input_region: RegionValue::infinite(),
                 opaque_region: RegionValue::empty(),
+                release_callbacks: Vec::new(),
             },
             vec![resolved_callback(7)],
             vec![feedback(17, 2)],
@@ -4933,6 +5049,7 @@ mod tests {
                 damage_buffer: vec![],
                 input_region: RegionValue::empty(),
                 opaque_region: RegionValue::infinite(),
+                release_callbacks: Vec::new(),
             },
             vec![resolved_callback(8)],
             vec![feedback(18, 2)],

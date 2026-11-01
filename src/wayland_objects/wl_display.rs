@@ -49,9 +49,8 @@ impl Object for WlDisplay {
                 client.delete_id(&self, state, dispatcher, resolved.wayland_id().into());
             }
             GetRegistry { registry } => {
-                let registry = WlRegistry::new(registry);
-                registry.list_global_objects(state, dispatcher);
-                let _ = client.insert_object(state, registry);
+                let (resolved, _) = client.insert_object(state, WlRegistry::new(registry));
+                WlRegistry::announce(resolved, state, dispatcher);
             }
         }
         Ok(())

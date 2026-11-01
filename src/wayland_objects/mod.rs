@@ -15,6 +15,7 @@ pub mod wl_data_device_manager;
 pub mod wl_data_offer;
 pub mod wl_data_source;
 pub mod wl_display;
+pub mod wl_fixes;
 pub mod wl_keyboard;
 pub mod wl_output;
 pub mod wl_pointer;
@@ -102,7 +103,6 @@ fake_obj! {
     // { wl_keyboard, WlKeyboard },
     // { wl_output, WlOutput },
     // { wl_subcompositor, WlSubcompositor },
-    { wl_fixes, WlFixes },
     // { wp_presentation, WpPresentation },
     // { wp_presentation_feedback, WpPresentationFeedback },
     // { xdg_wm_base, XdgWmBase },

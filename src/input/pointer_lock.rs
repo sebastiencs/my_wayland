@@ -313,7 +313,7 @@ fn warp_pointer(
     dispatch_client_event(
         dispatcher,
         focus.target.client_id(),
-        SeatClientEvent::PointerMotion { time: monotonic_time_msec(), x, y },
+        SeatClientEvent::PointerWarp { time: monotonic_time_msec(), x, y },
     );
     dispatch_client_event(dispatcher, focus.target.client_id(), SeatClientEvent::PointerFrame);
 }
@@ -521,7 +521,7 @@ mod tests {
                 ClientId::from_raw(3),
                 |action| matches!(
                     action,
-                    ClientAction::SeatEvent { event: SeatClientEvent::PointerMotion { x, y, .. } }
+                    ClientAction::SeatEvent { event: SeatClientEvent::PointerWarp { x, y, .. } }
                         if *x == 20.0 && *y == 20.0
                 ),
             ));

@@ -371,6 +371,21 @@ pub(crate) fn refresh_pointer_focus(
                 SeatClientEvent::PointerFrame,
             );
         }
+    } else if let (Some(old_focus), Some(new_focus)) = (old_focus, new_focus) {
+        let old_local = local_coords(old_focus.rect, state.seat.pointer_pos);
+        let new_local = local_coords(new_focus.rect, state.seat.pointer_pos);
+        if old_local != new_local {
+            dispatch_client_event(
+                dispatcher,
+                new_focus.target.client_id(),
+                SeatClientEvent::PointerWarp { time, x: new_local.0, y: new_local.1 },
+            );
+            dispatch_client_event(
+                dispatcher,
+                new_focus.target.client_id(),
+                SeatClientEvent::PointerFrame,
+            );
+        }
     }
 
     state.seat.pointer_focus = new_focus;

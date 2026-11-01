@@ -22,13 +22,31 @@ pub struct WlShmPool {
     fd: OwnedFd,
     size: usize,
     mem: Rc<SharedMemory>,
+    /// `wl_shm` version that created this pool. Pool error codes exist from version 3.
+    shm_version: u32,
 }
 
 impl WlShmPool {
-    pub fn new(id: WlShmPoolId, fd: RawFd, size: usize) -> Self {
+    pub fn new(id: WlShmPoolId, fd: RawFd, size: usize, shm_version: u32) -> Self {
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let mem = SharedMemory::mmap(fd.as_raw_fd(), size);
-        Self { id, fd, size, mem }
+        Self { id, fd, size, mem, shm_version }
+    }
+
+    fn format_error(&self) -> u32 {
+        if self.shm_version >= 3 {
+            wl_shm_pool::Error::InvalidFormat as u32
+        } else {
+            wl_shm::Error::InvalidFormat as u32
+        }
+    }
+
+    fn stride_error(&self) -> u32 {
+        if self.shm_version >= 3 {
+            wl_shm_pool::Error::InvalidStride as u32
+        } else {
+            wl_shm::Error::InvalidStride as u32
+        }
     }
 
     fn validate_create_buffer(
@@ -84,7 +102,7 @@ impl Object for WlShmPool {
                     client.send_protocol_error(
                         dispatcher,
                         self.id(),
-                        wl_shm::Error::InvalidFormat as u32,
+                        self.format_error(),
                         "invalid SHM buffer format",
                     );
                     return Ok(());
@@ -96,7 +114,7 @@ impl Object for WlShmPool {
                     client.send_protocol_error(
                         dispatcher,
                         self.id(),
-                        wl_shm::Error::InvalidStride as u32,
+                        self.stride_error(),
                         "invalid SHM buffer parameters",
                     );
                     return Ok(());
@@ -117,7 +135,7 @@ impl Object for WlShmPool {
                         client.send_protocol_error(
                             dispatcher,
                             self.id(),
-                            wl_shm::Error::InvalidStride as u32,
+                            self.stride_error(),
                             "invalid SHM buffer parameters",
                         );
                         return Ok(());

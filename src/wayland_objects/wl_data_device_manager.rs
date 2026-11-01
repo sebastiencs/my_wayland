@@ -3,10 +3,13 @@ use crate::{
     globals::Global,
     object::{Object, Parser, RequestResult},
     protocol_generated::{
-        wl_data_device_manager, Constants, NewId, WaylandId, WlDataDeviceId, WlDataDeviceManagerId,
+        wl_data_device_manager, wl_display, Constants, NewId, WaylandId, WlDataDeviceId,
+        WlDataDeviceManagerId,
     },
     state::{GrabbedObject, State},
-    wayland_objects::{wl_data_device::WlDataDevice, wl_data_source::WlDataSource},
+    wayland_objects::{
+        wl_data_device::WlDataDevice, wl_data_source::WlDataSource, wl_display::WlDisplay,
+    },
 };
 
 #[derive(Debug)]
@@ -78,6 +81,18 @@ impl Object for WlDataDeviceManager {
                     dispatcher
                         .dispatch_to(client.client_id(), ClientAction::RefreshDataDeviceSelection);
                 }
+            }
+            Release => {
+                if self.version < wl_data_device_manager::RELEASE_SINCE {
+                    client.protocol_violation_disconnect(
+                        dispatcher,
+                        self.id.into(),
+                        wl_display::Error::InvalidMethod as u32,
+                        "wl_data_device_manager.release requires wl_data_device_manager version >= 4",
+                    );
+                    return Ok(());
+                }
+                client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
         Ok(())

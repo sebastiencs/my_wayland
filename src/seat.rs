@@ -64,6 +64,13 @@ pub enum SeatClientEvent {
         x: f32,
         y: f32,
     },
+    /// Compositor-caused pointer relocation. Version 11 pointers receive `wl_pointer.warp`;
+    /// older pointers receive `wl_pointer.motion` so they still learn the position.
+    PointerWarp {
+        time: u32,
+        x: f32,
+        y: f32,
+    },
     PointerButton {
         serial: u32,
         time: u32,

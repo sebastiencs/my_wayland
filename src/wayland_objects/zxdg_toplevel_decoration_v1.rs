@@ -1,9 +1,9 @@
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
-    object::{Object, Parser, RequestResult},
+    object::{Object, Parser, PostAction, RequestResult},
     protocol_generated::{
-        zxdg_toplevel_decoration_v1, Constants, WaylandId, WlSurfaceId, XdgToplevelId,
-        ZxdgToplevelDecorationV1Id,
+        zxdg_toplevel_decoration_v1, Constants, WaylandId, WlSurfaceId, XdgSurfaceId,
+        XdgToplevelId, ZxdgToplevelDecorationV1Id,
     },
     state::{GrabbedObject, State},
     wayland_objects::{
@@ -20,11 +20,16 @@ pub struct ZxdgToplevelDecorationV1 {
     id: ZxdgToplevelDecorationV1Id,
     toplevel: Resolved<XdgToplevelId>,
     requested_mode: Option<ToplevelDecorationMode>,
+    version: u32,
 }
 
 impl ZxdgToplevelDecorationV1 {
-    pub fn new(id: ZxdgToplevelDecorationV1Id, toplevel: Resolved<XdgToplevelId>) -> Self {
-        Self { id, toplevel, requested_mode: None }
+    pub fn new(
+        id: ZxdgToplevelDecorationV1Id,
+        toplevel: Resolved<XdgToplevelId>,
+        version: u32,
+    ) -> Self {
+        Self { id, toplevel, requested_mode: None, version }
     }
 
     pub fn requested_mode(&self) -> Option<ToplevelDecorationMode> {
@@ -128,6 +133,80 @@ impl ZxdgToplevelDecorationV1 {
     }
 }
 
+pub(crate) fn queue_deferred_decoration_revert(
+    xdg_surface: Option<Resolved<XdgSurfaceId>>,
+    state: &mut State,
+    dispatcher: &mut ClientDispatcher,
+) {
+    let Some(xdg_surface) = xdg_surface else {
+        return;
+    };
+    let Some(toplevel_id) = xdg_surface
+        .try_ref(state)
+        .and_then(|xdg| xdg.toplevel_role())
+    else {
+        return;
+    };
+    let pending = toplevel_id.try_ref(state).is_some_and(|toplevel| {
+        toplevel.decoration_revert_on_commit() && !toplevel.has_decoration_object()
+    });
+    if !pending {
+        return;
+    }
+    if let Some(mut toplevel) = toplevel_id.try_ref_mut(state) {
+        toplevel.clear_decoration_revert_on_commit();
+    }
+    dispatcher.dispatch_post_action(RevertUnnegotiatedDecoration { toplevel: toplevel_id });
+}
+
+struct RevertUnnegotiatedDecoration {
+    toplevel: Resolved<XdgToplevelId>,
+}
+
+impl PostAction for RevertUnnegotiatedDecoration {
+    fn execute(
+        self: Box<Self>,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let root = {
+            let Some(toplevel) = self.toplevel.try_ref(state) else {
+                return;
+            };
+            if toplevel.has_decoration_object() {
+                return;
+            }
+            toplevel
+                .xdg_surface()
+                .try_ref(state)
+                .map(|xdg| xdg.wl_surface())
+        };
+        let target_mode = state.xdg_decoration_mode_for_surface(root, false, None);
+        let Some(mut toplevel) = self.toplevel.try_ref_mut(state) else {
+            return;
+        };
+        if toplevel.has_decoration_object() {
+            return;
+        }
+        let changed = toplevel.schedule_decoration_mode(target_mode);
+        let xdg_surface = toplevel.xdg_surface();
+        if !changed {
+            return;
+        }
+        let configure_bounds = {
+            let xdg_surface = xdg_surface.rref(state);
+            XdgToplevel::configure_bounds_for_xdg_surface(client, state, xdg_surface)
+        };
+        let mut xdg_surface = xdg_surface.grab(state);
+        if !xdg_surface.initial_commit_complete() {
+            return;
+        }
+        let mut toplevel = self.toplevel.grab(state);
+        toplevel.schedule_configure(client, state, configure_bounds, &mut xdg_surface, dispatcher);
+    }
+}
+
 fn decode_mode(raw_mode: u32) -> Option<ToplevelDecorationMode> {
     match raw_mode {
         value if value == zxdg_toplevel_decoration_v1::Mode::ClientSide as u32 => {
@@ -163,11 +242,17 @@ impl Object for ZxdgToplevelDecorationV1 {
 
         match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
+                let version = self.version;
                 if let Some(mut toplevel) = self.toplevel.try_grab(state) {
                     let this = client.resolve(self.id, state).unwrap();
                     toplevel.clear_decoration_object(this);
+                    if version >= 2 {
+                        toplevel.mark_decoration_revert_on_commit();
+                    }
                 }
-                self.revert_to_unnegotiated_mode(client, state, dispatcher);
+                if version < 2 {
+                    self.revert_to_unnegotiated_mode(client, state, dispatcher);
+                }
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
             SetMode { mode } => {
@@ -294,7 +379,7 @@ mod tests {
         state.register_xdg_toplevel_role(xdg_surface_resolved, toplevel_resolved);
         let (decoration_resolved, _) = client.insert_object(
             &mut state,
-            ZxdgToplevelDecorationV1::new(decoration_id, toplevel_resolved),
+            ZxdgToplevelDecorationV1::new(decoration_id, toplevel_resolved, 1),
         );
         let decoration_object_id = decoration_resolved.object_id();
         {
@@ -392,7 +477,7 @@ mod tests {
         state.register_xdg_toplevel_role(xdg_surface_resolved, toplevel_resolved);
         let (decoration_resolved, _) = client.insert_object(
             &mut state,
-            ZxdgToplevelDecorationV1::new(decoration_id, toplevel_resolved),
+            ZxdgToplevelDecorationV1::new(decoration_id, toplevel_resolved, 1),
         );
         let decoration_object_id = decoration_resolved.object_id();
         {

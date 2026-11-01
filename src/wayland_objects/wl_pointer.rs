@@ -53,6 +53,10 @@ impl WlPointer {
         );
     }
 
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
     pub fn send_motion(&self, time: u32, x: f32, y: f32, dispatcher: &mut ClientDispatcher) {
         self.send_event(wl_pointer::Event::Motion { time, surface_x: x, surface_y: y }, dispatcher);
     }
@@ -66,6 +70,10 @@ impl WlPointer {
         dispatcher: &mut ClientDispatcher,
     ) {
         self.send_event(wl_pointer::Event::Button { serial, time, button, state }, dispatcher);
+    }
+
+    pub fn send_warp(&self, x: f32, y: f32, dispatcher: &mut ClientDispatcher) {
+        self.send_event(wl_pointer::Event::Warp { surface_x: x, surface_y: y }, dispatcher);
     }
 
     pub fn send_frame(&self, dispatcher: &mut ClientDispatcher) {

@@ -2959,7 +2959,7 @@ impl State {
     }
 
     pub fn remove_global(&mut self, name: GlobalName) -> Option<Box<dyn Global>> {
-        self.globals.remove(name)
+        self.globals.withdraw(name)
     }
 
     pub fn insert_output(&mut self, output: Output) -> OutputId {

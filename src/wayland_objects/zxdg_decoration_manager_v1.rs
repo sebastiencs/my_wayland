@@ -68,6 +68,10 @@ impl Object for ZxdgDecorationManagerV1 {
             GetToplevelDecoration { id, toplevel } => {
                 let id = ZxdgToplevelDecorationV1Id::from(id);
                 let toplevel = client.resolve_or_disconnect(toplevel, state, dispatcher)?;
+                let retain_previous_mode = self.version >= 2
+                    && toplevel
+                        .try_ref(state)
+                        .is_some_and(|toplevel| toplevel.decoration_revert_on_commit());
                 let toplevel_ref = toplevel.rref(state);
                 if toplevel_ref.has_decoration_object() {
                     client.send_protocol_error(
@@ -88,9 +92,10 @@ impl Object for ZxdgDecorationManagerV1 {
                     return Ok(());
                 };
                 let wl_surface_object = xdg_surface_ref.wl_surface();
-                if wl_surface_object
-                    .try_ref(state)
-                    .is_some_and(WlSurface::has_attached_or_committed_buffer)
+                if self.version < 2
+                    && wl_surface_object
+                        .try_ref(state)
+                        .is_some_and(WlSurface::has_attached_or_committed_buffer)
                 {
                     client.send_protocol_error(
                         dispatcher,
@@ -101,14 +106,19 @@ impl Object for ZxdgDecorationManagerV1 {
                     return Ok(());
                 }
 
-                let decoration = ZxdgToplevelDecorationV1::new(id, toplevel);
+                let decoration = ZxdgToplevelDecorationV1::new(id, toplevel, self.version);
                 let (decoration_resolved, _) = client.insert_object(state, decoration);
                 {
                     let mut toplevel = toplevel.grab(state);
                     assert!(toplevel.set_decoration_object(decoration_resolved));
                 }
                 let mut decoration = client.grab_object(id, state);
-                decoration.initialize_negotiation(client, state, dispatcher);
+                if retain_previous_mode {
+                    let mode = toplevel.rref(state).decoration_mode();
+                    decoration.send_configure_mode(mode, dispatcher);
+                } else {
+                    decoration.initialize_negotiation(client, state, dispatcher);
+                }
             }
         }
         Ok(())
@@ -212,5 +222,73 @@ mod tests {
             action,
             IoUringAction::Sendmsg { .. }
         )));
+    }
+
+    #[test]
+    fn get_toplevel_decoration_version_two_allows_existing_buffer() {
+        let mut state = state_for_tests();
+        let mut client = Client::new_for_tests(ClientId::from_raw(8));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let manager_id = ZxdgDecorationManagerV1Id::from(1u32);
+        let wl_surface_id = WlSurfaceId::from(2u32);
+        let xdg_surface_id = XdgSurfaceId::from(3u32);
+        let toplevel_id = XdgToplevelId::from(4u32);
+        let decoration_id = ZxdgToplevelDecorationV1Id::from(5u32);
+
+        client.insert_object(&mut state, ZxdgDecorationManagerV1 { id: manager_id, version: 2 });
+        let (surface_resolved, _) =
+            client.insert_object(&mut state, WlSurface::new(wl_surface_id, client.client_id(), 6));
+        let surface_object_id = surface_resolved.object_id();
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            assert!(surface
+                .set_role(Role::XdgSurface, &mut client_dispatcher)
+                .is_ok());
+        }
+        let (xdg_surface_resolved, _) = client.insert_object(
+            &mut state,
+            XdgSurface::new(
+                xdg_surface_id,
+                Resolved::new(client.client_id(), XdgWmBaseId::from(6), ObjectId::from(6usize)),
+                Resolved::new(client.client_id(), wl_surface_id, surface_object_id),
+                7,
+            ),
+        );
+        let xdg_surface_object_id = xdg_surface_resolved.object_id();
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.set_xdg_surface_impl(Resolved::new(
+                client.client_id(),
+                xdg_surface_id,
+                xdg_surface_object_id,
+            ));
+            let buffer_object_id =
+                insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(40), 2, 2);
+            surface.test_map(buffer_object_id, 0, 0, 2, 2);
+        }
+        let (toplevel_resolved, _) = client.insert_object(
+            &mut state,
+            XdgToplevel::new(
+                toplevel_id,
+                Resolved::new(client.client_id(), xdg_surface_id, xdg_surface_object_id),
+                7,
+            ),
+        );
+        state.register_xdg_toplevel_role(xdg_surface_resolved, toplevel_resolved);
+
+        {
+            let mut manager = client.grab_object(manager_id, &mut state);
+            manager.on(
+                &mut client,
+                &mut state,
+                get_toplevel_decoration_request(manager_id, decoration_id, toplevel_id),
+                &mut client_dispatcher,
+            );
+        }
+        drop(client_dispatcher);
+
+        assert!(client.contains_object(decoration_id, &state));
     }
 }

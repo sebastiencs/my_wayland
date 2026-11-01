@@ -1,5 +1,5 @@
 use crate::{
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
     protocol_generated::{wl_display, wl_registry, WaylandId, WlRegistryId},
     state::{GrabbedObject, State},
@@ -29,15 +29,27 @@ impl WlRegistry {
         self.send_event(wl_registry::Event::GlobalRemove { name }, dispatcher);
     }
 
-    pub fn list_global_objects(&self, state: &mut State, dispatcher: &mut ClientDispatcher) {
-        for (name, global) in state.globals.iter() {
-            let (interface_name, interface_version) = global.interface();
-            self.send_global(
+    pub fn announce(
+        registry: crate::clients::Resolved<WlRegistryId>,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let advertised = state
+            .globals
+            .iter()
+            .map(|(name, global)| {
+                let (interface_name, interface_version) = global.interface();
+                (name, interface_name.to_string(), interface_version)
+            })
+            .collect::<Vec<_>>();
+        for (name, interface_name, interface_version) in advertised {
+            registry.rref(state).send_global(
                 dispatcher,
                 name.as_u32(),
-                interface_name.to_string(),
+                interface_name,
                 interface_version,
             );
+            state.globals.note_offer(name, registry);
         }
     }
 }
@@ -72,5 +84,16 @@ impl Object for WlRegistry {
             }
         }
         Ok(())
+    }
+
+    fn on_client_disconnect(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        _dispatcher: &mut ClientDispatcher,
+    ) {
+        if let Some(registry) = client.resolve(self.id, state) {
+            state.globals.release_registry(registry);
+        }
     }
 }

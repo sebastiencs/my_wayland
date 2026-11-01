@@ -28,11 +28,11 @@ impl Global for WlShmGlobal {
         client: &mut Client,
         state: &mut State,
         id: NewId,
-        _version: u32,
+        version: u32,
         dispatcher: &mut ClientDispatcher,
     ) {
         let id = WlShmId::from(id);
-        let (_, wl_shm) = client.insert_object(state, WlShm { id });
+        let (_, wl_shm) = client.insert_object(state, WlShm { id, version });
 
         // TODO: Send other supported formats
         for format in SHM_FORMATS {
@@ -44,11 +44,12 @@ impl Global for WlShmGlobal {
 #[derive(Debug)]
 pub struct WlShm {
     id: WlShmId,
+    version: u32,
 }
 
 impl WlShm {
-    pub fn new(id: WlShmId) -> Self {
-        Self { id }
+    pub fn new(id: WlShmId, version: u32) -> Self {
+        Self { id, version }
     }
 }
 
@@ -68,7 +69,7 @@ impl Object for WlShm {
 
         match client.parse::<Self>(req, dispatcher)? {
             CreatePool { id, fd, size } => {
-                let pool = WlShmPool::new(id, fd, size as usize);
+                let pool = WlShmPool::new(id, fd, size as usize, self.version);
                 client.insert_object(state, pool);
             }
             Release => {

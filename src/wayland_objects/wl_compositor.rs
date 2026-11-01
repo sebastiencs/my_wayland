@@ -2,9 +2,9 @@ use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
     globals::Global,
     object::{Object, Parser, RequestResult},
-    protocol_generated::{Constants, NewId, WaylandId, WlCompositorId},
+    protocol_generated::{wl_compositor, wl_display, Constants, NewId, WaylandId, WlCompositorId},
     state::{GrabbedObject, State},
-    wayland_objects::{wl_region::WlRegion, wl_surface::WlSurface},
+    wayland_objects::{wl_display::WlDisplay, wl_region::WlRegion, wl_surface::WlSurface},
 };
 
 #[derive(Debug)]
@@ -61,6 +61,18 @@ impl Object for WlCompositor {
             }
             CreateRegion { id } => {
                 let _ = client.insert_object(state, WlRegion::new(id));
+            }
+            Release => {
+                if self.version < wl_compositor::RELEASE_SINCE {
+                    client.protocol_violation_disconnect(
+                        dispatcher,
+                        self.id.into(),
+                        wl_display::Error::InvalidMethod as u32,
+                        "wl_compositor.release requires wl_compositor version >= 7",
+                    );
+                    return Ok(());
+                }
+                client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
         Ok(())

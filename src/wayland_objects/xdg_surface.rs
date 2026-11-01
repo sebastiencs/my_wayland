@@ -782,6 +782,8 @@ pub mod xdg_toplevel {
         pending_decoration_mode: Option<ToplevelDecorationMode>,
         window_geometry: Option<RectI>,
         decoration_object: Option<Resolved<ZxdgToplevelDecorationV1Id>>,
+        /// Version 2+ decorations switch back to an unnegotiated mode on the next surface commit.
+        decoration_revert_on_commit: bool,
     }
 
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -844,6 +846,7 @@ pub mod xdg_toplevel {
                 pending_decoration_mode: None,
                 window_geometry: None,
                 decoration_object: None,
+                decoration_revert_on_commit: false,
             }
         }
 
@@ -1194,6 +1197,7 @@ pub mod xdg_toplevel {
                 return false;
             }
             self.decoration_object = Some(decoration);
+            self.decoration_revert_on_commit = false;
             true
         }
 
@@ -1204,6 +1208,18 @@ pub mod xdg_toplevel {
             if self.decoration_object == Some(decoration) {
                 self.decoration_object = None;
             }
+        }
+
+        pub fn decoration_revert_on_commit(&self) -> bool {
+            self.decoration_revert_on_commit
+        }
+
+        pub fn mark_decoration_revert_on_commit(&mut self) {
+            self.decoration_revert_on_commit = true;
+        }
+
+        pub fn clear_decoration_revert_on_commit(&mut self) {
+            self.decoration_revert_on_commit = false;
         }
 
         fn send_decoration_configure_if_needed(
@@ -2374,7 +2390,7 @@ mod tests {
         state.register_xdg_toplevel_role(xdg_surface_resolved, toplevel_resolved);
         let (decoration_resolved, _) = client.insert_object(
             &mut state,
-            ZxdgToplevelDecorationV1::new(decoration_id, toplevel_resolved),
+            ZxdgToplevelDecorationV1::new(decoration_id, toplevel_resolved, 1),
         );
         let decoration_object_id = decoration_resolved.object_id();
         {

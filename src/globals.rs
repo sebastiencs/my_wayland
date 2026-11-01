@@ -1,12 +1,12 @@
 use crate::{
-    clients::{Client, ClientDispatcher},
-    protocol_generated::NewId,
+    clients::{Client, ClientDispatcher, Resolved},
+    protocol_generated::{NewId, WlRegistryId},
     state::{Grab, IndexMap, State},
     wayland_objects::{
         ext_idle_notifier_v1::ExtIdleNotifierV1Global,
         ext_workspace_manager_v1::ExtWorkspaceManagerV1Global, wl_compositor::WlCompositorGlobal,
-        wl_data_device_manager::WlDataDeviceManagerGlobal, wl_seat::WlSeatGlobal,
-        wl_shm::WlShmGlobal, wl_subcompositor::WlSubcompositorGlobal,
+        wl_data_device_manager::WlDataDeviceManagerGlobal, wl_fixes::WlFixesGlobal,
+        wl_seat::WlSeatGlobal, wl_shm::WlShmGlobal, wl_subcompositor::WlSubcompositorGlobal,
         wp_cursor_shape_manager_v1::WpCursorShapeManagerV1Global,
         wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1Global,
         wp_presentation::WpPresentationGlobal, wp_viewporter::WpViewporterGlobal,
@@ -21,13 +21,20 @@ use crate::{
     },
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct Globals {
     pub map: Box<IndexMap<GlobalSlotId, Box<dyn Global>>>,
     current_name: u32,
     names_by_slot: BTreeMap<GlobalSlotId, GlobalName>,
     slots_by_name: BTreeMap<GlobalName, GlobalSlotId>,
+    /// Globals that have sent `wl_registry.global_remove` and stay bindable until every
+    /// registry that was offered them acknowledges removal or is destroyed.
+    removed: BTreeSet<GlobalName>,
+    /// Registries that were sent `wl_registry.global` for a name. Matches libwayland's
+    /// per-registry offer list: a client that never calls `ack_global_remove` pins the
+    /// global until that registry object is destroyed.
+    offers: BTreeMap<GlobalName, BTreeSet<Resolved<WlRegistryId>>>,
 }
 
 index_map_id!(GlobalSlotId);
@@ -36,9 +43,21 @@ index_map_id!(GlobalSlotId);
 pub struct GlobalName(u32);
 
 impl GlobalName {
+    pub fn from_raw(name: u32) -> Self {
+        Self(name)
+    }
+
     pub fn as_u32(&self) -> u32 {
         self.0
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlobalRemoveAckError {
+    /// This registry was never told about the name.
+    Unknown,
+    /// The name exists but `wl_registry.global_remove` has not been sent.
+    NotRemoved,
 }
 
 pub trait Global {
@@ -61,6 +80,8 @@ impl Globals {
             current_name: 1,
             names_by_slot: BTreeMap::new(),
             slots_by_name: BTreeMap::new(),
+            removed: BTreeSet::new(),
+            offers: BTreeMap::new(),
         }
     }
 
@@ -68,6 +89,7 @@ impl Globals {
         for fun in [
             WlCompositorGlobal::new,
             WlDataDeviceManagerGlobal::new,
+            WlFixesGlobal::new,
             WlShmGlobal::new,
             WlSubcompositorGlobal::new,
             WlSeatGlobal::new, // TODO: `WlSeatGlobal` should be added dynamically
@@ -92,12 +114,12 @@ impl Globals {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (GlobalName, &Box<dyn Global>)> {
-        self.map.iter().map(|(slot_id, global)| {
+        self.map.iter().filter_map(|(slot_id, global)| {
             let name = *self
                 .names_by_slot
                 .get(&slot_id)
                 .expect("missing global wire name");
-            (name, global)
+            (!self.removed.contains(&name)).then_some((name, global))
         })
     }
 
@@ -116,24 +138,84 @@ impl Globals {
     pub fn remove(&mut self, name: GlobalName) -> Option<Box<dyn Global>> {
         let slot_id = self.slots_by_name.remove(&name)?;
         self.names_by_slot.remove(&slot_id);
+        self.removed.remove(&name);
+        self.offers.remove(&name);
         self.map.remove(slot_id)
     }
 
+    /// Stop advertising `name` but keep it bindable until every registry that saw it
+    /// acknowledges the removal or is destroyed. Returns the global only when nothing
+    /// is left to wait for.
+    pub fn withdraw(&mut self, name: GlobalName) -> Option<Box<dyn Global>> {
+        if !self.slots_by_name.contains_key(&name) || !self.removed.insert(name) {
+            return None;
+        }
+        self.finish_if_withdrawn(name)
+    }
+
+    pub fn note_offer(&mut self, name: GlobalName, registry: Resolved<WlRegistryId>) {
+        if self.removed.contains(&name) || !self.slots_by_name.contains_key(&name) {
+            return;
+        }
+        self.offers.entry(name).or_default().insert(registry);
+    }
+
+    pub fn was_offered(&self, name: GlobalName, registry: Resolved<WlRegistryId>) -> bool {
+        self.offers
+            .get(&name)
+            .is_some_and(|registries| registries.contains(&registry))
+    }
+
+    pub fn ack_global_remove(
+        &mut self,
+        name: GlobalName,
+        registry: Resolved<WlRegistryId>,
+    ) -> Result<Option<Box<dyn Global>>, GlobalRemoveAckError> {
+        if !self.was_offered(name, registry) {
+            return Err(GlobalRemoveAckError::Unknown);
+        }
+        if !self.removed.contains(&name) {
+            return Err(GlobalRemoveAckError::NotRemoved);
+        }
+        self.take_offer(name, registry);
+        Ok(self.finish_if_withdrawn(name))
+    }
+
+    pub fn release_registry(&mut self, registry: Resolved<WlRegistryId>) {
+        let names: Vec<GlobalName> = self.offers.keys().copied().collect();
+        for name in names {
+            if self.take_offer(name, registry) {
+                let _ = self.finish_if_withdrawn(name);
+            }
+        }
+    }
+
+    fn take_offer(&mut self, name: GlobalName, registry: Resolved<WlRegistryId>) -> bool {
+        let Some(registries) = self.offers.get_mut(&name) else {
+            return false;
+        };
+        let removed = registries.remove(&registry);
+        if registries.is_empty() {
+            self.offers.remove(&name);
+        }
+        removed
+    }
+
+    fn finish_if_withdrawn(&mut self, name: GlobalName) -> Option<Box<dyn Global>> {
+        if !self.removed.contains(&name) || self.offers.contains_key(&name) {
+            return None;
+        }
+        self.remove(name)
+    }
+
     pub fn contains_interface(&self, interface: &str) -> bool {
-        self.map
-            .iter()
+        self.iter()
             .any(|(_, global)| global.interface().0 == interface)
     }
 
     pub fn name_for_interface(&self, interface: &str) -> Option<GlobalName> {
-        self.map.iter().find_map(|(slot_id, global)| {
-            (global.interface().0 == interface).then(|| {
-                *self
-                    .names_by_slot
-                    .get(&slot_id)
-                    .expect("missing global wire name")
-            })
-        })
+        self.iter()
+            .find_map(|(name, global)| (global.interface().0 == interface).then_some(name))
     }
 
     /// Take a global out of the registry for binding. Fails if `name` is not a live global slot.

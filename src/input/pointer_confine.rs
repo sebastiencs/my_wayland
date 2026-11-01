@@ -294,7 +294,7 @@ fn warp_pointer(
     dispatch_client_event(
         dispatcher,
         focus.target.client_id(),
-        SeatClientEvent::PointerMotion {
+        SeatClientEvent::PointerWarp {
             time: monotonic_time_msec(),
             x: local.0 as f32,
             y: local.1 as f32,
@@ -557,7 +557,7 @@ mod tests {
                 .test_count_queued_action::<ClientAction>(|action| {
                     matches!(
                         action,
-                        ClientAction::SeatEvent { event: SeatClientEvent::PointerMotion { .. } }
+                        ClientAction::SeatEvent { event: SeatClientEvent::PointerWarp { .. } }
                     )
                 })
                 >= 1

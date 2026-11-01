@@ -212,11 +212,15 @@ pub mod wl_display {
         },
         /// Acknowledge object ID deletion
         ///
-        /// This event is used internally by the object ID management
-        /// logic. When a client deletes an object that it had created,
-        /// the server will send this event to acknowledge that it has
-        /// seen the delete request. When the client receives this event,
-        /// it will know that it can safely reuse the object ID.
+        /// This event is used internally by the object ID management logic.
+        ///
+        /// When the server stops using an object created by the client, the server
+        /// sends this event. In particular, after sending this event, the server
+        /// will no longer send any events that contain the object as the receiver
+        /// or as an argument.
+        ///
+        /// When the client receives this event, it knows that it can reuse the
+        /// object ID.
         DeleteId {
             /// Deleted object ID,
             id: u32,
@@ -306,7 +310,7 @@ pub mod wl_registry {
         Bind {
             /// Unique numeric name of the object,
             name: u32,
-            /// Bounded object,
+            /// Bound object,
             id: NewId,
             /// Client-requested interface version (from `new_id` marshalling),
             requested_version: u32,
@@ -444,7 +448,7 @@ pub mod wl_compositor {
     use super::*;
     impl Constants for crate::wayland_objects::wl_compositor::WlCompositor {
         const INTERFACE_NAME: &'static str = "wl_compositor";
-        const INTERFACE_VERSION: u32 = 6;
+        const INTERFACE_VERSION: u32 = 7;
     }
     impl crate::object::IdToObject for WlCompositorId {
         type Object = crate::wayland_objects::wl_compositor::WlCompositor;
@@ -452,6 +456,8 @@ pub mod wl_compositor {
     impl crate::object::ObjectWithId for crate::wayland_objects::wl_compositor::WlCompositor {
         type Id = WlCompositorId;
     }
+    /// Minimum interface version for the `release` message (XML `since` / `version`).
+    pub const RELEASE_SINCE: u32 = 7;
     #[derive(Debug)]
     pub enum Request {
         /// Create new surface
@@ -468,6 +474,10 @@ pub mod wl_compositor {
             /// The new region,
             id: WlRegionId,
         },
+        /// Destroy wl_compositor
+        ///
+        /// This request destroys the wl_compositor. This has no effect on any other objects.
+        Release,
     }
     impl Parser for crate::wayland_objects::wl_compositor::WlCompositor {
         type Request = Request;
@@ -476,6 +486,7 @@ pub mod wl_compositor {
             let request = match req.request_id {
                 0 => CreateSurface { id: req.id()? },
                 1 => CreateRegion { id: req.id()? },
+                2 => Release,
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -496,7 +507,7 @@ pub mod wl_shm_pool {
     use super::*;
     impl Constants for crate::wayland_objects::wl_shm_pool::WlShmPool {
         const INTERFACE_NAME: &'static str = "wl_shm_pool";
-        const INTERFACE_VERSION: u32 = 2;
+        const INTERFACE_VERSION: u32 = 3;
     }
     impl crate::object::IdToObject for WlShmPoolId {
         type Object = crate::wayland_objects::wl_shm_pool::WlShmPool;
@@ -578,6 +589,16 @@ pub mod wl_shm_pool {
             Ok(request)
         }
     }
+    /// Wl_shm_pool error values
+    ///
+    /// These errors can be emitted in response to wl_shm_pool requests.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Buffer format is not known,
+        InvalidFormat = 0,
+        /// Invalid size or stride during buffer creation,
+        InvalidStride = 1,
+    }
 }
 
 /// Shared memory support
@@ -595,7 +616,7 @@ pub mod wl_shm {
     use super::*;
     impl Constants for crate::wayland_objects::wl_shm::WlShm {
         const INTERFACE_NAME: &'static str = "wl_shm";
-        const INTERFACE_VERSION: u32 = 2;
+        const INTERFACE_VERSION: u32 = 3;
     }
     impl crate::object::IdToObject for WlShmId {
         type Object = crate::wayland_objects::wl_shm::WlShm;
@@ -649,6 +670,10 @@ pub mod wl_shm {
         /// Informs the client about a valid pixel format that
         /// can be used for buffers. Known formats include
         /// argb8888 and xrgb8888.
+        ///
+        /// Extensions to drm_fourcc.h (or the format enum) do not require
+        /// increasing the wl_shm version; as a result, clients may receive format
+        /// codes which were not in the list at the time the client was made.
         Format {
             /// Buffer pixel format,
             format: u32,
@@ -678,7 +703,7 @@ pub mod wl_shm {
     pub enum Error {
         /// Buffer format is not known,
         InvalidFormat = 0,
-        /// Invalid size or stride during pool or buffer creation,
+        /// Invalid size or stride during pool creation,
         InvalidStride = 1,
         /// Mmapping the file descriptor failed,
         InvalidFd = 2,
@@ -693,7 +718,8 @@ pub mod wl_shm {
     ///
     /// The drm format codes match the macros defined in drm_fourcc.h, except
     /// argb8888 and xrgb8888. The formats actually supported by the compositor
-    /// will be reported by the format event.
+    /// will be reported by the format event. See drm_fourcc.h for more detailed
+    /// format descriptions.
     ///
     /// For all wl_shm formats and unless specified in another protocol
     /// extension, pre-multiplied alpha is used for pixel values.
@@ -721,7 +747,7 @@ pub mod wl_shm {
         Argb4444 = 842093121,
         /// 16-bit ABGR format, [15:0] A:B:G:R 4:4:4:4 little endian,
         Abgr4444 = 842089025,
-        /// 16-bit RBGA format, [15:0] R:G:B:A 4:4:4:4 little endian,
+        /// 16-bit RGBA format, [15:0] R:G:B:A 4:4:4:4 little endian,
         Rgba4444 = 842088786,
         /// 16-bit BGRA format, [15:0] B:G:R:A 4:4:4:4 little endian,
         Bgra4444 = 842088770,
@@ -933,6 +959,55 @@ pub mod wl_shm {
         Xvuy8888 = 1498764888,
         /// 2x2 subsampled Cr:Cb plane 10 bits per channel packed,
         P030 = 808661072,
+        /// [47:0] R:G:B 16:16:16 little endian,
+        Rgb161616 = 942950226,
+        /// [47:0] B:G:R 16:16:16 little endian,
+        Bgr161616 = 942950210,
+        /// [15:0] R 16 little endian,
+        R16f = 1210064978,
+        /// [31:0] G:R 16:16 little endian,
+        Gr1616f = 1210077767,
+        /// [47:0] B:G:R 16:16:16 little endian,
+        Bgr161616f = 1213351746,
+        /// [31:0] R 32 little endian,
+        R32f = 1176510546,
+        /// [63:0] G:R 32:32 little endian,
+        Gr3232f = 1176523335,
+        /// [95:0] B:G:R 32:32:32 little endian,
+        Bgr323232f = 1179797314,
+        /// [127:0] A:B:G:R 32:32:32:32 little endian,
+        Abgr32323232f = 1178092097,
+        /// 2x1 subsampled Cr:Cb plane,
+        Nv20 = 808605262,
+        /// Non-subsampled Cr:Cb plane,
+        Nv30 = 808670798,
+        /// 2x2 subsampled Cb (1) and Cr (2) planes 10 bits per channel,
+        S010 = 808530003,
+        /// 2x1 subsampled Cb (1) and Cr (2) planes 10 bits per channel,
+        S210 = 808530515,
+        /// Non-subsampled Cb (1) and Cr (2) planes 10 bits per channel,
+        S410 = 808531027,
+        /// 2x2 subsampled Cb (1) and Cr (2) planes 12 bits per channel,
+        S012 = 842084435,
+        /// 2x1 subsampled Cb (1) and Cr (2) planes 12 bits per channel,
+        S212 = 842084947,
+        /// Non-subsampled Cb (1) and Cr (2) planes 12 bits per channel,
+        S412 = 842085459,
+        /// 2x2 subsampled Cb (1) and Cr (2) planes 16 bits per channel,
+        S016 = 909193299,
+        /// 2x1 subsampled Cb (1) and Cr (2) planes 16 bits per channel,
+        S216 = 909193811,
+        /// Non-subsampled Cb (1) and Cr (2) planes 16 bits per channel,
+        S416 = 909194323,
+        /// [31:0] x:Cr:Cb:Y 2:10:10:10 little endian,
+        Xvuy2101010 = 808671576,
+        /// 2x1 subsampled Cr:Cb plane 10 bits per channel packed,
+        P230 = 808661584,
+        T430 = 808662100,
+        /// 8-bit Y-only,
+        Y8 = 1497715271,
+        /// [31:0] x:Y2:Y1:Y0 2:10:10:10 little endian,
+        Xyyy2101010 = 876695641,
     }
 }
 
@@ -1036,7 +1111,7 @@ pub mod wl_data_offer {
     use super::*;
     impl Constants for crate::wayland_objects::wl_data_offer::WlDataOffer {
         const INTERFACE_NAME: &'static str = "wl_data_offer";
-        const INTERFACE_VERSION: u32 = 3;
+        const INTERFACE_VERSION: u32 = 4;
     }
     impl crate::object::IdToObject for WlDataOfferId {
         type Object = crate::wayland_objects::wl_data_offer::WlDataOffer;
@@ -1287,7 +1362,7 @@ pub mod wl_data_source {
     use super::*;
     impl Constants for crate::wayland_objects::wl_data_source::WlDataSource {
         const INTERFACE_NAME: &'static str = "wl_data_source";
-        const INTERFACE_VERSION: u32 = 3;
+        const INTERFACE_VERSION: u32 = 4;
     }
     impl crate::object::IdToObject for WlDataSourceId {
         type Object = crate::wayland_objects::wl_data_source::WlDataSource;
@@ -1403,8 +1478,8 @@ pub mod wl_data_source {
         /// acceptance, wl_data_source.cancelled may still be emitted afterwards
         /// if the drop destination does not accept any mime type.
         ///
-        /// However, this event might however not be received if the compositor
-        /// cancelled the drag-and-drop operation before this event could happen.
+        /// However, this event might not be received if the compositor cancelled
+        /// the drag-and-drop operation before this event could happen.
         ///
         /// Note that the data_source may still be used in the future and should
         /// not be destroyed here.
@@ -1441,7 +1516,7 @@ pub mod wl_data_source {
         /// The most recent action received is always the valid one. The chosen
         /// action may change alongside negotiation (e.g. an "ask" action can turn
         /// into a "move" operation), so the effects of the final action must
-        /// always be applied in wl_data_offer.dnd_finished.
+        /// always be applied in wl_data_source.dnd_finished.
         ///
         /// Clients can trigger cursor surface changes from this point, so
         /// they reflect the current action.
@@ -1510,7 +1585,7 @@ pub mod wl_data_device {
     use super::*;
     impl Constants for crate::wayland_objects::wl_data_device::WlDataDevice {
         const INTERFACE_NAME: &'static str = "wl_data_device";
-        const INTERFACE_VERSION: u32 = 3;
+        const INTERFACE_VERSION: u32 = 4;
     }
     impl crate::object::IdToObject for WlDataDeviceId {
         type Object = crate::wayland_objects::wl_data_device::WlDataDevice;
@@ -1761,7 +1836,7 @@ pub mod wl_data_device_manager {
     use super::*;
     impl Constants for crate::wayland_objects::wl_data_device_manager::WlDataDeviceManager {
         const INTERFACE_NAME: &'static str = "wl_data_device_manager";
-        const INTERFACE_VERSION: u32 = 3;
+        const INTERFACE_VERSION: u32 = 4;
     }
     impl crate::object::IdToObject for WlDataDeviceManagerId {
         type Object = crate::wayland_objects::wl_data_device_manager::WlDataDeviceManager;
@@ -1771,6 +1846,8 @@ pub mod wl_data_device_manager {
     {
         type Id = WlDataDeviceManagerId;
     }
+    /// Minimum interface version for the `release` message (XML `since` / `version`).
+    pub const RELEASE_SINCE: u32 = 4;
     #[derive(Debug)]
     pub enum Request {
         /// Create a new data source
@@ -1789,6 +1866,11 @@ pub mod wl_data_device_manager {
             /// Seat associated with the data device,
             seat: WlSeatId,
         },
+        /// Destroy wl_data_device_manager
+        ///
+        /// This request destroys the wl_data_device_manager. This has no effect on any other
+        /// objects.
+        Release,
     }
     impl Parser for crate::wayland_objects::wl_data_device_manager::WlDataDeviceManager {
         type Request = Request;
@@ -1797,6 +1879,7 @@ pub mod wl_data_device_manager {
             let request = match req.request_id {
                 0 => CreateDataSource { id: req.id()? },
                 1 => GetDataDevice { id: req.id()?, seat: req.id()? },
+                2 => Release,
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -2323,7 +2406,7 @@ pub mod wl_surface {
     use super::*;
     impl Constants for crate::wayland_objects::wl_surface::WlSurface {
         const INTERFACE_NAME: &'static str = "wl_surface";
-        const INTERFACE_VERSION: u32 = 6;
+        const INTERFACE_VERSION: u32 = 7;
     }
     impl crate::object::IdToObject for WlSurfaceId {
         type Object = crate::wayland_objects::wl_surface::WlSurface;
@@ -2339,6 +2422,8 @@ pub mod wl_surface {
     pub const DAMAGE_BUFFER_SINCE: u32 = 4;
     /// Minimum interface version for the `offset` message (XML `since` / `version`).
     pub const OFFSET_SINCE: u32 = 5;
+    /// Minimum interface version for the `get_release` message (XML `since` / `version`).
+    pub const GET_RELEASE_SINCE: u32 = 7;
     #[derive(Debug)]
     pub enum Request {
         /// Delete surface
@@ -2391,9 +2476,11 @@ pub mod wl_surface {
         /// If a pending wl_buffer has been committed to more than one wl_surface,
         /// the delivery of wl_buffer.release events becomes undefined. A well
         /// behaved client should not rely on wl_buffer.release events in this
-        /// case. Alternatively, a client could create multiple wl_buffer objects
-        /// from the same backing storage or use a protocol extension providing
-        /// per-commit release notifications.
+        /// case. Instead, clients hitting this case should use
+        /// wl_surface.get_release or use a protocol extension providing per-commit
+        /// release notifications (if none of these options are available, a
+        /// fallback can be implemented by creating multiple wl_buffer objects from
+        /// the same backing storage).
         ///
         /// Destroying the wl_buffer after wl_buffer.release does not change
         /// the surface contents. Destroying the wl_buffer before wl_buffer.release
@@ -2555,21 +2642,48 @@ pub mod wl_surface {
         /// etc.) is double-buffered. Protocol requests modify the pending state,
         /// as opposed to the active state in use by the compositor.
         ///
-        /// A commit request atomically creates a content update from the pending
-        /// state, even if the pending state has not been touched. The content
-        /// update is placed in a queue until it becomes active. After commit, the
-        /// new pending state is as documented for each related request.
-        ///
-        /// When the content update is applied, the wl_buffer is applied before all
-        /// other state. This means that all coordinates in double-buffered state
-        /// are relative to the newly attached wl_buffers, except for
-        /// wl_surface.attach itself. If there is no newly attached wl_buffer, the
-        /// coordinates are relative to the previous content update.
-        ///
         /// All requests that need a commit to become effective are documented
         /// to affect double-buffered state.
         ///
         /// Other interfaces may add further double-buffered surface state.
+        ///
+        /// A commit request atomically creates a Content Update (CU) from the
+        /// pending state, even if the pending state has not been touched. The
+        /// content update is placed at the end of a per-surface queue until it
+        /// becomes active. After commit, the new pending state is as documented for
+        /// each related request.
+        ///
+        /// A CU is either a Desync Content Update (DCU) or a Sync Content Update
+        /// (SCU). If the surface is effectively synchronized at the commit request,
+        /// it is a SCU, otherwise a DCU.
+        ///
+        /// When a surface transitions from effectively synchronized to effectively
+        /// desynchronized, all SCUs in its queue which are not reachable by any
+        /// DCU become DCUs and dependency edges from outside the queue to these CUs
+        /// are removed.
+        ///
+        /// See wl_subsurface for the definition of 'effectively synchronized' and
+        /// 'effectively desynchronized'.
+        ///
+        /// When a CU is placed in the queue, the CU has a dependency on the CU in
+        /// front of it and to the SCU at end of the queue of every direct child
+        /// surface if that SCU exists and does not have another dependent. This can
+        /// form a directed acyclic graph of CUs with dependencies as edges.
+        ///
+        /// In addition to surface state, the CU can have constraints that must be
+        /// satisfied before it can be applied. Other interfaces may add CU
+        /// constraints.
+        ///
+        /// All DCUs which do not have a SCU in front of themselves in their queue,
+        /// are candidates. If the graph that's reachable by a candidate does not
+        /// have any unsatisfied constraints, the entire graph must be applied
+        /// atomically.
+        ///
+        /// When a CU is applied, the wl_buffer is applied before all other state.
+        /// This means that all coordinates in double-buffered state are relative to
+        /// the newly attached wl_buffers, except for wl_surface.attach itself. If
+        /// there is no newly attached wl_buffer, the coordinates are relative to
+        /// the previous content update.
         Commit,
         /// Sets the buffer transformation
         ///
@@ -2704,6 +2818,30 @@ pub mod wl_surface {
             /// Surface-local y coordinate,
             y: i32,
         },
+        /// Get a release callback
+        ///
+        /// Create a callback for the release of the buffer attached by the client
+        /// with wl_surface.attach.
+        ///
+        /// The compositor will release the buffer when it has finished its usage of
+        /// the underlying storage for the relevant commit. Once the client receives
+        /// this event, and assuming the associated buffer is not pending release
+        /// from other wl_surface.commit requests, the client can safely re-use the
+        /// buffer.
+        ///
+        /// Release callbacks are double-buffered state, and will be associated
+        /// with the pending buffer at wl_surface.commit time.
+        ///
+        /// The callback_data passed in the wl_callback.done event is unused and
+        /// is always zero.
+        ///
+        /// Sending this request without attaching a non-null buffer in the same
+        /// content update is a protocol error. The compositor will send the
+        /// no_buffer error in this case.
+        GetRelease {
+            /// Callback object for the release,
+            callback: WlCallbackId,
+        },
     }
     impl Parser for crate::wayland_objects::wl_surface::WlSurface {
         type Request = Request;
@@ -2731,6 +2869,7 @@ pub mod wl_surface {
                     height: req.int()?,
                 },
                 10 => Offset { x: req.int()?, y: req.int()? },
+                11 => GetRelease { callback: req.id()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
@@ -2849,6 +2988,8 @@ pub mod wl_surface {
         InvalidOffset = 3,
         /// Surface was destroyed before its role object,
         DefunctRoleObject = 4,
+        /// No buffer was attached,
+        NoBuffer = 5,
     }
 }
 
@@ -2862,7 +3003,7 @@ pub mod wl_seat {
     use super::*;
     impl Constants for crate::wayland_objects::wl_seat::WlSeat {
         const INTERFACE_NAME: &'static str = "wl_seat";
-        const INTERFACE_VERSION: u32 = 10;
+        const INTERFACE_VERSION: u32 = 11;
     }
     impl crate::object::IdToObject for WlSeatId {
         type Object = crate::wayland_objects::wl_seat::WlSeat;
@@ -2984,7 +3125,7 @@ pub mod wl_seat {
         /// shared across processes to refer to a specific wl_seat global.
         ///
         /// The name event is sent after binding to the seat global, and should be sent
-        /// before announcing capabilities. This event only sent once per seat object,
+        /// before announcing capabilities. This event is only sent once per seat object,
         /// and the name does not change over the lifetime of the wl_seat global.
         ///
         /// Compositors may re-use the same seat name if the wl_seat global is
@@ -3053,7 +3194,7 @@ pub mod wl_pointer {
     use super::*;
     impl Constants for crate::wayland_objects::wl_pointer::WlPointer {
         const INTERFACE_NAME: &'static str = "wl_pointer";
-        const INTERFACE_VERSION: u32 = 10;
+        const INTERFACE_VERSION: u32 = 11;
     }
     impl crate::object::IdToObject for WlPointerId {
         type Object = crate::wayland_objects::wl_pointer::WlPointer;
@@ -3148,6 +3289,8 @@ pub mod wl_pointer {
     pub const AXIS_VALUE120_SINCE: u32 = 8;
     /// Minimum interface version for the `axis_relative_direction` message (XML `since` / `version`).
     pub const AXIS_RELATIVE_DIRECTION_SINCE: u32 = 9;
+    /// Minimum interface version for the `warp` message (XML `since` / `version`).
+    pub const WARP_SINCE: u32 = 11;
     #[derive(Debug)]
     pub enum Event {
         /// Enter event
@@ -3198,7 +3341,7 @@ pub mod wl_pointer {
         ///
         /// Mouse button click and release notifications.
         ///
-        /// The location of the click is given by the last motion or
+        /// The location of the click is given by the last motion, warp or
         /// enter event.
         /// The time argument is a timestamp with millisecond
         /// granularity, with an undefined base.
@@ -3446,6 +3589,27 @@ pub mod wl_pointer {
             /// Physical direction relative to axis motion,
             direction: u32,
         },
+        /// Pointer warp event
+        ///
+        /// Notification of pointer location change within a surface.
+        ///
+        /// This location change is not due to events on the input device,
+        /// but because either the surface under the pointer was moved and
+        /// thus the relative position of the pointer changed, or because
+        /// the compositor changed the pointer position in response to an
+        /// event like pointer confinement being exited.
+        ///
+        /// The arguments surface_x and surface_y are the location relative to
+        /// the focused surface.
+        ///
+        /// This event must not occur in the same wl_pointer.frame as a
+        /// wl_pointer.enter or wl_pointer.motion event.
+        Warp {
+            /// Surface-local x coordinate,
+            surface_x: f32,
+            /// Surface-local y coordinate,
+            surface_y: f32,
+        },
     }
     impl EventWriter for crate::wayland_objects::wl_pointer::WlPointer {
         type Event = Event;
@@ -3523,6 +3687,12 @@ pub mod wl_pointer {
                     let mut raw = RawEvent::new(self.id(), 10, 2);
                     raw.uint(axis);
                     raw.uint(direction);
+                    raw
+                }
+                Warp { surface_x, surface_y } => {
+                    let mut raw = RawEvent::new(self.id(), 11, 2);
+                    raw.fixed(surface_x);
+                    raw.fixed(surface_y);
                     raw
                 }
             }
@@ -3614,7 +3784,7 @@ pub mod wl_keyboard {
     use super::*;
     impl Constants for crate::wayland_objects::wl_keyboard::WlKeyboard {
         const INTERFACE_NAME: &'static str = "wl_keyboard";
-        const INTERFACE_VERSION: u32 = 10;
+        const INTERFACE_VERSION: u32 = 11;
     }
     impl crate::object::IdToObject for WlKeyboardId {
         type Object = crate::wayland_objects::wl_keyboard::WlKeyboard;
@@ -3888,7 +4058,7 @@ pub mod wl_touch {
     use super::*;
     impl Constants for crate::wayland_objects::wl_touch::WlTouch {
         const INTERFACE_NAME: &'static str = "wl_touch";
-        const INTERFACE_VERSION: u32 = 10;
+        const INTERFACE_VERSION: u32 = 11;
     }
     impl crate::object::IdToObject for WlTouchId {
         type Object = crate::wayland_objects::wl_touch::WlTouch;
@@ -4012,7 +4182,7 @@ pub mod wl_touch {
         /// of the ellipse, while the minor axis length describes the shorter
         /// diameter. Major and minor are orthogonal and both are specified in
         /// surface-local coordinates. The center of the ellipse is always at the
-        /// touchpoint location as reported by wl_touch.down or wl_touch.move.
+        /// touchpoint location as reported by wl_touch.down or wl_touch.motion.
         ///
         /// This event is only sent by the compositor if the touch device supports
         /// shape reports. The client has to make reasonable assumptions about the
@@ -4473,7 +4643,7 @@ pub mod wl_region {
     use super::*;
     impl Constants for crate::wayland_objects::wl_region::WlRegion {
         const INTERFACE_NAME: &'static str = "wl_region";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 7;
     }
     impl crate::object::IdToObject for WlRegionId {
         type Object = crate::wayland_objects::wl_region::WlRegion;
@@ -4645,23 +4815,9 @@ pub mod wl_subcompositor {
 /// hidden, or if a NULL wl_buffer is applied. These rules apply
 /// recursively through the tree of surfaces.
 ///
-/// The behaviour of a wl_surface.commit request on a sub-surface
-/// depends on the sub-surface's mode. The possible modes are
-/// synchronized and desynchronized, see methods
-/// wl_subsurface.set_sync and wl_subsurface.set_desync. Synchronized
-/// mode caches the wl_surface state to be applied when the parent's
-/// state gets applied, and desynchronized mode applies the pending
-/// wl_surface state directly. A sub-surface is initially in the
-/// synchronized mode.
-///
-/// Sub-surfaces also have another kind of state, which is managed by
-/// wl_subsurface requests, as opposed to wl_surface requests. This
-/// state includes the sub-surface position relative to the parent
-/// surface (wl_subsurface.set_position), and the stacking order of
-/// the parent and its sub-surfaces (wl_subsurface.place_above and
-/// .place_below). This state is applied when the parent surface's
-/// wl_surface state is applied, regardless of the sub-surface's mode.
-/// As the exception, set_sync and set_desync are effective immediately.
+/// A sub-surface can be in one of two modes. The possible modes are
+/// synchronized and desynchronized, see methods wl_subsurface.set_sync and
+/// wl_subsurface.set_desync.
 ///
 /// The main surface can be thought to be always in desynchronized mode,
 /// since it does not have a parent in the sub-surfaces sense.
@@ -4672,6 +4828,15 @@ pub mod wl_subcompositor {
 /// tree of surfaces. This means, that one can set a sub-surface into
 /// synchronized mode, and then assume that all its child and grand-child
 /// sub-surfaces are synchronized, too, without explicitly setting them.
+///
+/// If a surface behaves as in synchronized mode, it is effectively
+/// synchronized, otherwise it is effectively desynchronized.
+///
+/// A sub-surface is initially in the synchronized mode.
+///
+/// The wl_subsurface interface has requests which modify double-buffered
+/// state of the parent surface (wl_subsurface.set_position, .place_above and
+/// .place_below).
 ///
 /// Destroying a sub-surface takes effect immediately. If you need to
 /// synchronize the removal of a sub-surface to the parent surface update,
@@ -4708,20 +4873,18 @@ pub mod wl_subsurface {
         Destroy,
         /// Reposition the sub-surface
         ///
-        /// This schedules a sub-surface position change.
+        /// This sets the position of the sub-surface, relative to the parent
+        /// surface.
+        ///
         /// The sub-surface will be moved so that its origin (top left
         /// corner pixel) will be at the location x, y of the parent surface
         /// coordinate system. The coordinates are not restricted to the parent
         /// surface area. Negative values are allowed.
         ///
-        /// The scheduled coordinates will take effect whenever the state of the
-        /// parent surface is applied.
-        ///
-        /// If more than one set_position request is invoked by the client before
-        /// the commit of the parent surface, the position of a new request always
-        /// replaces the scheduled position from any previous request.
-        ///
         /// The initial position is 0, 0.
+        ///
+        /// Position is double-buffered state on the parent surface, see
+        /// wl_subsurface and wl_surface.commit for more information.
         SetPosition {
             /// X coordinate in the parent surface,
             x: i32,
@@ -4736,13 +4899,11 @@ pub mod wl_subsurface {
         /// parent surface. Using any other surface, including this sub-surface,
         /// will cause a protocol error.
         ///
-        /// The z-order is double-buffered. Requests are handled in order and
-        /// applied immediately to a pending state. The final pending state is
-        /// copied to the active state the next time the state of the parent
-        /// surface is applied.
-        ///
         /// A new sub-surface is initially added as the top-most in the stack
         /// of its siblings and parent.
+        ///
+        /// Z-order is double-buffered state on the parent surface, see
+        /// wl_subsurface and wl_surface.commit for more information.
         PlaceAbove {
             /// The reference surface,
             sibling: WlSurfaceId,
@@ -4750,6 +4911,7 @@ pub mod wl_subsurface {
         /// Restack the sub-surface
         ///
         /// The sub-surface is placed just below the reference surface.
+        ///
         /// See wl_subsurface.place_above.
         PlaceBelow {
             /// The reference surface,
@@ -4758,40 +4920,16 @@ pub mod wl_subsurface {
         /// Set sub-surface to synchronized mode
         ///
         /// Change the commit behaviour of the sub-surface to synchronized
-        /// mode, also described as the parent dependent mode.
+        /// mode.
         ///
-        /// In synchronized mode, wl_surface.commit on a sub-surface will
-        /// accumulate the committed state in a cache, but the state will
-        /// not be applied and hence will not change the compositor output.
-        /// The cached state is applied to the sub-surface immediately after
-        /// the parent surface's state is applied. This ensures atomic
-        /// updates of the parent and all its synchronized sub-surfaces.
-        /// Applying the cached state will invalidate the cache, so further
-        /// parent surface commits do not (re-)apply old state.
-        ///
-        /// See wl_subsurface for the recursive effect of this mode.
+        /// See wl_subsurface and wl_surface.commit for more information.
         SetSync,
         /// Set sub-surface to desynchronized mode
         ///
         /// Change the commit behaviour of the sub-surface to desynchronized
-        /// mode, also described as independent or freely running mode.
+        /// mode.
         ///
-        /// In desynchronized mode, wl_surface.commit on a sub-surface will
-        /// apply the pending state directly, without caching, as happens
-        /// normally with a wl_surface. Calling wl_surface.commit on the
-        /// parent surface has no effect on the sub-surface's wl_surface
-        /// state. This mode allows a sub-surface to be updated on its own.
-        ///
-        /// If cached state exists when wl_surface.commit is called in
-        /// desynchronized mode, the pending state is added to the cached
-        /// state, and applied as a whole. This invalidates the cache.
-        ///
-        /// Note: even if a sub-surface is set to desynchronized, a parent
-        /// sub-surface may override it to behave as synchronized. For details,
-        /// see wl_subsurface.
-        ///
-        /// If a surface's parent surface behaves as desynchronized, then
-        /// the cached state is applied on set_desync.
+        /// See wl_subsurface and wl_surface.commit for more information.
         SetDesync,
     }
     impl Parser for crate::wayland_objects::wl_subsurface::WlSubsurface {
@@ -4825,7 +4963,7 @@ pub mod wl_fixes {
     use super::*;
     impl Constants for crate::wayland_objects::wl_fixes::WlFixes {
         const INTERFACE_NAME: &'static str = "wl_fixes";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 2;
     }
     impl crate::object::IdToObject for WlFixesId {
         type Object = crate::wayland_objects::wl_fixes::WlFixes;
@@ -4833,6 +4971,8 @@ pub mod wl_fixes {
     impl crate::object::ObjectWithId for crate::wayland_objects::wl_fixes::WlFixes {
         type Id = WlFixesId;
     }
+    /// Minimum interface version for the `ack_global_remove` message (XML `since` / `version`).
+    pub const ACK_GLOBAL_REMOVE_SINCE: u32 = 2;
     #[derive(Debug)]
     pub enum Request {
         /// Destroys this object
@@ -4854,6 +4994,36 @@ pub mod wl_fixes {
             /// The registry to destroy,
             registry: WlRegistryId,
         },
+        /// Acknowledge global removal
+        ///
+        /// Acknowledge the removal of the specified global.
+        ///
+        /// If no global with the specified name exists or the global is not removed,
+        /// the wl_fixes.invalid_ack_remove protocol error will be posted.
+        ///
+        /// Due to the Wayland protocol being asynchronous, the wl_global objects
+        /// cannot be destroyed immediately. For example, if a wl_global is removed
+        /// and a client attempts to bind that global around same time, it can
+        /// result in a protocol error due to an unknown global name in the bind
+        /// request.
+        ///
+        /// In order to avoid crashing clients, the compositor should remove the
+        /// wl_global once it is guaranteed that no more bind requests will come.
+        ///
+        /// The wl_fixes.ack_global_remove() request is used to signal to the
+        /// compositor that the client will not bind the given global anymore. After
+        /// all clients acknowledge the removal of the global, the compositor can
+        /// safely destroy it.
+        ///
+        /// The client must call the wl_fixes.ack_global_remove() request in
+        /// response to a wl_registry.global_remove() event even if it did not bind
+        /// the corresponding global.
+        AckGlobalRemove {
+            /// The registry object,
+            registry: WlRegistryId,
+            /// Unique name of the global,
+            name: u32,
+        },
     }
     impl Parser for crate::wayland_objects::wl_fixes::WlFixes {
         type Request = Request;
@@ -4862,10 +5032,19 @@ pub mod wl_fixes {
             let request = match req.request_id {
                 0 => Destroy,
                 1 => DestroyRegistry { registry: req.id()? },
+                2 => AckGlobalRemove { registry: req.id()?, name: req.uint()? },
                 _ => return Err(ParserError::InvalidRequest),
             };
             Ok(request)
         }
+    }
+    /// Wl_fixes error values
+    ///
+    /// These errors can be emitted in response to wl_fixes requests.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Unknown global or the global is not removed,
+        InvalidAckRemove = 0,
     }
 }
 
@@ -5440,16 +5619,15 @@ pub mod xdg_wm_base {
         CreatePositioner { id: XdgPositionerId },
         /// Create a shell surface from a surface
         ///
-        /// This creates an xdg_surface for the given surface. While xdg_surface
-        /// itself is not a role, the corresponding surface may only be assigned
-        /// a role extending xdg_surface, such as xdg_toplevel or xdg_popup. It is
-        /// illegal to create an xdg_surface for a wl_surface which already has an
-        /// assigned role and this will result in a role error.
-        ///
         /// This creates an xdg_surface for the given surface. An xdg_surface is
         /// used as basis to define a role to a given surface, such as xdg_toplevel
         /// or xdg_popup. It also manages functionality shared between xdg_surface
         /// based surface roles.
+        ///
+        /// While xdg_surface itself is not a role, the corresponding surface may
+        /// only be assigned a role extending xdg_surface, such as xdg_toplevel or
+        /// xdg_popup. It is illegal to create an xdg_surface for a wl_surface which
+        /// already has anassigned role and this will result in a role error.
         ///
         /// See the documentation of xdg_surface for more details about what an
         /// xdg_surface is and how it is used.
@@ -5619,13 +5797,13 @@ pub mod xdg_positioner {
         /// Set anchor rectangle anchor
         ///
         /// Defines the anchor point for the anchor rectangle. The specified anchor
-        /// is used derive an anchor point that the child surface will be
+        /// is used to derive an anchor point that the child surface will be
         /// positioned relative to. If a corner anchor is set (e.g. 'top_left' or
         /// 'bottom_right'), the anchor point will be at the specified corner;
         /// otherwise, the derived anchor point will be centered on the specified
         /// edge, or in the center of the anchor rectangle if no edge is specified.
         SetAnchor {
-            /// Anchor,
+            /// Anchor point,
             anchor: u32,
         },
         /// Set child surface gravity
@@ -5688,7 +5866,7 @@ pub mod xdg_positioner {
         /// xdg_popup.configure event is sent with updated geometry, followed by an
         /// xdg_surface.configure event.
         SetReactive,
-        ///
+        /// Set parent size
         ///
         /// Set the parent window geometry the compositor should use when
         /// positioning the popup. The compositor may use this information to
@@ -5942,7 +6120,13 @@ pub mod xdg_surface {
         ///
         /// See the documentation of xdg_popup for more details about what an
         /// xdg_popup is and how it is used.
-        GetPopup { id: XdgPopupId, parent: XdgSurfaceId, positioner: XdgPositionerId },
+        GetPopup {
+            id: XdgPopupId,
+            /// Parent surface for this popup,
+            parent: XdgSurfaceId,
+            /// Positioner for this popup,
+            positioner: XdgPositionerId,
+        },
         /// Set the new window geometry
         ///
         /// The window geometry of a surface is its "visible bounds" from the
@@ -5985,7 +6169,16 @@ pub mod xdg_surface {
         /// The width and height of the effective window geometry must be
         /// greater than zero. Setting an invalid size will raise an
         /// invalid_size error.
-        SetWindowGeometry { x: i32, y: i32, width: i32, height: i32 },
+        SetWindowGeometry {
+            /// X coordinate of the top-left corner of the window inside this surface,
+            x: i32,
+            /// Y coordinate of the top-left corner of the window inside this surface,
+            y: i32,
+            /// Width of the window,
+            width: i32,
+            /// Height of the window,
+            height: i32,
+        },
         /// Ack a configure event
         ///
         /// When a configure event is received, if a client commits the
@@ -6112,7 +6305,7 @@ pub mod xdg_surface {
 /// id, and well as trigger user interactive operations such as interactive
 /// resize and move.
 ///
-/// A xdg_toplevel by default is responsible for providing the full intended
+/// An xdg_toplevel by default is responsible for providing the full intended
 /// visual representation of the toplevel, which depending on the window
 /// state, may mean things like a title bar, window controls and drop shadow.
 ///
@@ -6168,7 +6361,10 @@ pub mod xdg_toplevel {
         /// The parent toplevel must not be one of the child toplevel's
         /// descendants, and the parent must be different from the child toplevel,
         /// otherwise the invalid_parent protocol error is raised.
-        SetParent { parent: XdgToplevelId },
+        SetParent {
+            /// Parent surface for this surface,
+            parent: XdgToplevelId,
+        },
         /// Set surface title
         ///
         /// Set a short title for the surface.
@@ -6178,7 +6374,10 @@ pub mod xdg_toplevel {
         /// compositor.
         ///
         /// The string must be encoded in UTF-8.
-        SetTitle { title: String },
+        SetTitle {
+            /// Title of the surface,
+            title: String,
+        },
         /// Set application ID
         ///
         /// Set an application identifier for the surface.
@@ -6204,7 +6403,10 @@ pub mod xdg_toplevel {
         /// names and .desktop files.
         ///
         /// [0] https://standards.freedesktop.org/desktop-entry-spec/
-        SetAppId { app_id: String },
+        SetAppId {
+            /// Application identifier surface belongs to,
+            app_id: String,
+        },
         /// Show the window menu
         ///
         /// Clients implementing client-side decorations might want to show
@@ -6327,9 +6529,14 @@ pub mod xdg_toplevel {
         /// a surface is illegal and will result in an invalid_size error.
         ///
         /// The width and height must be greater than or equal to zero. Using
-        /// strictly negative values for width or height will result in a
+        /// strictly negative values for width or height will result in an
         /// invalid_size error.
-        SetMaxSize { width: i32, height: i32 },
+        SetMaxSize {
+            /// Maximum width of the window,
+            width: i32,
+            /// Maximum height of the window,
+            height: i32,
+        },
         /// Set the minimum size
         ///
         /// Set a minimum size for the window.
@@ -6363,9 +6570,14 @@ pub mod xdg_toplevel {
         /// a surface is illegal and will result in an invalid_size error.
         ///
         /// The width and height must be greater than or equal to zero. Using
-        /// strictly negative values for width and height will result in a
+        /// strictly negative values for width and height will result in an
         /// invalid_size error.
-        SetMinSize { width: i32, height: i32 },
+        SetMinSize {
+            /// Minimum width of the window,
+            width: i32,
+            /// Minimum height of the window,
+            height: i32,
+        },
         /// Maximize the window
         ///
         /// Maximize the surface.
@@ -6429,7 +6641,7 @@ pub mod xdg_toplevel {
         ///
         /// If the surface doesn't cover the whole output, the compositor will
         /// position the surface in the center of the output and compensate with
-        /// with border fill covering the rest of the output. The content of the
+        /// border fill covering the rest of the output. The content of the
         /// border fill is undefined, but should be assumed to be in some way that
         /// attempts to blend into the surrounding area (e.g. solid black).
         ///
@@ -6437,7 +6649,10 @@ pub mod xdg_toplevel {
         /// sure that other screen content not part of the same surface tree (made
         /// up of subsurfaces, popups or similarly coupled surfaces) are not
         /// visible below the fullscreened surface.
-        SetFullscreen { output: WlOutputId },
+        SetFullscreen {
+            /// Preferred output to place surface on,
+            output: WlOutputId,
+        },
         /// Unset the window as fullscreen
         ///
         /// Make the surface no longer fullscreen.
@@ -6524,9 +6739,19 @@ pub mod xdg_toplevel {
         /// arguments should be interpreted, and possibly how it should be
         /// drawn.
         ///
+        /// The states are sent as an array of 32-bit unsigned integers in
+        /// native endianness. State values are defined in the state enum.
+        ///
         /// Clients must send an ack_configure in response to this event. See
         /// xdg_surface.configure and xdg_surface.ack_configure for details.
-        Configure { width: i32, height: i32, states: Array },
+        Configure {
+            /// Suggested width of window,
+            width: i32,
+            /// Suggested height of window,
+            height: i32,
+            /// Suggested states of the window,
+            states: Array,
+        },
         /// Surface wants to be closed
         ///
         /// The close event is sent by the compositor when the user
@@ -6555,7 +6780,12 @@ pub mod xdg_toplevel {
         /// The bounds may change at any point, and in such a case, a new
         /// xdg_toplevel.configure_bounds will be sent, followed by
         /// xdg_toplevel.configure and xdg_surface.configure.
-        ConfigureBounds { width: i32, height: i32 },
+        ConfigureBounds {
+            /// Suggested maximum width of surface,
+            width: i32,
+            /// Suggested maximum height of surface,
+            height: i32,
+        },
         /// Compositor capabilities
         ///
         /// This event advertises the capabilities supported by the compositor. If
@@ -6577,7 +6807,7 @@ pub mod xdg_toplevel {
         /// xdg_surface.configure for details.
         ///
         /// The capabilities are sent as an array of 32-bit unsigned integers in
-        /// native endianness.
+        /// native endianness. Capability values are defined in the wm_capabilities enum.
         WmCapabilities {
             /// Array of 32-bit capabilities,
             capabilities: Array,
@@ -10587,6 +10817,577 @@ pub mod zwp_linux_buffer_release_v1 {
     }
 }
 
+/// Constrain the movement of a pointer
+///
+/// The global interface exposing pointer constraining functionality. It
+/// exposes two requests: lock_pointer for locking the pointer to its
+/// position, and confine_pointer for locking the pointer to a region.
+///
+/// The lock_pointer and confine_pointer requests create the objects
+/// wp_locked_pointer and wp_confined_pointer respectively, and the client can
+/// use these objects to interact with the lock.
+///
+/// For any surface, only one lock or confinement may be active across all
+/// wl_pointer objects of the same seat. If a lock or confinement is requested
+/// when another lock or confinement is active or requested on the same surface
+/// and with any of the wl_pointer objects of the same seat, an
+/// 'already_constrained' error will be raised.
+pub mod zwp_pointer_constraints_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1 {
+        const INTERFACE_NAME: &'static str = "zwp_pointer_constraints_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpPointerConstraintsV1Id {
+        type Object = crate::wayland_objects::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1
+    {
+        type Id = ZwpPointerConstraintsV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the pointer constraints manager object
+        ///
+        /// Used by the client to notify the server that it will no longer use this
+        /// pointer constraints object.
+        Destroy,
+        /// Lock pointer to a position
+        ///
+        /// The lock_pointer request lets the client request to disable movements of
+        /// the virtual pointer (i.e. the cursor), effectively locking the pointer
+        /// to a position. This request may not take effect immediately; in the
+        /// future, when the compositor deems implementation-specific constraints
+        /// are satisfied, the pointer lock will be activated and the compositor
+        /// sends a locked event.
+        ///
+        /// The protocol provides no guarantee that the constraints are ever
+        /// satisfied, and does not require the compositor to send an error if the
+        /// constraints cannot ever be satisfied. It is thus possible to request a
+        /// lock that will never activate.
+        ///
+        /// There may not be another pointer constraint of any kind requested or
+        /// active on the surface for any of the wl_pointer objects of the seat of
+        /// the passed pointer when requesting a lock. If there is, an error will be
+        /// raised. See general pointer lock documentation for more details.
+        ///
+        /// The intersection of the region passed with this request and the input
+        /// region of the surface is used to determine where the pointer must be
+        /// in order for the lock to activate. It is up to the compositor whether to
+        /// warp the pointer or require some kind of user interaction for the lock
+        /// to activate. If the region is null the surface input region is used.
+        ///
+        /// A surface may receive pointer focus without the lock being activated.
+        ///
+        /// The request creates a new object wp_locked_pointer which is used to
+        /// interact with the lock as well as receive updates about its state. See
+        /// the the description of wp_locked_pointer for further information.
+        ///
+        /// Note that while a pointer is locked, the wl_pointer objects of the
+        /// corresponding seat will not emit any wl_pointer.motion events, but
+        /// relative motion events will still be emitted via wp_relative_pointer
+        /// objects of the same seat. wl_pointer.axis and wl_pointer.button events
+        /// are unaffected.
+        LockPointer {
+            id: ZwpLockedPointerV1Id,
+            /// Surface to lock pointer to,
+            surface: WlSurfaceId,
+            /// The pointer that should be locked,
+            pointer: WlPointerId,
+            /// Region of surface,
+            region: WlRegionId,
+            /// Lock lifetime,
+            lifetime: u32,
+        },
+        /// Confine pointer to a region
+        ///
+        /// The confine_pointer request lets the client request to confine the
+        /// pointer cursor to a given region. This request may not take effect
+        /// immediately; in the future, when the compositor deems implementation-
+        /// specific constraints are satisfied, the pointer confinement will be
+        /// activated and the compositor sends a confined event.
+        ///
+        /// The intersection of the region passed with this request and the input
+        /// region of the surface is used to determine where the pointer must be
+        /// in order for the confinement to activate. It is up to the compositor
+        /// whether to warp the pointer or require some kind of user interaction for
+        /// the confinement to activate. If the region is null the surface input
+        /// region is used.
+        ///
+        /// The request will create a new object wp_confined_pointer which is used
+        /// to interact with the confinement as well as receive updates about its
+        /// state. See the the description of wp_confined_pointer for further
+        /// information.
+        ConfinePointer {
+            id: ZwpConfinedPointerV1Id,
+            /// Surface to lock pointer to,
+            surface: WlSurfaceId,
+            /// The pointer that should be confined,
+            pointer: WlPointerId,
+            /// Region of surface,
+            region: WlRegionId,
+            /// Confinement lifetime,
+            lifetime: u32,
+        },
+    }
+    impl Parser for crate::wayland_objects::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => LockPointer {
+                    id: req.id()?,
+                    surface: req.id()?,
+                    pointer: req.id()?,
+                    region: req.id()?,
+                    lifetime: req.uint()?,
+                },
+                2 => ConfinePointer {
+                    id: req.id()?,
+                    surface: req.id()?,
+                    pointer: req.id()?,
+                    region: req.id()?,
+                    lifetime: req.uint()?,
+                },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    /// Wp_pointer_constraints error values
+    ///
+    /// These errors can be emitted in response to wp_pointer_constraints
+    /// requests.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Pointer constraint already requested on that surface,
+        AlreadyConstrained = 1,
+    }
+    /// Constraint lifetime
+    ///
+    /// These values represent different lifetime semantics. They are passed
+    /// as arguments to the factory requests to specify how the constraint
+    /// lifetimes should be managed.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Lifetime {
+        /// The pointer constraint is defunct once deactivated
+        ///
+        /// A oneshot pointer constraint will never reactivate once it has been
+        /// deactivated. See the corresponding deactivation event
+        /// (wp_locked_pointer.unlocked and wp_confined_pointer.unconfined) for
+        /// details.
+        Oneshot = 1,
+        /// The pointer constraint may reactivate
+        ///
+        /// A persistent pointer constraint may again reactivate once it has
+        /// been deactivated. See the corresponding deactivation event
+        /// (wp_locked_pointer.unlocked and wp_confined_pointer.unconfined) for
+        /// details.
+        Persistent = 2,
+    }
+}
+
+/// Receive relative pointer motion events
+///
+/// The wp_locked_pointer interface represents a locked pointer state.
+///
+/// While the lock of this object is active, the wl_pointer objects of the
+/// associated seat will not emit any wl_pointer.motion events.
+///
+/// This object will send the event 'locked' when the lock is activated.
+/// Whenever the lock is activated, it is guaranteed that the locked surface
+/// will already have received pointer focus and that the pointer will be
+/// within the region passed to the request creating this object.
+///
+/// To unlock the pointer, send the destroy request. This will also destroy
+/// the wp_locked_pointer object.
+///
+/// If the compositor decides to unlock the pointer the unlocked event is
+/// sent. See wp_locked_pointer.unlock for details.
+///
+/// When unlocking, the compositor may warp the cursor position to the set
+/// cursor position hint. If it does, it will not result in any relative
+/// motion events emitted via wp_relative_pointer.
+///
+/// If the surface the lock was requested on is destroyed and the lock is not
+/// yet activated, the wp_locked_pointer object is now defunct and must be
+/// destroyed.
+pub mod zwp_locked_pointer_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1 {
+        const INTERFACE_NAME: &'static str = "zwp_locked_pointer_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpLockedPointerV1Id {
+        type Object = crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1
+    {
+        type Id = ZwpLockedPointerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the locked pointer object
+        ///
+        /// Destroy the locked pointer object. If applicable, the compositor will
+        /// unlock the pointer.
+        Destroy,
+        /// Set the pointer cursor position hint
+        ///
+        /// Set the cursor position hint relative to the top left corner of the
+        /// surface.
+        ///
+        /// If the client is drawing its own cursor, it should update the position
+        /// hint to the position of its own cursor. A compositor may use this
+        /// information to warp the pointer upon unlock in order to avoid pointer
+        /// jumps.
+        ///
+        /// The cursor position hint is double-buffered state, see
+        /// wl_surface.commit.
+        SetCursorPositionHint {
+            /// Surface-local x coordinate,
+            surface_x: f32,
+            /// Surface-local y coordinate,
+            surface_y: f32,
+        },
+        /// Set a new lock region
+        ///
+        /// Set a new region used to lock the pointer.
+        ///
+        /// The new lock region is double-buffered, see wl_surface.commit.
+        ///
+        /// For details about the lock region, see wp_locked_pointer.
+        SetRegion {
+            /// Region of surface,
+            region: WlRegionId,
+        },
+    }
+    impl Parser for crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => SetCursorPositionHint { surface_x: req.fixed()?, surface_y: req.fixed()? },
+                2 => SetRegion { region: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Lock activation event
+        ///
+        /// Notification that the pointer lock of the seat's pointer is activated.
+        Locked,
+        /// Lock deactivation event
+        ///
+        /// Notification that the pointer lock of the seat's pointer is no longer
+        /// active. If this is a oneshot pointer lock (see
+        /// wp_pointer_constraints.lifetime) this object is now defunct and should
+        /// be destroyed. If this is a persistent pointer lock (see
+        /// wp_pointer_constraints.lifetime) this pointer lock may again
+        /// reactivate in the future.
+        Unlocked,
+    }
+    impl EventWriter for crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Locked {} => {
+                    let mut raw = RawEvent::new(self.id(), 0, 0);
+                    raw
+                }
+                Unlocked {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// Confined pointer object
+///
+/// The wp_confined_pointer interface represents a confined pointer state.
+///
+/// This object will send the event 'confined' when the confinement is
+/// activated. Whenever the confinement is activated, it is guaranteed that
+/// the surface the pointer is confined to will already have received pointer
+/// focus and that the pointer will be within the region passed to the request
+/// creating this object. It is up to the compositor to decide whether this
+/// requires some user interaction and if the pointer will warp to within the
+/// passed region if outside.
+///
+/// To unconfine the pointer, send the destroy request. This will also destroy
+/// the wp_confined_pointer object.
+///
+/// If the compositor decides to unconfine the pointer the unconfined event is
+/// sent. The wp_confined_pointer object is at this point defunct and should
+/// be destroyed.
+pub mod zwp_confined_pointer_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1 {
+        const INTERFACE_NAME: &'static str = "zwp_confined_pointer_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpConfinedPointerV1Id {
+        type Object = crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1
+    {
+        type Id = ZwpConfinedPointerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the confined pointer object
+        ///
+        /// Destroy the confined pointer object. If applicable, the compositor will
+        /// unconfine the pointer.
+        Destroy,
+        /// Set a new confine region
+        ///
+        /// Set a new region used to confine the pointer.
+        ///
+        /// The new confine region is double-buffered, see wl_surface.commit.
+        ///
+        /// If the confinement is active when the new confinement region is applied
+        /// and the pointer ends up outside of newly applied region, the pointer may
+        /// warped to a position within the new confinement region. If warped, a
+        /// wl_pointer.motion event will be emitted, but no
+        /// wp_relative_pointer.relative_motion event.
+        ///
+        /// The compositor may also, instead of using the new region, unconfine the
+        /// pointer.
+        ///
+        /// For details about the confine region, see wp_confined_pointer.
+        SetRegion {
+            /// Region of surface,
+            region: WlRegionId,
+        },
+    }
+    impl Parser for crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => SetRegion { region: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Pointer confined
+        ///
+        /// Notification that the pointer confinement of the seat's pointer is
+        /// activated.
+        Confined,
+        /// Pointer unconfined
+        ///
+        /// Notification that the pointer confinement of the seat's pointer is no
+        /// longer active. If this is a oneshot pointer confinement (see
+        /// wp_pointer_constraints.lifetime) this object is now defunct and should
+        /// be destroyed. If this is a persistent pointer confinement (see
+        /// wp_pointer_constraints.lifetime) this pointer confinement may again
+        /// reactivate in the future.
+        Unconfined,
+    }
+    impl EventWriter for crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Confined {} => {
+                    let mut raw = RawEvent::new(self.id(), 0, 0);
+                    raw
+                }
+                Unconfined {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// Get relative pointer objects
+///
+/// A global interface used for getting the relative pointer object for a
+/// given pointer.
+pub mod zwp_relative_pointer_manager_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
+    {
+        const INTERFACE_NAME: &'static str = "zwp_relative_pointer_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpRelativePointerManagerV1Id {
+        type Object =
+            crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
+    {
+        type Id = ZwpRelativePointerManagerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the relative pointer manager object
+        ///
+        /// Used by the client to notify the server that it will no longer use this
+        /// relative pointer manager object.
+        Destroy,
+        /// Get a relative pointer object
+        ///
+        /// Create a relative pointer interface given a wl_pointer object. See the
+        /// wp_relative_pointer interface for more details.
+        GetRelativePointer { id: ZwpRelativePointerV1Id, pointer: WlPointerId },
+    }
+    impl Parser
+        for crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetRelativePointer { id: req.id()?, pointer: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
+/// Relative pointer object
+///
+/// A wp_relative_pointer object is an extension to the wl_pointer interface
+/// used for emitting relative pointer events. It shares the same focus as
+/// wl_pointer objects of the same seat and will only emit events when it has
+/// focus.
+pub mod zwp_relative_pointer_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1 {
+        const INTERFACE_NAME: &'static str = "zwp_relative_pointer_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpRelativePointerV1Id {
+        type Object = crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1
+    {
+        type Id = ZwpRelativePointerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Release the relative pointer object
+        ///
+        ///
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Relative pointer motion
+        ///
+        /// Relative x/y pointer motion from the pointer of the seat associated with
+        /// this object.
+        ///
+        /// A relative motion is in the same dimension as regular wl_pointer motion
+        /// events, except they do not represent an absolute position. For example,
+        /// moving a pointer from (x, y) to (x', y') would have the equivalent
+        /// relative motion (x' - x, y' - y). If a pointer motion caused the
+        /// absolute pointer position to be clipped by for example the edge of the
+        /// monitor, the relative motion is unaffected by the clipping and will
+        /// represent the unclipped motion.
+        ///
+        /// This event also contains non-accelerated motion deltas. The
+        /// non-accelerated delta is, when applicable, the regular pointer motion
+        /// delta as it was before having applied motion acceleration and other
+        /// transformations such as normalization.
+        ///
+        /// Note that the non-accelerated delta does not represent 'raw' events as
+        /// they were read from some device. Pointer motion acceleration is device-
+        /// and configuration-specific and non-accelerated deltas and accelerated
+        /// deltas may have the same value on some devices.
+        ///
+        /// Relative motions are not coupled to wl_pointer.motion events, and can be
+        /// sent in combination with such events, but also independently. There may
+        /// also be scenarios where wl_pointer.motion is sent, but there is no
+        /// relative motion. The order of an absolute and relative motion event
+        /// originating from the same physical motion is not guaranteed.
+        ///
+        /// If the client needs button events or focus state, it can receive them
+        /// from a wl_pointer object of the same seat that the wp_relative_pointer
+        /// object is associated with.
+        RelativeMotion {
+            /// High 32 bits of a 64 bit timestamp with microsecond granularity,
+            utime_hi: u32,
+            /// Low 32 bits of a 64 bit timestamp with microsecond granularity,
+            utime_lo: u32,
+            /// The x component of the motion vector,
+            dx: f32,
+            /// The y component of the motion vector,
+            dy: f32,
+            /// The x component of the unaccelerated motion vector,
+            dx_unaccel: f32,
+            /// The y component of the unaccelerated motion vector,
+            dy_unaccel: f32,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                RelativeMotion { utime_hi, utime_lo, dx, dy, dx_unaccel, dy_unaccel } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 6);
+                    raw.uint(utime_hi);
+                    raw.uint(utime_lo);
+                    raw.fixed(dx);
+                    raw.fixed(dy);
+                    raw.fixed(dx_unaccel);
+                    raw.fixed(dy_unaccel);
+                    raw
+                }
+            }
+        }
+    }
+}
+
 /// Controller object for graphic tablet devices
 ///
 /// An object that provides access to the graphics tablets available on this
@@ -12253,7 +13054,7 @@ pub mod zxdg_decoration_manager_v1 {
     use super::*;
     impl Constants for crate::wayland_objects::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1 {
         const INTERFACE_NAME: &'static str = "zxdg_decoration_manager_v1";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 2;
     }
     impl crate::object::IdToObject for ZxdgDecorationManagerV1Id {
         type Object = crate::wayland_objects::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
@@ -12274,11 +13075,26 @@ pub mod zxdg_decoration_manager_v1 {
         ///
         /// Create a new decoration object associated with the given toplevel.
         ///
-        /// Creating an xdg_toplevel_decoration from an xdg_toplevel which has a
-        /// buffer attached or committed is a client error, and any attempts by a
-        /// client to attach or manipulate a buffer prior to the first
-        /// xdg_toplevel_decoration.configure event must also be treated as
-        /// errors.
+        /// For objects of version 1, creating an xdg_toplevel_decoration from an
+        /// xdg_toplevel which has a buffer attached or committed is a client
+        /// error, and any attempts by a client to attach or manipulate a buffer
+        /// prior to the first xdg_toplevel_decoration.configure event must also be
+        /// treated as errors.
+        ///
+        /// For objects of version 2 or newer, creating an xdg_toplevel_decoration
+        /// from an xdg_toplevel which has a buffer attached or committed is
+        /// allowed. The initial decoration mode of the surface if a buffer is
+        /// already attached depends on whether a xdg_toplevel_decoration object
+        /// has been associated with the surface or not prior to this request.
+        ///
+        /// If an xdg_toplevel_decoration was associated with the surface, then
+        /// destroyed without a surface commit, the previous decoration mode is
+        /// retained.
+        ///
+        /// If no xdg_toplevel_decoration was associated with the surface prior to
+        /// this request, or if a surface commit has been performed after a previous
+        /// xdg_toplevel_decoration object associated with the surface was
+        /// destroyed, the decoration mode is assumed to be client-side.
         GetToplevelDecoration { id: ZxdgToplevelDecorationV1Id, toplevel: XdgToplevelId },
     }
     impl Parser for crate::wayland_objects::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1 {
@@ -12307,7 +13123,7 @@ pub mod zxdg_toplevel_decoration_v1 {
     use super::*;
     impl Constants for crate::wayland_objects::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1 {
         const INTERFACE_NAME: &'static str = "zxdg_toplevel_decoration_v1";
-        const INTERFACE_VERSION: u32 = 1;
+        const INTERFACE_VERSION: u32 = 2;
     }
     impl crate::object::IdToObject for ZxdgToplevelDecorationV1Id {
         type Object = crate::wayland_objects::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1;
@@ -12322,7 +13138,8 @@ pub mod zxdg_toplevel_decoration_v1 {
         /// Destroy the decoration object
         ///
         /// Switch back to a mode without any server-side decorations at the next
-        /// commit.
+        /// commit, unless a new xdg_toplevel_decoration is created for the surface
+        /// first.
         Destroy,
         /// Set the decoration mode
         ///
@@ -12918,7 +13735,7 @@ pub mod ext_workspace_group_handle_v1 {
         ///
         /// This event is emitted whenever a workspace is assigned to this group.
         /// A workspace may only ever be assigned to a single group at a single point
-        /// in time, but can be re-assigned during it's lifetime.
+        /// in time, but can be re-assigned during its lifetime.
         WorkspaceEnter { workspace: ExtWorkspaceHandleV1Id },
         /// Workspace removed from workspace group
         ///
@@ -13077,10 +13894,10 @@ pub mod ext_workspace_handle_v1 {
         ///
         /// If this event is emitted, it will be send immediately after the
         /// ext_workspace_handle_v1 is created or when an id is assigned to
-        /// a workspace (at most once during it's lifetime).
+        /// a workspace (at most once during its lifetime).
         ///
         /// An id will never change during the lifetime of the `ext_workspace_handle_v1`
-        /// and is guaranteed to be unique during it's lifetime.
+        /// and is guaranteed to be unique during its lifetime.
         ///
         /// Ids are not human-readable and shouldn't be displayed, use `name` for that purpose.
         ///
@@ -13964,576 +14781,5 @@ pub mod hyprland_ctm_control_manager_v1 {
     pub enum Error {
         /// The matrix values are invalid.,
         InvalidMatrix = 0,
-    }
-}
-
-/// Constrain the movement of a pointer
-///
-/// The global interface exposing pointer constraining functionality. It
-/// exposes two requests: lock_pointer for locking the pointer to its
-/// position, and confine_pointer for locking the pointer to a region.
-///
-/// The lock_pointer and confine_pointer requests create the objects
-/// wp_locked_pointer and wp_confined_pointer respectively, and the client can
-/// use these objects to interact with the lock.
-///
-/// For any surface, only one lock or confinement may be active across all
-/// wl_pointer objects of the same seat. If a lock or confinement is requested
-/// when another lock or confinement is active or requested on the same surface
-/// and with any of the wl_pointer objects of the same seat, an
-/// 'already_constrained' error will be raised.
-pub mod zwp_pointer_constraints_v1 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1 {
-        const INTERFACE_NAME: &'static str = "zwp_pointer_constraints_v1";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpPointerConstraintsV1Id {
-        type Object = crate::wayland_objects::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1;
-    }
-    impl crate::object::ObjectWithId
-        for crate::wayland_objects::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1
-    {
-        type Id = ZwpPointerConstraintsV1Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Destroy the pointer constraints manager object
-        ///
-        /// Used by the client to notify the server that it will no longer use this
-        /// pointer constraints object.
-        Destroy,
-        /// Lock pointer to a position
-        ///
-        /// The lock_pointer request lets the client request to disable movements of
-        /// the virtual pointer (i.e. the cursor), effectively locking the pointer
-        /// to a position. This request may not take effect immediately; in the
-        /// future, when the compositor deems implementation-specific constraints
-        /// are satisfied, the pointer lock will be activated and the compositor
-        /// sends a locked event.
-        ///
-        /// The protocol provides no guarantee that the constraints are ever
-        /// satisfied, and does not require the compositor to send an error if the
-        /// constraints cannot ever be satisfied. It is thus possible to request a
-        /// lock that will never activate.
-        ///
-        /// There may not be another pointer constraint of any kind requested or
-        /// active on the surface for any of the wl_pointer objects of the seat of
-        /// the passed pointer when requesting a lock. If there is, an error will be
-        /// raised. See general pointer lock documentation for more details.
-        ///
-        /// The intersection of the region passed with this request and the input
-        /// region of the surface is used to determine where the pointer must be
-        /// in order for the lock to activate. It is up to the compositor whether to
-        /// warp the pointer or require some kind of user interaction for the lock
-        /// to activate. If the region is null the surface input region is used.
-        ///
-        /// A surface may receive pointer focus without the lock being activated.
-        ///
-        /// The request creates a new object wp_locked_pointer which is used to
-        /// interact with the lock as well as receive updates about its state. See
-        /// the the description of wp_locked_pointer for further information.
-        ///
-        /// Note that while a pointer is locked, the wl_pointer objects of the
-        /// corresponding seat will not emit any wl_pointer.motion events, but
-        /// relative motion events will still be emitted via wp_relative_pointer
-        /// objects of the same seat. wl_pointer.axis and wl_pointer.button events
-        /// are unaffected.
-        LockPointer {
-            id: ZwpLockedPointerV1Id,
-            /// Surface to lock pointer to,
-            surface: WlSurfaceId,
-            /// The pointer that should be locked,
-            pointer: WlPointerId,
-            /// Region of surface,
-            region: WlRegionId,
-            /// Lock lifetime,
-            lifetime: u32,
-        },
-        /// Confine pointer to a region
-        ///
-        /// The confine_pointer request lets the client request to confine the
-        /// pointer cursor to a given region. This request may not take effect
-        /// immediately; in the future, when the compositor deems implementation-
-        /// specific constraints are satisfied, the pointer confinement will be
-        /// activated and the compositor sends a confined event.
-        ///
-        /// The intersection of the region passed with this request and the input
-        /// region of the surface is used to determine where the pointer must be
-        /// in order for the confinement to activate. It is up to the compositor
-        /// whether to warp the pointer or require some kind of user interaction for
-        /// the confinement to activate. If the region is null the surface input
-        /// region is used.
-        ///
-        /// The request will create a new object wp_confined_pointer which is used
-        /// to interact with the confinement as well as receive updates about its
-        /// state. See the the description of wp_confined_pointer for further
-        /// information.
-        ConfinePointer {
-            id: ZwpConfinedPointerV1Id,
-            /// Surface to lock pointer to,
-            surface: WlSurfaceId,
-            /// The pointer that should be confined,
-            pointer: WlPointerId,
-            /// Region of surface,
-            region: WlRegionId,
-            /// Confinement lifetime,
-            lifetime: u32,
-        },
-    }
-    impl Parser for crate::wayland_objects::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => Destroy,
-                1 => LockPointer {
-                    id: req.id()?,
-                    surface: req.id()?,
-                    pointer: req.id()?,
-                    region: req.id()?,
-                    lifetime: req.uint()?,
-                },
-                2 => ConfinePointer {
-                    id: req.id()?,
-                    surface: req.id()?,
-                    pointer: req.id()?,
-                    region: req.id()?,
-                    lifetime: req.uint()?,
-                },
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    /// Wp_pointer_constraints error values
-    ///
-    /// These errors can be emitted in response to wp_pointer_constraints
-    /// requests.
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-    pub enum Error {
-        /// Pointer constraint already requested on that surface,
-        AlreadyConstrained = 1,
-    }
-    /// Constraint lifetime
-    ///
-    /// These values represent different lifetime semantics. They are passed
-    /// as arguments to the factory requests to specify how the constraint
-    /// lifetimes should be managed.
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-    pub enum Lifetime {
-        /// The pointer constraint is defunct once deactivated
-        ///
-        /// A oneshot pointer constraint will never reactivate once it has been
-        /// deactivated. See the corresponding deactivation event
-        /// (wp_locked_pointer.unlocked and wp_confined_pointer.unconfined) for
-        /// details.
-        Oneshot = 1,
-        /// The pointer constraint may reactivate
-        ///
-        /// A persistent pointer constraint may again reactivate once it has
-        /// been deactivated. See the corresponding deactivation event
-        /// (wp_locked_pointer.unlocked and wp_confined_pointer.unconfined) for
-        /// details.
-        Persistent = 2,
-    }
-}
-
-/// Receive relative pointer motion events
-///
-/// The wp_locked_pointer interface represents a locked pointer state.
-///
-/// While the lock of this object is active, the wl_pointer objects of the
-/// associated seat will not emit any wl_pointer.motion events.
-///
-/// This object will send the event 'locked' when the lock is activated.
-/// Whenever the lock is activated, it is guaranteed that the locked surface
-/// will already have received pointer focus and that the pointer will be
-/// within the region passed to the request creating this object.
-///
-/// To unlock the pointer, send the destroy request. This will also destroy
-/// the wp_locked_pointer object.
-///
-/// If the compositor decides to unlock the pointer the unlocked event is
-/// sent. See wp_locked_pointer.unlock for details.
-///
-/// When unlocking, the compositor may warp the cursor position to the set
-/// cursor position hint. If it does, it will not result in any relative
-/// motion events emitted via wp_relative_pointer.
-///
-/// If the surface the lock was requested on is destroyed and the lock is not
-/// yet activated, the wp_locked_pointer object is now defunct and must be
-/// destroyed.
-pub mod zwp_locked_pointer_v1 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1 {
-        const INTERFACE_NAME: &'static str = "zwp_locked_pointer_v1";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpLockedPointerV1Id {
-        type Object = crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1;
-    }
-    impl crate::object::ObjectWithId
-        for crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1
-    {
-        type Id = ZwpLockedPointerV1Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Destroy the locked pointer object
-        ///
-        /// Destroy the locked pointer object. If applicable, the compositor will
-        /// unlock the pointer.
-        Destroy,
-        /// Set the pointer cursor position hint
-        ///
-        /// Set the cursor position hint relative to the top left corner of the
-        /// surface.
-        ///
-        /// If the client is drawing its own cursor, it should update the position
-        /// hint to the position of its own cursor. A compositor may use this
-        /// information to warp the pointer upon unlock in order to avoid pointer
-        /// jumps.
-        ///
-        /// The cursor position hint is double-buffered state, see
-        /// wl_surface.commit.
-        SetCursorPositionHint {
-            /// Surface-local x coordinate,
-            surface_x: f32,
-            /// Surface-local y coordinate,
-            surface_y: f32,
-        },
-        /// Set a new lock region
-        ///
-        /// Set a new region used to lock the pointer.
-        ///
-        /// The new lock region is double-buffered, see wl_surface.commit.
-        ///
-        /// For details about the lock region, see wp_locked_pointer.
-        SetRegion {
-            /// Region of surface,
-            region: WlRegionId,
-        },
-    }
-    impl Parser for crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => Destroy,
-                1 => SetCursorPositionHint { surface_x: req.fixed()?, surface_y: req.fixed()? },
-                2 => SetRegion { region: req.id()? },
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    #[derive(Debug)]
-    pub enum Event {
-        /// Lock activation event
-        ///
-        /// Notification that the pointer lock of the seat's pointer is activated.
-        Locked,
-        /// Lock deactivation event
-        ///
-        /// Notification that the pointer lock of the seat's pointer is no longer
-        /// active. If this is a oneshot pointer lock (see
-        /// wp_pointer_constraints.lifetime) this object is now defunct and should
-        /// be destroyed. If this is a persistent pointer lock (see
-        /// wp_pointer_constraints.lifetime) this pointer lock may again
-        /// reactivate in the future.
-        Unlocked,
-    }
-    impl EventWriter for crate::wayland_objects::zwp_locked_pointer_v1::ZwpLockedPointerV1 {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                Locked {} => {
-                    let mut raw = RawEvent::new(self.id(), 0, 0);
-                    raw
-                }
-                Unlocked {} => {
-                    let mut raw = RawEvent::new(self.id(), 1, 0);
-                    raw
-                }
-            }
-        }
-    }
-}
-
-/// Confined pointer object
-///
-/// The wp_confined_pointer interface represents a confined pointer state.
-///
-/// This object will send the event 'confined' when the confinement is
-/// activated. Whenever the confinement is activated, it is guaranteed that
-/// the surface the pointer is confined to will already have received pointer
-/// focus and that the pointer will be within the region passed to the request
-/// creating this object. It is up to the compositor to decide whether this
-/// requires some user interaction and if the pointer will warp to within the
-/// passed region if outside.
-///
-/// To unconfine the pointer, send the destroy request. This will also destroy
-/// the wp_confined_pointer object.
-///
-/// If the compositor decides to unconfine the pointer the unconfined event is
-/// sent. The wp_confined_pointer object is at this point defunct and should
-/// be destroyed.
-pub mod zwp_confined_pointer_v1 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1 {
-        const INTERFACE_NAME: &'static str = "zwp_confined_pointer_v1";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpConfinedPointerV1Id {
-        type Object = crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1;
-    }
-    impl crate::object::ObjectWithId
-        for crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1
-    {
-        type Id = ZwpConfinedPointerV1Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Destroy the confined pointer object
-        ///
-        /// Destroy the confined pointer object. If applicable, the compositor will
-        /// unconfine the pointer.
-        Destroy,
-        /// Set a new confine region
-        ///
-        /// Set a new region used to confine the pointer.
-        ///
-        /// The new confine region is double-buffered, see wl_surface.commit.
-        ///
-        /// If the confinement is active when the new confinement region is applied
-        /// and the pointer ends up outside of newly applied region, the pointer may
-        /// warped to a position within the new confinement region. If warped, a
-        /// wl_pointer.motion event will be emitted, but no
-        /// wp_relative_pointer.relative_motion event.
-        ///
-        /// The compositor may also, instead of using the new region, unconfine the
-        /// pointer.
-        ///
-        /// For details about the confine region, see wp_confined_pointer.
-        SetRegion {
-            /// Region of surface,
-            region: WlRegionId,
-        },
-    }
-    impl Parser for crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => Destroy,
-                1 => SetRegion { region: req.id()? },
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    #[derive(Debug)]
-    pub enum Event {
-        /// Pointer confined
-        ///
-        /// Notification that the pointer confinement of the seat's pointer is
-        /// activated.
-        Confined,
-        /// Pointer unconfined
-        ///
-        /// Notification that the pointer confinement of the seat's pointer is no
-        /// longer active. If this is a oneshot pointer confinement (see
-        /// wp_pointer_constraints.lifetime) this object is now defunct and should
-        /// be destroyed. If this is a persistent pointer confinement (see
-        /// wp_pointer_constraints.lifetime) this pointer confinement may again
-        /// reactivate in the future.
-        Unconfined,
-    }
-    impl EventWriter for crate::wayland_objects::zwp_confined_pointer_v1::ZwpConfinedPointerV1 {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                Confined {} => {
-                    let mut raw = RawEvent::new(self.id(), 0, 0);
-                    raw
-                }
-                Unconfined {} => {
-                    let mut raw = RawEvent::new(self.id(), 1, 0);
-                    raw
-                }
-            }
-        }
-    }
-}
-
-/// Get relative pointer objects
-///
-/// A global interface used for getting the relative pointer object for a
-/// given pointer.
-pub mod zwp_relative_pointer_manager_v1 {
-    use super::*;
-    impl Constants
-        for crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
-    {
-        const INTERFACE_NAME: &'static str = "zwp_relative_pointer_manager_v1";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpRelativePointerManagerV1Id {
-        type Object =
-            crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1;
-    }
-    impl crate::object::ObjectWithId
-        for crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
-    {
-        type Id = ZwpRelativePointerManagerV1Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Destroy the relative pointer manager object
-        ///
-        /// Used by the client to notify the server that it will no longer use this
-        /// relative pointer manager object.
-        Destroy,
-        /// Get a relative pointer object
-        ///
-        /// Create a relative pointer interface given a wl_pointer object. See the
-        /// wp_relative_pointer interface for more details.
-        GetRelativePointer { id: ZwpRelativePointerV1Id, pointer: WlPointerId },
-    }
-    impl Parser
-        for crate::wayland_objects::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1
-    {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => Destroy,
-                1 => GetRelativePointer { id: req.id()?, pointer: req.id()? },
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-}
-
-/// Relative pointer object
-///
-/// A wp_relative_pointer object is an extension to the wl_pointer interface
-/// used for emitting relative pointer events. It shares the same focus as
-/// wl_pointer objects of the same seat and will only emit events when it has
-/// focus.
-pub mod zwp_relative_pointer_v1 {
-    use super::*;
-    impl Constants for crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1 {
-        const INTERFACE_NAME: &'static str = "zwp_relative_pointer_v1";
-        const INTERFACE_VERSION: u32 = 1;
-    }
-    impl crate::object::IdToObject for ZwpRelativePointerV1Id {
-        type Object = crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1;
-    }
-    impl crate::object::ObjectWithId
-        for crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1
-    {
-        type Id = ZwpRelativePointerV1Id;
-    }
-    #[derive(Debug)]
-    pub enum Request {
-        /// Release the relative pointer object
-        ///
-        ///
-        Destroy,
-    }
-    impl Parser for crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1 {
-        type Request = Request;
-        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
-            use Request::*;
-            let request = match req.request_id {
-                0 => Destroy,
-                _ => return Err(ParserError::InvalidRequest),
-            };
-            Ok(request)
-        }
-    }
-    #[derive(Debug)]
-    pub enum Event {
-        /// Relative pointer motion
-        ///
-        /// Relative x/y pointer motion from the pointer of the seat associated with
-        /// this object.
-        ///
-        /// A relative motion is in the same dimension as regular wl_pointer motion
-        /// events, except they do not represent an absolute position. For example,
-        /// moving a pointer from (x, y) to (x', y') would have the equivalent
-        /// relative motion (x' - x, y' - y). If a pointer motion caused the
-        /// absolute pointer position to be clipped by for example the edge of the
-        /// monitor, the relative motion is unaffected by the clipping and will
-        /// represent the unclipped motion.
-        ///
-        /// This event also contains non-accelerated motion deltas. The
-        /// non-accelerated delta is, when applicable, the regular pointer motion
-        /// delta as it was before having applied motion acceleration and other
-        /// transformations such as normalization.
-        ///
-        /// Note that the non-accelerated delta does not represent 'raw' events as
-        /// they were read from some device. Pointer motion acceleration is device-
-        /// and configuration-specific and non-accelerated deltas and accelerated
-        /// deltas may have the same value on some devices.
-        ///
-        /// Relative motions are not coupled to wl_pointer.motion events, and can be
-        /// sent in combination with such events, but also independently. There may
-        /// also be scenarios where wl_pointer.motion is sent, but there is no
-        /// relative motion. The order of an absolute and relative motion event
-        /// originating from the same physical motion is not guaranteed.
-        ///
-        /// If the client needs button events or focus state, it can receive them
-        /// from a wl_pointer object of the same seat that the wp_relative_pointer
-        /// object is associated with.
-        RelativeMotion {
-            /// High 32 bits of a 64 bit timestamp with microsecond granularity,
-            utime_hi: u32,
-            /// Low 32 bits of a 64 bit timestamp with microsecond granularity,
-            utime_lo: u32,
-            /// The x component of the motion vector,
-            dx: f32,
-            /// The y component of the motion vector,
-            dy: f32,
-            /// The x component of the unaccelerated motion vector,
-            dx_unaccel: f32,
-            /// The y component of the unaccelerated motion vector,
-            dy_unaccel: f32,
-        },
-    }
-    impl EventWriter for crate::wayland_objects::zwp_relative_pointer_v1::ZwpRelativePointerV1 {
-        type Event = Event;
-        fn object_id(&self) -> WaylandId {
-            use crate::object::Object;
-            self.id()
-        }
-        fn to_raw_event(&self, event: Event) -> RawEvent {
-            use {crate::object::Object, Event::*};
-            match event {
-                RelativeMotion { utime_hi, utime_lo, dx, dy, dx_unaccel, dy_unaccel } => {
-                    let mut raw = RawEvent::new(self.id(), 0, 6);
-                    raw.uint(utime_hi);
-                    raw.uint(utime_lo);
-                    raw.fixed(dx);
-                    raw.fixed(dy);
-                    raw.fixed(dx_unaccel);
-                    raw.fixed(dy_unaccel);
-                    raw
-                }
-            }
-        }
     }
 }

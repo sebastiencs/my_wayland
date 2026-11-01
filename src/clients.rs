@@ -21,10 +21,11 @@ use crate::{
     },
     object::{AbortRequest, IdToObject, Object, ObjectWithId, Parser, ParserError, PostAction},
     protocol_generated::{
-        wl_data_device_manager::DndAction, wl_data_offer, wl_display, Array, Constants,
-        ExtWorkspaceManagerV1Id, HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId,
-        WlDataSourceId, WlOutputId, WlRegistryId, WlSurfaceId, WpPresentationFeedbackId,
-        XdgPopupId, XdgToplevelId, ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id, ZxdgOutputV1Id,
+        wl_data_device_manager::DndAction, wl_data_offer, wl_display, wl_pointer, Array, Constants,
+        ExtWorkspaceManagerV1Id, HyprlandCtmControlManagerV1Id, WaylandId, WlCallbackId,
+        WlDataOfferId, WlDataSourceId, WlOutputId, WlRegistryId, WlSurfaceId,
+        WpPresentationFeedbackId, XdgPopupId, XdgToplevelId, ZwlrGammaControlV1Id,
+        ZwlrLayerSurfaceV1Id, ZxdgOutputV1Id,
     },
     region::RectI,
     runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
@@ -487,6 +488,9 @@ pub enum ClientAction {
     RefreshSurfaceOutputs,
     ReleaseBuffer {
         buffer_id: crate::protocol_generated::WlBufferId,
+    },
+    CompleteBufferReleaseCallbacks {
+        callbacks: Vec<Resolved<WlCallbackId>>,
     },
     CompleteSurfaceFrameCallbacks {
         surfaces: Vec<Resolved<WlSurfaceId>>,
@@ -951,6 +955,19 @@ impl Client {
                         continue;
                     }
                     pointer.ref_mut(state).send_motion(time, x, y, dispatcher);
+                }
+            }
+            SeatClientEvent::PointerWarp { time, x, y } => {
+                for pointer in state.seat.pointer_resources(self.id) {
+                    if !pointer.exists(state) {
+                        continue;
+                    }
+                    let pointer = pointer.ref_mut(state);
+                    if pointer.version() >= wl_pointer::WARP_SINCE {
+                        pointer.send_warp(x, y, dispatcher);
+                    } else {
+                        pointer.send_motion(time, x, y, dispatcher);
+                    }
                 }
             }
             SeatClientEvent::PointerButton { serial, time, button, state: button_state } => {
@@ -1588,15 +1605,22 @@ impl Client {
 
     fn handle_registry_global_added(
         &self,
-        state: &State,
+        state: &mut State,
         dispatcher: &mut ClientDispatcher,
         name: u32,
         interface: String,
         version: u32,
     ) {
-        for registry in self.iter_resolved_of::<WlRegistryId>(state) {
-            let registry = registry.rref(state);
-            registry.send_global(dispatcher, name, interface.clone(), version);
+        let registries = self
+            .iter_resolved_of::<WlRegistryId>(state)
+            .collect::<Vec<_>>();
+        for registry in registries {
+            registry
+                .rref(state)
+                .send_global(dispatcher, name, interface.clone(), version);
+            state
+                .globals
+                .note_offer(crate::globals::GlobalName::from_raw(name), registry);
         }
     }
 
@@ -1606,7 +1630,11 @@ impl Client {
         dispatcher: &mut ClientDispatcher,
         name: u32,
     ) {
+        let global_name = crate::globals::GlobalName::from_raw(name);
         for registry in self.iter_resolved_of::<WlRegistryId>(state) {
+            if !state.globals.was_offered(global_name, registry) {
+                continue;
+            }
             let registry = registry.rref(state);
             registry.send_global_remove(dispatcher, name);
         }
@@ -2366,6 +2394,17 @@ impl Model for Client {
                 if self.contains_object(buffer_id, state) {
                     let buffer = self.ref_object_mut(buffer_id, state);
                     buffer.send_release(&mut dispatcher);
+                }
+            }
+            CompleteBufferReleaseCallbacks { callbacks } => {
+                use crate::wayland_objects::wl_display::WlDisplay;
+                let display = WlDisplay::default();
+                for callback in callbacks {
+                    if !self.contains_object(callback.wayland_id(), state) {
+                        continue;
+                    }
+                    callback.rref(state).done(0, &mut dispatcher);
+                    self.delete_id(&display, state, &mut dispatcher, callback.wayland_id().into());
                 }
             }
             CompleteSurfaceFrameCallbacks { surfaces, time_msec } => {

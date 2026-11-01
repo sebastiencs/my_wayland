@@ -93,6 +93,7 @@ pub struct SurfaceSyncState {
 pub struct RetiredBufferCandidate {
     pub buffer: Resolved<WlBufferId>,
     pub sync: SurfaceSyncState,
+    pub release_callbacks: Vec<Resolved<crate::protocol_generated::WlCallbackId>>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +101,7 @@ pub struct DeferredRelease {
     pub buffer: Resolved<WlBufferId>,
     pub plain_release: Option<PlainRelease>,
     pub release: ReleasePoint,
+    pub release_callbacks: Vec<Resolved<crate::protocol_generated::WlCallbackId>>,
 }
 
 pub type PlainRelease = Resolved<WlBufferId>;
@@ -247,6 +249,7 @@ impl DeferredRelease {
             buffer: candidate.buffer,
             plain_release,
             release: candidate.sync.release,
+            release_callbacks: candidate.release_callbacks,
         }
     }
 
@@ -257,6 +260,14 @@ impl DeferredRelease {
             dispatcher.dispatch_to(
                 buffer.client_id(),
                 crate::clients::ClientAction::ReleaseBuffer { buffer_id: buffer.wayland_id() },
+            );
+        }
+        if !self.release_callbacks.is_empty() {
+            dispatcher.dispatch_to(
+                self.buffer.client_id(),
+                crate::clients::ClientAction::CompleteBufferReleaseCallbacks {
+                    callbacks: self.release_callbacks,
+                },
             );
         }
 
@@ -429,13 +440,20 @@ pub fn resolve_unused_candidate_immediately(
     candidate: RetiredBufferCandidate,
 ) {
     candidate.sync.release.signal();
-    let Some(buffer) = candidate.buffer.try_ref_mut(state) else {
-        return;
-    };
-    if buffer
-        .plain_release_target(candidate.buffer.object_id())
-        .is_some()
-    {
-        buffer.send_release(dispatcher);
+    let callbacks = candidate.release_callbacks;
+    let client_id = candidate.buffer.client_id();
+    if let Some(buffer) = candidate.buffer.try_ref_mut(state) {
+        if buffer
+            .plain_release_target(candidate.buffer.object_id())
+            .is_some()
+        {
+            buffer.send_release(dispatcher);
+        }
+    }
+    if !callbacks.is_empty() {
+        dispatcher.dispatch_to(
+            client_id,
+            crate::clients::ClientAction::CompleteBufferReleaseCallbacks { callbacks },
+        );
     }
 }
