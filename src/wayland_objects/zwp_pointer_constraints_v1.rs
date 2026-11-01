@@ -256,7 +256,7 @@ mod tests {
 
     use super::ZwpPointerConstraintsV1;
 
-    fn request(object_id: u32, request_id: u16, words: &[u32]) -> RawRequest {
+    fn request(object_id: u32, request_id: u16, words: &[u32]) -> RawRequest<'_> {
         RawRequest {
             object_id,
             request_id,
