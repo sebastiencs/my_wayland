@@ -3,7 +3,7 @@
 //! Output and toplevel copies record pixels, damage, and completion here. A painted screencopy
 //! can blend the cursor into its own buffer. This registry also tracks which
 //! protocol objects must stop when an output, toplevel, or pointer disappears, and completes each
-//! queued copy once. Globals stay unpublished until those later phases pass. Hyprland's screencopy
+//! queued copy once. The five capture globals are advertised at their implemented versions. Hyprland's screencopy
 //! permission prompt is intentionally not copied.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -2314,16 +2314,28 @@ mod tests {
     }
 
     #[test]
-    fn capture_globals_stay_unpublished() {
+    fn capture_globals_are_advertised_at_their_implemented_versions() {
         let state = state_for_tests();
-        for interface in [
-            ZwlrScreencopyManagerV1::INTERFACE_NAME,
-            ExtImageCopyCaptureManagerV1::INTERFACE_NAME,
-            ExtOutputImageCaptureSourceManagerV1::INTERFACE_NAME,
-            ExtForeignToplevelImageCaptureSourceManagerV1::INTERFACE_NAME,
-            ExtForeignToplevelListV1::INTERFACE_NAME,
+        for (interface, version) in [
+            (ZwlrScreencopyManagerV1::INTERFACE_NAME, ZwlrScreencopyManagerV1::INTERFACE_VERSION),
+            (
+                ExtImageCopyCaptureManagerV1::INTERFACE_NAME,
+                ExtImageCopyCaptureManagerV1::INTERFACE_VERSION,
+            ),
+            (
+                ExtOutputImageCaptureSourceManagerV1::INTERFACE_NAME,
+                ExtOutputImageCaptureSourceManagerV1::INTERFACE_VERSION,
+            ),
+            (
+                ExtForeignToplevelImageCaptureSourceManagerV1::INTERFACE_NAME,
+                ExtForeignToplevelImageCaptureSourceManagerV1::INTERFACE_VERSION,
+            ),
+            (ExtForeignToplevelListV1::INTERFACE_NAME, ExtForeignToplevelListV1::INTERFACE_VERSION),
         ] {
-            assert!(!state.globals.contains_interface(interface), "{interface}");
+            let advertised = state.globals.iter().find_map(|(_, global)| {
+                (global.interface().0 == interface).then_some(global.interface().1)
+            });
+            assert_eq!(advertised, Some(version), "{interface}");
         }
     }
 

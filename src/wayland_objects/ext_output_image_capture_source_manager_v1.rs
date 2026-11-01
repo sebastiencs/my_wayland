@@ -1,4 +1,4 @@
-//! `ext_output_image_capture_source_manager_v1`. Unpublished until capture validation.
+//! `ext_output_image_capture_source_manager_v1`, advertised at version 1.
 
 use crate::{
     capture::CaptureTarget,

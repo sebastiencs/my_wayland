@@ -1,4 +1,4 @@
-//! `ext_image_copy_capture_manager_v1`. Unpublished until capture validation.
+//! `ext_image_copy_capture_manager_v1`, advertised at version 1.
 //! Unknown option bits raise `invalid_option`. `paint_cursors` selects a cursor-painted copy.
 
 use crate::{

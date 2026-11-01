@@ -1,4 +1,4 @@
-//! `ext_foreign_toplevel_image_capture_source_manager_v1`. Unpublished until capture validation.
+//! `ext_foreign_toplevel_image_capture_source_manager_v1`, advertised at version 1.
 //! A closed handle cannot become a source.
 
 use crate::{

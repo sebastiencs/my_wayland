@@ -1,4 +1,4 @@
-//! `zwlr_screencopy_manager_v1`. Unpublished until capture security tests pass.
+//! `zwlr_screencopy_manager_v1`, advertised at version 3.
 //! A new frame advertises SHM buffers immediately. `ready` follows the shared capture queue.
 
 use crate::{

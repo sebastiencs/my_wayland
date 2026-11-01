@@ -863,7 +863,7 @@ pub struct State {
     pub idle_inhibitors_honored: bool,
     /// Secure lock. `locked` stays unsent until a later phase presents every active output.
     pub session_lock: crate::session_lock::SessionLock,
-    /// Live screenshot protocol objects. Globals stay unpublished until capture is validated.
+    /// Live screenshot protocol objects. The capture globals are advertised from `Globals::initialize`.
     pub capture: crate::capture::CaptureRegistry,
     #[cfg(test)]
     pub realize_closing_snapshots_in_tests: bool,

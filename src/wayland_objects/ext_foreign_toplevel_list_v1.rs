@@ -1,5 +1,5 @@
 //! `ext_foreign_toplevel_list_v1`. Binding sends the toplevels that are already mapped.
-//! `stop` ends the stream with one `finished` event. The global stays unpublished.
+//! `stop` ends the stream with one `finished` event. The global is advertised at version 1.
 
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
