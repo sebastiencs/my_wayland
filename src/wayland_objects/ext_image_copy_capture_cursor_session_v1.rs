@@ -2,8 +2,8 @@
 //! Destroying this object leaves the image-copy session and its frames in place.
 
 use crate::{
-    capture::CaptureTarget,
-    clients::{Client, ClientDispatcher, RawRequest, Resolved},
+    capture::{self, CaptureTarget},
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
     protocol_generated::{
         ext_image_copy_capture_cursor_session_v1, ExtImageCopyCaptureCursorSessionV1Id,
@@ -21,6 +21,9 @@ pub struct ExtImageCopyCaptureCursorSessionV1 {
     target: CaptureTarget,
     pointer: Resolved<WlPointerId>,
     session: Option<Resolved<ExtImageCopyCaptureSessionV1Id>>,
+    entered: bool,
+    position: Option<(i32, i32)>,
+    hotspot: Option<(i32, i32)>,
 }
 
 impl ExtImageCopyCaptureCursorSessionV1 {
@@ -29,7 +32,55 @@ impl ExtImageCopyCaptureCursorSessionV1 {
         target: CaptureTarget,
         pointer: Resolved<WlPointerId>,
     ) -> Self {
-        Self { id, target, pointer, session: None }
+        Self {
+            id,
+            target,
+            pointer,
+            session: None,
+            entered: false,
+            position: None,
+            hotspot: None,
+        }
+    }
+
+    pub(crate) fn note_left(&mut self, dispatcher: &mut ClientDispatcher) {
+        if !self.entered {
+            return;
+        }
+        self.entered = false;
+        self.send_event(ext_image_copy_capture_cursor_session_v1::Event::Leave, dispatcher);
+    }
+
+    pub(crate) fn note_cursor(
+        &mut self,
+        position: (i32, i32),
+        hotspot: (i32, i32),
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        if !self.entered {
+            self.entered = true;
+            self.send_event(ext_image_copy_capture_cursor_session_v1::Event::Enter, dispatcher);
+        }
+        if self.position != Some(position) {
+            self.position = Some(position);
+            self.send_event(
+                ext_image_copy_capture_cursor_session_v1::Event::Position {
+                    x: position.0,
+                    y: position.1,
+                },
+                dispatcher,
+            );
+        }
+        if self.hotspot != Some(hotspot) {
+            self.hotspot = Some(hotspot);
+            self.send_event(
+                ext_image_copy_capture_cursor_session_v1::Event::Hotspot {
+                    x: hotspot.0,
+                    y: hotspot.1,
+                },
+                dispatcher,
+            );
+        }
     }
 }
 
@@ -77,6 +128,22 @@ impl Object for ExtImageCopyCaptureCursorSessionV1 {
                 );
                 self.session = Some(resolved);
                 state.capture.track_session(resolved, target, Some(pointer));
+                let cursor_session = client.resolve_this(&self, state);
+                let size = capture::image_copy_buffer_size(state, target, true);
+                let placement = capture::cursor_placement(state, target);
+                if let Some(session) = resolved.try_ref_mut(state) {
+                    session.set_cursor_session(cursor_session);
+                    session.send_constraints(size, dispatcher);
+                }
+                if let Some(placement) = placement {
+                    if placement.inside {
+                        self.note_cursor(
+                            placement.position,
+                            (placement.image.hotspot_x, placement.image.hotspot_y),
+                            dispatcher,
+                        );
+                    }
+                }
             }
         }
         Ok(())

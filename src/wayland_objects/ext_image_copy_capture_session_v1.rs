@@ -1,13 +1,13 @@
 //! One `ext_image_copy_capture_session_v1`. At most one frame exists at a time.
-//! Constraint events arrive with the capture backend. `stopped` is sent once.
+//! SHM constraints are sent when the source size is known. `stopped` is sent once.
 
 use crate::{
     capture::CaptureTarget,
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
     protocol_generated::{
-        ext_image_copy_capture_session_v1, ExtImageCopyCaptureFrameV1Id,
-        ExtImageCopyCaptureSessionV1Id, WaylandId, WlPointerId,
+        ext_image_copy_capture_session_v1, ExtImageCopyCaptureCursorSessionV1Id,
+        ExtImageCopyCaptureFrameV1Id, ExtImageCopyCaptureSessionV1Id, WaylandId, WlPointerId,
     },
     state::{GrabbedObject, State},
     wayland_objects::{
@@ -21,8 +21,10 @@ pub struct ExtImageCopyCaptureSessionV1 {
     target: CaptureTarget,
     paint_cursors: bool,
     pointer: Option<Resolved<WlPointerId>>,
+    cursor_session: Option<Resolved<ExtImageCopyCaptureCursorSessionV1Id>>,
     frame: Option<Resolved<ExtImageCopyCaptureFrameV1Id>>,
     stopped: bool,
+    advertised: Option<(i32, i32)>,
 }
 
 impl ExtImageCopyCaptureSessionV1 {
@@ -37,8 +39,10 @@ impl ExtImageCopyCaptureSessionV1 {
             target,
             paint_cursors,
             pointer,
+            cursor_session: None,
             frame: None,
             stopped: false,
+            advertised: None,
         }
     }
 
@@ -52,6 +56,55 @@ impl ExtImageCopyCaptureSessionV1 {
 
     pub(crate) fn pointer(&self) -> Option<Resolved<WlPointerId>> {
         self.pointer
+    }
+
+    pub(crate) fn cursor_session(&self) -> Option<Resolved<ExtImageCopyCaptureCursorSessionV1Id>> {
+        self.cursor_session
+    }
+
+    pub(crate) fn set_cursor_session(
+        &mut self,
+        cursor_session: Resolved<ExtImageCopyCaptureCursorSessionV1Id>,
+    ) {
+        self.cursor_session = Some(cursor_session);
+    }
+
+    pub(crate) fn advertised_size(&self) -> Option<(i32, i32)> {
+        self.advertised
+    }
+
+    /// SHM formats this compositor can write, then the source size, then `done`.
+    /// DMA-BUF stays deferred. A cursor session with no cursor image waits for one.
+    pub(crate) fn send_constraints(
+        &mut self,
+        size: Option<(i32, i32)>,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let Some((width, height)) = size else {
+            if self.pointer.is_none() {
+                self.mark_stopped(dispatcher);
+            }
+            return;
+        };
+        let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) else {
+            self.mark_stopped(dispatcher);
+            return;
+        };
+        if self.stopped {
+            return;
+        }
+        for format in [crate::drm::ARGB8888.wayland_id, crate::drm::XRGB8888.wayland_id] {
+            self.send_event(
+                ext_image_copy_capture_session_v1::Event::ShmFormat { format },
+                dispatcher,
+            );
+        }
+        self.send_event(
+            ext_image_copy_capture_session_v1::Event::BufferSize { width, height },
+            dispatcher,
+        );
+        self.send_event(ext_image_copy_capture_session_v1::Event::Done, dispatcher);
+        self.advertised = Some((width as i32, height as i32));
     }
 
     pub(crate) fn is_stopped(&self) -> bool {

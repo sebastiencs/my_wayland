@@ -126,6 +126,8 @@ struct ExtFrameSlot {
     frame: Resolved<ExtImageCopyCaptureFrameV1Id>,
     target: CaptureTarget,
     pointer: Option<Resolved<WlPointerId>>,
+    job: Option<CaptureJobId>,
+    reported: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -140,6 +142,8 @@ struct ScreencopySlot {
 enum Pending {
     StopSession(Resolved<ExtImageCopyCaptureSessionV1Id>),
     FailExtFrame(Resolved<ExtImageCopyCaptureFrameV1Id>),
+    FinishExtFrame { frame: Resolved<ExtImageCopyCaptureFrameV1Id>, job: CaptureJobId },
+    CursorLeft(Resolved<crate::protocol_generated::ExtImageCopyCaptureCursorSessionV1Id>),
     FailScreencopy(Resolved<ZwlrScreencopyFrameV1Id>),
     FinishScreencopy { frame: Resolved<ZwlrScreencopyFrameV1Id>, job: CaptureJobId },
     CloseHandle(Resolved<ExtForeignToplevelHandleV1Id>),
@@ -195,7 +199,21 @@ impl CaptureRegistry {
         pointer: Option<Resolved<WlPointerId>>,
     ) {
         self.ext_frames
-            .push(ExtFrameSlot { frame, target, pointer });
+            .push(ExtFrameSlot { frame, target, pointer, job: None, reported: false });
+    }
+
+    pub(crate) fn bind_ext_frame_job(
+        &mut self,
+        frame: ExtImageCopyCaptureFrameV1Id,
+        job: CaptureJobId,
+    ) {
+        if let Some(slot) = self
+            .ext_frames
+            .iter_mut()
+            .find(|slot| slot.frame.wayland_id() == frame)
+        {
+            slot.job = Some(job);
+        }
     }
 
     pub(crate) fn track_screencopy(
@@ -595,6 +613,269 @@ pub(crate) fn publish_screencopy(state: &mut State, dispatcher: &mut Dispatcher)
         clients.insert(client_id);
     }
     dispatch_deliver(dispatcher, clients);
+}
+
+/// Send ext-image-copy `damage`, `transform`, `presentation_time`, and `ready`, or `failed`.
+pub(crate) fn publish_ext_frames(state: &mut State, dispatcher: &mut Dispatcher) {
+    let finished: Vec<_> = state
+        .capture
+        .ext_frames
+        .iter()
+        .filter_map(|slot| {
+            if slot.reported {
+                return None;
+            }
+            let job = slot.job?;
+            let status = state.capture.jobs.get(&job)?.status;
+            if status == CaptureJobStatus::Queued {
+                return None;
+            }
+            Some((slot.frame, job))
+        })
+        .collect();
+    let mut clients = BTreeSet::new();
+    for (frame, job) in finished {
+        if let Some(slot) = state
+            .capture
+            .ext_frames
+            .iter_mut()
+            .find(|slot| slot.frame == frame)
+        {
+            slot.reported = true;
+        }
+        let client_id = frame.client_id();
+        state
+            .capture
+            .enqueue(client_id, Pending::FinishExtFrame { frame, job });
+        clients.insert(client_id);
+    }
+    dispatch_deliver(dispatcher, clients);
+}
+
+/// Pixel size a client must allocate for this session. Cursor sessions use the cursor image.
+fn ext_failure_reason(state: &State, job_id: CaptureJobId) -> u32 {
+    use crate::protocol_generated::ext_image_copy_capture_frame_v1::FailureReason;
+    let Some(job) = state.capture.jobs.get(&job_id) else {
+        return FailureReason::Unknown as u32;
+    };
+    if !target_is_live(state, job.target) {
+        return FailureReason::Stopped as u32;
+    }
+    if let Some((width, height)) = image_copy_buffer_size(state, job.target, false) {
+        if job.width != width || job.height != height {
+            return FailureReason::BufferConstraints as u32;
+        }
+    }
+    FailureReason::Unknown as u32
+}
+
+pub(crate) fn image_copy_buffer_size(
+    state: &State,
+    target: CaptureTarget,
+    cursor: bool,
+) -> Option<(i32, i32)> {
+    if cursor {
+        let placement = cursor_placement(state, target)?;
+        return Some((placement.image.width, placement.image.height));
+    }
+    match target {
+        CaptureTarget::Output(output_id) => {
+            let output = state.outputs.try_get(output_id)?;
+            let rect = output_capture_rect(
+                output.current_mode.width,
+                output.current_mode.height,
+                output.scale,
+                output.transform,
+                None,
+            )?;
+            Some((rect.width, rect.height))
+        }
+        CaptureTarget::Toplevel(key) => {
+            let bounds = toplevel_rendered_bounds(state, key)?;
+            Some((bounds.width, bounds.height))
+        }
+    }
+}
+
+/// Cursor image in output-local or toplevel-local coordinates. `argb` is little-endian BGRA.
+#[derive(Clone, Debug)]
+pub(crate) struct CursorSnapshot {
+    pub width: i32,
+    pub height: i32,
+    pub hotspot_x: i32,
+    pub hotspot_y: i32,
+    pub stride: usize,
+    pub argb: Vec<u8>,
+    pub origin_x: i32,
+    pub origin_y: i32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CursorPlacement {
+    pub image: CursorSnapshot,
+    pub inside: bool,
+    /// Hotspot in the source buffer, which may lie outside that buffer.
+    pub position: (i32, i32),
+}
+
+pub(crate) fn cursor_placement(state: &State, target: CaptureTarget) -> Option<CursorPlacement> {
+    if state.session_lock.input_gated() {
+        return None;
+    }
+    let image = cursor_snapshot(state)?;
+    let position = cursor_hotspot_position(state, target, &image)?;
+    let cursor_rect = RectI::new(image.origin_x, image.origin_y, image.width, image.height)?;
+    let inside = source_bounds(state, target).is_some_and(|bounds| cursor_rect.intersects(bounds));
+    Some(CursorPlacement { image, inside, position })
+}
+
+/// Blend a painted cursor into a toplevel capture. The desktop frame is not modified.
+pub(crate) fn paint_toplevel_cursor(
+    state: &State,
+    key: ToplevelKey,
+    bytes: &mut [u8],
+    stride: usize,
+) {
+    if state.session_lock.input_gated() {
+        return;
+    }
+    let Some(bounds) = toplevel_rendered_bounds(state, key) else {
+        return;
+    };
+    let Some(image) = cursor_snapshot(state) else {
+        return;
+    };
+    let cursor = CaptureCursorImage {
+        local_x: image.origin_x.saturating_sub(bounds.x),
+        local_y: image.origin_y.saturating_sub(bounds.y),
+        width: image.width,
+        height: image.height,
+        stride: image.stride,
+        argb: image.argb,
+        mode_width: bounds.width,
+        mode_height: bounds.height,
+        scale: crate::state::FractionalScale::ONE,
+        transform: 0,
+    };
+    blend_cursor_into_copy(
+        bytes,
+        stride,
+        CapturePixelRect { x: 0, y: 0, width: bounds.width, height: bounds.height },
+        &cursor,
+    );
+}
+
+fn cursor_snapshot(state: &State) -> Option<CursorSnapshot> {
+    let (pointer_x, pointer_y) = state.seat.pointer_position();
+    let pointer_x = pointer_x.round() as i32;
+    let pointer_y = pointer_y.round() as i32;
+    match state.seat.visible_cursor_source()? {
+        crate::cursor::CursorSourceRef::Named { image, .. } => {
+            let width = image.width;
+            let height = image.height;
+            if width <= 0 || height <= 0 {
+                return None;
+            }
+            Some(CursorSnapshot {
+                width,
+                height,
+                hotspot_x: image.hotspot_x,
+                hotspot_y: image.hotspot_y,
+                stride: (width as usize).saturating_mul(4),
+                argb: rgba_to_argb(&image.pixels_rgba, width as usize, height as usize),
+                origin_x: pointer_x.saturating_sub(image.hotspot_x),
+                origin_y: pointer_y.saturating_sub(image.hotspot_y),
+            })
+        }
+        crate::cursor::CursorSourceRef::Surface { cursor } => {
+            let surface = cursor.surface.try_ref(state)?;
+            let render = surface.render_state_at(0, 0)?;
+            if render.tex_transform != crate::transform::Mat3::identity() {
+                return None;
+            }
+            let buffer = render.buffer.try_ref(state)?;
+            let shm = buffer.shm_cursor_argb8888()?;
+            let argb = shm.argb_bytes();
+            if argb.is_empty() || render.width <= 0 || render.height <= 0 {
+                return None;
+            }
+            Some(CursorSnapshot {
+                width: render.width,
+                height: render.height,
+                hotspot_x: cursor.hotspot_x,
+                hotspot_y: cursor.hotspot_y,
+                stride: shm.stride(),
+                argb,
+                origin_x: pointer_x.saturating_sub(cursor.hotspot_x),
+                origin_y: pointer_y.saturating_sub(cursor.hotspot_y),
+            })
+        }
+    }
+}
+
+fn cursor_hotspot_position(
+    state: &State,
+    target: CaptureTarget,
+    image: &CursorSnapshot,
+) -> Option<(i32, i32)> {
+    let hotspot_x = image.origin_x.saturating_add(image.hotspot_x);
+    let hotspot_y = image.origin_y.saturating_add(image.hotspot_y);
+    match target {
+        CaptureTarget::Toplevel(key) => {
+            let bounds = toplevel_rendered_bounds(state, key)?;
+            Some((hotspot_x.saturating_sub(bounds.x), hotspot_y.saturating_sub(bounds.y)))
+        }
+        CaptureTarget::Output(output_id) => {
+            let output = state.outputs.try_get(output_id)?;
+            let local_x = hotspot_x.saturating_sub(output.x);
+            let local_y = hotspot_y.saturating_sub(output.y);
+            let wayland = crate::transform::BufferTransform::from_wayland(output.transform)
+                .unwrap_or(crate::transform::BufferTransform::Normal);
+            let (buffer_width, buffer_height) =
+                wayland.maybe_swap((output.current_mode.width, output.current_mode.height));
+            let logical_width = output.scale.logical_length(buffer_width);
+            let logical_height = output.scale.logical_length(buffer_height);
+            let (x, y, _, _) = transform_output_box(
+                local_x,
+                local_y,
+                1,
+                1,
+                invert_output_transform(output.transform),
+                logical_width,
+                logical_height,
+            )?;
+            Some((
+                scale_logical_to_buffer(x, output.scale),
+                scale_logical_to_buffer(y, output.scale),
+            ))
+        }
+    }
+}
+
+fn source_bounds(state: &State, target: CaptureTarget) -> Option<RectI> {
+    match target {
+        CaptureTarget::Output(output_id) => state.outputs.try_get(output_id)?.logical_bounds(),
+        CaptureTarget::Toplevel(key) => toplevel_rendered_bounds(state, key),
+    }
+}
+
+fn rgba_to_argb(src: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let stride = width.saturating_mul(4);
+    let mut dst = vec![0u8; stride.saturating_mul(height)];
+    for row in 0..height {
+        let start = row.saturating_mul(stride);
+        let Some(src_row) = src.get(start..start + stride) else {
+            break;
+        };
+        let dst_row = &mut dst[start..start + stride];
+        for (src_px, dst_px) in src_row.chunks_exact(4).zip(dst_row.chunks_exact_mut(4)) {
+            dst_px[0] = src_px[2];
+            dst_px[1] = src_px[1];
+            dst_px[2] = src_px[0];
+            dst_px[3] = src_px[3];
+        }
+    }
+    dst
 }
 
 /// Blend `cursor` over one capture image. The destination is premultiplied BGRA from the
@@ -1177,6 +1458,27 @@ pub(crate) fn stop_protected_toplevel_captures(state: &mut State, dispatcher: &m
         .capture
         .sessions
         .retain(|slot| !matches!(slot.target, CaptureTarget::Toplevel(_)));
+    let cursor_hosts: Vec<_> = state
+        .capture
+        .sessions
+        .iter()
+        .filter(|slot| slot.pointer.is_some() && matches!(slot.target, CaptureTarget::Output(_)))
+        .map(|slot| slot.session)
+        .collect();
+    let cursor_sessions: Vec<_> = cursor_hosts
+        .into_iter()
+        .filter_map(|session| {
+            session
+                .try_ref(state)
+                .and_then(|session| session.cursor_session())
+        })
+        .collect();
+    for cursor in cursor_sessions {
+        state
+            .capture
+            .enqueue(cursor.client_id(), Pending::CursorLeft(cursor));
+        clients.insert(cursor.client_id());
+    }
     let frames: Vec<_> = state
         .capture
         .ext_frames
@@ -1644,6 +1946,23 @@ pub fn deliver(client: &mut Client, state: &mut State, dispatcher: &mut ClientDi
             Pending::FailExtFrame(frame) => {
                 if let Some(frame) = frame.try_ref_mut(state) {
                     frame.fail_stopped(dispatcher);
+                }
+            }
+            Pending::FinishExtFrame { frame, job } => {
+                let status = state.capture.jobs.get(&job).map(|job| job.status);
+                let sample = state.capture.samples.get(&job).cloned();
+                let reason = ext_failure_reason(state, job);
+                if let Some(frame) = frame.try_ref_mut(state) {
+                    if let (Some(CaptureJobStatus::Written), Some(sample)) = (status, sample) {
+                        frame.ready(&sample, dispatcher);
+                    } else {
+                        frame.fail_reason(reason, dispatcher);
+                    }
+                }
+            }
+            Pending::CursorLeft(cursor) => {
+                if let Some(cursor) = cursor.try_ref_mut(state) {
+                    cursor.note_left(dispatcher);
                 }
             }
             Pending::FailScreencopy(frame) => {
@@ -2558,7 +2877,7 @@ mod tests {
     #[test]
     fn output_loss_stops_the_session_and_fails_a_capturing_frame() {
         let (mut client, mut dispatcher, mut state) = client_state();
-        let output_id = insert_output(&mut client, &mut state);
+        let output_id = state.insert_output(test_output_drm1(0, 0, 2, 2));
         insert_buffer(&mut client, &mut state);
         let session_id = ExtImageCopyCaptureSessionV1Id::from(33);
         client.insert_object(
@@ -2791,6 +3110,272 @@ mod tests {
         );
         test_deliver(&mut client, &mut state, &mut dispatcher);
         assert!(test_sent(&dispatcher, 33, 5));
+    }
+
+    #[test]
+    fn an_ext_session_advertises_shm_constraints_and_completes_a_frame() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let output_id = state.insert_output(test_output_drm1(0, 0, 2, 2));
+        client.insert_object(
+            &mut state,
+            WlOutput::new(WlOutputId::from(OUTPUT_OBJECT), output_id, 4),
+        );
+        client.insert_object(
+            &mut state,
+            ExtOutputImageCaptureSourceManagerV1::new(
+                ExtOutputImageCaptureSourceManagerV1Id::from(30),
+            ),
+        );
+        let mut event = test_request(30, 0, 2);
+        event.id(ExtImageCaptureSourceV1Id::from(31));
+        event.id(WlOutputId::from(OUTPUT_OBJECT));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtOutputImageCaptureSourceManagerV1Id::from(30),
+            event,
+        );
+        insert_buffer(&mut client, &mut state);
+        client.insert_object(
+            &mut state,
+            ExtImageCopyCaptureManagerV1::new(ExtImageCopyCaptureManagerV1Id::from(32)),
+        );
+        let mut event = test_request(32, 0, 3);
+        event.id(ExtImageCopyCaptureSessionV1Id::from(33));
+        event.id(ExtImageCaptureSourceV1Id::from(31));
+        event.uint(1);
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureManagerV1Id::from(32),
+            event,
+        );
+        assert!(test_sent_arg(&dispatcher, 33, 1, 0));
+        assert!(test_sent_arg(&dispatcher, 33, 1, 1));
+        assert!(test_sent_arg(&dispatcher, 33, 0, 2));
+        assert!(test_sent(&dispatcher, 33, 4));
+        assert!(!test_sent(&dispatcher, 33, 2));
+        let mut frame = test_request(33, 0, 1);
+        frame.id(ExtImageCopyCaptureFrameV1Id::from(34));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureSessionV1Id::from(33),
+            frame,
+        );
+        let attach = with_id(test_request(34, 1, 1), WlBufferId::from(BUFFER));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureFrameV1Id::from(34),
+            attach,
+        );
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureFrameV1Id::from(34),
+            test_request(34, 3, 0),
+        );
+        assert!(!test_closed(&dispatcher, &client));
+        let specs = output_copy_specs(&state.capture, &state.objects, output_id);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].cursor, CaptureCursor::Painted);
+        apply_rendered_output(
+            &mut state.capture,
+            &state.objects,
+            output_id,
+            2,
+            2,
+            crate::state::FractionalScale::ONE,
+            0,
+            &[CapturePixelRect { x: 0, y: 0, width: 2, height: 2 }],
+            vec![RenderedOutputCopy {
+                job_id: specs[0].job_id,
+                bytes: vec![4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7],
+                stride: specs[0].stride,
+                read_ok: true,
+            }],
+            CaptureTimestamp { sec: 9, nsec: 8 },
+        );
+        publish_ext_frames(&mut state, &mut dispatcher);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        assert!(test_sent_arg(&dispatcher, 34, 1, 0));
+        assert!(test_sent_arg(&dispatcher, 34, 0, 0));
+        assert!(test_sent(&dispatcher, 34, 2));
+        assert!(test_sent(&dispatcher, 34, 3));
+        let stored = client
+            .resolve(WlBufferId::from(BUFFER), &state)
+            .unwrap()
+            .rref(&state)
+            .begin_capture_write(2, 2)
+            .unwrap();
+        assert_eq!(stored.as_slice()[..4], [4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn an_ext_frame_fails_a_buffer_that_misses_the_constraints() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        output_source(&mut client, &mut state, &mut dispatcher);
+        insert_buffer(&mut client, &mut state);
+        client.insert_object(
+            &mut state,
+            ExtImageCopyCaptureManagerV1::new(ExtImageCopyCaptureManagerV1Id::from(32)),
+        );
+        let mut event = test_request(32, 0, 3);
+        event.id(ExtImageCopyCaptureSessionV1Id::from(33));
+        event.id(ExtImageCaptureSourceV1Id::from(31));
+        event.uint(0);
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureManagerV1Id::from(32),
+            event,
+        );
+        let mut frame = test_request(33, 0, 1);
+        frame.id(ExtImageCopyCaptureFrameV1Id::from(34));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureSessionV1Id::from(33),
+            frame,
+        );
+        let attach = with_id(test_request(34, 1, 1), WlBufferId::from(BUFFER));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureFrameV1Id::from(34),
+            attach,
+        );
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureFrameV1Id::from(34),
+            test_request(34, 3, 0),
+        );
+        assert!(!test_closed(&dispatcher, &client));
+        assert!(test_sent_arg(&dispatcher, 34, 4, 1));
+    }
+
+    #[test]
+    fn a_pointer_cursor_session_copies_the_cursor_image() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        output_source(&mut client, &mut state, &mut dispatcher);
+        let pixels = vec![10, 20, 30, 255];
+        let (cursor_buffer, _) = client.insert_object(
+            &mut state,
+            WlBuffer::new(NewWlBufferParams {
+                id: WlBufferId::from(70),
+                owner_client_id: client.client_id(),
+                offset: 0,
+                width: 1,
+                height: 1,
+                stride: 4,
+                format: &crate::drm::ARGB8888,
+                mem: crate::wayland_objects::wl_shm_pool::shared_memory_from_bytes(&pixels),
+            })
+            .unwrap(),
+        );
+        let surface = {
+            let (resolved, surface) = client.insert_object(
+                &mut state,
+                crate::wayland_objects::wl_surface::WlSurface::new(
+                    crate::protocol_generated::WlSurfaceId::from(72),
+                    client.client_id(),
+                    6,
+                ),
+            );
+            surface.test_map(cursor_buffer.object_id(), 0, 0, 1, 1);
+            resolved
+        };
+        state.seat.set_cursor_surface(surface, 0, 0);
+        state.seat.pointer_pos = (10.0, 20.0);
+        client.insert_object(&mut state, WlPointer::new(WlPointerId::from(40), 3));
+        client.insert_object(
+            &mut state,
+            ExtImageCopyCaptureManagerV1::new(ExtImageCopyCaptureManagerV1Id::from(32)),
+        );
+        let mut event = test_request(32, 1, 3);
+        event.id(ExtImageCopyCaptureCursorSessionV1Id::from(41));
+        event.id(ExtImageCaptureSourceV1Id::from(31));
+        event.id(WlPointerId::from(40));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureManagerV1Id::from(32),
+            event,
+        );
+        let mut event = test_request(41, 1, 1);
+        event.id(ExtImageCopyCaptureSessionV1Id::from(33));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureCursorSessionV1Id::from(41),
+            event,
+        );
+        assert!(test_sent(&dispatcher, 41, 0));
+        assert!(test_sent_arg(&dispatcher, 41, 2, 10));
+        assert!(test_sent_arg(&dispatcher, 41, 3, 0));
+        assert!(test_sent_arg(&dispatcher, 33, 0, 1));
+        assert!(test_sent(&dispatcher, 33, 4));
+        let capture_pixels = vec![0, 0, 0, 0];
+        client.insert_object(
+            &mut state,
+            WlBuffer::new(NewWlBufferParams {
+                id: WlBufferId::from(71),
+                owner_client_id: client.client_id(),
+                offset: 0,
+                width: 1,
+                height: 1,
+                stride: 4,
+                format: &crate::drm::ARGB8888,
+                mem: crate::wayland_objects::wl_shm_pool::shared_memory_from_bytes(&capture_pixels),
+            })
+            .unwrap(),
+        );
+        let mut frame = test_request(33, 0, 1);
+        frame.id(ExtImageCopyCaptureFrameV1Id::from(34));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureSessionV1Id::from(33),
+            frame,
+        );
+        let attach = with_id(test_request(34, 1, 1), WlBufferId::from(71));
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureFrameV1Id::from(34),
+            attach,
+        );
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtImageCopyCaptureFrameV1Id::from(34),
+            test_request(34, 3, 0),
+        );
+        assert!(!test_closed(&dispatcher, &client));
+        assert!(test_sent(&dispatcher, 34, 3));
+        let stored = client
+            .resolve(WlBufferId::from(71), &state)
+            .unwrap()
+            .rref(&state)
+            .begin_capture_write(1, 1)
+            .unwrap();
+        assert_eq!(stored.as_slice(), [10, 20, 30, 255]);
     }
 
     #[test]

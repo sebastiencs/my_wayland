@@ -1,5 +1,5 @@
 //! `ext_image_copy_capture_manager_v1`. Unpublished until capture validation.
-//! Unknown option bits raise `invalid_option`. `paint_cursors` is stored for a later phase.
+//! Unknown option bits raise `invalid_option`. `paint_cursors` selects a cursor-painted copy.
 
 use crate::{
     capture::{self, CaptureTarget},
@@ -123,6 +123,10 @@ impl Object for ExtImageCopyCaptureManagerV1 {
                     ExtImageCopyCaptureSessionV1::new(session, target, options & paint != 0, None),
                 );
                 state.capture.track_session(resolved, target, None);
+                let size = capture::image_copy_buffer_size(state, target, false);
+                if let Some(session) = resolved.try_ref_mut(state) {
+                    session.send_constraints(size, dispatcher);
+                }
             }
             CreatePointerCursorSession { session, source, pointer } => {
                 let Some(target) = self.live_source(client, state, dispatcher, source) else {

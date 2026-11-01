@@ -3975,7 +3975,17 @@ fn sample_pending_toplevel_captures(
         render_prepared_toplevels(&mut state.objects, drm, drm_crtc_id, &prepared)
     };
     let timestamp = crate::capture::capture_timestamp_now();
-    for item in rendered {
+    for mut item in rendered {
+        if crate::capture::capture_job_cursor(state, item.copy.job_id)
+            == Some(crate::capture::CaptureCursor::Painted)
+        {
+            crate::capture::paint_toplevel_cursor(
+                state,
+                item.key,
+                &mut item.copy.bytes,
+                item.copy.stride,
+            );
+        }
         crate::capture::apply_rendered_toplevel(
             &mut state.capture,
             &state.objects,
@@ -4620,6 +4630,7 @@ impl DrmOutputModel {
         }
         sample_pending_toplevel_captures(state, self.drm_id, drm_crtc_id, self.output_id);
         crate::capture::publish_screencopy(state, dispatcher);
+        crate::capture::publish_ext_frames(state, dispatcher);
     }
 
     fn handle_flip_complete(
