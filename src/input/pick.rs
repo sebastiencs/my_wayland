@@ -16,6 +16,9 @@ use super::{
 };
 
 pub(crate) fn scene_pick_at(state: &State, pointer_pos: (f64, f64)) -> ScenePick {
+    if state.session_lock.input_gated() {
+        return pick_mapped_lock_surface(state, pointer_pos);
+    }
     let scene = state.build_scene_model();
     // Output-less state has no composition view. Keep the global root walk so geometry tests and
     // startup before the first output still resolve hits. Once an output exists, pointer picks
@@ -306,6 +309,84 @@ fn hit_test_subtree(
         }
     }
 
+    None
+}
+
+fn pick_mapped_lock_surface(state: &State, pointer_pos: (f64, f64)) -> ScenePick {
+    let Some(output_id) = pointer_output(state, pointer_pos) else {
+        return ScenePick { surface_focus: None, window_target: None };
+    };
+    if !state.session_lock.shows_lock_surface(output_id) {
+        return ScenePick { surface_focus: None, window_target: None };
+    }
+    let Some(lock_surface) = state.session_lock.surface_for_output(output_id) else {
+        return ScenePick { surface_focus: None, window_target: None };
+    };
+    let Some(surface) = lock_surface
+        .try_ref(state)
+        .map(|lock_surface| lock_surface.wl_surface())
+    else {
+        return ScenePick { surface_focus: None, window_target: None };
+    };
+    let Some(bounds) = state.output_bounds(output_id) else {
+        return ScenePick { surface_focus: None, window_target: None };
+    };
+    ScenePick {
+        surface_focus: hit_test_lock_tree(
+            state,
+            surface,
+            bounds.x,
+            bounds.y,
+            pointer_pos.0,
+            pointer_pos.1,
+        ),
+        window_target: None,
+    }
+}
+
+/// Lock surfaces are not scene roots. Walk the surface and its subsurfaces, and skip popups.
+fn hit_test_lock_tree(
+    state: &State,
+    surface_id: Resolved<WlSurfaceId>,
+    base_x: i32,
+    base_y: i32,
+    x: f64,
+    y: f64,
+) -> Option<SurfaceFocusPick> {
+    let surface = surface_id.try_ref(state)?;
+    let surface_state = surface.render_state_at(base_x, base_y)?;
+    let stack = surface.current_stack().to_vec();
+    for entry in stack.iter().rev() {
+        match *entry {
+            StackEntry::Parent => {
+                let rect = SurfaceRect {
+                    x: surface_state.x,
+                    y: surface_state.y,
+                    width: surface_state.width,
+                    height: surface_state.height,
+                };
+                if surface.accepts_input_at_with_origin(x, y, base_x, base_y) {
+                    return Some(SurfaceFocusPick { target: SurfaceFocus::new(surface_id), rect });
+                }
+            }
+            StackEntry::Child(child_surface_id) => {
+                let Some(child_surface) = child_surface_id.try_ref(state) else {
+                    continue;
+                };
+                let (child_x, child_y) = child_surface.current_subsurface_position();
+                if let Some(hit) = hit_test_lock_tree(
+                    state,
+                    child_surface_id,
+                    surface_state.x + child_x,
+                    surface_state.y + child_y,
+                    x,
+                    y,
+                ) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
     None
 }
 

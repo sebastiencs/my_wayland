@@ -81,6 +81,9 @@ pub(crate) fn request_toplevel_move(
     is_maximized: bool,
     is_fullscreen: bool,
 ) -> bool {
+    if state.session_lock.input_gated() {
+        return false;
+    }
     if !state
         .seat
         .validate_implicit_grab_serial(client_id, surface, serial)
@@ -125,6 +128,9 @@ pub(crate) fn request_toplevel_resize(
     is_fullscreen: bool,
     edges: u32,
 ) -> bool {
+    if state.session_lock.input_gated() {
+        return false;
+    }
     if !state
         .seat
         .validate_implicit_grab_serial(client_id, surface, serial)

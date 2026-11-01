@@ -1,7 +1,8 @@
 use {
     crate::{
-        clients::{Client, ClientAction, ClientId, Resolved},
+        clients::{Client, ClientAction, ClientDispatcher, ClientId, Resolved},
         drm::{kick_visual_animation_pump, request_outputs_for_rects},
+        object::PostAction,
         protocol_generated::{WlSeatId, WlSurfaceId},
         runner::Dispatcher,
         scene::{compose_output, CompositionTier},
@@ -65,7 +66,7 @@ pub(crate) fn set_keyboard_focus(
 
     let old_focus = state.seat.keyboard_focus;
     state.seat.keyboard_focus = new_focus;
-    if let Some(new_focus) = new_focus {
+    if let Some(new_focus) = new_focus.filter(|_| !state.session_lock.input_gated()) {
         let root_focus = state
             .root_surface_for_surface(new_focus.surface)
             .map(SurfaceFocus::new)
@@ -147,7 +148,25 @@ pub(crate) fn refresh_scene_focus(state: &mut State, dispatcher: &mut Dispatcher
     refresh_keyboard_focus(state, dispatcher);
 }
 
+/// Runs after the committing surface is released. Picking it while it is grabbed panics.
+pub(crate) struct RefreshLockFocus;
+
+impl PostAction for RefreshLockFocus {
+    fn execute(
+        self: Box<Self>,
+        _client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        refresh_scene_focus(state, dispatcher);
+    }
+}
+
 pub(crate) fn focus_after_client_disconnect(state: &mut State, dispatcher: &mut Dispatcher) {
+    if state.session_lock.input_gated() {
+        refresh_keyboard_focus(state, dispatcher);
+        return;
+    }
     if state.seat.keyboard_focus().is_some() {
         return;
     }
@@ -511,6 +530,9 @@ fn normalize_keyboard_focus_with_snapshot(
     requested_focus: Option<SurfaceFocus>,
     snapshot: Option<LayerLayoutObjectSnapshot<'_>>,
 ) -> Option<SurfaceFocus> {
+    if state.session_lock.input_gated() {
+        return lock_keyboard_focus(state, requested_focus);
+    }
     let requested_focus = requested_focus.and_then(|focus| {
         let root_surface = root_surface_for_focus(state, focus)?;
         match layer_surface_keyboard_focus_with_snapshot(state, root_surface, snapshot) {
@@ -571,6 +593,61 @@ fn topmost_exclusive_layer_focus_with_snapshot(
         .rev()
         .next()
         .map(SurfaceFocus::new)
+}
+
+fn lock_keyboard_focus(
+    state: &State,
+    requested_focus: Option<SurfaceFocus>,
+) -> Option<SurfaceFocus> {
+    if let Some(focus) = requested_focus.filter(|focus| mapped_lock_content(state, focus.surface)) {
+        return Some(focus);
+    }
+    state
+        .seat
+        .keyboard_focus()
+        .filter(|focus| mapped_lock_content(state, focus.surface))
+        .or_else(|| first_mapped_lock_focus(state))
+}
+
+fn mapped_lock_content(state: &State, mut surface: Resolved<WlSurfaceId>) -> bool {
+    loop {
+        let parent = {
+            let Some(wl_surface) = surface.try_ref(state) else {
+                return false;
+            };
+            if wl_surface.has_lock_surface_role() {
+                let Some(lock_surface) = wl_surface.lock_surface() else {
+                    return false;
+                };
+                let Some(output_id) = lock_surface
+                    .try_ref(state)
+                    .map(|lock_surface| lock_surface.output_id())
+                else {
+                    return false;
+                };
+                return state.session_lock.shows_lock_surface(output_id);
+            }
+            wl_surface.parent_surface().copied()
+        };
+        match parent {
+            Some(parent) => surface = parent,
+            None => return false,
+        }
+    }
+}
+
+fn first_mapped_lock_focus(state: &State) -> Option<SurfaceFocus> {
+    state
+        .session_lock
+        .covered_outputs()
+        .into_iter()
+        .find_map(|output_id| {
+            if !state.session_lock.shows_lock_surface(output_id) {
+                return None;
+            }
+            let lock_surface = state.session_lock.surface_for_output(output_id)?;
+            Some(SurfaceFocus::new(lock_surface.try_ref(state)?.wl_surface()))
+        })
 }
 
 fn root_surface_for_focus(state: &State, focus: SurfaceFocus) -> Option<Resolved<WlSurfaceId>> {

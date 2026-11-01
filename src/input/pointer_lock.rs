@@ -157,7 +157,8 @@ pub(crate) fn recheck_pointer_capture(state: &mut State, dispatcher: &mut Dispat
 }
 
 pub(crate) fn compositor_blocks_pointer_capture(state: &State) -> bool {
-    state.seat.pointer_interactive_grab.is_some()
+    state.session_lock.input_gated()
+        || state.seat.pointer_interactive_grab.is_some()
         || state.seat.popup_grab_client().is_some()
         || state.seat.active_drag().is_some()
 }

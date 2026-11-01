@@ -230,6 +230,10 @@ fn start_drag(
 ) -> RequestResult {
     use crate::state::{DragPhase, DragSource, DragState};
 
+    if state.session_lock.input_gated() {
+        return Ok(());
+    }
+
     let origin = client.resolve_or_disconnect(origin, state, dispatcher)?;
     if !state.seat.validate_data_transfer_serial(origin, serial) {
         return Ok(());

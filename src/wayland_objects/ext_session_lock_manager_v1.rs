@@ -45,6 +45,7 @@ impl Object for ExtSessionLockManagerV1 {
                 } else {
                     let outputs = state.session_lock.covered_outputs();
                     crate::drm::request_outputs(state, outputs, dispatcher);
+                    crate::seat::gate_for_session_lock(state, dispatcher);
                 }
             }
         }
@@ -64,10 +65,12 @@ mod tests {
         super::*,
         crate::{
             clients::{Client, ClientAction, ClientId, ClientManagerAction, RawEvent},
+            config::{Binding, CompositorAction, KeyBinding},
             input::types::SurfaceFocus,
             object::IdToObject,
             protocol_generated::{ExtSessionLockSurfaceV1Id, WlOutputId, WlSurfaceId},
             runner::{Dispatcher, Model},
+            seat::handle_keyboard_key,
             session_lock::{LockBlank, SessionLockPhase},
             test_support::{state_for_tests, test_output_drm1},
             wayland_objects::{
@@ -76,6 +79,7 @@ mod tests {
                 wl_surface::{Role, WlSurface},
             },
         },
+        xkbcommon::xkb,
     };
 
     const MANAGER_ID: u32 = 8;
@@ -125,6 +129,36 @@ mod tests {
     }
 
     #[test]
+    fn a_lock_drops_desktop_input_and_ignores_bindings() {
+        let mut state = state_for_tests();
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        let mut dispatcher = Dispatcher::default();
+        insert_manager(&mut client, &mut state);
+        let surface = client
+            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(20), client.client_id(), 6))
+            .0;
+        let focus = SurfaceFocus::new(surface);
+        state.seat.keyboard_focus = Some(focus);
+        state.seat.remember_keyboard_focus(focus);
+        handle_keyboard_key(&mut state, &mut dispatcher, 30, 1, 0);
+        assert!(state.seat.last_keyboard_trigger_serial().is_some());
+
+        let keysym = xkb::Keysym::from(xkb::keysyms::KEY_a);
+        assert_eq!(state.keyboard.key_get_one_sym(30), keysym);
+        state.config.bindings.push(Binding {
+            trigger: KeyBinding { description: "quit".into(), keysym, modifiers: 0 },
+            action: CompositorAction::Quit,
+        });
+        lock(&mut client, &mut state, &mut dispatcher, LOCK_ID);
+
+        assert!(state.seat.keyboard_focus().is_none());
+        assert!(state.seat.last_keyboard_trigger_serial().is_none());
+        assert_eq!(state.seat.keyboard_focus_history(), vec![focus]);
+        handle_keyboard_key(&mut state, &mut dispatcher, 30, 1, 0);
+        assert!(!dispatcher.shutdown_requested());
+    }
+
+    #[test]
     fn the_manager_is_not_advertised() {
         let state = state_for_tests();
         assert!(state
@@ -147,8 +181,11 @@ mod tests {
         lock(&mut client, &mut state, &mut dispatcher, LOCK_ID);
         assert_eq!(state.session_lock.phase(), SessionLockPhase::Locking);
         assert!(!state.session_lock.locked_sent());
+        assert!(state.seat.keyboard_focus().is_none());
         assert_eq!(state.session_lock.pre_lock_focus().keyboard, Some(SurfaceFocus::new(surface)));
-        assert!(!dispatcher.test_has_queued_action::<ClientAction>(|_| true));
+        assert!(!dispatcher.test_has_queued_action::<ClientAction>(|action| {
+            matches!(action, ClientAction::SendSessionLockLocked)
+        }));
 
         lock(&mut client, &mut state, &mut dispatcher, OTHER_LOCK_ID);
         assert_eq!(

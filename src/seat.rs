@@ -941,6 +941,16 @@ impl SeatState {
         self.cursor.ensure_default_named_cursor()
     }
 
+    pub(crate) fn invalidate_implicit_grabs(&mut self) {
+        self.pointer_button_count = 0;
+        self.pressed_buttons.clear();
+        self.last_pointer_press = None;
+        self.last_keyboard_trigger = None;
+        self.client_serials.clear();
+        self.intercepted_keyboard_keys.clear();
+        self.intercepted_pointer_buttons.clear();
+    }
+
     pub fn set_cursor_surface(
         &mut self,
         surface: Resolved<WlSurfaceId>,
@@ -1196,7 +1206,7 @@ pub fn handle_pointer_motion(
         state.seat.pointer_pos.1,
         time
     );
-    if refresh_drag_focus(state, dispatcher, time, true) {
+    if !state.session_lock.input_gated() && refresh_drag_focus(state, dispatcher, time, true) {
         refresh_visible_cursor_surface_outputs(state, dispatcher);
         refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
         if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
@@ -1204,7 +1214,7 @@ pub fn handle_pointer_motion(
         }
         return;
     }
-    if apply_pointer_interactive_grab(state, dispatcher) {
+    if !state.session_lock.input_gated() && apply_pointer_interactive_grab(state, dispatcher) {
         return;
     }
     refresh_pointer_focus(state, dispatcher, time, true);
@@ -1222,10 +1232,13 @@ pub fn handle_pointer_button(
     button_state: u32,
     time: u32,
 ) {
-    if let Some(focus) = popup_keyboard_focus(state) {
-        set_keyboard_focus(state, dispatcher, Some(focus));
+    if !state.session_lock.input_gated() {
+        if let Some(focus) = popup_keyboard_focus(state) {
+            set_keyboard_focus(state, dispatcher, Some(focus));
+        }
     }
-    let interactive_grab_active = state.seat.pointer_interactive_grab.is_some();
+    let interactive_grab_active =
+        !state.session_lock.input_gated() && state.seat.pointer_interactive_grab.is_some();
     if !interactive_grab_active {
         refresh_pointer_focus(state, dispatcher, time, false);
     }
@@ -1270,11 +1283,17 @@ pub fn handle_pointer_button(
         return;
     }
 
-    if maybe_dismiss_popup_grab_on_button(state, dispatcher, button_state, time) {
+    if !state.session_lock.input_gated()
+        && maybe_dismiss_popup_grab_on_button(state, dispatcher, button_state, time)
+    {
         return;
     }
 
-    if button_state == 1 && button == 0x110 && begin_decoration_pointer_action(state, dispatcher) {
+    if !state.session_lock.input_gated()
+        && button_state == 1
+        && button == 0x110
+        && begin_decoration_pointer_action(state, dispatcher)
+    {
         state.seat.intercept_pointer_button(button);
         return;
     }
@@ -1283,7 +1302,7 @@ pub fn handle_pointer_button(
         set_keyboard_focus(state, dispatcher, pointer_focus.map(|focus| focus.target));
     }
 
-    if button_state == 1 {
+    if !state.session_lock.input_gated() && button_state == 1 {
         if let Some(action) = state
             .config
             .binding_for_pointer_button(&state.keyboard, button)
@@ -1360,7 +1379,7 @@ pub fn handle_pointer_motion_absolute(
     //     state.seat.pointer_pos.1,
     //     time
     // );
-    if refresh_drag_focus(state, dispatcher, time, true) {
+    if !state.session_lock.input_gated() && refresh_drag_focus(state, dispatcher, time, true) {
         refresh_visible_cursor_surface_outputs(state, dispatcher);
         refresh_visible_dnd_icon_surface_outputs(state, dispatcher);
         if state.seat.cursor_is_visible() || visible_dnd_icon_owner_client(state).is_some() {
@@ -1368,7 +1387,7 @@ pub fn handle_pointer_motion_absolute(
         }
         return;
     }
-    if apply_pointer_interactive_grab(state, dispatcher) {
+    if !state.session_lock.input_gated() && apply_pointer_interactive_grab(state, dispatcher) {
         return;
     }
     refresh_pointer_focus(state, dispatcher, time, true);
@@ -1380,6 +1399,30 @@ pub fn handle_pointer_motion_absolute(
 }
 
 /// Release stuck keys, buttons, focus, and grabs before a device pause.
+pub fn gate_for_session_lock(state: &mut State, dispatcher: &mut Dispatcher) {
+    cancel_active_drag(state, dispatcher, None);
+    if let Some((client_id, popups)) = state.seat.dismiss_popup_grab() {
+        dispatcher.dispatch_to(client_id, ClientAction::DismissPopupGrab { popups });
+    }
+    let time = monotonic_time_msec();
+    if state.seat.pointer_interactive_grab.is_some() {
+        abort_pointer_interactive_grab(state, dispatcher, time);
+    }
+    let keys = state.keyboard.pressed_keys().0;
+    let buttons: Vec<u32> = state.seat.pressed_buttons.iter().copied().collect();
+    for key in keys {
+        handle_keyboard_key(state, dispatcher, key, 0, time);
+    }
+    for button in buttons {
+        handle_pointer_button(state, dispatcher, button, 0, time);
+    }
+    crate::input::pointer_lock::release_pointer_capture(state, dispatcher);
+    set_keyboard_focus(state, dispatcher, None);
+    clear_pointer_focus(state, dispatcher);
+    state.seat.set_default_cursor();
+    state.seat.invalidate_implicit_grabs();
+}
+
 pub fn quiesce_for_session_pause(state: &mut State, dispatcher: &mut Dispatcher) {
     let keys = state.keyboard.pressed_keys().0;
     let buttons: Vec<u32> = state.seat.pressed_buttons.iter().copied().collect();
@@ -1447,7 +1490,7 @@ pub fn handle_keyboard_key(
         return;
     }
 
-    if key_state == 1 {
+    if key_state == 1 && !state.session_lock.input_gated() {
         if let Some(action) = state.config.binding_for_key(&state.keyboard, key) {
             log::info!("seat executing compositor binding key={} action={:?}", key, action);
             state.seat.intercept_keyboard_key(key);
@@ -1456,7 +1499,15 @@ pub fn handle_keyboard_key(
         }
     }
 
-    if state.seat.keyboard_focus.is_none() {
+    if state.session_lock.input_gated() {
+        if key_state == 1 {
+            let requested = state
+                .seat
+                .keyboard_focus
+                .or_else(|| state.seat.pointer_focus.map(|focus| focus.target));
+            set_keyboard_focus(state, dispatcher, requested);
+        }
+    } else if state.seat.keyboard_focus.is_none() {
         set_keyboard_focus(state, dispatcher, state.seat.pointer_focus.map(|focus| focus.target));
     }
 
@@ -1830,6 +1881,9 @@ pub fn request_popup_grab(
     popup: Resolved<XdgPopupId>,
     popup_surface: Resolved<WlSurfaceId>,
 ) -> bool {
+    if state.session_lock.input_gated() {
+        return false;
+    }
     if popup_surface.client_id() != client_id || !popup_surface.exists(state) {
         return false;
     }

@@ -565,6 +565,10 @@ impl WlSurface {
         self.role == Role::LockSurface
     }
 
+    pub fn lock_surface(&self) -> Option<Resolved<ExtSessionLockSurfaceV1Id>> {
+        self.lock_surface
+    }
+
     pub fn set_lock_surface(&mut self, lock_surface: Resolved<ExtSessionLockSurfaceV1Id>) {
         self.lock_surface = Some(lock_surface);
     }
@@ -1395,17 +1399,17 @@ impl WlSurface {
         true
     }
 
-    fn note_lock_surface_mapped(&self, state: &mut State) {
+    fn note_lock_surface_mapped(&self, state: &mut State) -> bool {
         let Some(lock_surface_id) = self.lock_surface else {
-            return;
+            return false;
         };
         let Some(mut lock_surface) = lock_surface_id.try_ref_mut(state) else {
-            return;
+            return false;
         };
         let Some(output_id) = lock_surface.mark_mapped_if_ready() else {
-            return;
+            return false;
         };
-        state.session_lock.note_mapped(output_id);
+        state.session_lock.note_mapped(output_id)
     }
 
     fn validate_pending_mapping(
@@ -2070,7 +2074,7 @@ impl WlSurface {
         } else {
             None
         };
-        this.note_lock_surface_mapped(state);
+        let mapped = this.note_lock_surface_mapped(state);
         if let Some(output_id) = lock_output {
             crate::drm::request_output(state, output_id, dispatcher);
         }
@@ -2101,6 +2105,9 @@ impl WlSurface {
                 false,
             )
         };
+        if mapped {
+            dispatcher.dispatch_post_action(crate::input::focus::RefreshLockFocus);
+        }
 
         if let Some((xdg_surface_id, role_changes)) = pending_xdg_role_changes {
             let mut xdg_surface = xdg_surface_id.grab(state);

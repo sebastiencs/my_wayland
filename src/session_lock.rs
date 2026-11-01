@@ -1,4 +1,4 @@
-//! Session-lock lifecycle. Input gating and focus restoration arrive in later phases.
+//! Session-lock lifecycle. While locking, locked, or abandoned, input stays on lock surfaces.
 //! `locked` is not emitted here: confirmation waits until every active output has presented.
 
 use {
@@ -104,6 +104,11 @@ impl SessionLock {
 
     pub fn accepts_new_lock(&self) -> bool {
         matches!(self.phase, SessionLockPhase::Unlocked | SessionLockPhase::Abandoned)
+    }
+
+    /// Locking, locked, and abandoned all hide the desktop. Bindings and normal clients stay out.
+    pub fn input_gated(&self) -> bool {
+        !matches!(self.phase, SessionLockPhase::Unlocked)
     }
 
     /// Accept the first lock, or the single replacement after the previous locker died.

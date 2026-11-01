@@ -1250,6 +1250,9 @@ impl State {
     }
 
     pub fn activate_workspace(&mut self, workspace_id: WorkspaceId) -> bool {
+        if self.session_lock.input_gated() {
+            return false;
+        }
         let previous_workspace = self
             .workspaces
             .try_get(workspace_id)
@@ -1281,6 +1284,9 @@ impl State {
         &mut self,
         direction: WorkspaceTransitionDirection,
     ) -> Option<WorkspaceGroupId> {
+        if self.session_lock.input_gated() {
+            return None;
+        }
         let output_id = self
             .active_output_id()
             .or_else(|| self.fallback_output_id())?;

@@ -151,6 +151,7 @@ impl Object for ExtSessionLockSurfaceV1 {
                 self.delete_self(client, state, dispatcher);
                 if repaint {
                     crate::drm::request_output(state, output_id, dispatcher);
+                    dispatcher.dispatch_post_action(crate::input::focus::RefreshLockFocus);
                 }
             }
             AckConfigure { serial } => {
@@ -193,6 +194,7 @@ impl Object for ExtSessionLockSurfaceV1 {
         let output_id = self.output_id;
         if !self.inert && state.session_lock.clear_surface(output_id) {
             crate::drm::request_output(state, output_id, dispatcher);
+            dispatcher.dispatch_post_action(crate::input::focus::RefreshLockFocus);
         }
     }
 }
@@ -202,12 +204,13 @@ mod tests {
     use {
         super::*,
         crate::{
-            clients::{Client, ClientId, ClientManagerAction, RawEvent},
+            clients::{Client, ClientId, ClientManagerAction, RawEvent, Resolved},
             drm::ARGB8888,
+            input::types::SurfaceFocus,
             object::IdToObject,
             protocol_generated::{
                 ExtSessionLockManagerV1Id, ExtSessionLockV1Id, WaylandId, WlBufferId, WlOutputId,
-                WlSurfaceId,
+                WlSurfaceId, XdgPopupId,
             },
             runner::{Dispatcher, Model},
             session_lock::SessionLockPhase,
@@ -249,6 +252,7 @@ mod tests {
             (&*event.into_bytes()).try_into().unwrap(),
             &mut client_dispatcher,
         );
+        client_dispatcher.drain_post_actions(client, state);
     }
 
     fn closed(dispatcher: &Dispatcher, client: &Client) -> bool {
@@ -492,6 +496,106 @@ mod tests {
         ack(&mut fixture, 2);
         commit(&mut fixture);
         assert!(closed(&fixture.dispatcher, &fixture.client));
+    }
+
+    #[test]
+    fn a_mapped_lock_surface_takes_input_without_entering_focus_history() {
+        let mut fixture = fixture();
+        let desktop = fixture
+            .client
+            .insert_object(
+                &mut fixture.state,
+                WlSurface::new(WlSurfaceId::from(21), fixture.client.client_id(), 6),
+            )
+            .0;
+        let desktop_focus = SurfaceFocus::new(desktop);
+        fixture.state.seat.remember_keyboard_focus(desktop_focus);
+        fixture.state.seat.keyboard_focus = Some(desktop_focus);
+
+        ack(&mut fixture, 1);
+        let buffer = insert_buffer(&mut fixture, 40, 640, 480);
+        attach(&mut fixture, buffer);
+        commit(&mut fixture);
+
+        assert_eq!(
+            fixture
+                .state
+                .seat
+                .keyboard_focus()
+                .map(|focus| focus.surface),
+            Some(fixture.surface)
+        );
+        assert_eq!(
+            fixture
+                .state
+                .seat
+                .pointer_focus
+                .map(|focus| focus.target.surface),
+            Some(fixture.surface)
+        );
+        assert_eq!(fixture.state.seat.keyboard_focus_history(), vec![desktop_focus]);
+
+        fixture.state.seat.keyboard_focus = Some(desktop_focus);
+        crate::seat::refresh_scene_focus(&mut fixture.state, &mut fixture.dispatcher);
+        assert_eq!(
+            fixture
+                .state
+                .seat
+                .keyboard_focus()
+                .map(|focus| focus.surface),
+            Some(fixture.surface)
+        );
+        assert_eq!(fixture.state.seat.keyboard_focus_history(), vec![desktop_focus]);
+
+        let group = fixture
+            .state
+            .workspace_group_for_output(fixture.output_id)
+            .unwrap();
+        let second = fixture
+            .state
+            .workspace_groups
+            .try_get(group)
+            .unwrap()
+            .workspaces[1];
+        assert!(!fixture.state.activate_workspace(second));
+        assert!(!crate::seat::request_popup_grab(
+            &mut fixture.state,
+            &mut fixture.dispatcher,
+            fixture.client.client_id(),
+            fixture.surface,
+            1,
+            Resolved::new(
+                fixture.client.client_id(),
+                XdgPopupId::from(99),
+                fixture.surface.object_id()
+            ),
+            fixture.surface,
+        ));
+
+        fixture.state.seat.keyboard_focus = None;
+        crate::input::focus::focus_after_client_disconnect(
+            &mut fixture.state,
+            &mut fixture.dispatcher,
+        );
+        assert_eq!(
+            fixture
+                .state
+                .seat
+                .keyboard_focus()
+                .map(|focus| focus.surface),
+            Some(fixture.surface)
+        );
+
+        dispatch(
+            &mut fixture.client,
+            &mut fixture.state,
+            &mut fixture.dispatcher,
+            ExtSessionLockSurfaceV1Id::from(LOCK_SURFACE_ID),
+            request(LOCK_SURFACE_ID, 0, 0),
+        );
+        assert!(fixture.state.seat.keyboard_focus().is_none());
+        assert!(fixture.state.seat.pointer_focus.is_none());
+        assert_eq!(fixture.state.seat.keyboard_focus_history(), vec![desktop_focus]);
     }
 
     #[test]
