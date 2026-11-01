@@ -28,6 +28,8 @@ pub struct PreLockFocus {
 #[derive(Clone, Copy, Debug)]
 struct LockOutput {
     surface: Option<Resolved<ExtSessionLockSurfaceV1Id>>,
+    /// A commit matched the last acked configure. Destroying that surface exposes the fallback.
+    mapped: bool,
     presented: bool,
     /// Enabled when the lock was accepted. A surface on any other output does not join this set.
     required: bool,
@@ -110,7 +112,15 @@ impl SessionLock {
         self.outputs = outputs
             .into_iter()
             .map(|output_id| {
-                (output_id, LockOutput { surface: None, presented: false, required: true })
+                (
+                    output_id,
+                    LockOutput {
+                        surface: None,
+                        mapped: false,
+                        presented: false,
+                        required: true,
+                    },
+                )
             })
             .collect();
     }
@@ -140,6 +150,7 @@ impl SessionLock {
         self.lock = None;
         for output in self.outputs.values_mut() {
             output.surface = None;
+            output.mapped = false;
             output.presented = false;
         }
     }
@@ -159,6 +170,7 @@ impl SessionLock {
     ) -> bool {
         let entry = self.outputs.entry(output_id).or_insert(LockOutput {
             surface: None,
+            mapped: false,
             presented: false,
             required: false,
         });
@@ -172,7 +184,32 @@ impl SessionLock {
     pub fn clear_surface(&mut self, output_id: OutputId) {
         if let Some(output) = self.outputs.get_mut(&output_id) {
             output.surface = None;
+            output.mapped = false;
         }
+    }
+
+    pub fn note_mapped(&mut self, output_id: OutputId) {
+        if let Some(output) = self.outputs.get_mut(&output_id) {
+            if output.surface.is_some() {
+                output.mapped = true;
+            }
+        }
+    }
+
+    pub fn shows_lock_surface(&self, output_id: OutputId) -> bool {
+        self.outputs
+            .get(&output_id)
+            .is_some_and(|output| output.mapped && output.surface.is_some())
+    }
+
+    /// The output is gone. The lock surface stays alive and becomes inert for its client.
+    pub fn detach_output(
+        &mut self,
+        output_id: OutputId,
+    ) -> Option<Resolved<ExtSessionLockSurfaceV1Id>> {
+        self.outputs
+            .remove(&output_id)
+            .and_then(|output| output.surface)
     }
 
     pub fn mark_output_presented(&mut self, output_id: OutputId) -> bool {

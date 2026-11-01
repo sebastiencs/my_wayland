@@ -2795,6 +2795,12 @@ impl State {
         if !surface.exists(self) {
             return;
         }
+        if surface
+            .try_ref(self)
+            .is_some_and(|wl_surface| wl_surface.has_lock_surface_role())
+        {
+            return;
+        }
         self.unregister_root_surface(surface);
         self.root_surfaces.push(surface);
         self.root_surface_process_info.insert(
@@ -2975,6 +2981,11 @@ impl State {
 
     pub fn remove_output(&mut self, output_id: OutputId) -> Option<Output> {
         let removed = self.outputs.remove(output_id)?;
+        if let Some(lock_surface) = self.session_lock.detach_output(output_id) {
+            if let Some(lock_surface) = lock_surface.try_ref_mut(self) {
+                lock_surface.make_inert();
+            }
+        }
         if let Some(group_id) = self.output_workspace_groups.remove(&output_id) {
             let fallback_group_id = self
                 .output_workspace_groups

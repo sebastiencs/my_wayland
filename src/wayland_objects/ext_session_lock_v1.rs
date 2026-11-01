@@ -270,11 +270,13 @@ fn create_lock_surface(
         );
         return;
     }
+    state.unregister_root_surface(surface);
     let lock_resolved = client
         .resolve(lock.id, state)
         .expect("ext_session_lock_v1 is live");
     let (surface_resolved, _) = client
         .insert_object(state, ExtSessionLockSurfaceV1::new(id, lock_resolved, surface, output_id));
+    surface.ref_mut(state).set_lock_surface(surface_resolved);
     if !state
         .session_lock
         .assign_surface(output_id, surface_resolved)

@@ -48,7 +48,11 @@ fn pick_roots(
         let Some(surface) = root_surface.try_ref(state) else {
             continue;
         };
-        if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
+        if !surface.is_root()
+            || surface.has_cursor_role()
+            || surface.has_dnd_icon_role()
+            || surface.has_lock_surface_role()
+        {
             continue;
         }
         let root_hit = hit_test_subtree(state, root_surface, 0, 0, pointer_pos.0, pointer_pos.1);

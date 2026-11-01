@@ -122,7 +122,10 @@ fn collect_unmanaged_scene_entries(
         let Some(surface) = root_surface.try_ref(state) else {
             continue;
         };
-        if surface.has_cursor_role() || surface.has_dnd_icon_role() {
+        if surface.has_cursor_role()
+            || surface.has_dnd_icon_role()
+            || surface.has_lock_surface_role()
+        {
             continue;
         }
         if surface.layer_surface().is_some() {

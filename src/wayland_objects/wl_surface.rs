@@ -12,10 +12,10 @@ use crate::{
     object::{Object, Parser, PostAction, RequestResult},
     protocol_generated::{
         wl_pointer, wl_surface, wp_fractional_scale_v1, wp_linux_drm_syncobj_surface_v1,
-        wp_viewport, xdg_wm_base, WaylandId, WlBufferId, WlCallbackId, WlOutputId, WlRegionId,
-        WlSubsurfaceId, WlSurfaceId, WpFractionalScaleV1Id, WpLinuxDrmSyncobjSurfaceV1Id,
-        WpPresentationFeedbackId, WpViewportId, XdgSurfaceId, ZwlrLayerSurfaceV1Id,
-        ZwpIdleInhibitorV1Id,
+        wp_viewport, xdg_wm_base, ExtSessionLockSurfaceV1Id, WaylandId, WlBufferId, WlCallbackId,
+        WlOutputId, WlRegionId, WlSubsurfaceId, WlSurfaceId, WpFractionalScaleV1Id,
+        WpLinuxDrmSyncobjSurfaceV1Id, WpPresentationFeedbackId, WpViewportId, XdgSurfaceId,
+        ZwlrLayerSurfaceV1Id, ZwpIdleInhibitorV1Id,
     },
     region::{DamageRegion, RectI, RegionValue},
     scene::visibility::root_participates_in_input,
@@ -197,6 +197,7 @@ pub struct WlSurface {
     preferred_buffer_transform_sent: Option<u32>,
     pointer_constraint: Option<SurfacePointerConstraint>,
     idle_inhibitors: Vec<Resolved<ZwpIdleInhibitorV1Id>>,
+    lock_surface: Option<Resolved<ExtSessionLockSurfaceV1Id>>,
 }
 
 #[derive(Clone, Debug)]
@@ -435,6 +436,7 @@ impl WlSurface {
             preferred_buffer_transform_sent: None,
             pointer_constraint: None,
             idle_inhibitors: Vec::new(),
+            lock_surface: None,
         }
     }
 
@@ -557,6 +559,14 @@ impl WlSurface {
 
     pub fn has_dnd_icon_role(&self) -> bool {
         self.role == Role::DndIcon
+    }
+
+    pub fn has_lock_surface_role(&self) -> bool {
+        self.role == Role::LockSurface
+    }
+
+    pub fn set_lock_surface(&mut self, lock_surface: Resolved<ExtSessionLockSurfaceV1Id>) {
+        self.lock_surface = Some(lock_surface);
     }
 
     pub fn has_pending_buffer_attach(&self) -> bool {
@@ -1346,6 +1356,58 @@ impl WlSurface {
         }
     }
 
+    fn lock_commit_logical_size(&self, state: &State) -> Option<SizeI> {
+        let buffer_id = match self.pending.buffer {
+            Some(None) => return None,
+            Some(Some(buffer_id)) => buffer_id,
+            None => self.on_screen.buffer_object_id?,
+        };
+        let buffer = buffer_id.try_ref(state)?;
+        let (width, height) = buffer.dimensions();
+        Some(transform::derive_logical_size(
+            SizeI { width, height },
+            self.pending.buffer_transform,
+            self.pending.buffer_scale,
+            self.pending.viewport,
+        ))
+    }
+
+    fn reject_lock_surface_commit(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) -> bool {
+        if self.role != Role::LockSurface {
+            return false;
+        }
+        let Some(lock_surface_id) = self.lock_surface else {
+            return false;
+        };
+        let size = self.lock_commit_logical_size(state);
+        let Some(mut lock_surface) = lock_surface_id.try_ref_mut(state) else {
+            return false;
+        };
+        let Err((code, message)) = lock_surface.check_commit(size) else {
+            return false;
+        };
+        client.protocol_violation_disconnect(dispatcher, lock_surface.id().into(), code, message);
+        true
+    }
+
+    fn note_lock_surface_mapped(&self, state: &mut State) {
+        let Some(lock_surface_id) = self.lock_surface else {
+            return;
+        };
+        let Some(mut lock_surface) = lock_surface_id.try_ref_mut(state) else {
+            return;
+        };
+        let Some(output_id) = lock_surface.mark_mapped_if_ready() else {
+            return;
+        };
+        state.session_lock.note_mapped(output_id);
+    }
+
     fn validate_pending_mapping(
         &self,
         client: &Client,
@@ -1970,6 +2032,11 @@ impl WlSurface {
             self
         };
 
+        if this.reject_lock_surface_commit(client, state, dispatcher) {
+            this.clear_failed_surface_commit();
+            return;
+        }
+
         if !this.validate_pending_mapping(client, state, dispatcher) {
             this.clear_failed_surface_commit();
             return;
@@ -1996,6 +2063,7 @@ impl WlSurface {
             this.discard_presentation_feedbacks(client, state, dispatcher, discarded);
             return;
         }
+        this.note_lock_surface_mapped(state);
 
         let has_cached_commit = this.cached_commit.is_some();
         let (changed, needs_frame) = if has_cached_commit {

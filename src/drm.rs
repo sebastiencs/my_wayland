@@ -6203,7 +6203,11 @@ fn render_composed_entry(
     else {
         return;
     };
-    if !surface.is_root() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
+    if !surface.is_root()
+        || surface.has_cursor_role()
+        || surface.has_dnd_icon_role()
+        || surface.has_lock_surface_role()
+    {
         return;
     }
     let visual_state = state.root_surface_visual_state(root_surface);
