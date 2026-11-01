@@ -1,6 +1,7 @@
 //! Shared lifecycle and SHM capture queue for both screenshot protocols.
 //!
-//! Scene sampling, damage, and cursor pixels land in later phases. This registry tracks which
+//! Output and toplevel copies record pixels, damage, and completion here. Cursor pixels and the
+//! protocol events that publish them land in later phases. This registry also tracks which
 //! protocol objects must stop when an output, toplevel, or pointer disappears, and completes each
 //! queued copy once. Globals stay unpublished until those later phases pass. Hyprland's screencopy
 //! permission prompt is intentionally not copied.
@@ -14,6 +15,7 @@ use crate::{
         ExtImageCopyCaptureSessionV1Id, WlBufferId, WlPointerId, XdgToplevelId,
         ZwlrScreencopyFrameV1Id,
     },
+    region::RectI,
     runner::Dispatcher,
     state::{OutputId, State},
     wayland_objects::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
@@ -163,6 +165,8 @@ pub struct CaptureRegistry {
     samples: BTreeMap<CaptureJobId, CaptureSample>,
     /// Damage since the previous `with_damage` copy, keyed by client, output, and cursor mode.
     damage: BTreeMap<(ClientId, OutputId, CaptureCursor), ConsumerDamage>,
+    /// Same accumulator for a toplevel image. Hidden and painted consumers do not share it.
+    toplevel_damage: BTreeMap<(ClientId, ToplevelKey, CaptureCursor), ConsumerDamage>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -253,6 +257,8 @@ impl CaptureRegistry {
             .retain(|_, job| job.buffer.client_id() != client_id);
         self.samples.retain(|id, _| self.jobs.contains_key(id));
         self.damage.retain(|(client, _, _), _| *client != client_id);
+        self.toplevel_damage
+            .retain(|(client, _, _), _| *client != client_id);
         self.pending.remove(&client_id);
     }
 
@@ -298,6 +304,8 @@ pub enum CaptureQueueError {
     Buffer(crate::wayland_objects::wl_buffer::CaptureBufferError),
     BufferBusy,
     EmptyRegion,
+    /// The session is protected, so a toplevel image would expose the hidden desktop.
+    Protected,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -835,6 +843,344 @@ fn transform_output_box(
     Some((dest_x, dest_y, dest_width, dest_height))
 }
 
+pub(crate) fn toplevel_sample_pending(capture: &CaptureRegistry, output_id: OutputId) -> bool {
+    capture
+        .jobs
+        .values()
+        .any(|job| toplevel_job_matches(job, output_id))
+}
+
+fn toplevel_job_matches(job: &CaptureJob, output_id: OutputId) -> bool {
+    job.status == CaptureJobStatus::Queued
+        && matches!(job.target, CaptureTarget::Toplevel(_))
+        && job.pixel_rect.is_some()
+        && (job.outputs.is_empty() || job.outputs.contains(&output_id))
+}
+
+pub(crate) fn queued_toplevel_job(
+    state: &State,
+    job_id: CaptureJobId,
+) -> Option<(ToplevelKey, i32, i32)> {
+    let job = state.capture.jobs.get(&job_id)?;
+    let CaptureTarget::Toplevel(key) = job.target else {
+        return None;
+    };
+    if job.status != CaptureJobStatus::Queued || job.pixel_rect.is_none() {
+        return None;
+    }
+    Some((key, job.width, job.height))
+}
+
+pub(crate) fn toplevel_jobs_for_output(
+    capture: &CaptureRegistry,
+    output_id: OutputId,
+) -> Vec<CaptureJobId> {
+    capture
+        .jobs
+        .iter()
+        .filter(|(_, job)| toplevel_job_matches(job, output_id))
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// Queue a toplevel copy the size of the rendered window, including its tree and decorations.
+pub(crate) fn submit_toplevel_capture(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    key: ToplevelKey,
+    buffer: Resolved<WlBufferId>,
+    cursor: CaptureCursor,
+    with_damage: bool,
+) -> Result<CaptureJobId, CaptureQueueError> {
+    if state.session_lock.input_gated() {
+        return Err(CaptureQueueError::Protected);
+    }
+    let Some(bounds) = toplevel_rendered_bounds(state, key) else {
+        return Err(CaptureQueueError::SourceGone);
+    };
+    let id = submit_capture(
+        state,
+        dispatcher,
+        CaptureJobRequest {
+            target: CaptureTarget::Toplevel(key),
+            buffer,
+            width: bounds.width,
+            height: bounds.height,
+            cursor,
+        },
+    )?;
+    if let Some(job) = state.capture.jobs.get_mut(&id) {
+        job.pixel_rect =
+            Some(CapturePixelRect { x: 0, y: 0, width: bounds.width, height: bounds.height });
+        job.with_damage = with_damage;
+    }
+    Ok(id)
+}
+
+/// Stop toplevel sessions and fail their frames while the desktop is hidden.
+///
+/// Foreign-toplevel handles stay listed. Output captures are left to sample the protected frame.
+pub(crate) fn stop_protected_toplevel_captures(state: &mut State, dispatcher: &mut Dispatcher) {
+    if !state.session_lock.input_gated() {
+        return;
+    }
+    for job in state.capture.jobs.values_mut() {
+        if job.status == CaptureJobStatus::Queued
+            && matches!(job.target, CaptureTarget::Toplevel(_))
+        {
+            job.status = CaptureJobStatus::Failed;
+        }
+    }
+    state.capture.toplevel_damage.clear();
+    let mut clients = BTreeSet::new();
+    let sessions: Vec<_> = state
+        .capture
+        .sessions
+        .iter()
+        .filter(|slot| matches!(slot.target, CaptureTarget::Toplevel(_)))
+        .copied()
+        .collect();
+    for slot in sessions {
+        state
+            .capture
+            .enqueue(slot.session.client_id(), Pending::StopSession(slot.session));
+        clients.insert(slot.session.client_id());
+    }
+    state
+        .capture
+        .sessions
+        .retain(|slot| !matches!(slot.target, CaptureTarget::Toplevel(_)));
+    let frames: Vec<_> = state
+        .capture
+        .ext_frames
+        .iter()
+        .filter(|slot| matches!(slot.target, CaptureTarget::Toplevel(_)))
+        .copied()
+        .collect();
+    for slot in frames {
+        state
+            .capture
+            .enqueue(slot.frame.client_id(), Pending::FailExtFrame(slot.frame));
+        clients.insert(slot.frame.client_id());
+    }
+    state
+        .capture
+        .ext_frames
+        .retain(|slot| !matches!(slot.target, CaptureTarget::Toplevel(_)));
+    dispatch_deliver(dispatcher, clients);
+}
+
+pub(crate) fn toplevel_root_surface(
+    state: &State,
+    key: ToplevelKey,
+) -> Option<Resolved<crate::protocol_generated::WlSurfaceId>> {
+    let toplevel = state
+        .capture
+        .by_xdg
+        .iter()
+        .find(|(_, candidate)| **candidate == key)
+        .map(|(toplevel, _)| *toplevel)?;
+    let xdg_surface = toplevel.try_ref(state)?.xdg_surface();
+    Some(xdg_surface.try_ref(state)?.wl_surface())
+}
+
+/// Bounds of the window as this compositor draws it: the surface tree, popups, and decoration box.
+pub(crate) fn toplevel_rendered_bounds(state: &State, key: ToplevelKey) -> Option<RectI> {
+    let root = toplevel_root_surface(state, key)?;
+    let mut bounds = None;
+    let mut seen = BTreeSet::new();
+    accumulate_rendered_bounds(state, root, &mut bounds, &mut seen);
+    if let Some(visual) = state.root_surface_visual_state(root) {
+        bounds = union_bounds(bounds, visual.influence_bounds());
+    }
+    bounds.filter(|bounds| bounds.width > 0 && bounds.height > 0)
+}
+
+fn accumulate_rendered_bounds(
+    state: &State,
+    surface: Resolved<crate::protocol_generated::WlSurfaceId>,
+    bounds: &mut Option<RectI>,
+    seen: &mut BTreeSet<Resolved<crate::protocol_generated::WlSurfaceId>>,
+) {
+    if !seen.insert(surface) {
+        return;
+    }
+    if let Some(rect) = state.surface_scene_bounds(surface) {
+        *bounds = union_bounds(*bounds, rect);
+    }
+    for popup in state.popup_child_surfaces(surface) {
+        accumulate_rendered_bounds(state, popup, bounds, seen);
+    }
+}
+
+fn union_bounds(current: Option<RectI>, next: RectI) -> Option<RectI> {
+    if next.width <= 0 || next.height <= 0 {
+        return current;
+    }
+    let Some(current) = current else {
+        return Some(next);
+    };
+    RectI::from_extents(
+        current.x.min(next.x),
+        current.y.min(next.y),
+        current.x2().max(next.x2()),
+        current.y2().max(next.y2()),
+    )
+}
+
+/// Read-only view of the toplevel tree. Damage, frame callbacks, feedbacks, and retired buffers stay put.
+pub(crate) fn peek_toplevel_snapshots(
+    state: &State,
+    key: ToplevelKey,
+) -> Vec<crate::wayland_objects::wl_surface::SurfaceRenderState> {
+    let Some(root) = toplevel_root_surface(state, key) else {
+        return Vec::new();
+    };
+    let mut snapshots = Vec::new();
+    peek_surface_snapshots(state, root, 0, 0, true, &mut snapshots);
+    snapshots
+}
+
+fn peek_surface_snapshots(
+    state: &State,
+    surface: Resolved<crate::protocol_generated::WlSurfaceId>,
+    base_x: i32,
+    base_y: i32,
+    inherit_root_clip: bool,
+    snapshots: &mut Vec<crate::wayland_objects::wl_surface::SurfaceRenderState>,
+) {
+    let Some(surface_obj) = surface.try_ref(state) else {
+        return;
+    };
+    let stack = surface_obj.current_stack().to_vec();
+    let Some(mut surface_state) = surface_obj.render_state_at(base_x, base_y) else {
+        return;
+    };
+    surface_state.surface = Some(surface);
+    surface_state.inherit_root_clip = inherit_root_clip;
+    surface_state.presentation_feedbacks.clear();
+    for entry in &stack {
+        if let crate::wayland_objects::wl_surface::StackEntry::Child(child) = *entry {
+            let Some(child_surface) = child.try_ref(state) else {
+                continue;
+            };
+            let (x, y) = child_surface.current_subsurface_position();
+            peek_surface_snapshots(
+                state,
+                child,
+                surface_state.x.saturating_add(x),
+                surface_state.y.saturating_add(y),
+                inherit_root_clip,
+                snapshots,
+            );
+        } else {
+            snapshots.push(surface_state.clone());
+        }
+    }
+    for popup in state.popup_child_surfaces(surface) {
+        let Some((x, y)) = state.surface_scene_origin(popup) else {
+            continue;
+        };
+        peek_surface_snapshots(state, popup, x, y, false, snapshots);
+    }
+}
+
+pub(crate) fn apply_rendered_toplevel(
+    capture: &mut CaptureRegistry,
+    objects: &crate::indexmap::IndexMap<crate::state::ObjectId, Box<dyn crate::object::Object>>,
+    key: ToplevelKey,
+    bounds_width: i32,
+    bounds_height: i32,
+    frame_damage: &[CapturePixelRect],
+    copy: RenderedOutputCopy,
+    timestamp: CaptureTimestamp,
+) {
+    let Some(job) = capture.jobs.get(&copy.job_id) else {
+        return;
+    };
+    if job.status != CaptureJobStatus::Queued || job.target != CaptureTarget::Toplevel(key) {
+        return;
+    }
+    let cursor = job.cursor;
+    let with_damage = job.with_damage;
+    let client_id = job.buffer.client_id();
+    let buffer = job.buffer;
+    let stored = job.pixel_rect;
+    let Some(stored) = stored else {
+        return;
+    };
+    if bounds_width != stored.width || bounds_height != stored.height || !copy.read_ok {
+        if let Some(job) = capture.jobs.get_mut(&copy.job_id) {
+            job.status = CaptureJobStatus::Failed;
+        }
+        return;
+    }
+    let Some(buffer) =
+        objects.try_ref_object::<crate::wayland_objects::wl_buffer::WlBuffer>(buffer.object_id())
+    else {
+        if let Some(job) = capture.jobs.get_mut(&copy.job_id) {
+            job.status = CaptureJobStatus::Failed;
+        }
+        return;
+    };
+    let written = buffer
+        .begin_capture_write(stored.width, stored.height)
+        .and_then(|write| write.write_top_left(&copy.bytes, copy.stride))
+        .is_ok();
+    if !written {
+        if let Some(job) = capture.jobs.get_mut(&copy.job_id) {
+            job.status = CaptureJobStatus::Failed;
+        }
+        return;
+    }
+    let damage =
+        take_toplevel_damage(capture, client_id, key, cursor, stored, with_damage, frame_damage);
+    if let Some(job) = capture.jobs.get_mut(&copy.job_id) {
+        job.status = CaptureJobStatus::Written;
+    }
+    capture.samples.insert(
+        copy.job_id,
+        CaptureSample {
+            rect: stored,
+            stride: copy.stride,
+            flags: 0,
+            tv_sec_hi: (timestamp.sec >> 32) as u32,
+            tv_sec_lo: timestamp.sec as u32,
+            tv_nsec: timestamp.nsec,
+            damage,
+        },
+    );
+}
+
+fn take_toplevel_damage(
+    capture: &mut CaptureRegistry,
+    client_id: ClientId,
+    key: ToplevelKey,
+    cursor: CaptureCursor,
+    rect: CapturePixelRect,
+    with_damage: bool,
+    frame_damage: &[CapturePixelRect],
+) -> Vec<CapturePixelRect> {
+    let entry = capture
+        .toplevel_damage
+        .entry((client_id, key, cursor))
+        .or_default();
+    if entry.started {
+        entry.rects.extend(frame_damage.iter().copied());
+    }
+    if !with_damage {
+        return Vec::new();
+    }
+    let damage = if entry.started {
+        clip_damage_to_capture(&entry.rects, rect)
+    } else {
+        vec![CapturePixelRect { x: 0, y: 0, width: rect.width, height: rect.height }]
+    };
+    entry.started = true;
+    entry.rects.clear();
+    damage
+}
+
 pub(crate) fn output_removed(state: &mut State, dispatcher: &mut Dispatcher, output_id: OutputId) {
     let target = CaptureTarget::Output(output_id);
     let mut clients = BTreeSet::new();
@@ -1009,6 +1355,10 @@ pub(crate) fn close_toplevel(state: &mut State, dispatcher: &mut Dispatcher, key
         .by_xdg
         .retain(|_, announced| *announced != key);
     fail_queued_jobs(state, CaptureTarget::Toplevel(key));
+    state
+        .capture
+        .toplevel_damage
+        .retain(|(_, damaged, _), _| *damaged != key);
 
     let mut clients = BTreeSet::new();
     let handles = state.capture.handles_for(key);
@@ -2709,5 +3059,310 @@ mod tests {
             vec![CapturePixelRect { x: 1, y: 0, width: 2, height: 1 }]
         );
         assert!(!output_capture_pending(&state, output_id));
+    }
+
+    fn mapped_window(
+        client: &mut crate::clients::Client,
+        state: &mut State,
+        dispatcher: &mut crate::runner::Dispatcher,
+    ) -> (Resolved<crate::protocol_generated::WlSurfaceId>, ToplevelKey) {
+        let surface = client
+            .insert_object(
+                state,
+                crate::wayland_objects::wl_surface::WlSurface::new(
+                    crate::protocol_generated::WlSurfaceId::from(80),
+                    client.client_id(),
+                    6,
+                ),
+            )
+            .0;
+        state.register_root_surface(surface);
+        surface
+            .ref_mut(state)
+            .test_map(crate::state::ObjectId::from(1usize), 10, 20, 30, 40);
+        let child = client
+            .insert_object(
+                state,
+                crate::wayland_objects::wl_surface::WlSurface::new(
+                    crate::protocol_generated::WlSurfaceId::from(83),
+                    client.client_id(),
+                    6,
+                ),
+            )
+            .0;
+        child
+            .ref_mut(state)
+            .test_map(crate::state::ObjectId::from(2usize), 0, 0, 10, 4);
+        child
+            .ref_mut(state)
+            .test_mark_subsurface_at(surface, (28, 0));
+        surface.ref_mut(state).test_push_current_child(child);
+        let xdg_surface = client
+            .insert_object(
+                state,
+                crate::wayland_objects::xdg_surface::XdgSurface::new(
+                    crate::protocol_generated::XdgSurfaceId::from(81),
+                    Resolved::new(
+                        client.client_id(),
+                        crate::protocol_generated::XdgWmBaseId::from(1u32),
+                        crate::state::ObjectId::from(1usize),
+                    ),
+                    surface,
+                    7,
+                ),
+            )
+            .0;
+        surface.ref_mut(state).set_xdg_surface_impl(xdg_surface);
+        let toplevel = client
+            .insert_object(
+                state,
+                crate::wayland_objects::xdg_toplevel::XdgToplevel::new(
+                    crate::protocol_generated::XdgToplevelId::from(82),
+                    xdg_surface,
+                    7,
+                ),
+            )
+            .0;
+        ExtForeignToplevelListV1::attach(
+            client,
+            state,
+            dispatcher,
+            ExtForeignToplevelListV1Id::from(84),
+        );
+        map_xdg_toplevel(state, dispatcher, toplevel, "Terminal", "app");
+        let key = state.capture.by_xdg[&toplevel];
+        (surface, key)
+    }
+
+    #[test]
+    fn a_toplevel_capture_uses_the_rendered_tree_without_consuming_it() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let (surface, key) = mapped_window(&mut client, &mut state, &mut dispatcher);
+        assert_eq!(
+            toplevel_rendered_bounds(&state, key),
+            crate::region::RectI::new(10, 20, 38, 40)
+        );
+        surface
+            .ref_mut(&mut state)
+            .test_push_frame_callback_and_feedback();
+        let damage_before = surface.rref(&state).render_state().unwrap().damage.clone();
+        let _ = peek_toplevel_snapshots(&state, key);
+        assert_eq!(surface.rref(&state).test_frame_callback_count(), 1);
+        assert_eq!(surface.rref(&state).test_presentation_feedback_count(), 1);
+        assert_eq!(surface.rref(&state).render_state().unwrap().damage, damage_before);
+
+        let too_small = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            85,
+            2,
+            2,
+            8,
+            vec![0; 16],
+            crate::drm::ARGB8888,
+        );
+        assert!(matches!(
+            submit_toplevel_capture(
+                &mut state,
+                &mut dispatcher,
+                key,
+                too_small,
+                CaptureCursor::Hidden,
+                true,
+            ),
+            Err(CaptureQueueError::Buffer(_))
+        ));
+        let hidden = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            86,
+            38,
+            40,
+            152,
+            vec![0xAB; 6080],
+            crate::drm::ARGB8888,
+        );
+        let painted = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            87,
+            38,
+            40,
+            152,
+            vec![0xCD; 6080],
+            crate::drm::ARGB8888,
+        );
+        let hidden_job = submit_toplevel_capture(
+            &mut state,
+            &mut dispatcher,
+            key,
+            hidden,
+            CaptureCursor::Hidden,
+            true,
+        )
+        .unwrap();
+        let painted_job = submit_toplevel_capture(
+            &mut state,
+            &mut dispatcher,
+            key,
+            painted,
+            CaptureCursor::Painted,
+            true,
+        )
+        .unwrap();
+        let bytes = vec![0x11; 6080];
+        apply_rendered_toplevel(
+            &mut state.capture,
+            &state.objects,
+            key,
+            38,
+            40,
+            &[CapturePixelRect { x: 1, y: 0, width: 2, height: 1 }],
+            RenderedOutputCopy {
+                job_id: hidden_job,
+                bytes: bytes.clone(),
+                stride: 152,
+                read_ok: true,
+            },
+            CaptureTimestamp { sec: 9, nsec: 3 },
+        );
+        apply_rendered_toplevel(
+            &mut state.capture,
+            &state.objects,
+            key,
+            38,
+            40,
+            &[CapturePixelRect { x: 1, y: 0, width: 2, height: 1 }],
+            RenderedOutputCopy { job_id: painted_job, bytes, stride: 152, read_ok: true },
+            CaptureTimestamp { sec: 9, nsec: 3 },
+        );
+        assert_eq!(capture_sample(&state, hidden_job).unwrap().flags, 0);
+        assert_eq!(
+            capture_sample(&state, hidden_job).unwrap().damage,
+            vec![CapturePixelRect { x: 0, y: 0, width: 38, height: 40 }]
+        );
+        assert_eq!(
+            capture_sample(&state, painted_job).unwrap().damage,
+            vec![CapturePixelRect { x: 0, y: 0, width: 38, height: 40 }]
+        );
+        let again = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            88,
+            38,
+            40,
+            152,
+            vec![0; 6080],
+            crate::drm::ARGB8888,
+        );
+        let later = submit_toplevel_capture(
+            &mut state,
+            &mut dispatcher,
+            key,
+            again,
+            CaptureCursor::Hidden,
+            true,
+        )
+        .unwrap();
+        apply_rendered_toplevel(
+            &mut state.capture,
+            &state.objects,
+            key,
+            38,
+            40,
+            &[CapturePixelRect { x: 4, y: 5, width: 6, height: 7 }],
+            RenderedOutputCopy {
+                job_id: later,
+                bytes: vec![0x22; 6080],
+                stride: 152,
+                read_ok: true,
+            },
+            CaptureTimestamp { sec: 10, nsec: 0 },
+        );
+        assert_eq!(
+            capture_sample(&state, later).unwrap().damage,
+            vec![CapturePixelRect { x: 4, y: 5, width: 6, height: 7 }]
+        );
+        assert_eq!(
+            hidden
+                .rref(&state)
+                .begin_capture_write(38, 40)
+                .unwrap()
+                .as_slice()[..4],
+            [0x11, 0x11, 0x11, 0x11]
+        );
+    }
+
+    #[test]
+    fn a_protected_session_stops_toplevel_capture_and_keeps_the_handle() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let (_surface, key) = mapped_window(&mut client, &mut state, &mut dispatcher);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        let handle = state.capture.handles_for(key)[0];
+        let buffer = shm_capture_buffer(
+            &mut client,
+            &mut state,
+            89,
+            38,
+            40,
+            152,
+            vec![0; 6080],
+            crate::drm::ARGB8888,
+        );
+        let job = submit_toplevel_capture(
+            &mut state,
+            &mut dispatcher,
+            key,
+            buffer,
+            CaptureCursor::Hidden,
+            false,
+        )
+        .unwrap();
+        let session = client
+            .insert_object(
+                &mut state,
+                ExtImageCopyCaptureSessionV1::new(
+                    ExtImageCopyCaptureSessionV1Id::from(90),
+                    CaptureTarget::Toplevel(key),
+                    false,
+                    None,
+                ),
+            )
+            .0;
+        state
+            .capture
+            .track_session(session, CaptureTarget::Toplevel(key), None);
+        let lock = client
+            .insert_object(
+                &mut state,
+                crate::wayland_objects::ext_session_lock_v1::ExtSessionLockV1::new(
+                    crate::protocol_generated::ExtSessionLockV1Id::from(91),
+                    client.client_id(),
+                ),
+            )
+            .0;
+        state.session_lock.install(
+            client.client_id(),
+            lock,
+            false,
+            crate::session_lock::PreLockFocus::default(),
+            [],
+        );
+        stop_protected_toplevel_captures(&mut state, &mut dispatcher);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        assert_eq!(fail_capture(&mut state, job), CaptureFinish::AlreadyFinished);
+        assert!(session.rref(&state).is_stopped());
+        assert!(!handle.rref(&state).is_closed());
+        assert_eq!(
+            submit_toplevel_capture(
+                &mut state,
+                &mut dispatcher,
+                key,
+                buffer,
+                CaptureCursor::Hidden,
+                false,
+            ),
+            Err(CaptureQueueError::Protected)
+        );
     }
 }

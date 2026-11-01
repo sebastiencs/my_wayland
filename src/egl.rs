@@ -853,6 +853,15 @@ impl OffscreenColorTarget {
         TextureFrameBuffer::new(width, height).map(|framebuffer| Self { framebuffer })
     }
 
+    pub(crate) fn render_recipe(&self, renderer: &EglFrameBuffer, recipe: &OutputFrameRecipe) {
+        renderer.render_into_transparent(
+            self.framebuffer.framebuffer_object,
+            self.framebuffer.width,
+            self.framebuffer.height,
+            recipe,
+        );
+    }
+
     pub(crate) fn read_top_left(&self, dst_stride: usize, dst: &mut [u8]) -> bool {
         read_flip_y_framebuffer(
             self.framebuffer.framebuffer_object,
@@ -1557,6 +1566,44 @@ impl EglFrameBuffer {
             presentation_transform,
         );
         Some(framebuffer.into_texture())
+    }
+
+    /// Draw a window into another framebuffer and clear that target to transparent first.
+    ///
+    /// The output framebuffer keeps its own pixels. FlipY matches [`EglFrameBuffer::read_top_left`].
+    pub(crate) fn render_into_transparent(
+        &self,
+        framebuffer: gl::GLuint,
+        width: i32,
+        height: i32,
+        recipe: &OutputFrameRecipe,
+    ) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER as _, framebuffer);
+            gl::Viewport(0, 0, width, height);
+            gl::Disable(gl::SCISSOR_TEST as _);
+            gl::ClearColor(0.0, 0.0, 0.0, 0.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT as _);
+        }
+        let Some(damage) = RectI::new(0, 0, width, height).map(DamageRegion::from_rect) else {
+            return;
+        };
+        self.render_frame_elements_to_target(
+            framebuffer,
+            width,
+            height,
+            &recipe.elements,
+            crate::transform::output_projection(
+                width as f32,
+                height as f32,
+                OutputPresentationTransform::FlipY,
+            ),
+            &damage,
+            OutputPresentationTransform::FlipY,
+        );
     }
 
     pub(crate) fn read_top_left(

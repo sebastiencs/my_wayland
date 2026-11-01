@@ -44,6 +44,7 @@ impl Object for ExtSessionLockManagerV1 {
                 ) {
                     resolved.ref_mut(state).deny(dispatcher);
                 } else {
+                    crate::capture::stop_protected_toplevel_captures(state, dispatcher);
                     let outputs = state.session_lock.covered_outputs();
                     crate::drm::request_outputs(state, outputs, dispatcher);
                     crate::seat::gate_for_session_lock(state, dispatcher);

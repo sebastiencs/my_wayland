@@ -3906,6 +3906,190 @@ fn read_output_capture_copies(
         .collect()
 }
 
+struct PreparedToplevelCapture {
+    job_id: crate::capture::CaptureJobId,
+    key: crate::capture::ToplevelKey,
+    width: i32,
+    height: i32,
+    bounds: Option<RectI>,
+    snapshots: Vec<crate::wayland_objects::wl_surface::SurfaceRenderState>,
+    visual: Option<RootSurfaceVisualState>,
+}
+
+struct RenderedToplevelCapture {
+    key: crate::capture::ToplevelKey,
+    bounds_width: i32,
+    bounds_height: i32,
+    damage: Vec<crate::capture::CapturePixelRect>,
+    copy: crate::capture::RenderedOutputCopy,
+}
+
+fn sample_pending_toplevel_captures(
+    state: &mut State,
+    drm_id: DrmId,
+    drm_crtc_id: u32,
+    output_id: OutputId,
+) {
+    if !crate::capture::toplevel_sample_pending(&state.capture, output_id) {
+        return;
+    }
+    if state.session_lock.input_gated() {
+        for job_id in crate::capture::toplevel_jobs_for_output(&state.capture, output_id) {
+            crate::capture::fail_capture(state, job_id);
+        }
+        return;
+    }
+    let jobs = crate::capture::toplevel_jobs_for_output(&state.capture, output_id);
+    let mut prepared = Vec::new();
+    for job_id in jobs {
+        let Some((key, width, height)) = crate::capture::queued_toplevel_job(state, job_id) else {
+            continue;
+        };
+        let bounds = crate::capture::toplevel_rendered_bounds(state, key);
+        let snapshots = crate::capture::peek_toplevel_snapshots(state, key);
+        let visual = crate::capture::toplevel_root_surface(state, key)
+            .and_then(|root| state.root_surface_visual_state(root));
+        prepared.push(PreparedToplevelCapture {
+            job_id,
+            key,
+            width,
+            height,
+            bounds,
+            snapshots,
+            visual,
+        });
+    }
+    let rendered = {
+        let drm = state.drm.get(drm_id);
+        render_prepared_toplevels(&mut state.objects, drm, drm_crtc_id, &prepared)
+    };
+    let timestamp = crate::capture::capture_timestamp_now();
+    for item in rendered {
+        crate::capture::apply_rendered_toplevel(
+            &mut state.capture,
+            &state.objects,
+            item.key,
+            item.bounds_width,
+            item.bounds_height,
+            &item.damage,
+            item.copy,
+            timestamp,
+        );
+    }
+}
+
+fn render_prepared_toplevels(
+    objects: &mut Box<crate::state::IndexMap<ObjectId, Box<dyn Object>>>,
+    drm: &Drm,
+    drm_crtc_id: u32,
+    prepared: &[PreparedToplevelCapture],
+) -> Vec<RenderedToplevelCapture> {
+    drm.bind_context();
+    let drm_fd = drm.fd();
+    prepared
+        .iter()
+        .map(|item| {
+            let failed = |bounds_width, bounds_height| RenderedToplevelCapture {
+                key: item.key,
+                bounds_width,
+                bounds_height,
+                damage: Vec::new(),
+                copy: crate::capture::RenderedOutputCopy {
+                    job_id: item.job_id,
+                    bytes: Vec::new(),
+                    stride: 0,
+                    read_ok: false,
+                },
+            };
+            let Some(bounds) = item.bounds else {
+                return failed(0, 0);
+            };
+            if bounds.width != item.width
+                || bounds.height != item.height
+                || bounds.width > 16_384
+                || bounds.height > 16_384
+            {
+                return failed(bounds.width, bounds.height);
+            }
+            let mut items = Vec::new();
+            let mut elements = Vec::new();
+            let alpha = item
+                .visual
+                .map(|visual| visual.effects.opacity_alpha)
+                .unwrap_or(u8::MAX);
+            let effect_start = elements.len();
+            push_root_surface_effect_elements(&mut elements, item.visual, FramePhase::UnderWindow);
+            push_root_surface_effect_elements(&mut elements, item.visual, FramePhase::OverWindow);
+            push_root_surface_effect_elements(&mut elements, item.visual, FramePhase::Overlay);
+            let mut window_effects = elements.split_off(effect_start);
+            window_effects.retain(|element| {
+                !matches!(
+                    element,
+                    RecordedFrameElement::Effect {
+                        element: EffectElement::WindowBlurBackdrop { .. },
+                        ..
+                    }
+                )
+            });
+            elements.append(&mut window_effects);
+            let item_start = items.len();
+            push_scene_items_from_snapshots(
+                &mut items,
+                objects,
+                drm,
+                &drm_fd,
+                drm_crtc_id,
+                bounds,
+                item.snapshots.clone(),
+                false,
+                item.visual.and_then(|visual| visual.clip),
+                alpha,
+            );
+            push_scene_item_frame_elements(&mut elements, item_start..items.len());
+            translate_scene_items(&mut items, -bounds.x, -bounds.y);
+            translate_recorded_frame_elements(&mut elements, -bounds.x, -bounds.y);
+            let recipe = build_output_frame_recipe(&items, &elements);
+            let Some(target) = crate::egl::OffscreenColorTarget::new(bounds.width, bounds.height)
+            else {
+                return failed(bounds.width, bounds.height);
+            };
+            let Some(renderer) = drm
+                .output(drm_crtc_id)
+                .map(|output| &output.render_buffer().gl_framebuffer)
+            else {
+                return failed(bounds.width, bounds.height);
+            };
+            target.render_recipe(renderer, &recipe);
+            let stride = (bounds.width as usize).saturating_mul(4);
+            let mut bytes = vec![0u8; stride.saturating_mul(bounds.height.max(0) as usize)];
+            let read_ok = target.read_top_left(stride, &mut bytes);
+            let damage = item
+                .snapshots
+                .iter()
+                .flat_map(|snapshot| snapshot.damage.rects().iter().copied())
+                .map(|rect| crate::capture::CapturePixelRect {
+                    x: rect.x.saturating_sub(bounds.x),
+                    y: rect.y.saturating_sub(bounds.y),
+                    width: rect.width,
+                    height: rect.height,
+                })
+                .collect();
+            RenderedToplevelCapture {
+                key: item.key,
+                bounds_width: bounds.width,
+                bounds_height: bounds.height,
+                damage,
+                copy: crate::capture::RenderedOutputCopy {
+                    job_id: item.job_id,
+                    bytes,
+                    stride,
+                    read_ok,
+                },
+            }
+        })
+        .collect()
+}
+
 impl DrmOutputModel {
     fn model_id(&self) -> OutputId {
         self.output_id
@@ -4052,6 +4236,12 @@ impl DrmOutputModel {
                             .unwrap()
                             .pipeline
                             .set_force_full_redraw(true);
+                        sample_pending_toplevel_captures(
+                            state,
+                            self.drm_id,
+                            drm_crtc_id,
+                            self.output_id,
+                        );
                         return;
                     }
                     Err(_) => {}
@@ -4403,6 +4593,7 @@ impl DrmOutputModel {
                 release.resolve(state, dispatcher);
             }
         }
+        sample_pending_toplevel_captures(state, self.drm_id, drm_crtc_id, self.output_id);
     }
 
     fn handle_flip_complete(
