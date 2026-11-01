@@ -189,6 +189,7 @@ pub mod runner;
 mod scene;
 mod scheduler;
 mod seat;
+mod session_lock;
 mod signals;
 mod state;
 mod sync;
@@ -320,6 +321,7 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
         idle_notifications: Vec::new(),
         idle_inhibitors: Vec::new(),
         idle_inhibitors_honored: false,
+        session_lock: Default::default(),
         #[cfg(test)]
         realize_closing_snapshots_in_tests: false,
         frame_scheduler: Default::default(),

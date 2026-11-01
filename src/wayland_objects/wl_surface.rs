@@ -115,6 +115,7 @@ pub enum Role {
     XdgSurface,
     LayerSurface,
     Subsurface,
+    LockSurface,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -568,6 +569,14 @@ impl WlSurface {
 
     pub fn has_committed_buffer(&self) -> bool {
         self.on_screen.buffer_object_id.is_some()
+    }
+
+    pub(crate) fn assign_lock_surface_role(&mut self) -> bool {
+        if self.role != Role::None {
+            return false;
+        }
+        self.role = Role::LockSurface;
+        true
     }
 
     pub fn has_attached_or_committed_buffer(&self) -> bool {

@@ -861,6 +861,8 @@ pub struct State {
     pub idle_inhibitors: Vec<Resolved<ZwpIdleInhibitorV1Id>>,
     /// Last result of the visibility policy. Inhibitor-aware notifications follow this bit.
     pub idle_inhibitors_honored: bool,
+    /// Secure lock. `locked` stays unsent until a later phase presents every active output.
+    pub session_lock: crate::session_lock::SessionLock,
     #[cfg(test)]
     pub realize_closing_snapshots_in_tests: bool,
     pub frame_scheduler: BTreeMap<OutputId, OutputSchedulerSnapshot>,

@@ -34,8 +34,7 @@ impl Global for WlOutputGlobal {
         dispatcher: &mut ClientDispatcher,
     ) {
         let id = WlOutputId::from(id);
-        let _ =
-            client.insert_object(state, WlOutput { id, output_id: Some(self.output_id), version });
+        let _ = client.insert_object(state, WlOutput::new(id, self.output_id, version));
         let Some(wl_output) = client.resolve(id, state) else {
             return;
         };
@@ -78,6 +77,10 @@ impl Object for WlOutput {
 }
 
 impl WlOutput {
+    pub fn new(id: WlOutputId, output_id: OutputId, version: u32) -> Self {
+        Self { id, output_id: Some(output_id), version }
+    }
+
     pub fn wl_output_id(&self) -> WlOutputId {
         self.id
     }

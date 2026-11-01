@@ -2,6 +2,9 @@
 
 pub mod ext_idle_notification_v1;
 pub mod ext_idle_notifier_v1;
+pub mod ext_session_lock_manager_v1;
+pub mod ext_session_lock_surface_v1;
+pub mod ext_session_lock_v1;
 pub mod ext_workspace_group_handle_v1;
 pub mod ext_workspace_handle_v1;
 pub mod ext_workspace_manager_v1;
@@ -116,14 +119,11 @@ fake_obj! {
     { wp_drm_lease_connector_v1, WpDrmLeaseConnectorV1 },
     { wp_drm_lease_request_v1, WpDrmLeaseRequestV1 },
     { wp_drm_lease_v1, WpDrmLeaseV1 },
-    { ext_session_lock_manager_v1, ExtSessionLockManagerV1 },
-    { ext_session_lock_v1, ExtSessionLockV1 },
     { wp_single_pixel_buffer_manager_v1, WpSinglePixelBufferManagerV1 },
     { wp_tearing_control_manager_v1, WpTearingControlManagerV1 },
     { wp_tearing_control_v1, WpTearingControlV1 },
     // { xdg_activation_v1, XdgActivationV1 },
     { xwayland_shell_v1, XwaylandShellV1 },
-    { ext_session_lock_surface_v1, ExtSessionLockSurfaceV1 },
     { xwayland_surface_v1, XwaylandSurfaceV1 },
     // xdg-toplevel-drag not in protocol_generated
     { zwp_linux_buffer_release_v1, ZwpLinuxBufferReleaseV1 },
