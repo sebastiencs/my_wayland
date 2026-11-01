@@ -1299,7 +1299,11 @@ pub fn handle_pointer_button(
     }
 
     if button_state == 1 {
-        set_keyboard_focus(state, dispatcher, pointer_focus.map(|focus| focus.target));
+        set_keyboard_focus(
+            state,
+            dispatcher,
+            keyboard_focus_for_pointer_press(state, pointer_focus),
+        );
     }
 
     if !state.session_lock.input_gated() && button_state == 1 {
@@ -1335,6 +1339,26 @@ pub fn handle_pointer_button(
     if button_state != 1 {
         finish_pointer_interactive_grab(state, dispatcher, time);
     }
+}
+
+/// Keyboard target for a button press. A popup grab keeps the top popup. Any other hit,
+/// including that toplevel's popup or subsurface, gives the keyboard to the owning toplevel.
+/// The button itself stays on the hit surface. Focusing the popup sends `wl_keyboard.leave`
+/// to the parent, and clients such as Firefox close the menu on that leave.
+fn keyboard_focus_for_pointer_press(
+    state: &State,
+    pointer_focus: Option<SurfaceFocusPick>,
+) -> Option<SurfaceFocus> {
+    if !state.session_lock.input_gated() {
+        if let Some(focus) = popup_keyboard_focus(state) {
+            return Some(focus);
+        }
+    }
+    let pointer_focus = pointer_focus?;
+    state
+        .root_surface_for_surface(pointer_focus.target.surface)
+        .map(SurfaceFocus::new)
+        .or(Some(pointer_focus.target))
 }
 
 /// Deliver one scroll frame to the pointer-focused client. Pointer resources expand it according
@@ -2223,7 +2247,7 @@ mod xdg_seat_tests {
             handle_pointer_button, handle_pointer_motion, handle_pointer_motion_absolute,
             handle_pointer_scroll, pointer_scroll_protocol_events, quiesce_for_session_pause,
             recover_pointer_after_interactive_grab_loss, remove_popup_grab, scene_pick_at,
-            window_hit_at, HitSemantics, PointerAxisChange, PointerScrollAxis,
+            set_keyboard_focus, window_hit_at, HitSemantics, PointerAxisChange, PointerScrollAxis,
             PointerScrollDirection, PointerScrollFrame, PointerScrollSource,
             PointerScrollWireEvent, SeatClientEvent, SeatState,
         },
@@ -2237,7 +2261,7 @@ mod xdg_seat_tests {
                 XdgPopupId, XdgPositionerId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
                 ZwpRelativePointerV1Id,
             },
-            region::RectI,
+            region::{RectI, RegionValue},
             runner::Dispatcher,
             state::{
                 BackendOutputRef, DragPhase, DragSource, DragState, DragTargetState, DrmId,
@@ -2799,6 +2823,247 @@ mod xdg_seat_tests {
 
         assert!(super::maybe_dismiss_popup_grab_on_button(&mut state, &mut dispatcher, 1, 1000));
         assert!(state.seat.popup_grab.is_none());
+    }
+
+    struct MappedPopup {
+        parent_object_id: ObjectId,
+        popup_object_id: ObjectId,
+        popup_surface: crate::clients::Resolved<WlSurfaceId>,
+        popup_role: crate::clients::Resolved<XdgPopupId>,
+    }
+
+    fn map_toplevel_popup(
+        state: &mut State,
+        client: &mut Client,
+        dispatcher: &mut Dispatcher,
+    ) -> MappedPopup {
+        let mut client_dispatcher = client.test_dispatcher(dispatcher);
+        let (parent_object_id, parent_xdg_object_id) = insert_xdg_surface(
+            state,
+            client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(170),
+            XdgSurfaceId::from(180),
+        );
+        let (popup_object_id, popup_xdg_object_id) = insert_xdg_surface(
+            state,
+            client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(171),
+            XdgSurfaceId::from(181),
+        );
+        state
+            .objects
+            .get_mut(parent_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(900usize), 0, 0, 400, 300);
+        state
+            .objects
+            .get_mut(popup_object_id)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(901usize), 0, 0, 80, 60);
+
+        let parent_xdg = crate::clients::Resolved::new(
+            client.client_id(),
+            XdgSurfaceId::from(180),
+            parent_xdg_object_id,
+        );
+        let popup_xdg = crate::clients::Resolved::new(
+            client.client_id(),
+            XdgSurfaceId::from(181),
+            popup_xdg_object_id,
+        );
+        let (_, popup_role_object_id) = state.insert_object(XdgPopup::new(
+            XdgPopupId::from(182),
+            popup_xdg,
+            Some(parent_xdg),
+            PositionerState::default(),
+            7,
+        ));
+        let popup_role = crate::clients::Resolved::new(
+            client.client_id(),
+            XdgPopupId::from(182),
+            popup_role_object_id,
+        );
+        state
+            .objects
+            .get_mut(popup_role_object_id)
+            .downcast_mut::<XdgPopup>()
+            .unwrap()
+            .apply_acked_configure(RectI { x: 100, y: 80, width: 80, height: 60 });
+        {
+            let popup_xdg_surface = state
+                .objects
+                .get_mut(popup_xdg_object_id)
+                .downcast_mut::<XdgSurface>()
+                .unwrap();
+            popup_xdg_surface.test_set_current_window_geometry(Some(RectI {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 60,
+            }));
+            popup_xdg_surface.test_set_popup_role(popup_role);
+        }
+        state
+            .objects
+            .get_mut(parent_xdg_object_id)
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .add_popup_child(popup_role);
+        client_dispatcher.drain_post_actions(client, state);
+
+        MappedPopup {
+            parent_object_id,
+            popup_object_id,
+            popup_surface: crate::clients::Resolved::new(
+                client.client_id(),
+                WlSurfaceId::from(171),
+                popup_object_id,
+            ),
+            popup_role,
+        }
+    }
+
+    #[test]
+    fn pointer_press_on_ungrabbed_popup_keeps_keyboard_on_toplevel() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mapped = map_toplevel_popup(&mut state, &mut client, &mut dispatcher);
+        let parent_focus =
+            focus_for_surface(client.client_id(), WlSurfaceId::from(170), mapped.parent_object_id);
+        set_keyboard_focus(&mut state, &mut dispatcher, Some(parent_focus));
+        state.seat.pointer_pos = (120.0, 100.0);
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+
+        assert_eq!(state.seat.keyboard_focus, Some(parent_focus));
+        assert_eq!(
+            state
+                .seat
+                .pointer_focus
+                .map(|focus| focus.target.surface_id()),
+            Some(WlSurfaceId::from(171))
+        );
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| matches!(
+                action,
+                ClientAction::SeatEvent {
+                    event: SeatClientEvent::PointerButton { button: 0x110, state: 1, .. },
+                }
+            )
+        ));
+        assert!(!dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| matches!(
+                action,
+                ClientAction::SeatEvent { event: SeatClientEvent::KeyboardLeave { .. } }
+            )
+        ));
+    }
+
+    #[test]
+    fn pointer_press_on_ungrabbed_popup_subsurface_keeps_keyboard_on_toplevel() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mapped = map_toplevel_popup(&mut state, &mut client, &mut dispatcher);
+        let child_object_id = insert_surface(&mut state, &mut client, WlSurfaceId::from(172));
+        let child_surface = crate::clients::Resolved::new(
+            client.client_id(),
+            WlSurfaceId::from(172),
+            child_object_id,
+        );
+        state.unregister_root_surface(child_surface);
+        {
+            let popup = state
+                .objects
+                .get_mut(mapped.popup_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            popup.test_set_input_region(RegionValue::empty());
+            popup.add_pending_child(child_surface);
+        }
+        {
+            let child = state
+                .objects
+                .get_mut(child_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            child.test_mark_subsurface_at(mapped.popup_surface, (0, 0));
+            child.test_map(ObjectId::from(902usize), 0, 0, 80, 60);
+        }
+        {
+            let mut popup = state
+                .objects
+                .grab_object::<WlSurface>(mapped.popup_object_id);
+            assert!(popup.apply_pending_tree_state(&mut state));
+        }
+
+        let parent_focus =
+            focus_for_surface(client.client_id(), WlSurfaceId::from(170), mapped.parent_object_id);
+        set_keyboard_focus(&mut state, &mut dispatcher, Some(parent_focus));
+        state.seat.pointer_pos = (120.0, 100.0);
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+
+        assert_eq!(state.seat.keyboard_focus, Some(parent_focus));
+        assert_eq!(
+            state
+                .seat
+                .pointer_focus
+                .map(|focus| focus.target.surface_id()),
+            Some(WlSurfaceId::from(172))
+        );
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| matches!(
+                action,
+                ClientAction::SeatEvent {
+                    event: SeatClientEvent::PointerButton { button: 0x110, state: 1, .. },
+                }
+            )
+        ));
+    }
+
+    #[test]
+    fn pointer_press_inside_popup_grab_keeps_keyboard_on_popup() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mapped = map_toplevel_popup(&mut state, &mut client, &mut dispatcher);
+        begin_popup_grab(
+            &mut state,
+            &mut dispatcher,
+            client.client_id(),
+            mapped.popup_role,
+            mapped.popup_surface,
+        );
+        state.seat.pointer_pos = (120.0, 100.0);
+
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+
+        assert_eq!(
+            state.seat.keyboard_focus.map(|focus| focus.surface),
+            Some(mapped.popup_surface)
+        );
+        assert_eq!(
+            state
+                .seat
+                .pointer_focus
+                .map(|focus| focus.target.surface_id()),
+            Some(WlSurfaceId::from(171))
+        );
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| matches!(
+                action,
+                ClientAction::SeatEvent {
+                    event: SeatClientEvent::PointerButton { button: 0x110, state: 1, .. },
+                }
+            )
+        ));
     }
 
     #[test]
