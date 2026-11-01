@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    time::Instant,
+};
 
 use crate::{
     clients::{Client, ClientAction, ClientId, Resolved},
@@ -313,6 +316,10 @@ pub struct SeatState {
     keyboard_resources: BTreeMap<ClientId, Vec<Resolved<WlKeyboardId>>>,
     intercepted_keyboard_keys: BTreeSet<u32>,
     intercepted_pointer_buttons: BTreeSet<u32>,
+    /// Last real libinput event on this seat. Absent until the first one.
+    /// A held key or button does not refresh it, and neither do synthetic
+    /// pause releases or focus changes.
+    last_real_input: Option<Instant>,
 }
 
 impl Default for SeatState {
@@ -345,12 +352,28 @@ impl Default for SeatState {
             keyboard_resources: BTreeMap::default(),
             intercepted_keyboard_keys: BTreeSet::default(),
             intercepted_pointer_buttons: BTreeSet::default(),
+            last_real_input: None,
         }
     }
 }
 
 impl SeatState {
+    /// Record one real libinput event.
+    ///
+    /// Idle time starts at this instant. A key or button that stays down does
+    /// not call this again, so holding input does not postpone idle.
+    pub(crate) fn note_real_input(&mut self, at: Instant) {
+        self.last_real_input = Some(at);
+    }
+
+    pub(crate) fn last_real_input(&self) -> Option<Instant> {
+        self.last_real_input
+    }
+
     /// Drop pointer and keyboard device state after input devices are removed.
+    ///
+    /// The activity clock stays. Device removal is not a new input, and idle
+    /// time keeps running from the last real event.
     pub fn clear_device_state(&mut self) {
         self.pointer_button_count = 0;
         self.pressed_buttons.clear();
@@ -2137,7 +2160,7 @@ mod xdg_seat_tests {
         super::{
             begin_popup_grab, cancel_active_drag, complete_drag_drop, handle_keyboard_key,
             handle_pointer_button, handle_pointer_motion, handle_pointer_motion_absolute,
-            handle_pointer_scroll, pointer_scroll_protocol_events,
+            handle_pointer_scroll, pointer_scroll_protocol_events, quiesce_for_session_pause,
             recover_pointer_after_interactive_grab_loss, remove_popup_grab, scene_pick_at,
             window_hit_at, HitSemantics, PointerAxisChange, PointerScrollAxis,
             PointerScrollDirection, PointerScrollFrame, PointerScrollSource,
@@ -2154,6 +2177,7 @@ mod xdg_seat_tests {
                 ZwpRelativePointerV1Id,
             },
             region::RectI,
+            runner::Dispatcher,
             state::{
                 BackendOutputRef, DragPhase, DragSource, DragState, DragTargetState, DrmId,
                 ObjectId, State, WorkspaceGroup,
@@ -4135,6 +4159,90 @@ mod xdg_seat_tests {
                 )
             }
         ));
+    }
+
+    #[test]
+    fn seat_input_handlers_do_not_record_activity() {
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        handle_keyboard_key(&mut state, &mut dispatcher, 30, 1, 10);
+        handle_keyboard_key(&mut state, &mut dispatcher, 30, 0, 20);
+        handle_pointer_button(&mut state, &mut dispatcher, 272, 1, 10);
+        handle_pointer_button(&mut state, &mut dispatcher, 272, 0, 20);
+        handle_pointer_motion(&mut state, &mut dispatcher, 4.0, -2.0, 4.0, -2.0, 10, 10_000);
+        handle_pointer_motion_absolute(&mut state, &mut dispatcher, 12.0, 8.0, 10);
+        handle_pointer_scroll(
+            &mut state,
+            &mut dispatcher,
+            PointerScrollFrame {
+                time: 10,
+                source: PointerScrollSource::Wheel,
+                vertical: None,
+                horizontal: None,
+            },
+        );
+        crate::input::set_keyboard_focus(
+            &mut state,
+            &mut dispatcher,
+            Some(fake_focus(ClientId::from_raw(7), WlSurfaceId::from(10))),
+        );
+        assert!(state.seat.last_real_input().is_none());
+    }
+
+    #[test]
+    fn a_held_button_does_not_move_the_activity_clock() {
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        let at = std::time::Instant::now() - std::time::Duration::from_secs(30);
+        state.seat.note_real_input(at);
+        handle_pointer_button(&mut state, &mut dispatcher, 272, 1, 10);
+        assert_eq!(state.seat.pointer_button_count, 1);
+        assert_eq!(state.seat.last_real_input(), Some(at));
+    }
+
+    #[test]
+    fn pause_releases_do_not_move_the_activity_clock() {
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        let at = std::time::Instant::now();
+        state.seat.note_real_input(at);
+        handle_keyboard_key(&mut state, &mut dispatcher, 30, 1, 10);
+        handle_pointer_button(&mut state, &mut dispatcher, 272, 1, 10);
+        state.session_active = false;
+        quiesce_for_session_pause(&mut state, &mut dispatcher);
+        assert_eq!(state.seat.last_real_input(), Some(at));
+        assert!(state.keyboard.pressed_keys().0.is_empty());
+        assert!(state.seat.pressed_buttons.is_empty());
+    }
+
+    #[test]
+    fn clearing_device_state_keeps_the_activity_clock() {
+        let mut state = state_for_tests();
+        let at = std::time::Instant::now();
+        state.seat.note_real_input(at);
+        state.seat.clear_device_state();
+        assert_eq!(state.seat.last_real_input(), Some(at));
+    }
+
+    #[test]
+    fn a_swallowed_binding_keeps_activity_recorded_before_routing() {
+        let mut state = state_for_tests();
+        let (_client, mut dispatcher) = test_client_and_dispatcher(7);
+        state.config = RuntimeConfig::parse_for_test(
+            r#"
+            [bindings]
+            "Super+Return" = { action = "spawn", command = ":" }
+            "#,
+            &state.xkb,
+        )
+        .unwrap();
+        state.seat.keyboard_focus = Some(fake_focus(ClientId::from_raw(7), WlSurfaceId::from(10)));
+        let at = std::time::Instant::now();
+        state.seat.note_real_input(at);
+        handle_keyboard_key(&mut state, &mut dispatcher, 125, 1, 10);
+        handle_keyboard_key(&mut state, &mut dispatcher, 28, 1, 20);
+        handle_keyboard_key(&mut state, &mut dispatcher, 28, 0, 30);
+        assert_eq!(state.seat.last_real_input(), Some(at));
     }
 
     #[test]

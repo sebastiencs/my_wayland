@@ -349,6 +349,7 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
     runner.add_model(dbus);
     runner.add_model(udev);
     runner.add_model(libinput);
+    runner.add_model(Box::new(scheduler::IdleScheduler::new()));
     runner.add_model(client_manager);
     runner.add_model(config_watcher);
     runner.add_model(Box::new(drm::VisualAnimationPump::new()));
@@ -358,6 +359,7 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
     let mut dispatcher = Dispatcher::default();
     dispatcher.start::<ClientManager>();
     dispatcher.start::<libinput::Libinput>();
+    dispatcher.start::<scheduler::IdleScheduler>();
     dispatcher.start::<config::ConfigWatcher>();
     dispatcher.start::<drm::VisualAnimationPump>();
     dispatcher.start::<signals::SignalHandler>();

@@ -5,12 +5,14 @@
 
 pub mod completion;
 pub mod frame_clock;
+pub mod idle_scheduler;
 pub mod output_scheduler;
 pub mod presentation;
 
 pub use {
     completion::{complete_frame_for_timeline, discard_frame_for_timeline, FrameCompletionOutcome},
     frame_clock::{PresentFlags, PresentSample, RequestFrameReason},
+    idle_scheduler::IdleScheduler,
     output_scheduler::{output_scheduler_id, OutputScheduler, OutputSchedulerAction},
     presentation::PresentationSubsystem,
 };

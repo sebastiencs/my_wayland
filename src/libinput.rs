@@ -3,6 +3,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::Path,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use input::{
@@ -208,6 +209,10 @@ impl From<std::io::Result<PollCompleted>> for LibinputAction {
     }
 }
 
+fn record_real_input(state: &mut State) {
+    state.seat.note_real_input(Instant::now());
+}
+
 impl Model for Libinput {
     type Action = LibinputAction;
 
@@ -230,6 +235,10 @@ impl Model for Libinput {
                 if dispatcher.shutdown_requested() {
                     return Ok(());
                 }
+                // Events drained while the session is paused are not activity.
+                // Real events that pass this gate update the idle clock before
+                // binding and client routing, so a swallowed binding still counts
+                // and a synthetic pause release, which never reaches this loop, does not.
                 if !state.session_active {
                     self.drain_events();
                     return Ok(());
@@ -242,6 +251,7 @@ impl Model for Libinput {
                     match event {
                         input::Event::Pointer(pointer) => match pointer {
                             PointerEvent::Motion(motion) => {
+                                record_real_input(state);
                                 log::debug!(
                                     "libinput pointer motion dx={} dy={} time={}",
                                     motion.dx(),
@@ -260,6 +270,7 @@ impl Model for Libinput {
                                 )
                             }
                             PointerEvent::MotionAbsolute(motion) => {
+                                record_real_input(state);
                                 let Some(bounds) = current_output_layout_bounds(state) else {
                                     continue;
                                 };
@@ -289,6 +300,7 @@ impl Model for Libinput {
                                 );
                             }
                             PointerEvent::Button(button) => {
+                                record_real_input(state);
                                 let button_state = match button.button_state() {
                                     ButtonState::Pressed => 1,
                                     ButtonState::Released => 0,
@@ -308,20 +320,27 @@ impl Model for Libinput {
                                 );
                             }
                             PointerEvent::ScrollWheel(wheel) => {
+                                record_real_input(state);
                                 deliver_wheel_scroll(state, dispatcher, &wheel)
                             }
-                            PointerEvent::ScrollFinger(finger) => deliver_smooth_scroll(
-                                state,
-                                dispatcher,
-                                PointerScrollSource::Finger,
-                                &finger,
-                            ),
-                            PointerEvent::ScrollContinuous(continuous) => deliver_smooth_scroll(
-                                state,
-                                dispatcher,
-                                PointerScrollSource::Continuous,
-                                &continuous,
-                            ),
+                            PointerEvent::ScrollFinger(finger) => {
+                                record_real_input(state);
+                                deliver_smooth_scroll(
+                                    state,
+                                    dispatcher,
+                                    PointerScrollSource::Finger,
+                                    &finger,
+                                );
+                            }
+                            PointerEvent::ScrollContinuous(continuous) => {
+                                record_real_input(state);
+                                deliver_smooth_scroll(
+                                    state,
+                                    dispatcher,
+                                    PointerScrollSource::Continuous,
+                                    &continuous,
+                                );
+                            }
                             // libinput emits the deprecated axis event in addition to the
                             // scroll events above. Forwarding both would scroll twice.
                             #[allow(deprecated)]
@@ -330,6 +349,7 @@ impl Model for Libinput {
                         },
                         input::Event::Keyboard(keyboard) => match keyboard {
                             KeyboardEvent::Key(key) => {
+                                record_real_input(state);
                                 let key_state = match key.key_state() {
                                     KeyState::Pressed => 1,
                                     KeyState::Released => 0,
