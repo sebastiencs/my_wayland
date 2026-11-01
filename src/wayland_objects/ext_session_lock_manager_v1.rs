@@ -46,6 +46,9 @@ impl Object for ExtSessionLockManagerV1 {
                     let outputs = state.session_lock.covered_outputs();
                     crate::drm::request_outputs(state, outputs, dispatcher);
                     crate::seat::gate_for_session_lock(state, dispatcher);
+                    crate::wayland_objects::ext_session_lock_v1::publish_locked_hint(
+                        state, dispatcher,
+                    );
                 }
             }
         }
@@ -66,12 +69,14 @@ mod tests {
         crate::{
             clients::{Client, ClientAction, ClientId, ClientManagerAction, RawEvent},
             config::{Binding, CompositorAction, KeyBinding},
+            dbus::DbusAction,
             input::types::SurfaceFocus,
             object::IdToObject,
             protocol_generated::{ExtSessionLockSurfaceV1Id, WlOutputId, WlSurfaceId},
             runner::{Dispatcher, Model},
             seat::handle_keyboard_key,
             session_lock::{LockBlank, SessionLockPhase},
+            state::ObjectId,
             test_support::{state_for_tests, test_output_drm1},
             wayland_objects::{
                 ext_session_lock_v1::{confirm_lock, on_protected_frame_presented},
@@ -301,6 +306,54 @@ mod tests {
         );
         assert_eq!(state.session_lock.phase(), SessionLockPhase::Unlocked);
         assert!(!closed(&dispatcher, &client));
+    }
+
+    fn locked_hints(dispatcher: &Dispatcher, locked: bool) -> usize {
+        dispatcher.test_count_queued_action(|action: &DbusAction| {
+            matches!(action, DbusAction::SetLockedHint { locked: value } if *value == locked)
+        })
+    }
+
+    #[test]
+    fn unlock_restores_a_mapped_window_and_clears_the_locked_hint() {
+        let mut state = state_for_tests();
+        let output = state.insert_output(test_output_drm1(0, 0, 640, 480));
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        let mut dispatcher = Dispatcher::default();
+        insert_manager(&mut client, &mut state);
+        let surface = client
+            .insert_object(&mut state, WlSurface::new(WlSurfaceId::from(20), client.client_id(), 6))
+            .0;
+        surface
+            .ref_mut(&mut state)
+            .test_map(ObjectId::from(40usize), 0, 0, 20, 20);
+        let focus = SurfaceFocus::new(surface);
+        state.seat.keyboard_focus = Some(focus);
+
+        lock(&mut client, &mut state, &mut dispatcher, LOCK_ID);
+        assert!(state.seat.keyboard_focus().is_none());
+        assert_eq!(locked_hints(&dispatcher, true), 1);
+        state.session_lock.consume_full_damage(output);
+        state.session_lock.consume_full_damage(output);
+        state.session_lock.note_session_resumed();
+        assert!(state.session_lock.consume_full_damage(output));
+
+        state.session_lock.mark_locked_for_tests();
+        client
+            .resolve(ExtSessionLockV1Id::from(LOCK_ID), &state)
+            .unwrap()
+            .ref_mut(&mut state)
+            .mark_locked_sent();
+        dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ExtSessionLockV1Id::from(LOCK_ID),
+            request(LOCK_ID, 2, 0),
+        );
+        assert_eq!(state.session_lock.phase(), SessionLockPhase::Unlocked);
+        assert_eq!(state.seat.keyboard_focus(), Some(focus));
+        assert_eq!(locked_hints(&dispatcher, false), 1);
     }
 
     #[test]

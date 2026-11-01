@@ -686,6 +686,17 @@ impl Dbus {
         if !active {
             crate::seat::quiesce_for_session_pause(state, dispatcher);
         } else {
+            if state.session_lock.input_gated() {
+                state.session_lock.note_session_resumed();
+                let outputs = state
+                    .outputs
+                    .iter()
+                    .filter(|(_, output)| output.enabled)
+                    .map(|(output_id, _)| output_id)
+                    .collect::<Vec<_>>();
+                crate::drm::request_outputs(state, outputs, dispatcher);
+                crate::seat::refresh_scene_focus(state, dispatcher);
+            }
             dispatcher.dispatch(UdevAction::SessionActive);
             dispatcher.dispatch(crate::libinput::LibinputAction::SessionActive);
         }
@@ -806,6 +817,28 @@ impl Dbus {
             }
             dispatcher.dispatch(UdevAction::ResumeDevice { devnum, fd });
         }
+    }
+
+    fn set_locked_hint(&mut self, locked: bool, dispatcher: &mut Dispatcher) {
+        if self.released_control || self.session_path.is_empty() {
+            return;
+        }
+        let mut message = session_method(self.session_path.as_str(), "SetLockedHint");
+        message.add_value(Value::Boolean(locked));
+        message.set_serial(self.next_serial().as_u32());
+        let encoded = match message.encode() {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                log::warn!("could not encode SetLockedHint: {error}");
+                return;
+            }
+        };
+        dispatcher.dispatch(IoUringAction::Write {
+            fd: self.socket.as_raw_fd(),
+            offset: 0,
+            buffer: Box::from(&encoded[..]),
+            dispatch_to: Redispatcher::None,
+        });
     }
 
     fn queue_pause_device_complete(&mut self, devnum: libc::dev_t, dispatcher: &mut Dispatcher) {
@@ -968,6 +1001,10 @@ pub enum DbusAction {
         devnum: libc::dev_t,
         error: Option<String>,
     },
+    /// logind `SetLockedHint`. Sent when a lock is accepted and cleared on unlock.
+    SetLockedHint {
+        locked: bool,
+    },
 }
 
 impl Model for Dbus {
@@ -1001,6 +1038,7 @@ impl Model for Dbus {
             }
             MsgReceived { msg, fds } => self.handle_message(state, msg, fds, dispatcher),
             DevicePauseQuiesced { devnum } => self.finish_device_pause(devnum, dispatcher),
+            SetLockedHint { locked } => self.set_locked_hint(locked, dispatcher),
             PauseAckFinished { devnum, error } => {
                 if let Some(error) = error {
                     isolate_session_fault(
@@ -1548,6 +1586,27 @@ mod session_release_tests {
             1
         );
         assert_eq!(session.devices.get(&devnum).unwrap().phase, super::DevicePhase::Resuming);
+    }
+
+    #[test]
+    fn set_locked_hint_is_written_to_the_session() {
+        use crate::io_uring::model::IoUringAction;
+
+        let mut session = dbus_for_tests();
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        session
+            .process(&mut state, super::DbusAction::SetLockedHint { locked: true }, &mut dispatcher)
+            .expect("hint");
+        let written = dispatcher.test_count_queued_action(|action: &IoUringAction| {
+            let crate::io_uring::model::IoUringAction::Write { buffer, .. } = action else {
+                return false;
+            };
+            buffer
+                .windows(b"SetLockedHint".len())
+                .any(|window| window == b"SetLockedHint")
+        });
+        assert_eq!(written, 1);
     }
 
     #[test]

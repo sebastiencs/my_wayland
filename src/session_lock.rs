@@ -178,7 +178,7 @@ impl SessionLock {
         self.bump_coverage();
     }
 
-    /// `unlock_and_destroy` after `locked`. Focus restoration is a later phase.
+    /// `unlock_and_destroy` after `locked`. The caller restores focus and clears the logind hint.
     pub fn unlock(&mut self) {
         if !self.locked_sent {
             return;
@@ -186,6 +186,32 @@ impl SessionLock {
         let epoch = self.coverage_epoch.saturating_add(1);
         *self = Self::default();
         self.coverage_epoch = epoch;
+    }
+
+    /// A resumed session redraws protected pixels before any desktop frame.
+    pub fn note_session_resumed(&mut self) {
+        if self.input_gated() {
+            self.bump_coverage();
+        }
+    }
+
+    /// An output that appears while protected is covered, but it does not join the
+    /// acceptance barrier. An empty barrier still cannot be confirmed by that output.
+    pub fn cover_output(&mut self, output_id: OutputId) -> bool {
+        if !self.input_gated() || self.outputs.contains_key(&output_id) {
+            return false;
+        }
+        self.outputs.insert(
+            output_id,
+            LockOutput {
+                surface: None,
+                mapped: false,
+                presented: false,
+                required: false,
+            },
+        );
+        self.bump_coverage();
+        true
     }
 
     pub fn covered_outputs(&self) -> Vec<OutputId> {

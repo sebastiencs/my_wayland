@@ -149,6 +149,7 @@ impl Object for ExtSessionLockV1 {
         } else {
             state.session_lock.cancel_pending();
         }
+        publish_locked_hint(state, dispatcher);
         crate::drm::request_outputs(state, outputs, dispatcher);
     }
 }
@@ -197,14 +198,21 @@ fn release_lock(
     if !owns_session {
         return;
     }
+    let saved_focus = state.session_lock.pre_lock_focus();
     let outputs = state.session_lock.covered_outputs();
     let surfaces = state.session_lock.surfaces();
     inert_surfaces(state, surfaces);
     if unlock {
         state.session_lock.unlock();
+        crate::input::focus::restore_keyboard_focus_after_unlock(
+            state,
+            dispatcher,
+            saved_focus.keyboard,
+        );
     } else {
         state.session_lock.cancel_pending();
     }
+    publish_locked_hint(state, dispatcher);
     crate::drm::request_outputs(state, outputs, dispatcher);
 }
 
@@ -351,6 +359,45 @@ pub(crate) fn enabled_outputs(state: &State) -> Vec<crate::state::OutputId> {
         .filter(|(_, output)| output.enabled)
         .map(|(output_id, _)| output_id)
         .collect()
+}
+
+pub(crate) fn publish_locked_hint(state: &State, dispatcher: &mut crate::runner::Dispatcher) {
+    dispatcher.dispatch(crate::dbus::DbusAction::SetLockedHint {
+        locked: state.session_lock.input_gated(),
+    });
+}
+
+/// Mode, scale, and enable changes. A disabled output leaves the barrier without
+/// counting as a flip. An enabled output is covered and its lock surface is resized.
+pub(crate) fn on_output_state_changed(
+    state: &mut State,
+    dispatcher: &mut crate::runner::Dispatcher,
+    output_id: crate::state::OutputId,
+) {
+    if !state.session_lock.input_gated() {
+        return;
+    }
+    let Some(output) = state.outputs.try_get(output_id) else {
+        return;
+    };
+    if !output.enabled {
+        if let Some(surface) = state.session_lock.detach_output(output_id) {
+            if let Some(mut surface) = surface.try_ref_mut(state) {
+                surface.make_inert();
+            }
+        }
+        let outputs = state.session_lock.covered_outputs();
+        crate::drm::request_outputs(state, outputs, dispatcher);
+        return;
+    }
+    state.session_lock.cover_output(output_id);
+    if let Some(lock) = state.session_lock.lock() {
+        dispatcher.dispatch_to(
+            lock.client_id(),
+            crate::clients::ClientAction::ReconfigureLockOutput { output_id },
+        );
+    }
+    crate::drm::request_output(state, output_id, dispatcher);
 }
 
 pub(crate) fn accept_lock(

@@ -12,8 +12,8 @@
 //! notification resumes immediately, and lifting inhibition starts a fresh
 //! timeout. Input-idle notifications ignore the bit.
 //!
-//! Milestone 6 can reject inhibition while a session is locked by changing
-//! [`any_honored_inhibitor`] before the visibility walk.
+//! A session lock keeps this policy. Visible inhibitors still pause idle
+//! notifications, and real lock-screen input still restarts them.
 
 use std::time::Instant;
 

@@ -162,6 +162,29 @@ impl PostAction for RefreshLockFocus {
     }
 }
 
+pub(crate) fn restore_keyboard_focus_after_unlock(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    saved: Option<SurfaceFocus>,
+) {
+    refresh_pointer_focus(state, dispatcher, monotonic_time_msec(), false);
+    if let Some(focus) = saved.filter(|focus| keyboard_focus_is_restorable(state, *focus)) {
+        set_keyboard_focus(state, dispatcher, Some(focus));
+        return;
+    }
+    focus_after_client_disconnect(state, dispatcher);
+}
+
+fn keyboard_focus_is_restorable(state: &State, focus: SurfaceFocus) -> bool {
+    let Some(surface) = focus.surface.try_ref(state) else {
+        return false;
+    };
+    if surface.has_lock_surface_role() || surface.has_cursor_role() || surface.has_dnd_icon_role() {
+        return false;
+    }
+    surface.logical_size().is_some()
+}
+
 pub(crate) fn focus_after_client_disconnect(state: &mut State, dispatcher: &mut Dispatcher) {
     if state.session_lock.input_gated() {
         refresh_keyboard_focus(state, dispatcher);

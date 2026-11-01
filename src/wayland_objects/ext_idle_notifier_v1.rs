@@ -403,6 +403,31 @@ mod tests {
     }
 
     #[test]
+    fn activity_while_the_session_is_locked_restarts_the_timeout() {
+        let mut fixture = new_fixture(2);
+        get_idle(&mut fixture, 7, 5_000);
+        let before = notification(&fixture, 7).deadline().unwrap();
+        fixture.state.session_lock.install(
+            fixture.client.client_id(),
+            crate::clients::Resolved::new(
+                fixture.client.client_id(),
+                crate::protocol_generated::ExtSessionLockV1Id::from(9),
+                crate::state::ObjectId::from(9usize),
+            ),
+            false,
+            crate::session_lock::PreLockFocus::default(),
+            std::iter::empty::<crate::state::OutputId>(),
+        );
+        assert!(fixture.state.session_lock.input_gated());
+        let later = before + Duration::from_secs(10);
+        on_activity(&mut fixture.state, &mut fixture.dispatcher, later);
+        assert_eq!(
+            notification(&fixture, 7).deadline(),
+            Some(later + Duration::from_millis(5_000))
+        );
+    }
+
+    #[test]
     fn client_disconnect_drops_the_notification_without_an_event() {
         let mut fixture = new_fixture(2);
         get_idle(&mut fixture, 7, 5_000);

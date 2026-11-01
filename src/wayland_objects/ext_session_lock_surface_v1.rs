@@ -58,6 +58,12 @@ impl ExtSessionLockSurfaceV1 {
         &self.configures
     }
 
+    pub fn configured_size(&self) -> Option<(u32, u32)> {
+        self.configures
+            .last()
+            .map(|(_, width, height)| (*width, *height))
+    }
+
     pub fn make_inert(&mut self) {
         self.inert = true;
     }
@@ -204,7 +210,7 @@ mod tests {
     use {
         super::*,
         crate::{
-            clients::{Client, ClientId, ClientManagerAction, RawEvent, Resolved},
+            clients::{Client, ClientAction, ClientId, ClientManagerAction, RawEvent, Resolved},
             drm::ARGB8888,
             input::types::SurfaceFocus,
             object::IdToObject,
@@ -619,6 +625,64 @@ mod tests {
         assert_eq!(fixture.state.session_lock.phase(), SessionLockPhase::Locking);
         assert_eq!(fixture.surface.rref(&fixture.state).role(), Role::LockSurface);
         assert!(!fixture.state.root_surfaces().contains(&fixture.surface));
+    }
+
+    #[test]
+    fn a_logical_size_change_configures_the_lock_surface_again() {
+        let mut fixture = fixture();
+        let lock_surface = fixture
+            .client
+            .resolve(ExtSessionLockSurfaceV1Id::from(LOCK_SURFACE_ID), &fixture.state)
+            .unwrap();
+        assert_eq!(lock_surface.rref(&fixture.state).configured_size(), Some((640, 480)));
+        {
+            let output = fixture
+                .state
+                .outputs
+                .try_get_mut(fixture.output_id)
+                .unwrap();
+            output.current_mode.width = 800;
+            output.current_mode.height = 600;
+        }
+        crate::wayland_objects::ext_session_lock_v1::on_output_state_changed(
+            &mut fixture.state,
+            &mut fixture.dispatcher,
+            fixture.output_id,
+        );
+        fixture
+            .client
+            .process(
+                &mut fixture.state,
+                ClientAction::ReconfigureLockOutput { output_id: fixture.output_id },
+                &mut fixture.dispatcher,
+            )
+            .unwrap();
+        assert_eq!(lock_surface.rref(&fixture.state).configured_size(), Some((800, 600)));
+        assert_eq!(fixture.state.session_lock.phase(), SessionLockPhase::Locking);
+    }
+
+    #[test]
+    fn disabling_an_output_drops_its_lock_surface_without_confirming() {
+        let mut fixture = fixture();
+        fixture
+            .state
+            .outputs
+            .try_get_mut(fixture.output_id)
+            .unwrap()
+            .enabled = false;
+        crate::wayland_objects::ext_session_lock_v1::on_output_state_changed(
+            &mut fixture.state,
+            &mut fixture.dispatcher,
+            fixture.output_id,
+        );
+        assert!(fixture
+            .client
+            .resolve(ExtSessionLockSurfaceV1Id::from(LOCK_SURFACE_ID), &fixture.state)
+            .unwrap()
+            .rref(&fixture.state)
+            .is_inert());
+        assert_eq!(fixture.state.session_lock.phase(), SessionLockPhase::Locking);
+        assert!(!fixture.state.session_lock.locked_sent());
     }
 
     #[test]

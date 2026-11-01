@@ -345,6 +345,9 @@ impl Model for ClientManager {
                 }
             }
             OutputStateChanged { output_id } => {
+                crate::wayland_objects::ext_session_lock_v1::on_output_state_changed(
+                    state, dispatcher, output_id,
+                );
                 for client_id in self.set.iter().copied() {
                     dispatcher
                         .dispatch_to(client_id, ClientAction::OutputStateChanged { output_id });
@@ -497,6 +500,9 @@ pub enum ClientAction {
         time_msec: u32,
     },
     SendSessionLockLocked,
+    ReconfigureLockOutput {
+        output_id: OutputId,
+    },
     PresentationFeedbackPresented {
         feedbacks: Vec<Resolved<WpPresentationFeedbackId>>,
         output_id: Option<OutputId>,
@@ -2419,6 +2425,31 @@ impl Model for Client {
                         }
                     }
                 }
+            }
+            ReconfigureLockOutput { output_id } => {
+                let Some(surface_id) = state.session_lock.surface_for_output(output_id) else {
+                    return Ok(());
+                };
+                if surface_id.client_id() != self.id {
+                    return Ok(());
+                }
+                let Some((width, height)) = state
+                    .outputs
+                    .try_get(output_id)
+                    .map(|output| output.logical_size())
+                else {
+                    return Ok(());
+                };
+                let width = u32::try_from(width).unwrap_or(0);
+                let height = u32::try_from(height).unwrap_or(0);
+                let serial = state.seat.next_serial();
+                let Some(surface) = surface_id.try_ref_mut(state) else {
+                    return Ok(());
+                };
+                if surface.is_inert() || surface.configured_size() == Some((width, height)) {
+                    return Ok(());
+                }
+                surface.configure(serial, width, height, &mut dispatcher);
             }
             PresentationFeedbackPresented {
                 feedbacks,
