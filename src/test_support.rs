@@ -57,6 +57,8 @@ pub fn state_for_tests_with_config(config: RuntimeConfig) -> State {
         backend_syncobj_globals: Default::default(),
         session_active: true,
         idle_notifications: Vec::new(),
+        idle_inhibitors: Vec::new(),
+        idle_inhibitors_honored: false,
         frame_scheduler: Default::default(),
         presentation: Default::default(),
         globals,

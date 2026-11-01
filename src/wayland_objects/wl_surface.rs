@@ -2699,6 +2699,7 @@ impl WlSurface {
         self.cleanup_extension_objects();
         state.unregister_root_surface(object);
         dispatcher.dispatch_post_action(PostWlSurface::ClearFocusAfterDestroy);
+        crate::idle_inhibit::queue_refresh(dispatcher);
         use crate::wayland_objects::wl_display::WlDisplay;
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
         if let Some(bounds) = scene_bounds {

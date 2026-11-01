@@ -11,7 +11,7 @@ use crate::{
     protocol_generated::{
         ExtIdleNotificationV1Id, HyprlandCtmControlManagerV1Id, WaylandId, WlDataOfferId,
         WlDataSourceId, WlSeatId, WlSurfaceId, XdgSurfaceId, XdgToplevelId, ZwlrGammaControlV1Id,
-        ZwlrLayerSurfaceV1Id,
+        ZwlrLayerSurfaceV1Id, ZwpIdleInhibitorV1Id,
     },
     region::RectI,
     render::{
@@ -857,6 +857,10 @@ pub struct State {
     pub session_active: bool,
     /// Live `ext_idle_notification_v1` objects. Destroying the manager does not clear this.
     pub idle_notifications: Vec<Resolved<ExtIdleNotificationV1Id>>,
+    /// Live `zwp_idle_inhibitor_v1` objects, including ones left inert after surface destruction.
+    pub idle_inhibitors: Vec<Resolved<ZwpIdleInhibitorV1Id>>,
+    /// Last result of the visibility policy. Inhibitor-aware notifications follow this bit.
+    pub idle_inhibitors_honored: bool,
     #[cfg(test)]
     pub realize_closing_snapshots_in_tests: bool,
     pub frame_scheduler: BTreeMap<OutputId, OutputSchedulerSnapshot>,

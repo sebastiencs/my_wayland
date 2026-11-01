@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest},
     globals::Global,
@@ -74,6 +76,8 @@ impl Object for ZwpIdleInhibitManagerV1 {
                     .try_ref_mut(state)
                     .expect("idle inhibitor surface")
                     .add_idle_inhibitor(inhibitor);
+                crate::idle_inhibit::register_inhibitor(state, inhibitor);
+                crate::idle_inhibit::refresh(state, dispatcher, Instant::now());
             }
         }
         Ok(())

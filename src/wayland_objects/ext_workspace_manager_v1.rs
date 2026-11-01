@@ -33,6 +33,7 @@ pub fn publish_workspace_state_changed(
     affected_outputs: impl IntoIterator<Item = OutputId>,
 ) {
     let opened = state.relayout_dirty_workspaces();
+    crate::idle_inhibit::refresh(state, dispatcher, std::time::Instant::now());
     if !opened.is_empty() {
         kick_visual_animation_pump(dispatcher);
     }

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::{
     clients::{Client, ClientDispatcher, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
@@ -69,6 +71,10 @@ impl Object for ZwpIdleInhibitorV1 {
         match client.parse::<Self>(req, dispatcher)? {
             zwp_idle_inhibitor_v1::Request::Destroy => {
                 self.detach(client, state);
+                if let Some(inhibitor) = client.resolve(self.id, state) {
+                    crate::idle_inhibit::unregister_inhibitor(state, inhibitor);
+                }
+                crate::idle_inhibit::refresh(state, dispatcher, Instant::now());
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
@@ -79,8 +85,12 @@ impl Object for ZwpIdleInhibitorV1 {
         &mut self,
         client: &mut Client,
         state: &mut State,
-        _dispatcher: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) {
         self.detach(client, state);
+        if let Some(inhibitor) = client.resolve(self.id, state) {
+            crate::idle_inhibit::unregister_inhibitor(state, inhibitor);
+        }
+        crate::idle_inhibit::refresh(state, dispatcher, Instant::now());
     }
 }

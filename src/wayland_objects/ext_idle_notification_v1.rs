@@ -7,8 +7,10 @@
 //! that event. `resumed` is sent only after `idled`, and never twice in a row.
 //!
 //! wlroots, Smithay, and Hyprland arm one timer per notification. Those
-//! deadlines share this compositor's single idle timerfd. Inhibition is
-//! recorded on the object and applied in a later phase; nothing is inhibited yet.
+//! deadlines share this compositor's single idle timerfd. When inhibitors are
+//! honored, an inhibitor-aware notification stays resumed with no deadline.
+//! Lifting inhibition starts a fresh timeout. Input-idle notifications ignore
+//! that bit.
 
 use std::time::{Duration, Instant};
 
@@ -126,7 +128,11 @@ impl ExtIdleNotificationV1 {
         dispatcher.dispatch(IdleSchedulerAction::ClearDeadline { id: self.deadline_id });
     }
 
-    fn handle_activity(&mut self, dispatcher: &mut Dispatcher, now: Instant) {
+    fn handle_activity(&mut self, dispatcher: &mut Dispatcher, now: Instant, inhibited: bool) {
+        if self.obey_inhibitors && inhibited {
+            self.inhibit(dispatcher);
+            return;
+        }
         if self.idle {
             self.idle = false;
             self.deadline = None;
@@ -135,7 +141,10 @@ impl ExtIdleNotificationV1 {
         self.arm_from(dispatcher, now);
     }
 
-    fn evaluate_at(&mut self, dispatcher: &mut Dispatcher, now: Instant) {
+    fn evaluate_at(&mut self, dispatcher: &mut Dispatcher, now: Instant, inhibited: bool) {
+        if self.obey_inhibitors && inhibited {
+            return;
+        }
         let Some(deadline) = self.deadline else {
             return;
         };
@@ -143,6 +152,25 @@ impl ExtIdleNotificationV1 {
             return;
         }
         self.mark_idle(dispatcher);
+    }
+
+    pub(crate) fn inhibit(&mut self, dispatcher: &mut Dispatcher) {
+        if !self.obey_inhibitors {
+            return;
+        }
+        if self.idle {
+            self.idle = false;
+            self.emit(dispatcher, IdleNotice::Resumed);
+        }
+        self.deadline = None;
+        dispatcher.dispatch(IdleSchedulerAction::ClearDeadline { id: self.deadline_id });
+    }
+
+    pub(crate) fn resume_after_inhibition(&mut self, dispatcher: &mut Dispatcher, now: Instant) {
+        if !self.obey_inhibitors {
+            return;
+        }
+        self.arm_from(dispatcher, now);
     }
 
     fn release_deadline(&mut self, dispatcher: &mut Dispatcher) {
@@ -162,6 +190,7 @@ impl ExtIdleNotificationV1 {
 /// `now`. There is one seat, so a notification stays tied to the `wl_seat` it
 /// was created with without waiting for that resource to remain alive.
 pub(crate) fn on_activity(state: &mut State, dispatcher: &mut Dispatcher, now: Instant) {
+    let inhibited = state.idle_inhibitors_honored;
     let object_ids: Vec<ObjectId> = state
         .idle_notifications
         .iter()
@@ -174,12 +203,13 @@ pub(crate) fn on_activity(state: &mut State, dispatcher: &mut Dispatcher, now: I
         else {
             continue;
         };
-        notification.handle_activity(dispatcher, now);
+        notification.handle_activity(dispatcher, now, inhibited);
     }
 }
 
 /// Send `idled` for notifications whose deadline is at or before `now`.
 pub(crate) fn evaluate(state: &mut State, dispatcher: &mut Dispatcher, now: Instant) {
+    let inhibited = state.idle_inhibitors_honored;
     let object_ids: Vec<ObjectId> = state
         .idle_notifications
         .iter()
@@ -192,7 +222,7 @@ pub(crate) fn evaluate(state: &mut State, dispatcher: &mut Dispatcher, now: Inst
         else {
             continue;
         };
-        notification.evaluate_at(dispatcher, now);
+        notification.evaluate_at(dispatcher, now, inhibited);
     }
 }
 
@@ -207,13 +237,16 @@ pub(crate) fn create_notification(
     now: Instant,
 ) -> RequestResult {
     let seat = client.resolve_or_disconnect(seat, state, dispatcher)?;
+    let inhibited = obey_inhibitors && state.idle_inhibitors_honored;
     let resolved = {
         let (resolved, notification) = client.insert_object(
             state,
             ExtIdleNotificationV1::new(id, client.client_id(), seat, timeout_msec, obey_inhibitors),
         );
         notification.attach(resolved.object_id());
-        notification.arm_from(dispatcher, now);
+        if !inhibited {
+            notification.arm_from(dispatcher, now);
+        }
         resolved
     };
     state.idle_notifications.push(resolved);

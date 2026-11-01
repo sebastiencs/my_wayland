@@ -172,6 +172,7 @@ mod drm;
 mod egl;
 mod gbm;
 mod globals;
+mod idle_inhibit;
 mod indexmap;
 mod input;
 mod io_uring;
@@ -317,6 +318,8 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
         backend_syncobj_globals: Default::default(),
         session_active: true,
         idle_notifications: Vec::new(),
+        idle_inhibitors: Vec::new(),
+        idle_inhibitors_honored: false,
         #[cfg(test)]
         realize_closing_snapshots_in_tests: false,
         frame_scheduler: Default::default(),

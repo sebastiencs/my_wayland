@@ -372,11 +372,13 @@ impl Model for ClientManager {
                 publish_workspace_state_changed(state, dispatcher, affected_outputs);
             }
             WorkspaceStateChanged => {
+                crate::idle_inhibit::refresh(state, dispatcher, std::time::Instant::now());
                 for client_id in self.set.iter().copied() {
                     dispatcher.dispatch_to(client_id, ClientAction::WorkspaceStateChanged);
                 }
             }
             LayerShellLayoutChanged => {
+                crate::idle_inhibit::refresh(state, dispatcher, std::time::Instant::now());
                 for client_id in self.set.iter().copied() {
                     dispatcher.dispatch_to(client_id, ClientAction::RefreshLayerSurfaces);
                 }
@@ -2526,6 +2528,7 @@ impl Model for Client {
                 if seat_removal.keyboard_focus_cleared {
                     crate::seat::focus_after_client_disconnect(state, &mut dispatcher);
                 }
+                crate::idle_inhibit::refresh(state, &mut dispatcher, std::time::Instant::now());
                 self.pending_fds.clear();
                 if seat_removal.cursor_changed
                     || seat_removal.interactive_grab_cleared
