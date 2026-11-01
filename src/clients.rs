@@ -496,6 +496,7 @@ pub enum ClientAction {
         surfaces: Vec<Resolved<WlSurfaceId>>,
         time_msec: u32,
     },
+    SendSessionLockLocked,
     PresentationFeedbackPresented {
         feedbacks: Vec<Resolved<WpPresentationFeedbackId>>,
         output_id: Option<OutputId>,
@@ -2409,6 +2410,15 @@ impl Model for Client {
             }
             CompleteSurfaceFrameCallbacks { surfaces, time_msec } => {
                 self.complete_surface_frame_callbacks(state, &mut dispatcher, surfaces, time_msec);
+            }
+            SendSessionLockLocked => {
+                if let Some(lock) = state.session_lock.lock() {
+                    if lock.client_id() == self.id {
+                        if let Some(lock) = lock.try_ref_mut(state) {
+                            lock.send_locked(&mut dispatcher);
+                        }
+                    }
+                }
             }
             PresentationFeedbackPresented {
                 feedbacks,

@@ -146,10 +146,12 @@ impl Object for ExtSessionLockSurfaceV1 {
         use ext_session_lock_surface_v1::Request::*;
         match client.parse::<Self>(req, dispatcher)? {
             Destroy => {
-                if !self.inert {
-                    state.session_lock.clear_surface(self.output_id);
-                }
+                let output_id = self.output_id;
+                let repaint = !self.inert && state.session_lock.clear_surface(output_id);
                 self.delete_self(client, state, dispatcher);
+                if repaint {
+                    crate::drm::request_output(state, output_id, dispatcher);
+                }
             }
             AckConfigure { serial } => {
                 let Some(index) = self
@@ -186,10 +188,11 @@ impl Object for ExtSessionLockSurfaceV1 {
         &mut self,
         _client: &mut Client,
         state: &mut State,
-        _dispatcher: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) {
-        if !self.inert {
-            state.session_lock.clear_surface(self.output_id);
+        let output_id = self.output_id;
+        if !self.inert && state.session_lock.clear_surface(output_id) {
+            crate::drm::request_output(state, output_id, dispatcher);
         }
     }
 }
@@ -550,5 +553,26 @@ mod tests {
             .state
             .session_lock
             .shows_lock_surface(fixture.output_id));
+    }
+
+    #[test]
+    fn only_a_mapped_lock_surface_joins_the_protected_plan() {
+        let mut fixture = fixture();
+        assert!(fixture
+            .state
+            .session_lock
+            .paint_order(&fixture.state, fixture.output_id)
+            .is_empty());
+        ack(&mut fixture, 1);
+        let buffer = insert_buffer(&mut fixture, 40, 640, 480);
+        attach(&mut fixture, buffer);
+        commit(&mut fixture);
+        assert_eq!(
+            fixture
+                .state
+                .session_lock
+                .paint_order(&fixture.state, fixture.output_id),
+            vec![fixture.surface]
+        );
     }
 }

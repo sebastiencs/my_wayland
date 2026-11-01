@@ -5,8 +5,9 @@ use crate::{
 };
 
 // Output capture and any debug view of a physical output must consume this same
-// `OutputCompositionView` and frame plan, including both participants of a live workspace
-// transition. Retained closing capture is window-local and is not an output or screencopy path.
+// frame plan, including both participants of a live workspace transition. A session
+// lock replaces that view with the opaque blank and the lock surface. Retained closing
+// capture is window-local and is not an output or screencopy path.
 pub(super) fn collect_output_render_plan(
     state: &mut State,
     drm_id: DrmId,
@@ -26,6 +27,21 @@ pub(super) fn collect_output_render_plan(
             .unwrap()
             .output_bounds()
     });
+    if state.session_lock.consume_full_damage(logical_output_id) {
+        let drm = state.drm.get_mut(drm_id);
+        if let Some(output) = drm.output_mut(drm_crtc_id) {
+            output.pipeline.set_force_full_redraw(true);
+        }
+    }
+    if state.session_lock.blank().is_some() {
+        return collect_protected_output_render_plan(
+            state,
+            drm_id,
+            drm_crtc_id,
+            logical_output_id,
+            global_bounds,
+        );
+    }
     let view = state.compose_output_view(scene, logical_output_id, None);
     let (
         mut items,
@@ -59,6 +75,7 @@ pub(super) fn collect_output_render_plan(
             software_cursor_items,
             frame_elements,
             cursor_plane,
+            false,
         )
     };
     if state.output_has_live_workspace_transition(logical_output_id) {
@@ -85,6 +102,7 @@ pub(super) fn build_frame_plan(
     software_cursor_items: Vec<super::SceneItem>,
     frame_elements: Vec<super::RecordedFrameElement>,
     cursor_plane: Option<super::CursorPlaneCandidate>,
+    protected: bool,
 ) -> super::FramePlan {
     let output_bounds = output.output_bounds();
     let mut items = items;
@@ -152,7 +170,9 @@ pub(super) fn build_frame_plan(
         }
     }
 
-    let direct_scanout = if !has_effects
+    let direct_scanout = if protected {
+        None
+    } else if !has_effects
         && items.len() == 1
         && items[0].state.bounds == output_bounds
         && !super::scene_item_requires_compositor_compositing(&items[0])
@@ -182,6 +202,49 @@ pub(super) fn build_frame_plan(
             && output.preserve_render_buffer_contents()
             && !output.pipeline.force_full_redraw()
             && !has_effects,
+        protected,
+    }
+}
+
+fn collect_protected_output_render_plan(
+    state: &mut State,
+    drm_id: DrmId,
+    drm_crtc_id: u32,
+    logical_output_id: OutputId,
+    global_bounds: RectI,
+) -> super::OutputRenderPlan {
+    let (mut items, mut frame_elements, deferred_releases) = super::collect_protected_scene(
+        state,
+        drm_id,
+        drm_crtc_id,
+        logical_output_id,
+        global_bounds,
+    );
+    super::translate_scene_items(&mut items, -global_bounds.x, -global_bounds.y);
+    super::translate_recorded_frame_elements(
+        &mut frame_elements,
+        -global_bounds.x,
+        -global_bounds.y,
+    );
+    let frame = {
+        let drm = state.drm.get_mut(drm_id);
+        build_frame_plan(
+            drm.output_mut(drm_crtc_id)
+                .expect("missing DRM output pipeline for frame plan"),
+            items,
+            Vec::new(),
+            frame_elements,
+            None,
+            true,
+        )
+    };
+    super::OutputRenderPlan {
+        output_id: Some(logical_output_id),
+        global_bounds,
+        local_origin: (global_bounds.x, global_bounds.y),
+        deferred_releases,
+        cursor_animation_delay_msec: None,
+        frame,
     }
 }
 

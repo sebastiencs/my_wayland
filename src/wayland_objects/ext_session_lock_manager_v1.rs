@@ -42,6 +42,9 @@ impl Object for ExtSessionLockManagerV1 {
                     state, client_id, resolved,
                 ) {
                     resolved.ref_mut(state).deny(dispatcher);
+                } else {
+                    let outputs = state.session_lock.covered_outputs();
+                    crate::drm::request_outputs(state, outputs, dispatcher);
                 }
             }
         }
@@ -65,10 +68,10 @@ mod tests {
             object::IdToObject,
             protocol_generated::{ExtSessionLockSurfaceV1Id, WlOutputId, WlSurfaceId},
             runner::{Dispatcher, Model},
-            session_lock::SessionLockPhase,
+            session_lock::{LockBlank, SessionLockPhase},
             test_support::{state_for_tests, test_output_drm1},
             wayland_objects::{
-                ext_session_lock_v1::confirm_lock,
+                ext_session_lock_v1::{confirm_lock, on_protected_frame_presented},
                 wl_output::WlOutput,
                 wl_surface::{Role, WlSurface},
             },
@@ -509,5 +512,102 @@ mod tests {
             .process(&mut state, ClientAction::Close, &mut dispatcher)
             .unwrap();
         assert_eq!(state.session_lock.phase(), SessionLockPhase::Unlocked);
+    }
+
+    #[test]
+    fn the_blank_is_black_until_the_locker_is_gone() {
+        let mut state = state_for_tests();
+        let output = state.insert_output(test_output_drm1(0, 0, 640, 480));
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        let mut dispatcher = Dispatcher::default();
+        insert_manager(&mut client, &mut state);
+        assert!(state.session_lock.blank().is_none());
+        lock(&mut client, &mut state, &mut dispatcher, LOCK_ID);
+        assert_eq!(state.session_lock.blank(), Some(LockBlank::Black));
+        assert!(state.session_lock.consume_full_damage(output));
+        assert!(state.session_lock.consume_full_damage(output));
+        assert!(!state.session_lock.consume_full_damage(output));
+
+        state.session_lock.mark_locked_for_tests();
+        client
+            .resolve(ExtSessionLockV1Id::from(LOCK_ID), &state)
+            .unwrap()
+            .ref_mut(&mut state)
+            .mark_locked_sent();
+        client
+            .process(&mut state, ClientAction::Close, &mut dispatcher)
+            .unwrap();
+        assert_eq!(state.session_lock.phase(), SessionLockPhase::Abandoned);
+        assert_eq!(state.session_lock.blank(), Some(LockBlank::Red));
+        assert!(state.session_lock.consume_full_damage(output));
+        assert!(state.session_lock.consume_full_damage(output));
+        assert!(!state.session_lock.consume_full_damage(output));
+    }
+
+    #[test]
+    fn a_protected_flip_sends_locked_only_after_every_output() {
+        let mut state = state_for_tests();
+        let first = state.insert_output(test_output_drm1(0, 0, 640, 480));
+        let second = state.insert_output(test_output_drm1(640, 0, 640, 480));
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        let mut dispatcher = Dispatcher::default();
+        insert_manager(&mut client, &mut state);
+        lock(&mut client, &mut state, &mut dispatcher, LOCK_ID);
+
+        on_protected_frame_presented(&mut state, first, &mut dispatcher);
+        assert_eq!(state.session_lock.phase(), SessionLockPhase::Locking);
+        assert!(!dispatcher.test_has_queued_action::<ClientAction>(|action| {
+            matches!(action, ClientAction::SendSessionLockLocked)
+        }));
+
+        on_protected_frame_presented(&mut state, second, &mut dispatcher);
+        assert_eq!(state.session_lock.phase(), SessionLockPhase::Locked);
+        let lock = client
+            .resolve(ExtSessionLockV1Id::from(LOCK_ID), &state)
+            .unwrap();
+        assert!(lock.rref(&state).locked_notified());
+        assert!(!lock.rref(&state).locked_event_sent());
+        client
+            .process(&mut state, ClientAction::SendSessionLockLocked, &mut dispatcher)
+            .unwrap();
+        assert!(lock.rref(&state).locked_event_sent());
+        client
+            .process(&mut state, ClientAction::SendSessionLockLocked, &mut dispatcher)
+            .unwrap();
+        assert!(lock.rref(&state).locked_event_sent());
+    }
+
+    #[test]
+    fn removing_an_output_does_not_invent_a_presentation() {
+        let mut state = state_for_tests();
+        let first = state.insert_output(test_output_drm1(0, 0, 640, 480));
+        let second = state.insert_output(test_output_drm1(640, 0, 640, 480));
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        let mut dispatcher = Dispatcher::default();
+        insert_manager(&mut client, &mut state);
+        lock(&mut client, &mut state, &mut dispatcher, LOCK_ID);
+
+        assert!(state.session_lock.detach_output(second).is_none());
+        assert!(!state.session_lock.barrier_satisfied());
+        on_protected_frame_presented(&mut state, second, &mut dispatcher);
+        assert_eq!(state.session_lock.phase(), SessionLockPhase::Locking);
+
+        on_protected_frame_presented(&mut state, first, &mut dispatcher);
+        assert_eq!(state.session_lock.phase(), SessionLockPhase::Locked);
+    }
+
+    #[test]
+    fn an_empty_output_set_stays_unconfirmed() {
+        let mut state = state_for_tests();
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        let mut dispatcher = Dispatcher::default();
+        insert_manager(&mut client, &mut state);
+        lock(&mut client, &mut state, &mut dispatcher, LOCK_ID);
+        let output = state.insert_output(test_output_drm1(0, 0, 640, 480));
+        on_protected_frame_presented(&mut state, output, &mut dispatcher);
+        assert_eq!(state.session_lock.phase(), SessionLockPhase::Locking);
+        assert!(!dispatcher.test_has_queued_action::<ClientAction>(|action| {
+            matches!(action, ClientAction::SendSessionLockLocked)
+        }));
     }
 }

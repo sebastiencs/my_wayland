@@ -18,6 +18,7 @@ pub(super) fn submit_render_buffer(
     had_effects: bool,
     scene_build_duration: std::time::Duration,
     render_started_at: std::time::Instant,
+    protected: bool,
 ) -> std::io::Result<SubmittedFrameRegistration> {
     drm.submit_render_buffer(
         drm_crtc_id,
@@ -31,6 +32,7 @@ pub(super) fn submit_render_buffer(
         had_effects,
         scene_build_duration,
         render_started_at,
+        protected,
     )
 }
 

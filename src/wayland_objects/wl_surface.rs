@@ -2063,7 +2063,17 @@ impl WlSurface {
             this.discard_presentation_feedbacks(client, state, dispatcher, discarded);
             return;
         }
+        let lock_output = if this.role == Role::LockSurface {
+            this.lock_surface
+                .and_then(|lock_surface| lock_surface.try_ref(state))
+                .map(|lock_surface| lock_surface.output_id())
+        } else {
+            None
+        };
         this.note_lock_surface_mapped(state);
+        if let Some(output_id) = lock_output {
+            crate::drm::request_output(state, output_id, dispatcher);
+        }
 
         let has_cached_commit = this.cached_commit.is_some();
         let (changed, needs_frame) = if has_cached_commit {

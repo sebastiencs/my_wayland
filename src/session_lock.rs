@@ -1,15 +1,23 @@
-//! Session-lock lifecycle. Presentation, input gating, and restoration arrive in later phases.
+//! Session-lock lifecycle. Input gating and focus restoration arrive in later phases.
 //! `locked` is not emitted here: confirmation waits until every active output has presented.
 
 use {
     crate::{
         clients::{ClientId, Resolved},
         input::types::SurfaceFocus,
-        protocol_generated::{ExtSessionLockSurfaceV1Id, ExtSessionLockV1Id},
-        state::OutputId,
+        protocol_generated::{ExtSessionLockSurfaceV1Id, ExtSessionLockV1Id, WlSurfaceId},
+        state::{OutputId, State},
+        wayland_objects::wl_surface::StackEntry,
     },
     std::collections::BTreeMap,
 };
+
+/// Compositor-owned coverage. Black while a locker is alive, red after it dies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LockBlank {
+    Black,
+    Red,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionLockPhase {
@@ -43,6 +51,10 @@ pub struct SessionLock {
     outputs: BTreeMap<OutputId, LockOutput>,
     focus: PreLockFocus,
     locked_sent: bool,
+    /// Bumped when the protected coverage changes. Epoch 0 is the unlocked desktop.
+    coverage_epoch: u64,
+    /// `(epoch, full frames still owed)` per output. Two frames cover both render buffers.
+    coverage_applied: BTreeMap<OutputId, (u64, u8)>,
 }
 
 impl Default for SessionLock {
@@ -54,6 +66,8 @@ impl Default for SessionLock {
             outputs: BTreeMap::new(),
             focus: PreLockFocus::default(),
             locked_sent: false,
+            coverage_epoch: 0,
+            coverage_applied: BTreeMap::new(),
         }
     }
 }
@@ -123,6 +137,7 @@ impl SessionLock {
                 )
             })
             .collect();
+        self.bump_coverage();
     }
 
     pub fn surfaces(&self) -> Vec<Resolved<ExtSessionLockSurfaceV1Id>> {
@@ -137,7 +152,9 @@ impl SessionLock {
         if self.phase != SessionLockPhase::Locking || self.locked_sent {
             return;
         }
+        let epoch = self.coverage_epoch.saturating_add(1);
         *self = Self::default();
+        self.coverage_epoch = epoch;
     }
 
     /// The confirmed locker disconnected. The desktop stays covered for one replacement.
@@ -153,6 +170,7 @@ impl SessionLock {
             output.mapped = false;
             output.presented = false;
         }
+        self.bump_coverage();
     }
 
     /// `unlock_and_destroy` after `locked`. Focus restoration is a later phase.
@@ -160,7 +178,67 @@ impl SessionLock {
         if !self.locked_sent {
             return;
         }
+        let epoch = self.coverage_epoch.saturating_add(1);
         *self = Self::default();
+        self.coverage_epoch = epoch;
+    }
+
+    pub fn covered_outputs(&self) -> Vec<OutputId> {
+        self.outputs.keys().copied().collect()
+    }
+
+    /// Opaque coverage for the current phase. `None` while the desktop is visible.
+    pub fn blank(&self) -> Option<LockBlank> {
+        match self.phase {
+            SessionLockPhase::Unlocked => None,
+            SessionLockPhase::Locking | SessionLockPhase::Locked => Some(LockBlank::Black),
+            SessionLockPhase::Abandoned => Some(LockBlank::Red),
+        }
+    }
+
+    /// Lock surface and its subsurfaces, bottom to top. Popups are not part of this tree.
+    pub fn paint_order(&self, state: &State, output_id: OutputId) -> Vec<Resolved<WlSurfaceId>> {
+        if !self.shows_lock_surface(output_id) {
+            return Vec::new();
+        }
+        let Some(root) = self
+            .surface_for_output(output_id)
+            .and_then(|surface| surface.try_ref(state))
+            .map(|surface| surface.wl_surface())
+        else {
+            return Vec::new();
+        };
+        let mut order = Vec::new();
+        append_paint_order(state, root, &mut order);
+        order
+    }
+
+    /// The next rendered frames of `output_id` must repaint every pixel.
+    ///
+    /// Two frames cover the pair of render buffers, so a buffer that still holds the desktop
+    /// cannot be preserved by buffer age after the coverage changes.
+    pub fn consume_full_damage(&mut self, output_id: OutputId) -> bool {
+        let epoch = self.coverage_epoch;
+        if let Some((applied_epoch, remaining)) = self.coverage_applied.get_mut(&output_id) {
+            if *applied_epoch == epoch {
+                if *remaining == 0 {
+                    return false;
+                }
+                *remaining -= 1;
+                return true;
+            }
+        }
+        let frames = if epoch == 0 { 0 } else { 2 };
+        if frames == 0 {
+            self.coverage_applied.insert(output_id, (0, 0));
+            return false;
+        }
+        self.coverage_applied.insert(output_id, (epoch, frames - 1));
+        true
+    }
+
+    fn bump_coverage(&mut self) {
+        self.coverage_epoch = self.coverage_epoch.saturating_add(1);
     }
 
     pub fn assign_surface(
@@ -181,19 +259,34 @@ impl SessionLock {
         true
     }
 
-    pub fn clear_surface(&mut self, output_id: OutputId) {
-        if let Some(output) = self.outputs.get_mut(&output_id) {
+    /// Returns whether a mapped lock surface was removed and the fallback must be repainted.
+    pub fn clear_surface(&mut self, output_id: OutputId) -> bool {
+        let was_mapped = self.outputs.get_mut(&output_id).is_some_and(|output| {
+            let was_mapped = output.mapped;
             output.surface = None;
             output.mapped = false;
+            was_mapped
+        });
+        if was_mapped {
+            self.bump_coverage();
         }
+        was_mapped
     }
 
-    pub fn note_mapped(&mut self, output_id: OutputId) {
-        if let Some(output) = self.outputs.get_mut(&output_id) {
-            if output.surface.is_some() {
+    /// Returns whether this is the commit that first maps the lock surface.
+    pub fn note_mapped(&mut self, output_id: OutputId) -> bool {
+        let mapped_now = self.outputs.get_mut(&output_id).is_some_and(|output| {
+            if output.surface.is_some() && !output.mapped {
                 output.mapped = true;
+                true
+            } else {
+                false
             }
+        });
+        if mapped_now {
+            self.bump_coverage();
         }
+        mapped_now
     }
 
     pub fn shows_lock_surface(&self, output_id: OutputId) -> bool {
@@ -243,5 +336,22 @@ impl SessionLock {
     pub fn mark_locked_for_tests(&mut self) {
         self.phase = SessionLockPhase::Locked;
         self.locked_sent = true;
+    }
+}
+
+fn append_paint_order(
+    state: &State,
+    surface: Resolved<WlSurfaceId>,
+    order: &mut Vec<Resolved<WlSurfaceId>>,
+) {
+    let stack = surface
+        .try_ref(state)
+        .map(|wl_surface| wl_surface.current_stack().to_vec())
+        .unwrap_or_default();
+    for entry in stack {
+        match entry {
+            StackEntry::Child(child) => append_paint_order(state, child, order),
+            StackEntry::Parent => order.push(surface),
+        }
     }
 }

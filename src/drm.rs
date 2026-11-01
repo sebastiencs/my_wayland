@@ -225,6 +225,7 @@ enum SceneItemKey {
     Surface(SurfaceKey),
     Cursor,
     ClosingSnapshot(u64),
+    LockBlank,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -232,6 +233,7 @@ enum SceneItemContentKey {
     Buffer(Resolved<WlBufferId>),
     NamedCursor(CursorImageContentKey),
     ClosingSnapshot { id: u64, alpha: u8 },
+    LockBlank { red: bool },
 }
 
 #[derive(Clone, Debug)]
@@ -387,6 +389,8 @@ struct FramePlan {
     direct_scanout: Option<DirectScanoutCandidate>,
     cursor_plane: Option<CursorPlaneCandidate>,
     preserve_contents: bool,
+    /// This frame is the lock blank and lock surfaces. Its page flip may satisfy the barrier.
+    protected: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -417,6 +421,8 @@ pub(crate) struct OutputSubmission {
     scene_build_duration: Duration,
     render_submit_duration: Duration,
     submitted_at: Instant,
+    /// Queuing this frame is not presentation. The flip completion is.
+    protected: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -491,6 +497,7 @@ impl DrmOutput {
         scene_build_duration: Duration,
         render_submit_duration: Duration,
         submitted_at: Instant,
+        protected: bool,
     ) -> OutputSubmission {
         self.pipeline.allocate_submission(
             output_id,
@@ -502,6 +509,7 @@ impl DrmOutput {
             scene_build_duration,
             render_submit_duration,
             submitted_at,
+            protected,
         )
     }
 
@@ -1876,6 +1884,7 @@ impl Drm {
         had_effects: bool,
         scene_build_duration: Duration,
         render_started_at: Instant,
+        protected: bool,
     ) -> std::io::Result<SubmittedFrameRegistration> {
         let (primary_plane, fb, crtc) = {
             let output = self
@@ -2008,6 +2017,7 @@ impl Drm {
                         scene_build_duration,
                         render_submit_duration,
                         submitted_at,
+                        protected,
                     );
                     let callback_surfaces = submission.frame_callback_surfaces.clone();
                     let submission_id = submission.id;
@@ -2186,6 +2196,7 @@ impl Drm {
             scene_build_duration,
             render_submit_duration,
             submitted_at,
+            false,
         );
         let callback_surfaces = submission.frame_callback_surfaces.clone();
         let submission_id = submission.id;
@@ -3935,6 +3946,7 @@ impl DrmOutputModel {
                 direct_scanout,
                 mut cursor_plane,
                 mut preserve_contents,
+                protected,
             } = frame;
             let drm = state.drm.get_mut(self.drm_id);
             let target_vrr_enabled =
@@ -4011,6 +4023,7 @@ impl DrmOutputModel {
                         Vec::new(),
                         frame_elements.clone(),
                         None,
+                        protected,
                     );
                     items = fallback_plan.items;
                     software_cursor_items = fallback_plan.software_cursor_items;
@@ -4066,6 +4079,7 @@ impl DrmOutputModel {
                     recipe.has_effects(),
                     scene_build_duration,
                     render_started_at,
+                    protected,
                 );
                 if let Err(error) = submit_result {
                     if submit_had_cursor_plane {
@@ -4081,6 +4095,7 @@ impl DrmOutputModel {
                                 Vec::new(),
                                 frame_elements.clone(),
                                 None,
+                                protected,
                             );
                             let fallback_recipe = build_output_frame_recipe(
                                 &fallback_plan.items,
@@ -4105,6 +4120,7 @@ impl DrmOutputModel {
                                 fallback_recipe.has_effects(),
                                 scene_build_duration,
                                 render_started_at,
+                                protected,
                             ) {
                                 Ok(registration) => {
                                     state.presentation.register_submission(
@@ -4346,6 +4362,7 @@ impl DrmOutputModel {
             .unwrap_or(0);
         let drm_fd = state.drm.get(self.drm_id).fd.clone();
         let mut presentation = std::mem::take(&mut state.presentation);
+        let mut protected_presented = false;
         complete_frame_for_timeline(
             dispatcher,
             &mut presentation,
@@ -4361,6 +4378,7 @@ impl DrmOutputModel {
                 let drm = state.drm.get_mut(self.drm_id);
                 drm.output_mut(drm_crtc_id).unwrap().finish_page_flip().map(
                     |completed_submission| {
+                        protected_presented = completed_submission.submission.protected;
                         crate::scheduler::completion::TimelineCompletedSubmission {
                             submission_id: completed_submission.submission.id,
                             output_id: completed_submission.submission.output_id,
@@ -4388,6 +4406,13 @@ impl DrmOutputModel {
             },
         );
         state.presentation = presentation;
+        if protected_presented {
+            crate::wayland_objects::ext_session_lock_v1::on_protected_frame_presented(
+                state,
+                self.output_id,
+                dispatcher,
+            );
+        }
         sync_output_nodes_for_backend(state, self.drm_id);
         dispatcher.dispatch_to(
             output_scheduler_id(self.output_id),
@@ -4561,6 +4586,141 @@ fn settle_pipeline_reset(
             );
         },
     );
+}
+
+fn collect_protected_scene(
+    state: &mut crate::state::State,
+    drm_id: DrmId,
+    drm_crtc_id: u32,
+    output_id: OutputId,
+    global_bounds: RectI,
+) -> (Vec<SceneItem>, Vec<RecordedFrameElement>, Vec<DeferredRelease>) {
+    let red = matches!(state.session_lock.blank(), Some(crate::session_lock::LockBlank::Red));
+    let blank = {
+        let drm = state.drm.get(drm_id);
+        lock_blank_item(drm, global_bounds, red)
+    };
+    let mut snapshots = Vec::new();
+    let mut retired_candidates = Vec::new();
+    if state.session_lock.shows_lock_surface(output_id) {
+        if let Some(root) = state
+            .session_lock
+            .surface_for_output(output_id)
+            .and_then(|surface| surface.try_ref(state))
+            .map(|surface| surface.wl_surface())
+        {
+            collect_lock_surface_snapshots(
+                state,
+                root,
+                global_bounds.x,
+                global_bounds.y,
+                &mut retired_candidates,
+                &mut snapshots,
+            );
+        }
+    }
+    let mut items = Vec::new();
+    let mut frame_elements = Vec::new();
+    if let Some(blank) = blank {
+        items.push(blank);
+        push_scene_item_frame_elements(&mut frame_elements, 0..1);
+    } else {
+        log::error!("session lock blank texture is unavailable; desktop content stays hidden");
+    }
+    let surface_start = items.len();
+    {
+        let (objects, drm_map) = (&mut state.objects, &state.drm);
+        let drm = drm_map.get(drm_id);
+        let drm_fd = drm.fd();
+        push_scene_items_from_snapshots(
+            &mut items,
+            objects,
+            drm,
+            &drm_fd,
+            drm_crtc_id,
+            global_bounds,
+            snapshots,
+            false,
+            None,
+            u8::MAX,
+        );
+    }
+    push_scene_item_frame_elements(&mut frame_elements, surface_start..items.len());
+    let deferred_releases = retired_candidates
+        .into_iter()
+        .map(|retired| DeferredRelease::from_candidate(state, retired))
+        .collect();
+    (items, frame_elements, deferred_releases)
+}
+
+fn lock_blank_item(drm: &Drm, bounds: RectI, red: bool) -> Option<SceneItem> {
+    drm.egl_context.bind();
+    let pixels: [u8; 4] = if red { [255, 0, 0, 255] } else { [0, 0, 0, 255] };
+    let texture = GlTexture::from_rgba(&pixels, 1, 1).ok()?;
+    let texture_id = texture.texture_id();
+    Some(SceneItem {
+        state: SceneItemState {
+            key: SceneItemKey::LockBlank,
+            surface_key: None,
+            content_key: SceneItemContentKey::LockBlank { red },
+            bounds,
+            tex_transform: transform::Mat3::identity(),
+            alpha: u8::MAX,
+            mask: SceneItemMask::None,
+        },
+        mask: SceneItemMask::None,
+        texture: texture_id,
+        owned_texture: Some(texture),
+        damage: DamageRegion::from_rect(bounds),
+        sample_damage_padding: 0,
+        state_has_alpha: false,
+        alpha: u8::MAX,
+        opaque_region: DamageRegion::from_rect(bounds),
+        opaque: true,
+        sync: crate::sync::SurfaceSyncState::default(),
+        direct_scanout: None,
+        presentation_feedbacks: Vec::new(),
+    })
+}
+
+fn collect_lock_surface_snapshots(
+    state: &mut crate::state::State,
+    surface: Resolved<WlSurfaceId>,
+    base_x: i32,
+    base_y: i32,
+    retired_candidates: &mut Vec<RetiredBufferCandidate>,
+    snapshots: &mut Vec<crate::wayland_objects::wl_surface::SurfaceRenderState>,
+) {
+    let (stack, mut surface_state) = {
+        let mut surface_obj = state.objects.grab_object::<WlSurface>(surface.object_id());
+        retired_candidates.extend(surface_obj.take_retired_buffers());
+        let Some(surface_state) = surface_obj.take_render_state_at(surface, base_x, base_y) else {
+            return;
+        };
+        (surface_obj.current_stack().to_vec(), surface_state)
+    };
+    surface_state.inherit_root_clip = false;
+    for entry in &stack {
+        if let StackEntry::Child(child_surface_id) = *entry {
+            let child_base = {
+                let Some(child_surface) = child_surface_id.try_ref(state) else {
+                    continue;
+                };
+                let (x, y) = child_surface.current_subsurface_position();
+                (surface_state.x + x, surface_state.y + y)
+            };
+            collect_lock_surface_snapshots(
+                state,
+                child_surface_id,
+                child_base.0,
+                child_base.1,
+                retired_candidates,
+                snapshots,
+            );
+        } else {
+            snapshots.push(surface_state.clone());
+        }
+    }
 }
 
 fn collect_surface_snapshots(
@@ -8244,6 +8404,7 @@ mod presentation_timing_tests {
                 scene_build_duration: std::time::Duration::ZERO,
                 render_submit_duration: std::time::Duration::ZERO,
                 submitted_at: std::time::Instant::now(),
+                protected: false,
             },
             damage_blob: None,
             cursor_slot: None,

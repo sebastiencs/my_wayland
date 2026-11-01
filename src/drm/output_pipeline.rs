@@ -186,6 +186,7 @@ impl OutputPipeline {
         scene_build_duration: std::time::Duration,
         render_submit_duration: std::time::Duration,
         submitted_at: Instant,
+        protected: bool,
     ) -> OutputSubmission {
         let id = self.core.next_submission_id;
         self.core.next_submission_id = self.core.next_submission_id.saturating_add(1);
@@ -200,6 +201,7 @@ impl OutputPipeline {
             scene_build_duration,
             render_submit_duration,
             submitted_at,
+            protected,
         }
     }
 
@@ -438,6 +440,7 @@ mod tests {
             scene_build_duration: std::time::Duration::ZERO,
             render_submit_duration: std::time::Duration::ZERO,
             submitted_at: Instant::now(),
+            protected: false,
         }
     }
 

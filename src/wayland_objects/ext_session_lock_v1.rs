@@ -21,11 +21,18 @@ pub struct ExtSessionLockV1 {
     client_id: ClientId,
     finished: bool,
     locked_notified: bool,
+    locked_event_sent: bool,
 }
 
 impl ExtSessionLockV1 {
     pub fn new(id: ExtSessionLockV1Id, client_id: ClientId) -> Self {
-        Self { id, client_id, finished: false, locked_notified: false }
+        Self {
+            id,
+            client_id,
+            finished: false,
+            locked_notified: false,
+            locked_event_sent: false,
+        }
     }
 
     pub fn finished_sent(&self) -> bool {
@@ -48,7 +55,16 @@ impl ExtSessionLockV1 {
         self.send_event(ext_session_lock_v1::Event::Finished, dispatcher);
     }
 
-    pub fn send_locked(&self, dispatcher: &mut ClientDispatcher) {
+    pub fn locked_event_sent(&self) -> bool {
+        self.locked_event_sent
+    }
+
+    pub fn send_locked(&mut self, dispatcher: &mut ClientDispatcher) {
+        if self.locked_event_sent {
+            return;
+        }
+        self.locked_event_sent = true;
+        self.locked_notified = true;
         self.send_event(ext_session_lock_v1::Event::Locked, dispatcher);
     }
 
@@ -86,7 +102,7 @@ impl Object for ExtSessionLockV1 {
                     );
                     return Ok(());
                 }
-                release_lock(client, state, self.id, false);
+                release_lock(client, state, dispatcher, self.id, false);
                 self.delete_self(client, state, dispatcher);
             }
             GetLockSurface { id, surface, output } => {
@@ -102,7 +118,7 @@ impl Object for ExtSessionLockV1 {
                     );
                     return Ok(());
                 }
-                release_lock(client, state, self.id, true);
+                release_lock(client, state, dispatcher, self.id, true);
                 self.delete_self(client, state, dispatcher);
             }
         }
@@ -113,7 +129,7 @@ impl Object for ExtSessionLockV1 {
         &mut self,
         _client: &mut Client,
         state: &mut State,
-        _dispatcher: &mut ClientDispatcher,
+        dispatcher: &mut ClientDispatcher,
     ) {
         if self.finished {
             return;
@@ -126,12 +142,14 @@ impl Object for ExtSessionLockV1 {
         if !owns_session && !self.locked_notified {
             return;
         }
+        let outputs = state.session_lock.covered_outputs();
         inert_surfaces(state, surfaces);
         if self.locked_notified {
             state.session_lock.abandon();
         } else {
             state.session_lock.cancel_pending();
         }
+        crate::drm::request_outputs(state, outputs, dispatcher);
     }
 }
 
@@ -148,7 +166,30 @@ pub fn confirm_lock(state: &mut State, dispatcher: &mut ClientDispatcher) -> boo
     true
 }
 
-fn release_lock(client: &mut Client, state: &mut State, lock_id: ExtSessionLockV1Id, unlock: bool) {
+/// A protected frame finished its page flip. Queuing the frame does not reach this.
+pub fn on_protected_frame_presented(
+    state: &mut State,
+    output_id: crate::state::OutputId,
+    dispatcher: &mut crate::runner::Dispatcher,
+) {
+    state.session_lock.mark_output_presented(output_id);
+    let Some(lock) = state.session_lock.confirm_if_presented() else {
+        return;
+    };
+    let client_id = lock.client_id();
+    if let Some(mut lock) = lock.try_ref_mut(state) {
+        lock.mark_locked_sent();
+    }
+    dispatcher.dispatch_to(client_id, crate::clients::ClientAction::SendSessionLockLocked);
+}
+
+fn release_lock(
+    client: &mut Client,
+    state: &mut State,
+    dispatcher: &mut ClientDispatcher,
+    lock_id: ExtSessionLockV1Id,
+    unlock: bool,
+) {
     let owns_session = state
         .session_lock
         .lock()
@@ -156,6 +197,7 @@ fn release_lock(client: &mut Client, state: &mut State, lock_id: ExtSessionLockV
     if !owns_session {
         return;
     }
+    let outputs = state.session_lock.covered_outputs();
     let surfaces = state.session_lock.surfaces();
     inert_surfaces(state, surfaces);
     if unlock {
@@ -163,6 +205,7 @@ fn release_lock(client: &mut Client, state: &mut State, lock_id: ExtSessionLockV
     } else {
         state.session_lock.cancel_pending();
     }
+    crate::drm::request_outputs(state, outputs, dispatcher);
 }
 
 fn inert_surfaces(state: &mut State, surfaces: Vec<Resolved<ExtSessionLockSurfaceV1Id>>) {
