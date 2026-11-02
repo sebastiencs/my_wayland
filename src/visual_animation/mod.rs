@@ -18,7 +18,7 @@ mod workspace;
 
 pub use {
     closing::{FrozenClosingBlur, RetainedClosingSnapshot},
-    track::UnitValue,
+    track::{CubicBezier, Easing, UnitValue},
     window::{
         resolve_window_visual, FocusVisualAnimation, WindowLifecycleAnim, WindowLifecycleAnimation,
         WindowVisualBase,

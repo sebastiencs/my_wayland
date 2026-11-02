@@ -160,6 +160,15 @@ impl WorkspaceGroupTransition {
     }
 
     pub fn advance(&mut self, now: Instant, full_duration: Duration) -> WorkspaceTransitionAdvance {
+        self.advance_with_easing(now, full_duration, Easing::Linear)
+    }
+
+    pub fn advance_with_easing(
+        &mut self,
+        now: Instant,
+        full_duration: Duration,
+        easing: Easing,
+    ) -> WorkspaceTransitionAdvance {
         if matches!(self.phase, TransitionPhase::Paused { .. }) {
             return WorkspaceTransitionAdvance::Unchanged;
         }
@@ -184,20 +193,14 @@ impl WorkspaceGroupTransition {
                 self.cached_progress = goal;
                 return WorkspaceTransitionAdvance::Finished;
             }
-            self.track = RetargetableTrack::start_timed(
-                self.cached_progress,
-                goal,
-                now,
-                duration,
-                Easing::Linear,
-            );
+            self.track =
+                RetargetableTrack::start_timed(self.cached_progress, goal, now, duration, easing);
             self.phase = TransitionPhase::Running;
             return WorkspaceTransitionAdvance::Started;
         }
-        if duration_changed {
+        if duration_changed || self.track.easing() != easing {
             let duration = remaining_duration(self.cached_progress, goal, full_duration);
-            self.track
-                .retarget_timed(goal, now, duration, Easing::Linear);
+            self.track.retarget_timed(goal, now, duration, easing);
         }
         let sample = self.track.sample_mut(now);
         let changed = sample.value != self.cached_progress;

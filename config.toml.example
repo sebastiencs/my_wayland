@@ -69,15 +69,51 @@ active_alpha = 255
 inactive_alpha = 230
 inactive_dim = 24
 
-[animations.window]
-duration_msec = 160
-open_duration_msec = 160
-close_duration_msec = 160
+# Speed is Hyprland's unit: the animation lasts speed * 100 milliseconds.
+# A field you omit keeps the value below. windowsMove is absent, so it inherits windows.
+# Built-in curves include default, linear, easeOutQuint, easeInOutCubic, almostLinear, and quick.
+[animations.bezier.easeOutQuint]
+points = [0.23, 1.0, 0.32, 1.0]
 
-[animations.workspace]
-duration_msec = 250
-# The slide stays either way. false keeps both workspaces opaque during workspace-next and workspace-previous.
-fade = false
+[animations.bezier.almostLinear]
+points = [0.5, 0.5, 0.75, 1.0]
+
+[animations.bezier.quick]
+points = [0.15, 0.0, 0.1, 1.0]
+
+[animations.global]
+enabled = true
+speed = 10.0
+bezier = "default"
+
+[animations.windows]
+enabled = true
+speed = 4.79
+bezier = "easeOutQuint"
+
+[animations.windowsIn]
+enabled = true
+speed = 4.1
+bezier = "easeOutQuint"
+style = "popin 87%"
+
+[animations.windowsOut]
+enabled = true
+speed = 1.49
+bezier = "linear"
+style = "popin 87%"
+
+[animations.fade]
+enabled = true
+speed = 3.03
+bezier = "quick"
+
+[animations.workspaces]
+enabled = true
+speed = 1.94
+bezier = "almostLinear"
+# fade keeps the horizontal slide and also fades workspace opacity. slide leaves both opaque.
+style = "fade"
 
 [bindings]
 # Key names follow xkb (e.g. Super, Ctrl, Alt, Shift). Last segment is the key.

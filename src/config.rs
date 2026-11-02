@@ -16,6 +16,7 @@ use {
 };
 
 use crate::{
+    animation_config::{compile as compile_animations, AnimationsConfig, AnimationsConfigFile},
     clients::{ClientManagerAction, Resolved, WAYLAND_DISPLAY_NAME},
     drm::{kick_visual_animation_pump, request_outputs, request_outputs_for_points},
     io_uring::{
@@ -180,25 +181,6 @@ pub struct OpacityConfig {
     pub active_alpha: u8,
     pub inactive_alpha: u8,
     pub inactive_dim: u8,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AnimationsConfig {
-    pub window: WindowAnimationConfig,
-    pub workspace: WorkspaceAnimationConfig,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WindowAnimationConfig {
-    pub duration_msec: u32,
-    pub open_duration_msec: u32,
-    pub close_duration_msec: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WorkspaceAnimationConfig {
-    pub duration_msec: u32,
-    pub fade: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -490,28 +472,6 @@ struct OpacityConfigFile {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct AnimationsConfigFile {
-    window: WindowAnimationConfigFile,
-    workspace: WorkspaceAnimationConfigFile,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct WindowAnimationConfigFile {
-    duration_msec: u32,
-    open_duration_msec: u32,
-    close_duration_msec: u32,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct WorkspaceAnimationConfigFile {
-    duration_msec: u32,
-    fade: bool,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
 struct OutputConfigFile {
     #[serde(default)]
     scales: BTreeMap<String, OutputScaleSettingFile>,
@@ -658,17 +618,7 @@ impl RuntimeConfig {
                 inactive_dim: parsed.effects.opacity.inactive_dim,
             },
         };
-        let animations = AnimationsConfig {
-            window: WindowAnimationConfig {
-                duration_msec: parsed.animations.window.duration_msec,
-                open_duration_msec: parsed.animations.window.open_duration_msec,
-                close_duration_msec: parsed.animations.window.close_duration_msec,
-            },
-            workspace: WorkspaceAnimationConfig {
-                duration_msec: parsed.animations.workspace.duration_msec,
-                fade: parsed.animations.workspace.fade,
-            },
-        };
+        let animations = compile_animations(parsed.animations)?;
 
         Ok(Self {
             path,
@@ -885,31 +835,6 @@ impl Default for OpacityConfig {
     }
 }
 
-impl Default for AnimationsConfig {
-    fn default() -> Self {
-        Self {
-            window: WindowAnimationConfig::default(),
-            workspace: WorkspaceAnimationConfig::default(),
-        }
-    }
-}
-
-impl Default for WindowAnimationConfig {
-    fn default() -> Self {
-        Self {
-            duration_msec: 160,
-            open_duration_msec: 160,
-            close_duration_msec: 160,
-        }
-    }
-}
-
-impl Default for WorkspaceAnimationConfig {
-    fn default() -> Self {
-        Self { duration_msec: 250, fade: true }
-    }
-}
-
 impl Default for XdgDecorationModePolicy {
     fn default() -> Self {
         Self::HonorClient
@@ -1000,25 +925,6 @@ impl Default for OpacityConfigFile {
             active_alpha: defaults.active_alpha,
             inactive_alpha: defaults.inactive_alpha,
             inactive_dim: defaults.inactive_dim,
-        }
-    }
-}
-
-impl Default for WindowAnimationConfigFile {
-    fn default() -> Self {
-        Self {
-            duration_msec: WindowAnimationConfig::default().duration_msec,
-            open_duration_msec: WindowAnimationConfig::default().open_duration_msec,
-            close_duration_msec: WindowAnimationConfig::default().close_duration_msec,
-        }
-    }
-}
-
-impl Default for WorkspaceAnimationConfigFile {
-    fn default() -> Self {
-        Self {
-            duration_msec: WorkspaceAnimationConfig::default().duration_msec,
-            fade: WorkspaceAnimationConfig::default().fade,
         }
     }
 }
@@ -2507,34 +2413,34 @@ mod tests {
     }
 
     #[test]
-    fn open_duration_defaults_and_can_be_configured() {
+    fn animation_tree_parses_through_runtime_config() {
         let xkb = Xkb::new();
         let defaults = RuntimeConfig::parse_for_test("", &xkb).unwrap();
-        assert_eq!(defaults.animations.window.duration_msec, 160);
-        assert_eq!(defaults.animations.window.open_duration_msec, 160);
-        assert_eq!(defaults.animations.window.close_duration_msec, 160);
-        assert_eq!(defaults.animations.workspace.duration_msec, 250);
-        assert!(defaults.animations.workspace.fade);
+        assert_eq!(defaults.animations.focus().duration_msec(), 303);
+        assert_eq!(defaults.animations.opening().duration_msec(), 410);
+        assert_eq!(defaults.animations.closing().duration_msec(), 149);
+        assert_eq!(defaults.animations.workspace().duration_msec(), 194);
+        assert!(defaults.animations.workspace().fades());
 
         let configured = RuntimeConfig::parse_for_test(
             r#"
-            [animations.window]
-            duration_msec = 40
-            open_duration_msec = 0
-            close_duration_msec = 0
+            [animations.windowsIn]
+            enabled = false
 
-            [animations.workspace]
-            duration_msec = 0
-            fade = false
+            [animations.windowsOut]
+            enabled = false
+
+            [animations.workspaces]
+            enabled = false
+            style = "slide"
             "#,
             &xkb,
         )
         .unwrap();
-        assert_eq!(configured.animations.window.duration_msec, 40);
-        assert_eq!(configured.animations.window.open_duration_msec, 0);
-        assert_eq!(configured.animations.window.close_duration_msec, 0);
-        assert_eq!(configured.animations.workspace.duration_msec, 0);
-        assert!(!configured.animations.workspace.fade);
+        assert!(configured.animations.opening().duration().is_zero());
+        assert!(configured.animations.closing().duration().is_zero());
+        assert!(configured.animations.workspace().duration().is_zero());
+        assert!(!configured.animations.workspace().fades());
     }
 
     #[test]
@@ -3025,7 +2931,7 @@ mod tests {
     #[test]
     fn workspace_index_slides_within_the_active_output_group() {
         let mut state = state_for_tests();
-        state.config.animations.workspace.duration_msec = 250;
+        state.config.animations.set_workspace_duration_msec(250);
         let (left, _surface) = insert_managed_root(&mut state);
         let backend = BackendOutputRef::new(DrmId::from(0usize));
         let right = state.insert_output(test_output_with_crtc_name(backend, 2, 100, 0, 100, 100));
@@ -3073,7 +2979,7 @@ mod tests {
     #[test]
     fn move_to_workspace_follows_the_window_and_keeps_its_mode() {
         let mut state = state_for_tests();
-        state.config.animations.workspace.duration_msec = 250;
+        state.config.animations.set_workspace_duration_msec(250);
         let surface = focus_managed_root(&mut state);
         assert!(state.set_root_surface_floating(surface, true));
         assert!(state.set_root_surface_fullscreen(surface, true));

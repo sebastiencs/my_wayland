@@ -5827,7 +5827,7 @@ fn closing_snapshot_eligible(
     {
         return false;
     }
-    if !state.session_active || state.config.animations.window.close_duration_msec == 0 {
+    if !state.session_active || state.config.animations.closing().duration().is_zero() {
         return false;
     }
     let Some(managed) = state.managed_root_surface_state(surface_id) else {
@@ -6929,7 +6929,7 @@ mod window_animation_tests {
         state.config.effects.opacity.active_alpha = 255;
         state.config.effects.opacity.inactive_alpha = 120;
         state.config.effects.opacity.inactive_dim = 44;
-        state.config.animations.window.duration_msec = 120;
+        state.config.animations.set_focus_duration_msec(120);
         let surface = root(state, object_id);
         state.register_root_surface(surface);
         state.assign_root_surface_to_workspace(surface, workspace_id);
@@ -7018,7 +7018,7 @@ mod window_animation_tests {
         let mut state = state_for_tests();
         let (output_id, surface) = mapped_focus_target(&mut state);
         state.seat.keyboard_focus = Some(crate::input::SurfaceFocus::new(surface));
-        state.config.animations.window.duration_msec = 0;
+        state.config.animations.set_focus_duration_msec(0);
         let mut manager = VisualAnimationPump::new();
         let mut dispatcher = Dispatcher::default();
         manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
@@ -7086,7 +7086,7 @@ mod window_animation_tests {
     fn opening_only_window_schedules_until_it_returns_to_idle() {
         let mut state = state_for_tests();
         let (output_id, surface) = mapped_focus_target(&mut state);
-        state.config.animations.window.open_duration_msec = 100;
+        state.config.animations.set_open_duration_msec(100);
         state
             .managed_root_surfaces
             .get_mut(&surface)
@@ -7130,7 +7130,7 @@ mod window_animation_tests {
     fn zero_open_duration_settles_on_the_next_pump() {
         let mut state = state_for_tests();
         let (output_id, surface) = mapped_focus_target(&mut state);
-        state.config.animations.window.open_duration_msec = 0;
+        state.config.animations.set_open_duration_msec(0);
         state
             .managed_root_surfaces
             .get_mut(&surface)
@@ -7170,7 +7170,7 @@ mod window_animation_tests {
             DrmId::from(0usize),
         );
         state.closing_snapshots.push(snapshot);
-        state.config.animations.window.close_duration_msec = 100;
+        state.config.animations.set_close_duration_msec(100);
         let mut manager = VisualAnimationPump::new();
         let now = Instant::now();
 
@@ -7209,7 +7209,7 @@ mod window_animation_tests {
             DrmId::from(0usize),
         );
         state.closing_snapshots.push(snapshot);
-        state.config.animations.window.close_duration_msec = 0;
+        state.config.animations.set_close_duration_msec(0);
         let mut manager = VisualAnimationPump::new();
         let mut dispatcher = Dispatcher::default();
         manager.advance_and_schedule(&mut state, &mut dispatcher, Instant::now());
@@ -7230,7 +7230,7 @@ mod window_animation_tests {
             DrmId::from(0usize),
         );
         state.closing_snapshots.push(snapshot);
-        state.config.animations.window.close_duration_msec = 100;
+        state.config.animations.set_close_duration_msec(100);
         let mut manager = VisualAnimationPump::new();
         let now = Instant::now();
         let mut dispatcher = Dispatcher::default();
@@ -7275,7 +7275,7 @@ mod window_animation_tests {
     #[test]
     fn workspace_switch_reverses_restarts_and_settles_on_zero_duration() {
         let mut state = state_for_tests();
-        state.config.animations.workspace.duration_msec = 200;
+        state.config.animations.set_workspace_duration_msec(200);
         let (output_id, group_id, first, second) = live_group(&mut state, 800, 600, 1);
         let third = state.create_workspace(Some(group_id), Some("3".to_string()));
         assert!(state.activate_workspace(second));
@@ -7315,7 +7315,7 @@ mod window_animation_tests {
         assert_eq!(restarted.to_workspace(), third);
         assert_eq!(restarted.progress(), crate::visual_animation::UnitValue::ZERO);
 
-        state.config.animations.workspace.duration_msec = 0;
+        state.config.animations.set_workspace_duration_msec(0);
         let result = state.advance_visual_animations(now + Duration::from_millis(90));
         assert!(state
             .workspace_groups
@@ -7330,7 +7330,7 @@ mod window_animation_tests {
     #[test]
     fn next_and_previous_actions_share_the_activation_path() {
         let mut state = state_for_tests();
-        state.config.animations.workspace.duration_msec = 0;
+        state.config.animations.set_workspace_duration_msec(0);
         let backend = BackendOutputRef::new(DrmId::from(0usize));
         let output_id = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 200, 100));
         let group_id = state.workspace_group_for_output(output_id).unwrap();
@@ -7392,7 +7392,7 @@ mod window_animation_tests {
     #[test]
     fn shared_progress_uses_each_output_width_and_pauses_without_presentation() {
         let mut state = state_for_tests();
-        state.config.animations.workspace.duration_msec = 200;
+        state.config.animations.set_workspace_duration_msec(200);
         let (wide, group_id, from, to) = live_group(&mut state, 800, 600, 1);
         let narrow = state.insert_output(test_output_with_crtc_name(
             BackendOutputRef::new(DrmId::from(0usize)),
@@ -7487,8 +7487,8 @@ mod window_animation_tests {
     #[test]
     fn workspace_fade_can_be_disabled_without_stopping_the_slide() {
         let mut state = state_for_tests();
-        state.config.animations.workspace.duration_msec = 200;
-        state.config.animations.workspace.fade = false;
+        state.config.animations.set_workspace_duration_msec(200);
+        state.config.animations.set_workspace_fade(false);
         let (output_id, _, from, to) = live_group(&mut state, 800, 600, 1);
         assert!(state.activate_workspace(to));
         let now = Instant::now();
@@ -7505,7 +7505,7 @@ mod window_animation_tests {
     #[test]
     fn completion_publishes_once_and_output_local_kicks_do_not_double_advance() {
         let mut state = state_for_tests();
-        state.config.animations.workspace.duration_msec = 100;
+        state.config.animations.set_workspace_duration_msec(100);
         let (output_id, group_id, _, second) = live_group(&mut state, 320, 200, 1);
         assert!(state.activate_workspace(second));
         let mut manager = VisualAnimationPump::new();
@@ -7579,7 +7579,7 @@ mod window_animation_tests {
     #[test]
     fn removing_an_endpoint_drops_the_transition() {
         let mut state = state_for_tests();
-        state.config.animations.workspace.duration_msec = 200;
+        state.config.animations.set_workspace_duration_msec(200);
         let (_, group_id, first, second) = live_group(&mut state, 100, 100, 1);
         assert!(state.activate_workspace(second));
         assert!(state.remove_workspace(first));
@@ -7663,7 +7663,7 @@ mod window_animation_tests {
     #[test]
     fn a_live_workspace_transition_blocks_direct_scanout_for_its_roots() {
         let mut state = state_for_tests();
-        state.config.animations.workspace.duration_msec = 200;
+        state.config.animations.set_workspace_duration_msec(200);
         let (_, _, from, to) = live_group(&mut state, 200, 100, 1);
         assert!(state.activate_workspace(to));
         let (_, object_id) =
@@ -8042,7 +8042,7 @@ mod closing_capture_tests {
     #[test]
     fn closing_snapshots_follow_their_workspace_under_incoming_content() {
         let mut state = state_for_tests();
-        state.config.animations.workspace.duration_msec = 200;
+        state.config.animations.set_workspace_duration_msec(200);
         let output_id = state.insert_output(test_output_drm0_wh(800, 600));
         let group_id = state.workspace_group_for_output(output_id).unwrap();
         let outgoing = state.active_workspace_for_output(output_id).unwrap();

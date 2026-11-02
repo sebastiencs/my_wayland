@@ -1350,7 +1350,7 @@ impl State {
             .map(|bounds| bounds.width)
             .unwrap_or(0);
         let mut motion = transition.motion_for(workspace_id, width);
-        if !self.config.animations.workspace.fade {
+        if !self.config.animations.workspace().fades() {
             motion.alpha = u8::MAX;
         }
         motion
@@ -1371,8 +1371,7 @@ impl State {
         let Some(previous) = previous.filter(|previous| *previous != next) else {
             return;
         };
-        let duration =
-            Duration::from_millis(u64::from(self.config.animations.workspace.duration_msec));
+        let duration = self.config.animations.workspace().duration();
         let Some(group) = self.workspace_groups.try_get_mut(group_id) else {
             return;
         };
@@ -2001,10 +2000,10 @@ impl State {
         G: FnMut(RectI) -> bool,
         H: FnMut(WorkspaceGroupId) -> bool,
     {
-        let focus_duration =
-            Duration::from_millis(u64::from(self.config.animations.window.duration_msec));
-        let open_duration =
-            Duration::from_millis(u64::from(self.config.animations.window.open_duration_msec));
+        let focus = self.config.animations.focus();
+        let opening = self.config.animations.opening();
+        let focus_duration = focus.duration();
+        let open_duration = opening.duration();
         let surfaces = self
             .managed_root_surfaces
             .keys()
@@ -2025,8 +2024,12 @@ impl State {
                 managed.focus_animation.current(),
                 managed.lifecycle_animation.sample(),
             );
-            managed.focus_animation.advance(goal, focus_duration, now);
-            managed.lifecycle_animation.advance(open_duration, now);
+            managed
+                .focus_animation
+                .advance_with_easing(goal, focus_duration, focus.easing(), now);
+            managed
+                .lifecycle_animation
+                .advance_with_easing(open_duration, opening.easing(), now);
             let next = composed_window_style(
                 managed.focus_animation.current(),
                 managed.lifecycle_animation.sample(),
@@ -2039,15 +2042,15 @@ impl State {
             has_active_animations |=
                 managed.focus_animation.is_active() || managed.lifecycle_animation.is_active();
         }
-        let close_duration =
-            Duration::from_millis(u64::from(self.config.animations.window.close_duration_msec));
+        let closing = self.config.animations.closing();
+        let close_duration = closing.duration();
         let mut finished_ids = Vec::new();
         for snapshot in &mut self.closing_snapshots {
             if !include_snapshot(snapshot.bounds()) {
                 continue;
             }
             let before = snapshot.alpha();
-            let finished = snapshot.advance(now, close_duration);
+            let finished = snapshot.advance_with_easing(now, close_duration, closing.easing());
             if finished || snapshot.alpha() != before {
                 damaged_rects.push(snapshot.bounds());
             }
@@ -2069,8 +2072,8 @@ impl State {
             }
             self.closing_snapshots = kept;
         }
-        let workspace_duration =
-            Duration::from_millis(u64::from(self.config.animations.workspace.duration_msec));
+        let workspace = self.config.animations.workspace();
+        let workspace_duration = workspace.duration();
         let mut completed_transition_outputs = Vec::new();
         let group_ids = self.workspace_group_ids();
         for group_id in group_ids {
@@ -2090,7 +2093,8 @@ impl State {
                 continue;
             }
             transition.resume();
-            let outcome = transition.advance(now, workspace_duration);
+            let outcome =
+                transition.advance_with_easing(now, workspace_duration, workspace.easing());
             let active = self
                 .workspace_groups
                 .try_get(group_id)
@@ -3479,7 +3483,7 @@ mod tests {
         state.config.effects.opacity.active_alpha = 255;
         state.config.effects.opacity.inactive_alpha = 120;
         state.config.effects.opacity.inactive_dim = 44;
-        state.config.animations.window.duration_msec = 120;
+        state.config.animations.set_focus_duration_msec(120);
         state.register_root_surface(root(&state, object_id));
         state.assign_root_surface_to_workspace(root(&state, object_id), workspace_id);
         let surface = root(&state, object_id);
@@ -3541,7 +3545,7 @@ mod tests {
         state.config.effects.opacity.active_alpha = 255;
         state.config.effects.opacity.inactive_alpha = 100;
         state.config.effects.opacity.inactive_dim = 40;
-        state.config.animations.window.duration_msec = 100;
+        state.config.animations.set_focus_duration_msec(100);
         let surface = root(&state, object_id);
         state.register_root_surface(surface);
         state.assign_root_surface_to_workspace(surface, workspace_id);
@@ -3577,7 +3581,7 @@ mod tests {
         assert_eq!(before_advance.border.unwrap().gradient.end_color, RgbaColor::new(5, 6, 7, 8));
 
         let now = Instant::now();
-        state.config.animations.window.duration_msec = 0;
+        state.config.animations.set_focus_duration_msec(0);
         state.advance_visual_animations(now);
         let focused = state.root_surface_visual_state(surface).unwrap();
         assert_eq!(focused.effects.opacity_alpha, 255);
@@ -3645,8 +3649,12 @@ mod tests {
         state.config.effects.opacity.active_alpha = 200;
         state.config.effects.opacity.inactive_alpha = 100;
         state.config.effects.opacity.inactive_dim = 0;
-        state.config.animations.window.duration_msec = 0;
-        state.config.animations.window.open_duration_msec = 100;
+        state.config.animations.set_focus_duration_msec(0);
+        state.config.animations.set_open_duration_msec(100);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::WindowsIn);
         let surface = root(&state, object_id);
         state.register_root_surface(surface);
         state.assign_root_surface_to_workspace(surface, workspace_id);

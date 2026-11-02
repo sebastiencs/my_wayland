@@ -59,7 +59,7 @@ impl ClosingSnapshotAnimation {
         }
     }
 
-    fn advance(&mut self, now: Instant, duration: Duration) -> bool {
+    fn advance(&mut self, now: Instant, duration: Duration, easing: Easing) -> bool {
         if !self.active {
             return false;
         }
@@ -73,12 +73,12 @@ impl ClosingSnapshotAnimation {
                 UnitValue::ZERO,
                 now,
                 duration,
-                Easing::Linear,
+                easing,
             );
             self.pending = false;
-        } else if self.track.duration() != duration {
+        } else if self.track.duration() != duration || self.track.easing() != easing {
             self.track
-                .retarget_timed(UnitValue::ZERO, now, duration, Easing::Linear);
+                .retarget_timed(UnitValue::ZERO, now, duration, easing);
         }
         let sample = self.track.sample_mut(now);
         self.cached_alpha = sample.value.lerp_u8(0, u8::MAX);
@@ -179,7 +179,16 @@ impl RetainedClosingSnapshot {
 
     /// Samples absolute time. `true` means the fade finished and the caller must drop this record.
     pub(crate) fn advance(&mut self, now: Instant, duration: Duration) -> bool {
-        self.animation.advance(now, duration)
+        self.advance_with_easing(now, duration, Easing::Linear)
+    }
+
+    pub(crate) fn advance_with_easing(
+        &mut self,
+        now: Instant,
+        duration: Duration,
+        easing: Easing,
+    ) -> bool {
+        self.animation.advance(now, duration, easing)
     }
 }
 

@@ -72,6 +72,110 @@ impl UnitValue {
             duration.as_nanos().saturating_mul(u128::from(self.0)) / u128::from(Self::ONE.0);
         Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
     }
+
+    pub fn saturating_from_f64(value: f64) -> Self {
+        if !value.is_finite() || value <= 0.0 {
+            return Self::ZERO;
+        }
+        if value >= 1.0 {
+            return Self::ONE;
+        }
+        let scaled = (value * f64::from(Self::ONE.0)).round();
+        Self(
+            u32::try_from(scaled as u64)
+                .unwrap_or(Self::ONE.0)
+                .min(Self::ONE.0),
+        )
+    }
+
+    pub fn as_f64(self) -> f64 {
+        f64::from(self.0) / f64::from(Self::ONE.0)
+    }
+}
+
+/// Cubic Bézier from `(0, 0)` to `(1, 1)` with the two intermediate controls.
+///
+/// `x` controls stay within `0..=1`. `y` may leave that range, and the sampled progress is then
+/// clamped back into it because animation progress is a [`UnitValue`].
+#[derive(Clone, Copy, Debug)]
+pub struct CubicBezier {
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+}
+
+impl CubicBezier {
+    pub const fn new(x1: f64, y1: f64, x2: f64, y2: f64) -> Self {
+        Self { x1, y1, x2, y2 }
+    }
+
+    pub const fn linear() -> Self {
+        Self::new(0.0, 0.0, 1.0, 1.0)
+    }
+
+    pub fn y_at_x(self, x: f64) -> f64 {
+        let x = x.clamp(0.0, 1.0);
+        if x == 0.0 {
+            return 0.0;
+        }
+        if x == 1.0 {
+            return 1.0;
+        }
+        sample_bezier(self.solve_x(x), self.y1, self.y2).clamp(0.0, 1.0)
+    }
+
+    fn solve_x(self, x: f64) -> f64 {
+        let mut t = x;
+        for _ in 0..8 {
+            let slope = bezier_slope(t, self.x1, self.x2);
+            if slope.abs() < 1.0e-6 {
+                break;
+            }
+            let error = sample_bezier(t, self.x1, self.x2) - x;
+            if error.abs() < 1.0e-7 {
+                return t.clamp(0.0, 1.0);
+            }
+            t = (t - error / slope).clamp(0.0, 1.0);
+        }
+        let mut low = 0.0;
+        let mut high = 1.0;
+        t = x.clamp(0.0, 1.0);
+        for _ in 0..24 {
+            let estimate = sample_bezier(t, self.x1, self.x2);
+            if (estimate - x).abs() < 1.0e-7 {
+                return t;
+            }
+            if estimate < x {
+                low = t;
+            } else {
+                high = t;
+            }
+            t = (low + high) * 0.5;
+        }
+        t
+    }
+}
+
+impl PartialEq for CubicBezier {
+    fn eq(&self, other: &Self) -> bool {
+        self.x1.to_bits() == other.x1.to_bits()
+            && self.y1.to_bits() == other.y1.to_bits()
+            && self.x2.to_bits() == other.x2.to_bits()
+            && self.y2.to_bits() == other.y2.to_bits()
+    }
+}
+
+impl Eq for CubicBezier {}
+
+fn sample_bezier(t: f64, p1: f64, p2: f64) -> f64 {
+    let inverse = 1.0 - t;
+    3.0 * inverse * inverse * t * p1 + 3.0 * inverse * t * t * p2 + t * t * t
+}
+
+fn bezier_slope(t: f64, p1: f64, p2: f64) -> f64 {
+    let inverse = 1.0 - t;
+    3.0 * inverse * inverse * p1 + 6.0 * inverse * t * (p2 - p1) + 3.0 * t * t * (1.0 - p2)
 }
 
 /// Absolute progress of a timed segment. Time before the start stays at zero.
@@ -88,11 +192,13 @@ pub fn unit_progress_between(started_at: Instant, duration: Duration, now: Insta
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Easing {
     Linear,
+    Cubic(CubicBezier),
 }
 
 pub fn apply_easing(easing: Easing, progress: UnitValue) -> UnitValue {
     match easing {
         Easing::Linear => progress,
+        Easing::Cubic(curve) => UnitValue::saturating_from_f64(curve.y_at_x(progress.as_f64())),
     }
 }
 
@@ -390,7 +496,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        apply_easing, Easing, RetargetableTrack, TrackInterrupt, TrackMode, TrackStatus, UnitValue,
+        apply_easing, CubicBezier, Easing, RetargetableTrack, TrackInterrupt, TrackMode,
+        TrackStatus, UnitValue,
     };
 
     fn half() -> UnitValue {
@@ -574,5 +681,47 @@ mod tests {
         assert_eq!(finished.sample(now).value, UnitValue::ONE);
         assert_eq!(finished.last_interrupt(), None);
         assert!(!finished.needs_frames(now));
+    }
+
+    #[test]
+    fn cubic_bezier_matches_linear_controls_and_ease_out_leads() {
+        let linear = CubicBezier::linear();
+        for step in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let sampled = linear.y_at_x(step);
+            assert!((sampled - step).abs() < 1.0e-6, "linear curve moved {step} to {sampled}");
+        }
+        let ease_out = CubicBezier::new(0.23, 1.0, 0.32, 1.0);
+        assert_eq!(ease_out.y_at_x(0.0), 0.0);
+        assert_eq!(ease_out.y_at_x(1.0), 1.0);
+        assert!(ease_out.y_at_x(0.5) > 0.5);
+        let mut previous = 0.0;
+        for step in 1..=8 {
+            let y = ease_out.y_at_x(f64::from(step) / 8.0);
+            assert!(y >= previous);
+            previous = y;
+        }
+        let eased = apply_easing(Easing::Cubic(ease_out), half());
+        assert!(eased > half());
+        assert!(eased < UnitValue::ONE);
+    }
+
+    #[test]
+    fn cubic_track_starts_at_the_current_value_and_ends_at_the_goal() {
+        let now = Instant::now();
+        let easing = Easing::Cubic(CubicBezier::new(0.23, 1.0, 0.32, 1.0));
+        let track = RetargetableTrack::start_timed(
+            UnitValue::ZERO,
+            UnitValue::ONE,
+            now,
+            Duration::from_millis(100),
+            easing,
+        );
+        assert_eq!(track.sample(now).value, UnitValue::ZERO);
+        let mid = track.sample(now + Duration::from_millis(50));
+        assert!(mid.value > half());
+        assert_eq!(mid.status, TrackStatus::Active);
+        let end = track.sample(now + Duration::from_millis(100));
+        assert_eq!(end.value, UnitValue::ONE);
+        assert_eq!(end.status, TrackStatus::Settled);
     }
 }

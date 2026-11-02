@@ -4135,7 +4135,7 @@ mod tests {
         let _output_id =
             state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
         let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
-        state.config.animations.window.close_duration_msec = 0;
+        state.config.animations.set_close_duration_msec(0);
         let surface_object_id =
             map_closing_candidate(&mut state, &mut client, &mut dispatcher, 250);
         {
@@ -4153,7 +4153,7 @@ mod tests {
         }
         assert!(state.closing_snapshots.is_empty());
 
-        state.config.animations.window.close_duration_msec = 160;
+        state.config.animations.set_close_duration_msec(160);
         state.session_active = false;
         state.realize_closing_snapshots_in_tests = true;
         let surface_object_id =
@@ -4169,7 +4169,7 @@ mod tests {
     #[test]
     fn floating_map_starts_opening_when_reconfigure_consumes_the_edge() {
         let mut state = state_for_tests();
-        state.config.animations.window.open_duration_msec = 160;
+        state.config.animations.set_open_duration_msec(160);
         let backend = BackendOutputRef::new(DrmId::from(8usize));
         let _output_id =
             state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));

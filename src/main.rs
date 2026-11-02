@@ -163,6 +163,7 @@ use crate::{
     udev::Udev,
 };
 
+mod animation_config;
 mod capture;
 mod clients;
 mod config;

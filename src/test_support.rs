@@ -22,7 +22,7 @@ use crate::{
 
 pub fn state_for_tests() -> State {
     let mut state = state_for_tests_with_config(RuntimeConfig::default());
-    state.config.animations.workspace.duration_msec = 0;
+    state.config.animations.set_workspace_duration_msec(0);
     state
 }
 

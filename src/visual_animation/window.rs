@@ -51,9 +51,20 @@ impl FocusVisualAnimation {
         duration: Duration,
         now: Instant,
     ) -> WindowVisualBase {
+        self.advance_with_easing(goal, duration, Easing::Linear, now)
+    }
+
+    pub fn advance_with_easing(
+        &mut self,
+        goal: WindowVisualBase,
+        duration: Duration,
+        easing: Easing,
+        now: Instant,
+    ) -> WindowVisualBase {
         let goal_changed = goal != self.to;
         let duration_changed = duration != self.track.duration();
-        if goal_changed || (self.active && duration_changed) {
+        let easing_changed = easing != self.track.easing();
+        if goal_changed || (self.active && (duration_changed || easing_changed)) {
             let sampled =
                 interpolate_window_visual(self.from, self.to, self.track.sample(now).value);
             if duration.is_zero() || sampled == goal {
@@ -71,7 +82,7 @@ impl FocusVisualAnimation {
                 UnitValue::ONE,
                 now,
                 duration,
-                Easing::Linear,
+                easing,
             );
         }
         let sample = self.track.sample_mut(now);
@@ -124,6 +135,15 @@ impl WindowLifecycleAnimation {
 
     /// Sample the opening track. A zero duration settles immediately.
     pub fn advance(&mut self, duration: Duration, now: Instant) -> WindowLifecycleAnim {
+        self.advance_with_easing(duration, Easing::Linear, now)
+    }
+
+    pub fn advance_with_easing(
+        &mut self,
+        duration: Duration,
+        easing: Easing,
+        now: Instant,
+    ) -> WindowLifecycleAnim {
         if !self.active {
             return self.cached;
         }
@@ -138,11 +158,11 @@ impl WindowLifecycleAnimation {
                 UnitValue::ONE,
                 now,
                 duration,
-                Easing::Linear,
+                easing,
             );
-        } else if duration != self.track.duration() {
+        } else if duration != self.track.duration() || easing != self.track.easing() {
             self.track
-                .retarget_timed(UnitValue::ONE, now, duration, Easing::Linear);
+                .retarget_timed(UnitValue::ONE, now, duration, easing);
         }
         let sample = self.track.sample_mut(now);
         if sample.status == TrackStatus::Settled {

@@ -1519,7 +1519,7 @@ fn sync_workspace_layout(
                 .map(|managed| (*object_id, managed.mode))
         })
         .collect::<BTreeMap<_, _>>();
-    let open_duration_msec = state.config.animations.window.open_duration_msec;
+    let open_duration = state.config.animations.opening().duration();
     let workspace_active = state.workspace_is_active(workspace_id);
     let mut opened = Vec::new();
     for surface in &workspace_surface_ids {
@@ -1530,7 +1530,7 @@ fn sync_workspace_layout(
         let now_mapped = candidate_set.contains(surface);
         managed.mapped = now_mapped;
         if !was_mapped && now_mapped {
-            if workspace_active && open_duration_msec > 0 {
+            if workspace_active && !open_duration.is_zero() {
                 managed.lifecycle_animation.start_opening();
                 opened.push(*surface);
             } else {
@@ -2406,7 +2406,7 @@ mod tests {
     #[test]
     fn managed_map_edge_starts_opening_for_tiled_and_floating_windows() {
         let mut state = state_for_tests();
-        state.config.animations.window.open_duration_msec = 160;
+        state.config.animations.set_open_duration_msec(160);
         let surface = live_toplevel(&mut state);
 
         let opened = state.relayout_dirty_workspaces();
@@ -2464,7 +2464,7 @@ mod tests {
             .unwrap();
         let inactive = state.create_workspace(Some(group_id), Some("inactive".to_string()));
         state.assign_root_surface_to_workspace(surface, inactive);
-        state.config.animations.window.open_duration_msec = 160;
+        state.config.animations.set_open_duration_msec(160);
 
         assert!(state.relayout_dirty_workspaces().is_empty());
         assert_eq!(
@@ -2482,7 +2482,7 @@ mod tests {
             .get_mut(&surface)
             .unwrap()
             .mapped = false;
-        state.config.animations.window.open_duration_msec = 0;
+        state.config.animations.set_open_duration_msec(0);
         assert!(state.relayout_dirty_workspaces().is_empty());
         assert_eq!(
             state
@@ -2497,7 +2497,7 @@ mod tests {
     #[test]
     fn unmap_then_remap_restarts_opening() {
         let mut state = state_for_tests();
-        state.config.animations.window.open_duration_msec = 120;
+        state.config.animations.set_open_duration_msec(120);
         let surface = live_toplevel(&mut state);
         assert_eq!(state.relayout_dirty_workspaces(), vec![surface]);
 

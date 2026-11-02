@@ -5,7 +5,6 @@ use crate::{
     cursor::CursorSourceRef,
     drm::{request_active_output, request_outputs_for_points, request_outputs_for_rects},
     protocol_generated::{xdg_toplevel::ResizeEdge, WlSurfaceId, XdgToplevelId},
-    region::RectI,
     root_geometry::{CommittedRootGeometry, WindowTargetGeometry},
     runner::Dispatcher,
     seat::{dispatch_client_action, dispatch_client_event, refresh_pointer_focus, SeatClientEvent},

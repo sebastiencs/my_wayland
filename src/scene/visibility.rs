@@ -584,7 +584,7 @@ mod tests {
         let group_id = state.workspace_group_for_output(output_id).unwrap();
         let outgoing = state.active_workspace_for_output(output_id).unwrap();
         let incoming = state.create_workspace(Some(group_id), Some("2".to_string()));
-        state.config.animations.workspace.duration_msec = 200;
+        state.config.animations.set_workspace_duration_msec(200);
         assert!(state.activate_workspace(incoming));
         (output_id, outgoing, incoming)
     }
@@ -701,7 +701,7 @@ mod tests {
         let right_from = state.active_workspace_for_output(right).unwrap();
         let left_to = state.create_workspace(Some(left_group), Some("L".to_string()));
         let right_to = state.create_workspace(Some(right_group), Some("R".to_string()));
-        state.config.animations.workspace.duration_msec = 200;
+        state.config.animations.set_workspace_duration_msec(200);
         assert!(state.activate_workspace(left_to));
         assert!(state.activate_workspace(right_to));
 
