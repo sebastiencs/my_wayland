@@ -19,8 +19,9 @@ const POINTER_MOVE_CURSOR_ICON_NAMES: &[&str] = &["grab", "grabbing", "move"];
 pub(crate) fn window_allows_compositor_interaction(target: &WindowTarget) -> bool {
     !matches!(
         target.role,
-        WindowRoleSnapshot::XdgToplevel { is_maximized: true, .. }
-            | WindowRoleSnapshot::XdgToplevel { is_fullscreen: true, .. }
+        // Comment so we can move gtk windows
+        // WindowRoleSnapshot::XdgToplevel { is_maximized: true, .. }
+        WindowRoleSnapshot::XdgToplevel { is_fullscreen: true, .. }
             | WindowRoleSnapshot::Unsupported
     )
 }
