@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     clients::Resolved,
-    config::DecorationInsets,
+    config::{DecorationInsets, SplitRatio},
     protocol_generated::{xdg_toplevel, WlSurfaceId, XdgSurfaceId},
     region::RectI,
     root_geometry::{self, CommittedRootGeometry},
@@ -126,6 +126,13 @@ pub struct TiledResizeState {
     pair_weight: f64,
     initial_leaf_weight: f64,
     axis_span: i32,
+}
+
+/// A tiled window removed from the tree, with the layout needed to put it back.
+#[derive(Debug)]
+pub struct ExtractedTiledLeaf {
+    surface_object_id: Resolved<WlSurfaceId>,
+    previous: WorkspaceLayout,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -278,6 +285,151 @@ impl WorkspaceLayout {
 
         self.root = Some(root_id);
         self.focus_surface(surface_object_id);
+        self.mark_dirty();
+        true
+    }
+
+    /// Removes a tiled leaf and collapses a parent that would be left with one child.
+    ///
+    /// The sole tiled window is left in place. The returned value can restore the
+    /// previous tree, including focus and weights.
+    pub fn extract_tiled_leaf(
+        &mut self,
+        surface_object_id: Resolved<WlSurfaceId>,
+    ) -> Option<ExtractedTiledLeaf> {
+        if !self.is_tiled_surface(surface_object_id) || self.tiled_scene_order().len() <= 1 {
+            return None;
+        }
+        let previous = self.clone();
+        if !self.remove_surface(surface_object_id) {
+            return None;
+        }
+        Some(ExtractedTiledLeaf { surface_object_id, previous })
+    }
+
+    pub fn restore_extracted_tiled_leaf(&mut self, extracted: ExtractedTiledLeaf) {
+        *self = extracted.previous;
+    }
+
+    /// Splits the tiled leaf under `pointer` and inserts the extracted window beside it.
+    ///
+    /// A point inside a tiled rect selects that leaf. Empty space selects the nearest
+    /// remaining tiled rect. Floating windows are not destinations. On failure the
+    /// extracted window is returned so the caller can restore it.
+    pub fn drop_extracted_tiled_leaf(
+        &mut self,
+        extracted: ExtractedTiledLeaf,
+        pointer_x: f64,
+        pointer_y: f64,
+        precise_mouse_move: bool,
+        split_ratio: f32,
+    ) -> Result<(), ExtractedTiledLeaf> {
+        let Some(destination) = self.tiled_leaf_at_point(pointer_x, pointer_y) else {
+            return Err(extracted);
+        };
+        let Some(rect) = self.tiled_rect(destination) else {
+            return Err(extracted);
+        };
+        let (axis, dragged_is_first) =
+            tiled_drop_side(rect, pointer_x, pointer_y, precise_mouse_move);
+        if self.split_leaf_for_drag(
+            destination,
+            extracted.surface_object_id,
+            axis,
+            dragged_is_first,
+            split_ratio,
+        ) {
+            Ok(())
+        } else {
+            Err(extracted)
+        }
+    }
+
+    fn tiled_leaf_at_point(&self, pointer_x: f64, pointer_y: f64) -> Option<Resolved<WlSurfaceId>> {
+        let mut containing = None;
+        let mut nearest: Option<(f64, Resolved<WlSurfaceId>)> = None;
+        for surface_object_id in self.tiled_scene_order() {
+            let Some(rect) = self.tiled_rect(surface_object_id) else {
+                continue;
+            };
+            if rect.width <= 0 || rect.height <= 0 {
+                continue;
+            }
+            if rect_contains_point(rect, pointer_x, pointer_y) {
+                containing = Some(surface_object_id);
+                break;
+            }
+            let distance = distance_squared_to_rect(rect, pointer_x, pointer_y);
+            if nearest.is_none_or(|(best, _)| distance < best) {
+                nearest = Some((distance, surface_object_id));
+            }
+        }
+        containing.or_else(|| nearest.map(|(_, surface_object_id)| surface_object_id))
+    }
+
+    fn split_leaf_for_drag(
+        &mut self,
+        destination: Resolved<WlSurfaceId>,
+        dragged: Resolved<WlSurfaceId>,
+        axis: SplitAxis,
+        dragged_is_first: bool,
+        split_ratio: f32,
+    ) -> bool {
+        if self.surface_leaves.contains_key(&dragged) {
+            return false;
+        }
+        let Some(&existing_leaf_id) = self.surface_leaves.get(&destination) else {
+            return false;
+        };
+        if !matches!(self.nodes.get(&existing_leaf_id), Some(LayoutNode::Leaf(_))) {
+            return false;
+        }
+        let parent_id = self
+            .nodes
+            .get(&existing_leaf_id)
+            .and_then(LayoutNode::parent);
+        if parent_id.is_none() && self.root != Some(existing_leaf_id) {
+            return false;
+        }
+
+        let dragged_leaf_id = self.alloc_leaf(dragged, None);
+        let (first_weight, second_weight) = dwindle_child_weights(split_ratio, dragged_is_first);
+        let (first_id, second_id) = if dragged_is_first {
+            (dragged_leaf_id, existing_leaf_id)
+        } else {
+            (existing_leaf_id, dragged_leaf_id)
+        };
+        let container_id = self.alloc_container(
+            axis,
+            parent_id,
+            vec![
+                LayoutChild { node_id: first_id, weight: first_weight },
+                LayoutChild { node_id: second_id, weight: second_weight },
+            ],
+        );
+        for node_id in [first_id, second_id] {
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                node.set_parent(Some(container_id));
+            }
+        }
+        if let Some(parent_id) = parent_id {
+            let LayoutNode::Container(parent) = self
+                .nodes
+                .get_mut(&parent_id)
+                .expect("tiled leaf parent must exist")
+            else {
+                panic!("tiled leaf parent must be a container");
+            };
+            let index = parent
+                .children
+                .iter()
+                .position(|child| child.node_id == existing_leaf_id)
+                .expect("tiled leaf must be a child of its parent");
+            parent.children[index].node_id = container_id;
+        } else {
+            self.root = Some(container_id);
+        }
+        self.focus_surface(dragged);
         self.mark_dirty();
         true
     }
@@ -1854,6 +2006,85 @@ fn child_size_hint_for_container(
         .collect()
 }
 
+/// Hyprland dwindle sizes the first child as `span / 2 * split_ratio`.
+/// Weights `(applied, 2 - applied)` produce that fraction. The default
+/// directional bias stores `2 - split_ratio` when the dragged window is the
+/// first child, so the window that stayed in place keeps `split_ratio / 2`.
+fn dwindle_child_weights(split_ratio: f32, dragged_is_first: bool) -> (f64, f64) {
+    let ratio = f64::from(SplitRatio::sanitize(split_ratio).get());
+    let applied = if dragged_is_first { 2.0 - ratio } else { ratio };
+    (applied, 2.0 - applied)
+}
+
+/// Aspect mode splits left/right only when the tile is wider than it is tall.
+/// Precise mode uses the pointer quadrant. The dragged window is the first
+/// child when it lands on the left or top of the chosen axis.
+fn tiled_drop_side(
+    rect: RectI,
+    pointer_x: f64,
+    pointer_y: f64,
+    precise_mouse_move: bool,
+) -> (SplitAxis, bool) {
+    let left = rect.x as f64;
+    let top = rect.y as f64;
+    let width = rect.width.max(0) as f64;
+    let height = rect.height.max(0) as f64;
+    let center_x = left + width / 2.0;
+    let center_y = top + height / 2.0;
+    let horizontal = if precise_mouse_move {
+        let delta_x = pointer_x - center_x;
+        let delta_y = pointer_y - center_y;
+        let proportions = if width == 0.0 { f64::INFINITY } else { height / width };
+        (delta_y / delta_x).abs() < proportions
+    } else {
+        width > height
+    };
+    let dragged_is_first = if precise_mouse_move {
+        if horizontal {
+            pointer_x <= center_x
+        } else {
+            pointer_y <= center_y
+        }
+    } else if horizontal {
+        pointer_x < center_x
+    } else {
+        pointer_y < center_y
+    };
+    let axis = if horizontal { SplitAxis::Horizontal } else { SplitAxis::Vertical };
+    (axis, dragged_is_first)
+}
+
+fn rect_contains_point(rect: RectI, x: f64, y: f64) -> bool {
+    let left = rect.x as f64;
+    let top = rect.y as f64;
+    x >= left
+        && x <= left + rect.width.max(0) as f64
+        && y >= top
+        && y <= top + rect.height.max(0) as f64
+}
+
+fn distance_squared_to_rect(rect: RectI, x: f64, y: f64) -> f64 {
+    let left = rect.x as f64;
+    let right = left + rect.width.max(0) as f64;
+    let top = rect.y as f64;
+    let bottom = top + rect.height.max(0) as f64;
+    let dx = if x < left {
+        left - x
+    } else if x > right {
+        x - right
+    } else {
+        0.0
+    };
+    let dy = if y < top {
+        top - y
+    } else if y > bottom {
+        y - bottom
+    } else {
+        0.0
+    };
+    dx * dx + dy * dy
+}
+
 fn weighted_child_main_sizes(container: &ContainerNode, available: i32) -> Vec<i32> {
     let total_weight = container
         .children
@@ -3178,5 +3409,248 @@ mod tests {
         assert_eq!(first_edges, EDGE_LEFT | EDGE_RIGHT | EDGE_TOP | EDGE_BOTTOM);
         assert_eq!(second_edges, EDGE_LEFT | EDGE_RIGHT | EDGE_TOP | EDGE_BOTTOM);
         assert_eq!(third_edges, EDGE_LEFT | EDGE_RIGHT | EDGE_TOP | EDGE_BOTTOM);
+    }
+
+    fn set_tiled_rect(layout: &mut WorkspaceLayout, surface: Resolved<WlSurfaceId>, rect: RectI) {
+        let leaf_id = layout.surface_leaves[&surface];
+        let LayoutNode::Leaf(leaf) = layout.nodes.get_mut(&leaf_id).unwrap() else {
+            panic!("surface should be a tiled leaf");
+        };
+        leaf.last_applied_rect = Some(rect);
+    }
+
+    fn sibling_split(
+        layout: &WorkspaceLayout,
+        surface: Resolved<WlSurfaceId>,
+    ) -> (SplitAxis, Vec<(Resolved<WlSurfaceId>, f64)>) {
+        let leaf_id = layout.surface_leaves[&surface];
+        let parent_id = layout.nodes[&leaf_id].parent().unwrap();
+        let container = layout.nodes[&parent_id].as_container().unwrap();
+        let children = container
+            .children
+            .iter()
+            .map(|child| {
+                let LayoutNode::Leaf(leaf) = &layout.nodes[&child.node_id] else {
+                    panic!("drag split should place two leaves under the new parent");
+                };
+                (leaf.surface_object_id, child.weight)
+            })
+            .collect();
+        (container.axis, children)
+    }
+
+    fn assert_tree_links(layout: &WorkspaceLayout) {
+        let Some(root) = layout.root else {
+            assert!(layout.nodes.is_empty());
+            assert!(layout.surface_leaves.is_empty());
+            assert!(layout.focused_leaf.is_none());
+            return;
+        };
+        assert!(layout.nodes[&root].parent().is_none());
+        let mut seen = BTreeSet::new();
+        fn visit(
+            layout: &WorkspaceLayout,
+            node_id: LayoutNodeId,
+            seen: &mut BTreeSet<LayoutNodeId>,
+        ) {
+            assert!(seen.insert(node_id), "layout node is reachable twice");
+            match &layout.nodes[&node_id] {
+                LayoutNode::Leaf(leaf) => {
+                    assert_eq!(layout.surface_leaves.get(&leaf.surface_object_id), Some(&node_id));
+                }
+                LayoutNode::Container(container) => {
+                    assert!(container.children.len() >= 2);
+                    for (index, child) in container.children.iter().enumerate() {
+                        assert_eq!(layout.nodes[&child.node_id].parent(), Some(node_id));
+                        assert!(child.weight >= MIN_CHILD_WEIGHT);
+                        if container.focused_child == Some(index) {
+                            assert!(layout.nodes.contains_key(&child.node_id));
+                        }
+                        visit(layout, child.node_id, seen);
+                    }
+                }
+            }
+        }
+        visit(layout, root, &mut seen);
+        assert_eq!(seen.len(), layout.nodes.len());
+        if let Some(focused) = layout.focused_leaf {
+            assert!(matches!(layout.nodes.get(&focused), Some(LayoutNode::Leaf(_))));
+        }
+        for surface in layout.tiled_scene_order() {
+            assert!(layout.is_tiled_surface(surface));
+        }
+    }
+
+    #[test]
+    fn extracting_the_only_tiled_window_leaves_the_tree_unchanged() {
+        let mut layout = WorkspaceLayout::default();
+        let only = test_resolved_wl_surface_client1(30);
+        assert!(layout.insert_tiled(only));
+        layout.dirty = false;
+
+        assert!(layout.extract_tiled_leaf(only).is_none());
+        assert!(layout.is_tiled_surface(only));
+        assert_eq!(layout.root, layout.focused_leaf);
+        assert!(!layout.dirty);
+        assert_tree_links(&layout);
+    }
+
+    #[test]
+    fn extracting_a_nested_leaf_collapses_its_parent_and_restore_puts_it_back() {
+        let mut layout = WorkspaceLayout::default();
+        let first = test_resolved_wl_surface_client1(31);
+        let second = test_resolved_wl_surface_client1(32);
+        let third = test_resolved_wl_surface_client1(33);
+        assert!(layout.insert_tiled(first));
+        assert!(layout.insert_tiled(second));
+        assert!(layout.insert_tiled(third));
+        let before = layout.clone();
+
+        let extracted = layout
+            .extract_tiled_leaf(third)
+            .expect("third window is tiled");
+        assert!(!layout.is_tiled_surface(third));
+        assert_eq!(layout.tiled_scene_order(), vec![first, second]);
+        let root = layout.nodes[&layout.root.unwrap()].as_container().unwrap();
+        assert_eq!(root.axis, SplitAxis::Horizontal);
+        assert_eq!(root.children.len(), 2);
+        assert_eq!(layout.focused_leaf, Some(layout.surface_leaves[&second]));
+        assert_ne!(layout.focused_leaf, before.focused_leaf);
+        assert_tree_links(&layout);
+
+        layout.restore_extracted_tiled_leaf(extracted);
+        assert_eq!(layout.tiled_scene_order(), before.tiled_scene_order());
+        assert_eq!(layout.focused_leaf, before.focused_leaf);
+        assert_eq!(sibling_split(&layout, third).0, SplitAxis::Vertical);
+        assert_tree_links(&layout);
+    }
+
+    #[test]
+    fn dropping_selects_every_side_and_keeps_a_custom_ratio_on_the_window_that_stays() {
+        let mut layout = WorkspaceLayout::default();
+        let stayed = test_resolved_wl_surface_client1(34);
+        let dragged = test_resolved_wl_surface_client1(35);
+        assert!(layout.insert_tiled(stayed));
+        assert!(layout.insert_tiled(dragged));
+        let wide = RectI { x: 0, y: 0, width: 200, height: 100 };
+        set_tiled_rect(&mut layout, stayed, wide);
+
+        let cases = [
+            (10.0, 50.0, false, SplitAxis::Horizontal, true),
+            (190.0, 50.0, false, SplitAxis::Horizontal, false),
+            (100.0, 10.0, true, SplitAxis::Vertical, true),
+            (100.0, 90.0, true, SplitAxis::Vertical, false),
+        ];
+        for (pointer_x, pointer_y, precise, axis, dragged_is_first) in cases {
+            let mut candidate = layout.clone();
+            let extracted = candidate.extract_tiled_leaf(dragged).unwrap();
+            candidate
+                .drop_extracted_tiled_leaf(extracted, pointer_x, pointer_y, precise, 1.4)
+                .expect("wide tile is a destination");
+            let (split_axis, children) = sibling_split(&candidate, dragged);
+            assert_eq!(split_axis, axis);
+            let dragged_index = if dragged_is_first { 0 } else { 1 };
+            assert_eq!(children[dragged_index].0, dragged);
+            assert_eq!(children[1 - dragged_index].0, stayed);
+            assert!((children[1 - dragged_index].1 - 1.4).abs() < 1e-5);
+            assert!((children[dragged_index].1 - 0.6).abs() < 1e-5);
+            assert_eq!(candidate.focused_leaf, Some(candidate.surface_leaves[&dragged]));
+            assert!(candidate.dirty);
+            assert_tree_links(&candidate);
+        }
+    }
+
+    #[test]
+    fn precise_drop_uses_the_pointer_quadrant_of_a_tall_tile() {
+        let mut layout = WorkspaceLayout::default();
+        let stayed = test_resolved_wl_surface_client1(36);
+        let dragged = test_resolved_wl_surface_client1(37);
+        assert!(layout.insert_tiled(stayed));
+        assert!(layout.insert_tiled(dragged));
+        set_tiled_rect(&mut layout, stayed, RectI { x: 0, y: 0, width: 100, height: 400 });
+        let extracted = layout.extract_tiled_leaf(dragged).unwrap();
+        layout
+            .drop_extracted_tiled_leaf(extracted, 90.0, 210.0, true, 1.0)
+            .unwrap();
+
+        let (axis, children) = sibling_split(&layout, dragged);
+        assert_eq!(axis, SplitAxis::Horizontal);
+        assert_eq!(children[0].0, stayed);
+        assert_eq!(children[1].0, dragged);
+        assert_tree_links(&layout);
+    }
+
+    #[test]
+    fn empty_space_drops_on_the_nearest_tiled_leaf_and_ignores_floating_windows() {
+        let mut layout = WorkspaceLayout::default();
+        let left = test_resolved_wl_surface_client1(38);
+        let right = test_resolved_wl_surface_client1(39);
+        let dragged = test_resolved_wl_surface_client1(40);
+        let floating = test_resolved_wl_surface_client1(41);
+        assert!(layout.insert_tiled(left));
+        assert!(layout.insert_tiled(right));
+        assert!(layout.insert_tiled(dragged));
+        assert!(layout.set_floating(floating, true));
+        set_tiled_rect(&mut layout, left, RectI { x: 0, y: 0, width: 100, height: 100 });
+        set_tiled_rect(&mut layout, right, RectI { x: 400, y: 0, width: 100, height: 100 });
+
+        let extracted = layout.extract_tiled_leaf(dragged).unwrap();
+        layout
+            .drop_extracted_tiled_leaf(extracted, 390.0, 200.0, false, 1.0)
+            .unwrap();
+
+        let (_, children) = sibling_split(&layout, dragged);
+        assert!(children.iter().any(|(surface, _)| *surface == right));
+        assert!(children.iter().all(|(surface, _)| *surface != left));
+        assert!(layout.is_floating_surface(floating));
+        assert!(!layout.is_tiled_surface(floating));
+        assert_tree_links(&layout);
+    }
+
+    #[test]
+    fn a_failed_drop_can_restore_the_extracted_window() {
+        let mut layout = WorkspaceLayout::default();
+        let stayed = test_resolved_wl_surface_client1(42);
+        let dragged = test_resolved_wl_surface_client1(43);
+        assert!(layout.insert_tiled(stayed));
+        assert!(layout.insert_tiled(dragged));
+        let before = layout.clone();
+        let extracted = layout.extract_tiled_leaf(dragged).unwrap();
+
+        let extracted = layout
+            .drop_extracted_tiled_leaf(extracted, 10.0, 10.0, false, 1.0)
+            .expect_err("a tile without a rect is not a destination");
+        assert!(!layout.is_tiled_surface(dragged));
+        layout.restore_extracted_tiled_leaf(extracted);
+        assert_eq!(layout.tiled_scene_order(), before.tiled_scene_order());
+        assert_eq!(layout.focused_leaf, before.focused_leaf);
+        assert_tree_links(&layout);
+    }
+
+    #[test]
+    fn dropping_into_a_nested_tree_keeps_parent_links() {
+        let mut layout = WorkspaceLayout::default();
+        let first = test_resolved_wl_surface_client1(44);
+        let second = test_resolved_wl_surface_client1(45);
+        let third = test_resolved_wl_surface_client1(46);
+        assert!(layout.insert_tiled(first));
+        assert!(layout.insert_tiled(second));
+        assert!(layout.insert_tiled(third));
+        set_tiled_rect(&mut layout, first, RectI { x: 0, y: 0, width: 300, height: 100 });
+        let extracted = layout.extract_tiled_leaf(third).unwrap();
+        layout
+            .drop_extracted_tiled_leaf(extracted, 250.0, 40.0, false, 1.0)
+            .unwrap();
+
+        let first_parent = layout.nodes[&layout.surface_leaves[&first]]
+            .parent()
+            .unwrap();
+        let third_parent = layout.nodes[&layout.surface_leaves[&third]]
+            .parent()
+            .unwrap();
+        assert_eq!(first_parent, third_parent);
+        assert_ne!(layout.nodes[&layout.surface_leaves[&second]].parent(), Some(first_parent));
+        assert_eq!(layout.nodes[&first_parent].parent(), Some(layout.root.unwrap()));
+        assert_tree_links(&layout);
     }
 }
