@@ -127,6 +127,41 @@ pub fn map_layout_rect(logical: RectI, visual: RectI, rect: RectI) -> RectI {
     .unwrap_or(rect)
 }
 
+/// Map a global point from the logical layout rectangle into the sampled visual rectangle.
+pub fn map_layout_point(logical: RectI, visual: RectI, point: (f64, f64)) -> (f64, f64) {
+    let Some((scale_x, scale_y)) = layout_scale(logical, visual) else {
+        return point;
+    };
+    (
+        f64::from(visual.x) + (point.0 - f64::from(logical.x)) * scale_x,
+        f64::from(visual.y) + (point.1 - f64::from(logical.y)) * scale_y,
+    )
+}
+
+/// Map a global point from the sampled visual rectangle back into the logical layout rectangle.
+pub fn unmap_layout_point(logical: RectI, visual: RectI, point: (f64, f64)) -> (f64, f64) {
+    let Some((scale_x, scale_y)) = layout_scale(logical, visual) else {
+        return point;
+    };
+    if scale_x == 0.0 || scale_y == 0.0 {
+        return point;
+    }
+    (
+        f64::from(logical.x) + (point.0 - f64::from(visual.x)) / scale_x,
+        f64::from(logical.y) + (point.1 - f64::from(visual.y)) / scale_y,
+    )
+}
+
+fn layout_scale(logical: RectI, visual: RectI) -> Option<(f64, f64)> {
+    if logical.width <= 0 || logical.height <= 0 || logical == visual {
+        return None;
+    }
+    Some((
+        f64::from(visual.width) / f64::from(logical.width),
+        f64::from(visual.height) / f64::from(logical.height),
+    ))
+}
+
 /// Move a window's decorations onto `visual_layout` without scaling their pixel thickness.
 ///
 /// The client surfaces use [`map_layout_rect`]. The border inset, corner radius, and shadow spread
@@ -221,6 +256,19 @@ mod tests {
             state::RootSurfaceClip,
         },
     };
+
+    #[test]
+    fn layout_point_mapping_round_trips_through_a_scaled_visual_rect() {
+        let logical = RectI::new(10, 20, 100, 80).unwrap();
+        let visual = RectI::new(40, 30, 50, 40).unwrap();
+        let point = (60.0, 60.0);
+        let mapped = super::map_layout_point(logical, visual, point);
+        let restored = super::unmap_layout_point(logical, visual, mapped);
+        assert!((restored.0 - point.0).abs() < 1e-9);
+        assert!((restored.1 - point.1).abs() < 1e-9);
+        assert!((mapped.0 - 65.0).abs() < 1e-9);
+        assert!((mapped.1 - 50.0).abs() < 1e-9);
+    }
 
     #[test]
     fn shadow_geometry_offsets_inner_rect_within_shifted_shadow_bounds() {

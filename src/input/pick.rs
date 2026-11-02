@@ -37,7 +37,11 @@ pub(crate) fn scene_pick_at(state: &State, pointer_pos: (f64, f64)) -> ScenePick
         view.entries
             .iter()
             .rev()
-            .filter(|entry| entry.participates_in_input)
+            .filter(|entry| {
+                entry.participates_in_input
+                    || (entry.participates_in_render
+                        && state.root_surface_is_mapped(entry.root_surface))
+            })
             .map(|entry| entry.root_surface),
     )
 }
@@ -58,13 +62,14 @@ fn pick_roots(
         {
             continue;
         }
-        let root_hit = hit_test_subtree(state, root_surface, 0, 0, pointer_pos.0, pointer_pos.1);
+        let hit_pos = state.logical_pointer_for_surface(root_surface, pointer_pos);
+        let root_hit = hit_test_subtree(state, root_surface, 0, 0, hit_pos.0, hit_pos.1);
         let has_mapped_bounds =
             WlSurface::local_surface_tree_bounds_from_ref(state, &surface).is_some();
         let window_target_for_root = has_mapped_bounds
             .then(|| state.committed_root_geometry(root_surface))
             .flatten()
-            .filter(|geometry| rect_contains_point(geometry.window_target_rect(), pointer_pos))
+            .filter(|geometry| rect_contains_point(geometry.window_target_rect(), hit_pos))
             .and_then(|_| build_window_target(state, root_surface));
         if root_hit.is_some() || window_target_for_root.is_some() {
             return ScenePick {
@@ -396,7 +401,8 @@ mod tests {
         clients::{ClientId, Resolved},
         config::DecorationInsets,
         protocol_generated::{
-            WlSubsurfaceId, WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
+            xdg_toplevel::ResizeEdge, WlSubsurfaceId, WlSurfaceId, XdgPopupId, XdgSurfaceId,
+            XdgToplevelId, XdgWmBaseId,
         },
         region::RectI,
         root_geometry::CommittedRootGeometry,
@@ -818,6 +824,337 @@ mod tests {
                 .surface_focus
                 .map(|focus| focus.target.surface),
             Some(child)
+        );
+    }
+
+    fn floating_visual_root(
+        state: &mut crate::state::State,
+        output_bounds: RectI,
+        logical: RectI,
+        visual: RectI,
+    ) -> (crate::state::OutputId, Resolved<WlSurfaceId>) {
+        let backend = crate::state::BackendOutputRef::new(crate::state::DrmId::from(0usize));
+        let output = state.insert_output(crate::test_support::test_output_with_crtc_name(
+            backend,
+            1,
+            output_bounds.x,
+            output_bounds.y,
+            output_bounds.width,
+            output_bounds.height,
+        ));
+        let workspace = state.active_workspace_for_output(output).unwrap();
+        let surface = insert_pick_root(state, 91);
+        state.assign_root_surface_to_workspace(surface, workspace);
+        state
+            .workspaces
+            .try_get_mut(workspace)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![surface];
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .mapped = true;
+        state
+            .objects
+            .get_mut(surface.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(910usize), 0, 0, logical.width, logical.height);
+        state
+            .objects
+            .get_mut(surface.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_root_position(logical.x, logical.y);
+        state.mark_root_geometry_dirty(surface);
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .geometry_animation
+            .set_goal(visual, crate::visual_animation::WindowGeometryMotion::Layout);
+        state.advance_visual_animations(std::time::Instant::now());
+        (output, surface)
+    }
+
+    #[test]
+    fn visual_box_receives_pointer_hits_and_resize_edges() {
+        let mut state = state_for_tests();
+        let logical = RectI::new(0, 0, 90, 90).unwrap();
+        let visual = RectI::new(200, 0, 90, 90).unwrap();
+        let (_, surface) =
+            floating_visual_root(&mut state, RectI::new(0, 0, 400, 100).unwrap(), logical, visual);
+
+        assert_eq!(
+            scene_pick_at(&state, (230.0, 45.0))
+                .surface_focus
+                .map(|focus| focus.target.surface),
+            Some(surface)
+        );
+        assert!(scene_pick_at(&state, (20.0, 45.0)).surface_focus.is_none());
+
+        let hit = crate::input::window_hit_at(&state, (270.0, 45.0)).unwrap();
+        assert_eq!(hit.binding_resize_edges, ResizeEdge::Right as u32);
+    }
+
+    #[test]
+    fn visual_box_is_clickable_on_a_neighbor_output() {
+        let mut state = state_for_tests();
+        let logical = RectI::new(10, 10, 40, 40).unwrap();
+        let visual = RectI::new(120, 10, 40, 40).unwrap();
+        let (left, surface) =
+            floating_visual_root(&mut state, RectI::new(0, 0, 100, 100).unwrap(), logical, visual);
+        let backend = crate::state::BackendOutputRef::new(crate::state::DrmId::from(0usize));
+        let right = state.insert_output(crate::test_support::test_output_with_crtc_name(
+            backend, 2, 100, 0, 100, 100,
+        ));
+
+        assert_eq!(
+            scene_pick_at(&state, (130.0, 20.0))
+                .surface_focus
+                .map(|focus| focus.target.surface),
+            Some(surface)
+        );
+        let scene = crate::scene::build_scene_model(&state);
+        let right_entry = crate::scene::compose_output(&state, &scene, right, None)
+            .entries
+            .into_iter()
+            .find(|entry| entry.root_surface == surface)
+            .expect("neighbor output draws the visual box");
+        assert!(!right_entry.participates_in_protocol_visibility);
+        assert!(right_entry.participates_in_render);
+        let left_entry = crate::scene::compose_output(&state, &scene, left, None)
+            .entries
+            .into_iter()
+            .find(|entry| entry.root_surface == surface)
+            .expect("owning output keeps the window");
+        assert!(left_entry.participates_in_protocol_visibility);
+    }
+
+    #[test]
+    fn direct_move_keeps_the_grabbed_point_under_the_cursor() {
+        let mut state = state_for_tests();
+        let logical = RectI::new(0, 0, 100, 80).unwrap();
+        let visual = RectI::new(100, 0, 100, 80).unwrap();
+        let (_, surface) =
+            floating_visual_root(&mut state, RectI::new(0, 0, 300, 100).unwrap(), logical, visual);
+        state.seat.pointer_pos = (150.0, 40.0);
+        let target = super::build_window_target(&state, surface).unwrap();
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        crate::input::apply_interaction_intent(
+            &mut state,
+            &mut dispatcher,
+            crate::input::InteractionIntent::StartMove(target),
+            crate::input::PROTOCOL_INTERACTION_START_OPTIONS,
+        );
+
+        let position = state
+            .objects
+            .get(surface.object_id())
+            .downcast_ref::<WlSurface>()
+            .unwrap()
+            .root_position();
+        assert_eq!(position, (100, 0));
+        state.advance_visual_animations(std::time::Instant::now());
+        let visual_now = state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .geometry_animation
+            .visual_rect()
+            .unwrap();
+        assert_eq!(visual_now.x, 100);
+        assert_eq!(visual_now.y, 0);
+    }
+
+    #[test]
+    fn visual_hit_follows_a_move_until_it_settles() {
+        use std::time::{Duration, Instant};
+
+        let mut state = state_for_tests();
+        let logical = RectI::new(0, 0, 100, 100).unwrap();
+        let (_, surface) =
+            floating_visual_root(&mut state, RectI::new(0, 0, 400, 120).unwrap(), logical, logical);
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::Windows, 200);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::Windows);
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::WindowsMove, 200);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::WindowsMove);
+        let goal = RectI::new(200, 0, 100, 100).unwrap();
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .geometry_animation
+            .set_goal(goal, crate::visual_animation::WindowGeometryMotion::Layout);
+        let now = Instant::now();
+        state.advance_visual_animations(now);
+        state.advance_visual_animations(now + Duration::from_millis(100));
+        let midway = state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .geometry_animation
+            .visual_rect()
+            .unwrap();
+        assert!(midway.x > logical.x && midway.x < goal.x);
+        assert_eq!(
+            scene_pick_at(&state, (midway.x as f64 + 10.0, 10.0))
+                .surface_focus
+                .map(|focus| focus.target.surface),
+            Some(surface)
+        );
+        assert!(scene_pick_at(&state, (10.0, 10.0)).surface_focus.is_none());
+
+        state.advance_visual_animations(now + Duration::from_millis(200));
+        assert_eq!(
+            state
+                .managed_root_surfaces
+                .get(&surface)
+                .unwrap()
+                .geometry_animation
+                .visual_rect(),
+            Some(goal)
+        );
+        assert_eq!(
+            scene_pick_at(&state, (210.0, 10.0))
+                .surface_focus
+                .map(|focus| focus.target.surface),
+            Some(surface)
+        );
+        assert!(scene_pick_at(&state, (10.0, 10.0)).surface_focus.is_none());
+    }
+
+    #[test]
+    fn popup_hit_follows_the_parent_visual_box() {
+        let mut state = state_for_tests();
+        let client_id = ClientId::from_raw(7);
+        let (parent_wl, parent_xdg) = insert_test_xdg_surface(
+            &mut state,
+            client_id,
+            WlSurfaceId::from(161),
+            XdgSurfaceId::from(162),
+        );
+        let (popup_wl, popup_xdg) = insert_test_xdg_surface(
+            &mut state,
+            client_id,
+            WlSurfaceId::from(163),
+            XdgSurfaceId::from(164),
+        );
+        state
+            .objects
+            .get_mut(parent_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(1401usize), 640, 0, 640, 800);
+        state
+            .objects
+            .get_mut(parent_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_root_position(640, 0);
+        state
+            .objects
+            .get_mut(popup_wl.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(ObjectId::from(1402usize), 0, 0, 299, 457);
+
+        let (_, popup_object_id) = state.insert_object(XdgPopup::new(
+            XdgPopupId::from(165),
+            popup_xdg,
+            Some(parent_xdg),
+            PositionerState::default(),
+            7,
+        ));
+        let popup = Resolved::new(client_id, XdgPopupId::from(165), popup_object_id);
+        state
+            .objects
+            .get_mut(popup_object_id)
+            .downcast_mut::<XdgPopup>()
+            .unwrap()
+            .apply_acked_configure(RectI { x: 387, y: 40, width: 253, height: 411 });
+        state
+            .objects
+            .get_mut(popup_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_current_window_geometry(Some(RectI {
+                x: 23,
+                y: 21,
+                width: 253,
+                height: 411,
+            }));
+        state
+            .objects
+            .get_mut(popup_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_popup_role(popup);
+        state
+            .objects
+            .get_mut(parent_xdg.object_id())
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .add_popup_child(popup);
+
+        let backend = crate::state::BackendOutputRef::new(crate::state::DrmId::from(0usize));
+        let output = state.insert_output(crate::test_support::test_output_with_crtc_name(
+            backend, 1, 0, 0, 2000, 1200,
+        ));
+        let workspace = state.active_workspace_for_output(output).unwrap();
+        state.assign_root_surface_to_workspace(parent_wl, workspace);
+        state
+            .workspaces
+            .try_get_mut(workspace)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![parent_wl];
+        state
+            .managed_root_surfaces
+            .get_mut(&parent_wl)
+            .unwrap()
+            .mapped = true;
+
+        let layout = state
+            .committed_root_geometry(parent_wl)
+            .unwrap()
+            .layout_rect_global;
+        let shifted = RectI { x: layout.x + 80, ..layout };
+        state
+            .managed_root_surfaces
+            .get_mut(&parent_wl)
+            .unwrap()
+            .geometry_animation
+            .set_goal(shifted, crate::visual_animation::WindowGeometryMotion::Layout);
+        state.advance_visual_animations(std::time::Instant::now());
+
+        assert_eq!(
+            scene_pick_at(&state, (1090.0, 25.0))
+                .surface_focus
+                .map(|focus| focus.target.surface),
+            Some(popup_wl)
+        );
+        assert_ne!(
+            scene_pick_at(&state, (1010.0, 25.0))
+                .surface_focus
+                .map(|focus| focus.target.surface),
+            Some(popup_wl)
         );
     }
 }

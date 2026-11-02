@@ -69,7 +69,7 @@ pub(crate) fn maybe_activate_pointer_confine(state: &mut State, dispatcher: &mut
         return;
     };
     let effective = RegionValue::effective(region.as_ref(), &input_region);
-    let local = local_position(pointer_focus, state.seat.pointer_pos);
+    let local = local_position(state, pointer_focus, state.seat.pointer_pos);
     if !effective.contains(local.0.floor() as i32, local.1.floor() as i32) {
         if !surface_is_fullscreen(state, surface_id) {
             return;
@@ -271,7 +271,8 @@ fn confine_fields(state: &State, id: Resolved<ZwpConfinedPointerV1Id>) -> Option
     })
 }
 
-fn local_position(focus: SurfaceFocusPick, pointer: (f64, f64)) -> (f64, f64) {
+fn local_position(state: &State, focus: SurfaceFocusPick, pointer: (f64, f64)) -> (f64, f64) {
+    let pointer = state.logical_pointer_for_surface(focus.target.surface, pointer);
     local_from_origin((focus.rect.x, focus.rect.y), pointer)
 }
 
@@ -289,7 +290,8 @@ fn warp_pointer(
     focus: SurfaceFocusPick,
     local: (f64, f64),
 ) {
-    state.seat.pointer_pos = global_from_origin((focus.rect.x, focus.rect.y), local);
+    let logical_global = global_from_origin((focus.rect.x, focus.rect.y), local);
+    state.seat.pointer_pos = state.visual_pointer_for_surface(focus.target.surface, logical_global);
     crate::seat::clamp_pointer_to_outputs(state);
     dispatch_client_event(
         dispatcher,

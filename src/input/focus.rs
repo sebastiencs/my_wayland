@@ -478,7 +478,12 @@ pub(crate) fn refresh_pointer_focus(
         }
 
         if let Some(new_focus) = new_focus {
-            let (x, y) = local_coords(new_focus.rect, state.seat.pointer_pos);
+            let (x, y) = local_coords(
+                state,
+                new_focus.target.surface,
+                new_focus.rect,
+                state.seat.pointer_pos,
+            );
             state
                 .seat
                 .record_pointer_enter(new_focus.target.client_id(), serial);
@@ -504,7 +509,12 @@ pub(crate) fn refresh_pointer_focus(
         }
     } else if send_motion {
         if let Some(new_focus) = new_focus {
-            let (x, y) = local_coords(new_focus.rect, state.seat.pointer_pos);
+            let (x, y) = local_coords(
+                state,
+                new_focus.target.surface,
+                new_focus.rect,
+                state.seat.pointer_pos,
+            );
             dispatch_client_event(
                 dispatcher,
                 new_focus.target.client_id(),
@@ -517,8 +527,10 @@ pub(crate) fn refresh_pointer_focus(
             );
         }
     } else if let (Some(old_focus), Some(new_focus)) = (old_focus, new_focus) {
-        let old_local = local_coords(old_focus.rect, state.seat.pointer_pos);
-        let new_local = local_coords(new_focus.rect, state.seat.pointer_pos);
+        let old_local =
+            local_coords(state, old_focus.target.surface, old_focus.rect, state.seat.pointer_pos);
+        let new_local =
+            local_coords(state, new_focus.target.surface, new_focus.rect, state.seat.pointer_pos);
         if old_local != new_local {
             dispatch_client_event(
                 dispatcher,
@@ -584,7 +596,7 @@ pub(crate) fn refresh_drag_focus(
 
         if let (Some(hit), Some(new_target)) = (hit, new_target) {
             let serial = state.seat.next_serial();
-            let (x, y) = local_coords(hit.rect, state.seat.pointer_pos);
+            let (x, y) = local_coords(state, hit.target.surface, hit.rect, state.seat.pointer_pos);
             dispatcher.dispatch_to(
                 new_target.client_id(),
                 ClientAction::DataDeviceDragEnter {
@@ -609,7 +621,7 @@ pub(crate) fn refresh_drag_focus(
 
     if send_motion {
         if let (Some(hit), Some(target)) = (hit, new_target) {
-            let (x, y) = local_coords(hit.rect, state.seat.pointer_pos);
+            let (x, y) = local_coords(state, hit.target.surface, hit.rect, state.seat.pointer_pos);
             dispatcher
                 .dispatch_to(target.client_id(), ClientAction::DataDeviceDragMotion { time, x, y });
         }
@@ -622,7 +634,13 @@ pub(crate) fn popup_keyboard_focus(state: &State) -> Option<SurfaceFocus> {
     Some(SurfaceFocus::new(state.seat.popup_keyboard_surface()?))
 }
 
-fn local_coords(rect: SurfaceRect, pointer_pos: (f64, f64)) -> (f32, f32) {
+fn local_coords(
+    state: &State,
+    surface: crate::clients::Resolved<crate::protocol_generated::WlSurfaceId>,
+    rect: SurfaceRect,
+    pointer_pos: (f64, f64),
+) -> (f32, f32) {
+    let pointer_pos = state.logical_pointer_for_surface(surface, pointer_pos);
     ((pointer_pos.0 - rect.x as f64) as f32, (pointer_pos.1 - rect.y as f64) as f32)
 }
 

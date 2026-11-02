@@ -2012,6 +2012,43 @@ impl State {
         }
     }
 
+    /// Pointer position in the root's logical layout space.
+    ///
+    /// The animated box is what the user sees. Surface-local coordinates stay in the logical
+    /// rectangle, so a hit on the visual box is mapped back before hit testing and client events.
+    pub(crate) fn logical_pointer_for_surface(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+        pointer: (f64, f64),
+    ) -> (f64, f64) {
+        let Some((logical, visual)) = self.geometry_scale_for_surface(surface) else {
+            return pointer;
+        };
+        crate::render::unmap_layout_point(logical, visual, pointer)
+    }
+
+    /// Global cursor position for a point already expressed in logical layout space.
+    pub(crate) fn visual_pointer_for_surface(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+        logical_pointer: (f64, f64),
+    ) -> (f64, f64) {
+        let Some((logical, visual)) = self.geometry_scale_for_surface(surface) else {
+            return logical_pointer;
+        };
+        crate::render::map_layout_point(logical, visual, logical_pointer)
+    }
+
+    fn geometry_scale_for_surface(&self, surface: Resolved<WlSurfaceId>) -> Option<(RectI, RectI)> {
+        let root = self.root_surface_for_surface(surface).unwrap_or(surface);
+        let logical = self.committed_root_geometry(root)?.layout_rect_global;
+        let visual = self
+            .managed_root_surfaces
+            .get(&root)
+            .and_then(|managed| managed.geometry_animation.visual_rect())?;
+        (logical != visual && logical.width > 0 && logical.height > 0).then_some((logical, visual))
+    }
+
     pub fn root_surface_visual_damage_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
         self.root_surface_visual_state(surface)
             .map(|visual| visual.influence_bounds())

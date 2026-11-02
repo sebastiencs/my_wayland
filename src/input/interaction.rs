@@ -53,6 +53,7 @@ pub(crate) fn begin_decoration_pointer_action(
 
 pub(crate) fn window_hit_at(state: &State, pointer_pos: (f64, f64)) -> Option<WindowHit> {
     let target = scene_pick_at(state, pointer_pos).window_target?;
+    let pointer_pos = state.logical_pointer_for_surface(target.root_surface, pointer_pos);
     let semantics = classify_window_semantics(state, &target, pointer_pos);
     let binding_resize_edges = rect_contains_point(target.geometry.binding_rect, pointer_pos)
         .then(|| resize_edges_for_pointer(target.geometry.binding_rect, pointer_pos))

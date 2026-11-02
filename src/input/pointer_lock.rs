@@ -110,8 +110,9 @@ pub(crate) fn maybe_activate_pointer_lock(state: &mut State, dispatcher: &mut Di
     };
 
     let rect = pointer_focus.rect;
-    let local_x = (state.seat.pointer_pos.0 - rect.x as f64).floor() as i32;
-    let local_y = (state.seat.pointer_pos.1 - rect.y as f64).floor() as i32;
+    let logical_pointer = state.logical_pointer_for_surface(surface_id, state.seat.pointer_pos);
+    let local_x = (logical_pointer.0 - rect.x as f64).floor() as i32;
+    let local_y = (logical_pointer.1 - rect.y as f64).floor() as i32;
     if !point_in_effective_region(region.as_ref(), &input_region, local_x, local_y) {
         if !lock_surface_is_fullscreen(state, surface_id) {
             return;
@@ -308,7 +309,8 @@ fn warp_pointer(
     local_x: f64,
     local_y: f64,
 ) {
-    state.seat.pointer_pos = (focus.rect.x as f64 + local_x, focus.rect.y as f64 + local_y);
+    let logical_global = (focus.rect.x as f64 + local_x, focus.rect.y as f64 + local_y);
+    state.seat.pointer_pos = state.visual_pointer_for_surface(focus.target.surface, logical_global);
     crate::seat::clamp_pointer_to_outputs(state);
     let (x, y) = (local_x as f32, local_y as f32);
     dispatch_client_event(

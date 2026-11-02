@@ -67,6 +67,7 @@ pub(crate) fn apply_interaction_intent(
                     );
                 }
             }
+            let target = anchored_grab_target(state, target);
             start_window_grab(state, dispatcher, &target, intent)
         }
         InteractionIntent::DismissPopupGrab | InteractionIntent::None => false,
@@ -383,6 +384,45 @@ pub(crate) fn resize_cursor_icon_names(edges: u32) -> &'static [&'static str] {
         e if e == ResizeEdge::BottomRight as u32 => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
         _ => POINTER_RESIZE_SE_CURSOR_ICON_NAMES,
     }
+}
+
+/// Place the logical window so the point under the cursor stays put, then snap the animation.
+fn anchored_grab_target(state: &mut State, target: WindowTarget) -> WindowTarget {
+    if state.is_tiled_root_surface(target.root_surface) {
+        return target;
+    }
+    let pointer = state.seat.pointer_position();
+    let Some(geometry) = state.ensure_root_geometry_fresh(target.root_surface) else {
+        return target;
+    };
+    let logical = geometry.layout_rect_global;
+    let Some(visual) = state
+        .managed_root_surfaces
+        .get(&target.root_surface)
+        .and_then(|managed| managed.geometry_animation.visual_rect())
+    else {
+        return target;
+    };
+    if visual == logical {
+        return target;
+    }
+    let logical_point = crate::render::unmap_layout_point(logical, visual, pointer);
+    let dx = (pointer.0 - logical_point.0).round() as i32;
+    let dy = (pointer.1 - logical_point.1).round() as i32;
+    if dx != 0 || dy != 0 {
+        let Some(mut surface) = target.root_surface.try_grab(state) else {
+            return target;
+        };
+        let position = surface.root_position();
+        surface.set_root_position(position.0 + dx, position.1 + dy);
+        drop(surface);
+        state.mark_root_geometry_dirty(target.root_surface);
+    }
+    state.sync_window_geometry_goal(
+        target.root_surface,
+        crate::visual_animation::WindowGeometryMotion::Warp,
+    );
+    super::pick::build_window_target(state, target.root_surface).unwrap_or(target)
 }
 
 fn prepare_window_for_pointer_grab(
