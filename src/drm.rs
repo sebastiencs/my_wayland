@@ -3612,10 +3612,13 @@ fn remember_animation_outputs(state: &State, rect: RectI, output_ids: &mut BTree
 fn active_animation_output_ids(state: &State) -> BTreeSet<OutputId> {
     let mut output_ids = BTreeSet::new();
     for (&surface, managed) in &state.managed_root_surfaces {
-        if !managed.focus_animation.is_active() && !managed.lifecycle_animation.is_active() {
+        if !managed.focus_animation.is_active()
+            && !managed.lifecycle_animation.is_active()
+            && !managed.geometry_animation.is_active()
+        {
             continue;
         }
-        let Some(rect) = state.root_surface_visual_damage_rect(surface) else {
+        let Some(rect) = state.root_surface_motion_bounds(surface) else {
             continue;
         };
         remember_animation_outputs(state, rect, &mut output_ids);
@@ -3706,7 +3709,7 @@ impl VisualAnimationPump {
     // `RequestFrameReason::Animation` through the output scheduler. Sampling is absolute-time,
     // so a repeated kick at the same instant does not advance the fade twice. Visual resolution
     // reads the cached sample and must not advance it again.
-    fn advance_and_schedule(
+    pub(crate) fn advance_and_schedule(
         &mut self,
         state: &mut State,
         dispatcher: &mut Dispatcher,
@@ -4065,6 +4068,7 @@ fn render_prepared_toplevels(
                 false,
                 item.visual.and_then(|visual| visual.clip),
                 alpha,
+                None,
             );
             push_scene_item_frame_elements(&mut elements, item_start..items.len());
             translate_scene_items(&mut items, -bounds.x, -bounds.y);
@@ -4956,6 +4960,7 @@ fn collect_protected_scene(
             false,
             None,
             u8::MAX,
+            None,
         );
     }
     push_scene_item_frame_elements(&mut frame_elements, surface_start..items.len());
@@ -5375,6 +5380,7 @@ fn push_scene_items_from_snapshots(
     allow_direct_scanout: bool,
     root_clip: Option<RootSurfaceClip>,
     alpha: u8,
+    geometry_scale: Option<(RectI, RectI)>,
 ) {
     for surface_state in snapshots {
         let buffer_oid = surface_state.buffer.object_id();
@@ -5396,7 +5402,7 @@ fn push_scene_items_from_snapshots(
         else {
             continue;
         };
-        if !bounds.intersects(output_bounds) {
+        if !bounds_visible_on_output(bounds, output_bounds, geometry_scale) {
             continue;
         }
         let mut damage = surface_state.damage.clone();
@@ -5627,6 +5633,7 @@ fn collect_software_cursor_items(
         false,
         None,
         u8::MAX,
+        None,
     );
     (items, None)
 }
@@ -6100,6 +6107,18 @@ fn split_closing_effects(
     (blur, effects)
 }
 
+fn bounds_visible_on_output(
+    bounds: RectI,
+    output_bounds: RectI,
+    geometry_scale: Option<(RectI, RectI)>,
+) -> bool {
+    let visible = match geometry_scale {
+        Some((logical, visual)) => crate::render::map_layout_rect(logical, visual, bounds),
+        None => bounds,
+    };
+    visible.intersects(output_bounds)
+}
+
 fn union_rects(rects: Vec<RectI>) -> Option<RectI> {
     let mut rects = rects.into_iter();
     let mut acc = rects.next()?;
@@ -6482,6 +6501,7 @@ fn collect_dnd_render_items(
         false,
         None,
         u8::MAX,
+        None,
     );
 }
 
@@ -6673,13 +6693,19 @@ fn render_workspace_content(
         if workspace_id.is_some_and(|workspace_id| rendered.contains(&workspace_id)) {
             continue;
         }
+        let motion = workspace_id
+            .and_then(|workspace_id| {
+                let owner = state.workspace_output_id(workspace_id)?;
+                Some(state.workspace_motion_for_output(owner, Some(workspace_id)))
+            })
+            .unwrap_or(WorkspaceMotion::IDENTITY);
         render_composed_entry(
             state,
             drm_id,
             drm_crtc_id,
             output_bounds,
             entry,
-            WorkspaceMotion::IDENTITY,
+            motion,
             items,
             frame_elements,
             retired_candidates,
@@ -6756,8 +6782,13 @@ fn render_composed_entry(
         && motion.is_identity()
         && !workspace_transition_blocks_scanout(state, root_surface);
     let root_clip = visual_state.and_then(|visual| visual.clip);
+    let effects_on_output = visual_state
+        .map(|visual| visual.influence_bounds().intersects(output_bounds))
+        .unwrap_or(false);
     let effect_start = frame_elements.len();
-    push_root_surface_effect_elements(frame_elements, visual_state, FramePhase::UnderWindow);
+    if effects_on_output {
+        push_root_surface_effect_elements(frame_elements, visual_state, FramePhase::UnderWindow);
+    }
     let mut snapshots = Vec::new();
     collect_surface_snapshots(state, root_surface, 0, 0, true, retired_candidates, &mut snapshots);
     let (objects, drm_map) = (&mut state.objects, &state.drm);
@@ -6777,10 +6808,13 @@ fn render_composed_entry(
         visual_state
             .map(|visual| visual.effects.opacity_alpha)
             .unwrap_or(u8::MAX),
+        geometry_scale,
     );
     push_scene_item_frame_elements(frame_elements, item_start..items.len());
-    push_root_surface_effect_elements(frame_elements, visual_state, FramePhase::OverWindow);
-    push_root_surface_effect_elements(frame_elements, visual_state, FramePhase::Overlay);
+    if effects_on_output {
+        push_root_surface_effect_elements(frame_elements, visual_state, FramePhase::OverWindow);
+        push_root_surface_effect_elements(frame_elements, visual_state, FramePhase::Overlay);
+    }
     if let Some((logical, visual)) = geometry_scale {
         scale_scene_items_into_visual_box(&mut items[item_start..], logical, visual);
     }
@@ -7122,6 +7156,16 @@ mod window_animation_tests {
 
         assert_eq!(animation_delay_msec_for_output(&state, left_id), Some(17));
         assert_eq!(animation_delay_msec_for_output(&state, right_id), Some(9));
+    }
+
+    #[test]
+    fn mapped_visual_bounds_stay_visible_on_the_output_they_enter() {
+        let logical = RectI::new(0, 0, 100, 80).unwrap();
+        let visual = RectI::new(200, 0, 50, 40).unwrap();
+        let destination = RectI::new(200, 0, 100, 100).unwrap();
+        assert!(!logical.intersects(destination));
+        assert!(super::bounds_visible_on_output(logical, destination, Some((logical, visual))));
+        assert!(!super::bounds_visible_on_output(logical, destination, None));
     }
 
     #[test]

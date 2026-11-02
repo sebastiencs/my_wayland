@@ -2341,7 +2341,10 @@ mod tests {
             transform::SizeI,
             wayland_objects::{
                 wl_surface::Role,
-                xdg_surface::{xdg_toplevel::ToplevelDecorationMode, XdgSurface},
+                xdg_surface::{
+                    xdg_toplevel::{ToplevelDecorationMode, XdgToplevel},
+                    XdgSurface,
+                },
             },
         },
     };
@@ -2497,6 +2500,307 @@ mod tests {
             .iter()
             .any(|rect| rect.intersects(initial)));
         assert!(moved.damaged_rects.iter().any(|rect| rect.intersects(mid)));
+    }
+
+    fn queues_animation_frame(dispatcher: &Dispatcher, output_id: crate::state::OutputId) -> bool {
+        dispatcher.test_has_queued_action_for::<crate::scheduler::OutputSchedulerAction, _>(
+            crate::scheduler::output_scheduler_id(output_id),
+            |action: &crate::scheduler::OutputSchedulerAction| {
+                matches!(
+                    action,
+                    crate::scheduler::OutputSchedulerAction::RequestFrame {
+                        reason: crate::scheduler::RequestFrameReason::Animation
+                    }
+                )
+            },
+        )
+    }
+
+    fn queues_animation_wakeup(dispatcher: &Dispatcher, output_id: crate::state::OutputId) -> bool {
+        dispatcher.test_has_queued_action_for::<crate::scheduler::OutputSchedulerAction, _>(
+            crate::scheduler::output_scheduler_id(output_id),
+            |action: &crate::scheduler::OutputSchedulerAction| {
+                matches!(action, crate::scheduler::OutputSchedulerAction::ScheduleAnimation { .. })
+            },
+        )
+    }
+
+    #[test]
+    fn crossing_window_renders_and_wakes_both_outputs_until_it_settles() {
+        use std::time::{Duration, Instant};
+
+        let mut state = state_for_tests();
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::Windows, 200);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::Windows);
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::WindowsMove, 200);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::WindowsMove);
+        state.config.animations.set_open_duration_msec(0);
+        let surface = live_toplevel(&mut state);
+        let left_workspace = state.root_surface_workspace(surface).unwrap();
+        let left = state.workspace_output_id(left_workspace).unwrap();
+        let backend = crate::state::BackendOutputRef::new(crate::state::DrmId::from(3usize));
+        let right = state.insert_output(crate::test_support::test_output_with_crtc_name(
+            backend, 2, 800, 0, 800, 600,
+        ));
+        let right_workspace = state.active_workspace_for_output(right).unwrap();
+        state.relayout_dirty_workspaces();
+        let now = Instant::now();
+        let mut pump = crate::drm::VisualAnimationPump::new();
+        let mut dispatcher = Dispatcher::default();
+        pump.advance_and_schedule(&mut state, &mut dispatcher, now);
+        let origin = state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .geometry_animation
+            .visual_rect()
+            .unwrap();
+        assert!(origin.x2() <= 800);
+
+        assert!(state.assign_root_surface_to_workspace(surface, right_workspace));
+        state.relayout_dirty_workspaces();
+        let goal = state
+            .committed_root_geometry(surface)
+            .unwrap()
+            .layout_rect_global;
+        assert!(goal.x >= 800);
+        assert_eq!(
+            state
+                .managed_root_surfaces
+                .get(&surface)
+                .unwrap()
+                .geometry_animation
+                .visual_rect(),
+            Some(origin)
+        );
+
+        let scene = crate::scene::build_scene_model(&state);
+        let left_entry = crate::scene::compose_output(&state, &scene, left, None)
+            .entries
+            .into_iter()
+            .find(|entry| entry.root_surface == surface)
+            .expect("source output draws the window while its visual box is still there");
+        assert!(left_entry.participates_in_render);
+        assert!(!left_entry.participates_in_input);
+        assert!(!left_entry.participates_in_protocol_visibility);
+        let right_entry = crate::scene::compose_output(&state, &scene, right, None)
+            .entries
+            .into_iter()
+            .find(|entry| entry.root_surface == surface)
+            .expect("destination output draws the window from its logical rectangle");
+        assert!(right_entry.participates_in_render);
+        assert!(right_entry.participates_in_input);
+        assert!(right_entry.participates_in_protocol_visibility);
+
+        let mut dispatcher = Dispatcher::default();
+        pump.advance_and_schedule(&mut state, &mut dispatcher, now);
+        assert_eq!(
+            state
+                .managed_root_surfaces
+                .get(&surface)
+                .unwrap()
+                .geometry_animation
+                .visual_rect(),
+            Some(origin)
+        );
+        assert!(state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .geometry_animation
+            .is_active());
+        assert!(queues_animation_wakeup(&dispatcher, left));
+        assert!(queues_animation_wakeup(&dispatcher, right));
+        assert!(!queues_animation_frame(&dispatcher, left));
+        assert!(!queues_animation_frame(&dispatcher, right));
+
+        let moved =
+            state.advance_visual_animations_for_output(left, now + Duration::from_millis(100));
+        let mid = state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .geometry_animation
+            .visual_rect()
+            .unwrap();
+        assert_ne!(mid, origin);
+        assert_ne!(mid, goal);
+        assert!(moved
+            .damaged_rects
+            .iter()
+            .any(|rect| rect.intersects(origin)));
+        assert!(moved.damaged_rects.iter().any(|rect| rect.intersects(mid)));
+
+        let mut dispatcher = Dispatcher::default();
+        pump.advance_and_schedule(&mut state, &mut dispatcher, now + Duration::from_millis(200));
+        assert_eq!(
+            state
+                .managed_root_surfaces
+                .get(&surface)
+                .unwrap()
+                .geometry_animation
+                .visual_rect(),
+            Some(goal)
+        );
+        assert!(!state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .geometry_animation
+            .is_active());
+        assert!(queues_animation_frame(&dispatcher, left));
+        assert!(queues_animation_frame(&dispatcher, right));
+
+        let mut dispatcher = Dispatcher::default();
+        pump.advance_and_schedule(&mut state, &mut dispatcher, now + Duration::from_millis(200));
+        assert!(!queues_animation_frame(&dispatcher, left));
+        assert!(!queues_animation_frame(&dispatcher, right));
+        assert!(!queues_animation_wakeup(&dispatcher, left));
+        assert!(!queues_animation_wakeup(&dispatcher, right));
+    }
+
+    #[test]
+    fn disabled_geometry_snap_damages_the_old_and_new_boxes() {
+        use std::time::Instant;
+
+        let mut state = state_for_tests();
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::Windows, 200);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::Windows);
+        state.config.animations.set_open_duration_msec(0);
+        let surface = live_toplevel(&mut state);
+        let output_id = state
+            .workspace_output_id(state.root_surface_workspace(surface).unwrap())
+            .unwrap();
+        state.relayout_dirty_workspaces();
+        let now = Instant::now();
+        let mut pump = crate::drm::VisualAnimationPump::new();
+        let mut dispatcher = Dispatcher::default();
+        pump.advance_and_schedule(&mut state, &mut dispatcher, now);
+        let origin = state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .geometry_animation
+            .visual_rect()
+            .unwrap();
+
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::Windows, 0);
+        assert!(state.set_root_surface_floating(surface, true));
+        {
+            let mut wl_surface = surface.try_grab(&mut state).unwrap();
+            wl_surface.set_root_position(origin.x + 120, origin.y + 40);
+        }
+        state.mark_root_geometry_dirty(surface);
+        state.sync_window_geometry_goal(
+            surface,
+            crate::visual_animation::WindowGeometryMotion::Layout,
+        );
+        let goal = state
+            .committed_root_geometry(surface)
+            .unwrap()
+            .layout_rect_global;
+        assert_ne!(goal, origin);
+
+        let snapped = state.advance_visual_animations(now);
+        assert_eq!(
+            state
+                .managed_root_surfaces
+                .get(&surface)
+                .unwrap()
+                .geometry_animation
+                .visual_rect(),
+            Some(goal)
+        );
+        assert!(!state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .geometry_animation
+            .is_active());
+        assert!(snapped
+            .damaged_rects
+            .iter()
+            .any(|rect| rect.intersects(origin)));
+        assert!(snapped
+            .damaged_rects
+            .iter()
+            .any(|rect| rect.intersects(goal)));
+
+        let mut dispatcher = Dispatcher::default();
+        pump.advance_and_schedule(&mut state, &mut dispatcher, now);
+        assert!(!queues_animation_frame(&dispatcher, output_id));
+        assert!(!queues_animation_wakeup(&dispatcher, output_id));
+    }
+
+    #[test]
+    fn shadow_makes_a_neighbor_output_draw_the_window_without_taking_input() {
+        let mut state = state_for_tests();
+        state.config.animations.set_open_duration_msec(0);
+        let surface = live_toplevel(&mut state);
+        let left_workspace = state.root_surface_workspace(surface).unwrap();
+        let left = state.workspace_output_id(left_workspace).unwrap();
+        let backend = crate::state::BackendOutputRef::new(crate::state::DrmId::from(3usize));
+        let right = state.insert_output(crate::test_support::test_output_with_crtc_name(
+            backend, 2, 800, 0, 200, 600,
+        ));
+        state.relayout_dirty_workspaces();
+        let xdg_surface = surface.try_ref(&state).unwrap().xdg_surface().unwrap();
+        let toplevel_id = state.xdg_toplevel_object_id(xdg_surface).unwrap();
+        {
+            let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_id);
+            toplevel.set_decoration_mode(ToplevelDecorationMode::ServerSide);
+        }
+        state.config.decorations.border.thickness = 4;
+        state.config.decorations.shadow.radius = 40;
+        state.config.decorations.shadow.offset_x = 0;
+        state.config.decorations.shadow.offset_y = 0;
+        state.mark_root_geometry_dirty(surface);
+        let frame = state
+            .committed_root_geometry(surface)
+            .unwrap()
+            .layout_rect_global;
+        assert!(frame.x2() <= 800);
+        let influence = state.root_surface_motion_bounds(surface).unwrap();
+        assert!(influence.x2() > 800);
+        assert!(influence.intersects(state.output_bounds(right).unwrap()));
+
+        let scene = crate::scene::build_scene_model(&state);
+        let right_entry = crate::scene::compose_output(&state, &scene, right, None)
+            .entries
+            .into_iter()
+            .find(|entry| entry.root_surface == surface)
+            .expect("shadow crossing the edge is drawn on the neighbor");
+        assert!(right_entry.participates_in_render);
+        assert!(!right_entry.participates_in_input);
+        assert!(!right_entry.participates_in_protocol_visibility);
+        let left_entry = crate::scene::compose_output(&state, &scene, left, None)
+            .entries
+            .into_iter()
+            .find(|entry| entry.root_surface == surface)
+            .unwrap();
+        assert!(left_entry.participates_in_input);
+        assert!(left_entry.participates_in_protocol_visibility);
     }
 
     #[test]

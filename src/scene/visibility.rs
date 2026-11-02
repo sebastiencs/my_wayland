@@ -21,6 +21,10 @@
 //!
 //! # Frame callbacks and presentation
 //!
+//! Render participation also follows the union of a window's logical influence and its sampled
+//! visual influence, including the shadow. A window crossing onto another output is drawn there
+//! while pointer hits and protocol output membership stay on the workspace that owns it.
+//!
 //! `wl_surface.frame` and `wp_presentation` follow surfaces that were actually submitted in the
 //! render item list. They do not follow interactive participation or logical workspace activity.
 //! A live workspace transition keeps the outgoing workspace in that submitted set through its
@@ -80,17 +84,37 @@ pub fn render_participates(
             if !workspace_axis_allows(ctx, entry.root_surface, ParticipationAxis::Render) {
                 return false;
             }
-            if !scene_entry_belongs_to_output_with_policy(
+            let belongs = scene_entry_belongs_to_output_with_policy(
                 ctx.state,
                 entry,
                 ctx.output_id,
                 ctx.policy,
-            ) {
-                return false;
+            );
+            let output = output_bounds(ctx.state, ctx.output_id);
+            let motion_hits = ctx
+                .state
+                .root_surface_motion_bounds(entry.root_surface)
+                .is_some_and(|bounds| bounds.intersects(output));
+            match entry.role {
+                SceneRole::WorkspaceRoot => {
+                    if belongs {
+                        root_bounds_for_output_membership(ctx.state, entry.root_surface)
+                            .map(|bounds| bounds.intersects(output))
+                            .unwrap_or(true)
+                            || motion_hits
+                    } else {
+                        motion_hits
+                    }
+                }
+                SceneRole::UnmanagedRoot => {
+                    if !belongs {
+                        return false;
+                    }
+                    root_bounds_for_output_membership(ctx.state, entry.root_surface)
+                        .map(|bounds| bounds.intersects(output))
+                        .unwrap_or(true)
+                }
             }
-            root_bounds_for_output_membership(ctx.state, entry.root_surface)
-                .map(|bounds| bounds.intersects(output_bounds(ctx.state, ctx.output_id)))
-                .unwrap_or(true)
         }
         CompositionSource::LayerRoot { placement, .. } => placement.output_id == ctx.output_id,
     }

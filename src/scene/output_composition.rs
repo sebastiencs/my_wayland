@@ -117,10 +117,12 @@ pub fn compose_output_with_policy(
     );
 
     for entry in &scene.entries {
-        if !scene_entry_belongs_to_output_with_policy(state, entry, output_id, policy) {
+        let source = CompositionSource::SceneEntry(entry);
+        let belongs = scene_entry_belongs_to_output_with_policy(state, entry, output_id, policy);
+        let renders = render_participates(&ctx, source);
+        if !belongs && !renders {
             continue;
         }
-        let source = CompositionSource::SceneEntry(entry);
         content_entries.push(ComposedEntry {
             scene_entry_id: entry.id,
             root_surface: entry.root_surface,
@@ -129,8 +131,8 @@ pub fn compose_output_with_policy(
             global_bounds: root_bounds_for_output_membership(state, entry.root_surface),
             participates_in_input: input_participates(&ctx, source),
             participates_in_protocol_visibility: protocol_visible(&ctx, source),
-            participates_in_render: render_participates(&ctx, source),
-            allow_direct_scanout: composition_allows_direct_scanout(&ctx, source),
+            participates_in_render: renders,
+            allow_direct_scanout: belongs && composition_allows_direct_scanout(&ctx, source),
         });
     }
 

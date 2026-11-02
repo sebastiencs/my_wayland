@@ -117,6 +117,11 @@ impl RootSurfaceClip {
     }
 }
 
+fn union_rect(a: RectI, b: RectI) -> RectI {
+    RectI::from_extents(a.x.min(b.x), a.y.min(b.y), a.x2().max(b.x2()), a.y2().max(b.y2()))
+        .unwrap_or(a)
+}
+
 fn inflate_rect_with_insets(rect: RectI, insets: DecorationInsets) -> Option<RectI> {
     RectI::from_extents(
         rect.x.saturating_sub(insets.left.max(0)),
@@ -1986,6 +1991,27 @@ impl State {
         Some(visual.influence_bounds())
     }
 
+    /// Union of the logical influence and the sampled visual influence.
+    ///
+    /// Scheduling and render membership use this so a window stays on every output it is leaving
+    /// or entering. The sample includes the shadow around the visual box.
+    pub(crate) fn root_surface_motion_bounds(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+    ) -> Option<RectI> {
+        let logical = self.root_surface_visual_damage_rect(surface);
+        let animated = self
+            .managed_root_surfaces
+            .get(&surface)
+            .and_then(|managed| managed.geometry_animation.visual_rect())
+            .and_then(|rect| self.geometry_sample_influence(surface, rect));
+        match (logical, animated) {
+            (Some(logical), Some(animated)) => Some(union_rect(logical, animated)),
+            (Some(rect), None) | (None, Some(rect)) => Some(rect),
+            (None, None) => None,
+        }
+    }
+
     pub fn root_surface_visual_damage_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
         self.root_surface_visual_state(surface)
             .map(|visual| visual.influence_bounds())
@@ -2010,7 +2036,7 @@ impl State {
             .keys()
             .copied()
             .filter(|surface| {
-                self.root_surface_visual_damage_rect(*surface)
+                self.root_surface_motion_bounds(*surface)
                     .is_some_and(|rect| rect.intersects(output_bounds))
             })
             .collect::<BTreeSet<_>>();
