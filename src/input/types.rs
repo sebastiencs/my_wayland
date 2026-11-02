@@ -1,7 +1,6 @@
 use crate::{
     clients::{ClientId, Resolved},
     protocol_generated::{WlSurfaceId, XdgToplevelId},
-    region::RectI,
     root_geometry::WindowTargetGeometry,
     tiling::TiledResizeState,
     wayland_objects::xdg_surface::xdg_toplevel::{
@@ -136,7 +135,7 @@ pub(crate) enum ActiveGrab {
     },
     /// Compositor move of a tiled window. The window stays tiled until the pointer
     /// travels past `threshold`, then it becomes a temporary floating preview.
-    /// The preview frame stays inside `source_output_bounds`.
+    /// The preview follows the pointer and may extend past the source output.
     MoveTiled {
         root_surface: Resolved<WlSurfaceId>,
         xdg_toplevel: Resolved<XdgToplevelId>,
@@ -151,8 +150,6 @@ pub(crate) enum ActiveGrab {
         preview_size: (i32, i32),
         /// Preview-frame origin minus the window root. Zero when they coincide.
         frame_from_root: (i32, i32),
-        /// Output rectangle frozen at pickup. The preview frame stays inside it.
-        source_output_bounds: RectI,
     },
 }
 

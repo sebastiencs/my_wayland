@@ -4155,14 +4155,13 @@ mod xdg_seat_tests {
 
         let preview_width = ((tile.width as f64) * 0.8489).floor() as i32;
         let preview_height = ((tile.height as f64) * 0.8489).floor() as i32;
-        let bounds = state.output_bounds(output_id).unwrap();
         let surface = state
             .objects
             .try_ref_object::<WlSurface>(wl_surface_object_id)
             .unwrap();
         assert_eq!(
             surface.root_position(),
-            clamp_preview_origin((70.0, 80.0), (preview_width, preview_height), bounds)
+            preview_origin((70.0, 80.0), (preview_width, preview_height))
         );
         assert!(matches!(
             state.seat.pointer_interactive_grab,
@@ -4260,28 +4259,10 @@ mod xdg_seat_tests {
         state.output_bounds(output_id).unwrap()
     }
 
-    fn clamp_preview_origin(pointer: (f64, f64), size: (i32, i32), bounds: RectI) -> (i32, i32) {
-        fn clamp_span(origin: i32, length: i32, bounds_origin: i32, bounds_length: i32) -> i32 {
-            let length = length.max(0);
-            let bounds_length = bounds_length.max(0);
-            if length >= bounds_length {
-                return bounds_origin;
-            }
-            origin.clamp(bounds_origin, bounds_origin + bounds_length - length)
-        }
+    fn preview_origin(pointer: (f64, f64), size: (i32, i32)) -> (i32, i32) {
         (
-            clamp_span(
-                (pointer.0 - size.0 as f64 / 2.0).round() as i32,
-                size.0,
-                bounds.x,
-                bounds.width,
-            ),
-            clamp_span(
-                (pointer.1 - size.1 as f64 / 2.0).round() as i32,
-                size.1,
-                bounds.y,
-                bounds.height,
-            ),
+            (pointer.0 - size.0 as f64 / 2.0).round() as i32,
+            (pointer.1 - size.1 as f64 / 2.0).round() as i32,
         )
     }
 
@@ -4439,10 +4420,7 @@ mod xdg_seat_tests {
                 .unwrap();
             surface.root_position()
         };
-        assert_eq!(
-            centered,
-            clamp_preview_origin(pointer, (preview_width, preview_height), bounds)
-        );
+        assert_eq!(centered, preview_origin(pointer, (preview_width, preview_height)));
         let center = (
             bounds.x as f64 + bounds.width as f64 / 2.0,
             bounds.y as f64 + bounds.height as f64 / 2.0,
@@ -4466,7 +4444,7 @@ mod xdg_seat_tests {
             .unwrap();
         assert_eq!(
             surface.root_position(),
-            clamp_preview_origin(pointer, (preview_width, preview_height), bounds)
+            preview_origin(pointer, (preview_width, preview_height))
         );
     }
 
@@ -4505,7 +4483,7 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn tiled_drag_preview_stays_inside_the_source_output() {
+    fn tiled_drag_preview_follows_the_pointer_onto_another_output() {
         let mut state = state_for_tests();
         let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -4549,7 +4527,9 @@ mod xdg_seat_tests {
         assert!(state.seat.pointer_pos.0 >= (bounds.x + bounds.width) as f64);
         let pointer = state.seat.pointer_pos;
         let surface = state.objects.try_ref_object::<WlSurface>(window).unwrap();
-        assert_eq!(surface.root_position(), clamp_preview_origin(pointer, preview_size, bounds));
+        let origin = preview_origin(pointer, preview_size);
+        assert_eq!(surface.root_position(), origin);
+        assert!(origin.0 + preview_size.0 > bounds.x + bounds.width);
     }
 
     #[test]

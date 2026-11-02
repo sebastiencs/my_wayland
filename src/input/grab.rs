@@ -118,15 +118,10 @@ pub(crate) fn apply_pointer_interactive_grab(
             picked_up: true,
             preview_size,
             frame_from_root,
-            source_output_bounds,
             ..
         } => {
-            let root_pos = preview_root_for_pointer(
-                state.seat.pointer_pos,
-                preview_size,
-                frame_from_root,
-                source_output_bounds,
-            );
+            let root_pos =
+                preview_root_for_pointer(state.seat.pointer_pos, preview_size, frame_from_root);
             place_grabbed_root(state, dispatcher, root_surface, root_pos);
         }
         ActiveGrabState::Resize {
@@ -473,7 +468,6 @@ fn start_tiled_drag(
         grab_geometry: initial_geometry,
         preview_size: (0, 0),
         frame_from_root: (0, 0),
-        source_output_bounds: RectI { x: 0, y: 0, width: 0, height: 0 },
     });
     if threshold <= 0 {
         pickup_tiled_drag(
@@ -544,9 +538,7 @@ fn pickup_tiled_drag(
     }
     let frame_from_root = (frame.x - built.root_pos.0, frame.y - built.root_pos.1);
     let preview_size = (frame.width, frame.height);
-    let source_output_bounds = source_output_bounds(state, root_surface);
-    let root_pos =
-        preview_root_for_pointer(pointer, preview_size, frame_from_root, source_output_bounds);
+    let root_pos = preview_root_for_pointer(pointer, preview_size, frame_from_root);
     state.seat.tiled_drag_origin = state
         .root_surface_workspace(root_surface)
         .and_then(|workspace_id| state.workspaces.try_get(workspace_id))
@@ -569,7 +561,6 @@ fn pickup_tiled_drag(
         grab_geometry,
         preview_size,
         frame_from_root,
-        source_output_bounds,
     });
     let old_bounds = interactive_damage_rect(state, root_surface);
     let Some(mut surface) = root_surface.try_grab(state) else {
@@ -602,47 +593,16 @@ fn pickup_tiled_drag(
     }
 }
 
+/// Places the preview so its center is the pointer. The frame may extend past the
+/// source output. Pointer motion is already limited to the output layout.
 fn preview_root_for_pointer(
     pointer: (f64, f64),
     preview_size: (i32, i32),
     frame_from_root: (i32, i32),
-    bounds: RectI,
 ) -> (i32, i32) {
-    let frame_x = clamp_span(
-        (pointer.0 - preview_size.0 as f64 / 2.0).round() as i32,
-        preview_size.0,
-        bounds.x,
-        bounds.width,
-    );
-    let frame_y = clamp_span(
-        (pointer.1 - preview_size.1 as f64 / 2.0).round() as i32,
-        preview_size.1,
-        bounds.y,
-        bounds.height,
-    );
+    let frame_x = (pointer.0 - preview_size.0 as f64 / 2.0).round() as i32;
+    let frame_y = (pointer.1 - preview_size.1 as f64 / 2.0).round() as i32;
     (frame_x.saturating_sub(frame_from_root.0), frame_y.saturating_sub(frame_from_root.1))
-}
-
-fn clamp_span(origin: i32, length: i32, bounds_origin: i32, bounds_length: i32) -> i32 {
-    let length = length.max(0);
-    let bounds_length = bounds_length.max(0);
-    if length >= bounds_length {
-        return bounds_origin;
-    }
-    origin.clamp(bounds_origin, bounds_origin + bounds_length - length)
-}
-
-fn source_output_bounds(state: &State, surface: Resolved<WlSurfaceId>) -> RectI {
-    state
-        .root_surface_workspace(surface)
-        .and_then(|workspace_id| state.workspace_output_id(workspace_id))
-        .and_then(|output_id| state.output_bounds(output_id))
-        .unwrap_or(RectI {
-            x: i32::MIN / 4,
-            y: i32::MIN / 4,
-            width: i32::MAX / 2,
-            height: i32::MAX / 2,
-        })
 }
 
 fn scaled_tiled_preview_frame(
@@ -927,21 +887,11 @@ mod tests {
     }
 
     #[test]
-    fn tiled_drag_preview_frame_stays_inside_the_source_output() {
-        let bounds = RectI { x: 0, y: 10, width: 100, height: 80 };
+    fn tiled_drag_preview_follows_the_pointer_past_the_output() {
         let size = (40, 20);
-        assert_eq!(
-            super::preview_root_for_pointer((1000.0, 1000.0), size, (0, 0), bounds),
-            (60, 70)
-        );
-        assert_eq!(super::preview_root_for_pointer((0.0, 0.0), size, (0, 0), bounds), (0, 10));
-        assert_eq!(
-            super::preview_root_for_pointer((1000.0, 1000.0), size, (2, 3), bounds),
-            (58, 67)
-        );
-        assert_eq!(
-            super::preview_root_for_pointer((50.0, 50.0), (200, 200), (0, 0), bounds),
-            (bounds.x, bounds.y)
-        );
+        assert_eq!(super::preview_root_for_pointer((1000.0, 1000.0), size, (0, 0)), (980, 990));
+        assert_eq!(super::preview_root_for_pointer((0.0, 0.0), size, (0, 0)), (-20, -10));
+        assert_eq!(super::preview_root_for_pointer((1000.0, 1000.0), size, (2, 3)), (978, 987));
+        assert_eq!(super::preview_root_for_pointer((50.0, 50.0), (200, 200), (0, 0)), (-50, -50));
     }
 }
