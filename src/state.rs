@@ -2021,6 +2021,9 @@ impl State {
         surface: Resolved<WlSurfaceId>,
         pointer: (f64, f64),
     ) -> (f64, f64) {
+        if self.objects.is_grabbed(surface.object_id()) {
+            return pointer;
+        }
         let Some((logical, visual)) = self.geometry_scale_for_surface(surface) else {
             return pointer;
         };
@@ -2033,6 +2036,9 @@ impl State {
         surface: Resolved<WlSurfaceId>,
         logical_pointer: (f64, f64),
     ) -> (f64, f64) {
+        if self.objects.is_grabbed(surface.object_id()) {
+            return logical_pointer;
+        }
         let Some((logical, visual)) = self.geometry_scale_for_surface(surface) else {
             return logical_pointer;
         };

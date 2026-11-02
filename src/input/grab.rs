@@ -5,6 +5,7 @@ use crate::{
     cursor::CursorSourceRef,
     drm::{request_active_output, request_outputs_for_points, request_outputs_for_rects},
     protocol_generated::{xdg_toplevel::ResizeEdge, WlSurfaceId, XdgToplevelId},
+    region::RectI,
     root_geometry::{CommittedRootGeometry, WindowTargetGeometry},
     runner::Dispatcher,
     seat::{dispatch_client_action, dispatch_client_event, refresh_pointer_focus, SeatClientEvent},
@@ -387,15 +388,17 @@ pub(crate) fn resize_cursor_icon_names(edges: u32) -> &'static [&'static str] {
 }
 
 /// Place the logical window so the point under the cursor stays put, then snap the animation.
-fn anchored_grab_target(state: &mut State, target: WindowTarget) -> WindowTarget {
+fn anchored_grab_target(state: &mut State, mut target: WindowTarget) -> WindowTarget {
     if state.is_tiled_root_surface(target.root_surface) {
         return target;
     }
     let pointer = state.seat.pointer_position();
-    let Some(geometry) = state.ensure_root_geometry_fresh(target.root_surface) else {
-        return target;
-    };
-    let logical = geometry.layout_rect_global;
+    let logical = state
+        .root_geometry_cache
+        .get(&target.root_surface)
+        .and_then(|entry| entry.get().geometry)
+        .map(|geometry| geometry.layout_rect_global)
+        .unwrap_or(target.geometry.target_rect);
     let Some(visual) = state
         .managed_root_surfaces
         .get(&target.root_surface)
@@ -417,12 +420,23 @@ fn anchored_grab_target(state: &mut State, target: WindowTarget) -> WindowTarget
         surface.set_root_position(position.0 + dx, position.1 + dy);
         drop(surface);
         state.mark_root_geometry_dirty(target.root_surface);
+        target.geometry.root_pos.0 += dx;
+        target.geometry.root_pos.1 += dy;
+        target.geometry.target_rect.x += dx;
+        target.geometry.target_rect.y += dy;
+        target.geometry.binding_rect.x += dx;
+        target.geometry.binding_rect.y += dy;
     }
-    state.sync_window_geometry_goal(
-        target.root_surface,
-        crate::visual_animation::WindowGeometryMotion::Warp,
-    );
-    super::pick::build_window_target(state, target.root_surface).unwrap_or(target)
+    let Some(goal) = RectI::new(logical.x + dx, logical.y + dy, logical.width, logical.height)
+    else {
+        return target;
+    };
+    if let Some(managed) = state.managed_root_surfaces.get_mut(&target.root_surface) {
+        managed
+            .geometry_animation
+            .set_goal(goal, crate::visual_animation::WindowGeometryMotion::Warp);
+    }
+    target
 }
 
 fn prepare_window_for_pointer_grab(

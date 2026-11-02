@@ -364,6 +364,13 @@ where
         }
     }
 
+    pub fn is_grabbed(&self, key: K) -> bool {
+        matches!(
+            self.slot_ref(key).map(|slot| &slot.value),
+            Some(ValueOrEmpty::Grabbed) | Some(ValueOrEmpty::GrabbedToRemove)
+        )
+    }
+
     pub fn contains(&self, key: K) -> bool {
         match self.slot_ref(key).map(|slot| &slot.value) {
             Some(ValueOrEmpty::Value(_)) | Some(ValueOrEmpty::Grabbed) => true,
