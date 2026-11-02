@@ -41,13 +41,32 @@ pub(crate) fn apply_interaction_intent(
             true
         }
         InteractionIntent::StartMove(target) | InteractionIntent::StartResize(target, _) => {
+            // GTK's headerbar gesture can send xdg_toplevel.move again once the
+            // window has left the tree. Replacing MoveTiled with a plain move
+            // drops the drag, so release never retiles. Hyprland's
+            // m_draggingTiled flag stays set across changeFloatingMode. Sway
+            // ignores xdg_toplevel.move on a tiled container. Mutter keeps a
+            // single META_GRAB_OP_MOVING for the implicit grab.
+            if let Some(dragging) = state.seat.tiled_drag_root() {
+                if dragging == target.root_surface {
+                    return true;
+                }
+                finish_pointer_interactive_grab(state, dispatcher, 0);
+            }
             let target = if options.prepare_window {
                 prepare_window_for_pointer_grab(state, dispatcher, &target)
             } else {
                 target
             };
-            if options.prepare_window
-                && matches!(intent, InteractionIntent::StartMove(_))
+            // xdg_toplevel.move does not raise the window (`prepare_window` is
+            // false). A tiled window still has to leave the tree and drop back
+            // in. Hyprland does this for every tiled move in
+            // CDragStateController::updateDragWindow. Sway ignores the protocol
+            // request and only starts seatop_begin_move_tiling from its mod drag.
+            let fullscreen =
+                matches!(target.role, WindowRoleSnapshot::XdgToplevel { is_fullscreen: true, .. });
+            if matches!(intent, InteractionIntent::StartMove(_))
+                && !fullscreen
                 && state.is_tiled_root_surface(target.root_surface)
             {
                 if let WindowRoleSnapshot::XdgToplevel {
@@ -459,6 +478,7 @@ fn start_tiled_drag(
     initial_geometry: WindowTargetGeometry,
 ) -> bool {
     begin_compositor_pointer_grab(state, dispatcher, POINTER_MOVE_CURSOR_ICON_NAMES);
+    state.seat.intercept_pressed_pointer_buttons();
     let pointer = state.seat.pointer_pos;
     let threshold = state.config.tiling.drag.threshold;
     state.seat.pointer_interactive_grab = Some(ActiveGrabState::MoveTiled {
@@ -735,6 +755,7 @@ fn start_interactive_move(
     initial_geometry: WindowTargetGeometry,
 ) -> bool {
     begin_compositor_pointer_grab(state, dispatcher, POINTER_MOVE_CURSOR_ICON_NAMES);
+    state.seat.intercept_pressed_pointer_buttons();
     state
         .seat
         .start_toplevel_move(client_id, root_surface, initial_geometry);
@@ -752,6 +773,7 @@ fn start_interactive_resize(
     initial_geometry: WindowTargetGeometry,
 ) -> bool {
     begin_compositor_pointer_grab(state, dispatcher, resize_cursor_icon_names(edges));
+    state.seat.intercept_pressed_pointer_buttons();
     state.seat.start_toplevel_resize(
         client_id,
         root_surface,
@@ -774,6 +796,7 @@ fn start_interactive_tiled_resize(
         return false;
     };
     begin_compositor_pointer_grab(state, dispatcher, resize_cursor_icon_names(edges));
+    state.seat.intercept_pressed_pointer_buttons();
     state
         .seat
         .start_toplevel_tiled_resize(client_id, root_surface, edges, resize_state);

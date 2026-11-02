@@ -834,6 +834,8 @@ mod tests {
             other_surface,
             Resolved::new(other.client_id(), XdgToplevelId::from(50), other_surface.object_id(),),
             crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode::ClientSide,
+            crate::wayland_objects::xdg_surface::xdg_toplevel::InteractiveSizeConstraints::default(
+            ),
             false,
             false,
         ));

@@ -1130,6 +1130,26 @@ impl SeatState {
         ))
     }
 
+    /// Root of the tiled drag still in progress, including after the window has left the tree.
+    pub(crate) fn tiled_drag_root(&self) -> Option<Resolved<WlSurfaceId>> {
+        match self.pointer_interactive_grab {
+            Some(PointerInteractiveGrab::MoveTiled { root_surface, .. }) => Some(root_surface),
+            _ => None,
+        }
+    }
+
+    /// The compositor owns the buttons that are already down for this grab.
+    ///
+    /// A titlebar press intercepts its button, so release finishes the grab.
+    /// `xdg_toplevel.move` arrives later and has no button of its own; the
+    /// buttons held at that moment are the implicit grab.
+    pub(crate) fn intercept_pressed_pointer_buttons(&mut self) {
+        let pressed = self.pressed_buttons.iter().copied().collect::<Vec<_>>();
+        for button in pressed {
+            self.intercepted_pointer_buttons.insert(button);
+        }
+    }
+
     pub(crate) fn start_toplevel_move(
         &mut self,
         _client_id: ClientId,
@@ -1284,7 +1304,12 @@ pub fn handle_pointer_button(
     }
 
     if interactive_grab_active {
-        if button_state != 1 && state.seat.pointer_button_count == 0 {
+        // Finish once every button we are tracking is up. A duplicate press
+        // leaves `pointer_button_count` above zero after that release, which
+        // kept a headerbar drag from calling settle_tiled_drag.
+        if button_state != 1
+            && (state.seat.pointer_button_count == 0 || state.seat.pressed_buttons.is_empty())
+        {
             finish_pointer_interactive_grab(state, dispatcher, time);
         }
         return;
@@ -1950,6 +1975,7 @@ pub fn request_toplevel_move(
     root_surface: Resolved<WlSurfaceId>,
     xdg_toplevel: Resolved<XdgToplevelId>,
     configure_decoration_mode: ToplevelDecorationMode,
+    size_constraints: InteractiveSizeConstraints,
     is_maximized: bool,
     is_fullscreen: bool,
 ) -> bool {
@@ -1962,6 +1988,7 @@ pub fn request_toplevel_move(
         root_surface,
         xdg_toplevel,
         configure_decoration_mode,
+        size_constraints,
         is_maximized,
         is_fullscreen,
     )
@@ -5074,35 +5101,36 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn protocol_move_of_a_tiled_window_does_not_float_it() {
+    fn protocol_move_of_a_tiled_window_drops_back_into_the_tree() {
         let mut state = state_for_tests();
         let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
         client.insert_object(&mut state, WlSeat::new(WlSeatId::from(8)));
-        let wl_surface_object_id = map_toplevel_on_active_output(
-            &mut state,
-            &mut client,
-            &mut client_dispatcher,
-            WlSurfaceId::from(268),
-            XdgSurfaceId::from(278),
-            XdgToplevelId::from(288),
-            911,
-            0,
-            0,
-            90,
-            70,
-        );
-        let toplevel_object_id = client.object_id(XdgToplevelId::from(288));
-        let focus =
-            focus_for_surface(client.client_id(), WlSurfaceId::from(268), wl_surface_object_id);
+        let (stayed, dragged) = map_drag_pair(&mut state, &mut client, &mut client_dispatcher);
+        let dragged_toplevel = state
+            .objects
+            .try_ref_object::<WlSurface>(dragged)
+            .unwrap()
+            .xdg_surface()
+            .and_then(|xdg_surface| state.xdg_toplevel(xdg_surface))
+            .unwrap()
+            .object_id();
+        {
+            let mut toplevel = state.objects.grab_object::<XdgToplevel>(dragged_toplevel);
+            toplevel.test_set_interactive_size_constraints(Some((40, 30)), None);
+        }
+        let stayed_before = layout_rect(&state, stayed).width;
+        let focus = focus_for_surface(client.client_id(), WlSurfaceId::from(302), dragged);
+        let tile = layout_rect(&state, dragged);
+        state.seat.pointer_pos = (tile.x as f64 + 10.0, tile.y as f64 + 10.0);
         let serial = state.seat.next_serial();
         state.seat.record_pointer_button(1, serial, Some(focus));
         {
-            let toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
+            let toplevel = state.objects.grab_object::<XdgToplevel>(dragged_toplevel);
             let _ = toplevel.on(
                 &mut client,
                 &mut state,
-                toplevel_move_request(XdgToplevelId::from(288), WlSeatId::from(8), serial),
+                toplevel_move_request(XdgToplevelId::from(322), WlSeatId::from(8), serial),
                 &mut client_dispatcher,
             );
         }
@@ -5110,18 +5138,100 @@ mod xdg_seat_tests {
 
         assert!(matches!(
             state.seat.pointer_interactive_grab,
-            Some(super::PointerInteractiveGrab::Move { .. })
+            Some(super::PointerInteractiveGrab::MoveTiled { picked_up: true, .. })
         ));
-        assert!(state.is_tiled_root_surface(root(&state, wl_surface_object_id)));
-        handle_pointer_motion(&mut state, &mut dispatcher, 15.0, 8.0, 15.0, 8.0, 130, 130_000);
+        assert!(state.is_floating_root_surface(root(&state, dragged)));
+        assert!(layout_rect(&state, stayed).width > stayed_before);
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::InteractiveResizeConfigure { width, height, .. }
+                        if *width >= 40 && *height >= 30
+                )
+            }
+        ));
+        let stayed_tile = layout_rect(&state, stayed);
+        move_pointer_to(
+            &mut state,
+            &mut dispatcher,
+            stayed_tile.x as f64 + stayed_tile.width as f64 - 20.0,
+            stayed_tile.y as f64 + stayed_tile.height as f64 / 2.0,
+            130,
+        );
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 0, 140);
+
+        assert!(state.seat.pointer_interactive_grab.is_none());
+        assert!(state.is_tiled_root_surface(root(&state, dragged)));
+        assert!(state.is_tiled_root_surface(root(&state, stayed)));
+        assert!(!state.is_floating_root_surface(root(&state, dragged)));
+        let (axis, children) = tiled_split(&state, root(&state, dragged));
+        assert_eq!(axis, crate::tiling::SplitAxis::Horizontal);
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[1].0, root(&state, dragged));
+    }
+
+    #[test]
+    fn second_protocol_move_during_tiled_drag_still_drops_back_into_the_tree() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        client.insert_object(&mut state, WlSeat::new(WlSeatId::from(8)));
+        let (stayed, dragged) = map_drag_pair(&mut state, &mut client, &mut client_dispatcher);
+        let dragged_toplevel = state
+            .objects
+            .try_ref_object::<WlSurface>(dragged)
+            .unwrap()
+            .xdg_surface()
+            .and_then(|xdg_surface| state.xdg_toplevel(xdg_surface))
+            .unwrap()
+            .object_id();
+        let focus = focus_for_surface(client.client_id(), WlSurfaceId::from(302), dragged);
+        let tile = layout_rect(&state, dragged);
+        state.seat.pointer_pos = (tile.x as f64 + 10.0, tile.y as f64 + 10.0);
+        let serial = state.seat.next_serial();
+        state.seat.record_pointer_button(1, serial, Some(focus));
+        state.seat.pressed_buttons.insert(0x110);
+        for _ in 0..2 {
+            let toplevel = state.objects.grab_object::<XdgToplevel>(dragged_toplevel);
+            let _ = toplevel.on(
+                &mut client,
+                &mut state,
+                toplevel_move_request(XdgToplevelId::from(322), WlSeatId::from(8), serial),
+                &mut client_dispatcher,
+            );
+            client_dispatcher.drain_post_actions(&mut client, &mut state);
+        }
+
         assert!(matches!(
             state.seat.pointer_interactive_grab,
-            Some(super::PointerInteractiveGrab::Move { .. })
+            Some(super::PointerInteractiveGrab::MoveTiled { picked_up: true, .. })
         ));
+        assert!(state.is_floating_root_surface(root(&state, dragged)));
+        assert_eq!(
+            state.xdg_decoration_mode_for_surface(
+                Some(root(&state, dragged)),
+                true,
+                Some(ToplevelDecorationMode::ClientSide),
+            ),
+            ToplevelDecorationMode::ServerSide
+        );
+        let stayed_tile = layout_rect(&state, stayed);
+        move_pointer_to(
+            &mut state,
+            &mut dispatcher,
+            stayed_tile.x as f64 + stayed_tile.width as f64 - 20.0,
+            stayed_tile.y as f64 + stayed_tile.height as f64 / 2.0,
+            130,
+        );
+        state.seat.pointer_button_count = 2;
         handle_pointer_button(&mut state, &mut dispatcher, 0x110, 0, 140);
+
         assert!(state.seat.pointer_interactive_grab.is_none());
-        assert!(state.is_tiled_root_surface(root(&state, wl_surface_object_id)));
-        assert!(!state.is_floating_root_surface(root(&state, wl_surface_object_id)));
+        assert!(state.is_tiled_root_surface(root(&state, dragged)));
+        assert!(state.is_tiled_root_surface(root(&state, stayed)));
+        assert!(!state.is_floating_root_surface(root(&state, dragged)));
     }
 
     #[test]

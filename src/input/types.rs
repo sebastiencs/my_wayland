@@ -134,8 +134,9 @@ pub(crate) enum ActiveGrab {
         initial_pointer_pos: (f64, f64),
         resize_state: TiledResizeState,
     },
-    /// Compositor move of a tiled window. The window stays tiled until the pointer
-    /// travels past `threshold`, then it becomes a temporary floating preview.
+    /// Move of a tiled window, from a binding, a server-side titlebar, or
+    /// `xdg_toplevel.move`. The window stays tiled until the pointer travels
+    /// past `threshold`, then it becomes a temporary floating preview.
     /// The preview frame stays inside `source_output_bounds`.
     MoveTiled {
         root_surface: Resolved<WlSurfaceId>,
