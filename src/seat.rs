@@ -4667,6 +4667,249 @@ mod xdg_seat_tests {
         assert!(state.is_tiled_root_surface(root(&state, dragged)));
     }
 
+    fn arm_settled_window_geometry(state: &mut State) {
+        state.advance_visual_animations(std::time::Instant::now());
+    }
+
+    fn enable_window_move_animation(state: &mut State) {
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::Windows, 200);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::Windows);
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::WindowsMove, 200);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::WindowsMove);
+    }
+
+    fn window_visual(state: &State, object_id: ObjectId) -> RectI {
+        state
+            .managed_root_surfaces
+            .get(&root(state, object_id))
+            .unwrap()
+            .geometry_animation
+            .visual_rect()
+            .unwrap()
+    }
+
+    #[test]
+    fn tiled_drag_pickup_animates_until_the_pointer_moves() {
+        use std::time::{Duration, Instant};
+
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let window = map_toplevel_on_active_output(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(401),
+            XdgSurfaceId::from(411),
+            XdgToplevelId::from(421),
+            941,
+            0,
+            0,
+            200,
+            100,
+        );
+        arm_settled_window_geometry(&mut state);
+        enable_window_move_animation(&mut state);
+        enable_move_window_binding(&mut state);
+        let tile = layout_rect(&state, window);
+        press_tiled_window(&mut state, &mut dispatcher, window);
+        let preview = layout_rect(&state, window);
+        assert!(preview.width < tile.width);
+
+        let now = Instant::now();
+        state.advance_visual_animations(now);
+        state.advance_visual_animations(now + Duration::from_millis(100));
+        let midway = window_visual(&state, window);
+        assert!(midway.width < tile.width && midway.width > preview.width);
+
+        let pointer = state.seat.pointer_pos;
+        move_pointer_to(&mut state, &mut dispatcher, pointer.0 + 80.0, pointer.1, 150);
+        state.advance_visual_animations(Instant::now());
+        assert_eq!(window_visual(&state, window), layout_rect(&state, window));
+        assert_ne!(window_visual(&state, window), midway);
+    }
+
+    #[test]
+    fn tiled_drag_drop_animates_from_the_preview_into_the_tile() {
+        use std::time::{Duration, Instant};
+
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let window = map_toplevel_on_active_output(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(402),
+            XdgSurfaceId::from(412),
+            XdgToplevelId::from(422),
+            942,
+            0,
+            0,
+            200,
+            100,
+        );
+        arm_settled_window_geometry(&mut state);
+        enable_window_move_animation(&mut state);
+        enable_move_window_binding(&mut state);
+        let tile = layout_rect(&state, window);
+        press_tiled_window(&mut state, &mut dispatcher, window);
+        let now = Instant::now();
+        state.advance_visual_animations(now);
+        state.advance_visual_animations(now + Duration::from_millis(100));
+        let midway = window_visual(&state, window);
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 0, 180);
+
+        assert!(state.is_tiled_root_surface(root(&state, window)));
+        assert_eq!(layout_rect(&state, window), tile);
+        let dropped = Instant::now();
+        state.advance_visual_animations(dropped);
+        state.advance_visual_animations(dropped + Duration::from_millis(100));
+        let visual = window_visual(&state, window);
+        assert!(visual.width > midway.width && visual.width < tile.width);
+    }
+
+    #[test]
+    fn tiled_drag_cancel_snaps_the_window_and_lets_the_neighbor_animate() {
+        use std::time::{Duration, Instant};
+
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (stayed, dragged) = map_drag_pair(&mut state, &mut client, &mut client_dispatcher);
+        arm_settled_window_geometry(&mut state);
+        enable_window_move_animation(&mut state);
+        enable_move_window_binding(&mut state);
+        let before = layout_rect(&state, stayed);
+        press_tiled_window(&mut state, &mut dispatcher, dragged);
+        let now = Instant::now();
+        state.advance_visual_animations(now);
+        state.advance_visual_animations(now + Duration::from_millis(100));
+        super::abort_pointer_interactive_grab(&mut state, &mut dispatcher, 190);
+        state.advance_visual_animations(Instant::now());
+
+        assert_eq!(layout_rect(&state, stayed).width, before.width);
+        assert_eq!(window_visual(&state, dragged), layout_rect(&state, dragged));
+        assert_ne!(window_visual(&state, stayed).width, layout_rect(&state, stayed).width);
+    }
+
+    #[test]
+    fn tiled_drag_motion_warps_the_preview_onto_the_neighbor_output() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let window = map_toplevel_on_active_output(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(403),
+            XdgSurfaceId::from(413),
+            XdgToplevelId::from(423),
+            943,
+            0,
+            0,
+            200,
+            100,
+        );
+        arm_settled_window_geometry(&mut state);
+        enable_window_move_animation(&mut state);
+        enable_move_window_binding(&mut state);
+        let workspace = state.root_surface_workspace(root(&state, window)).unwrap();
+        let bounds = output_bounds_for_surface(&state, root(&state, window));
+        state.insert_output(test_output_with_crtc_name(
+            BackendOutputRef::new(DrmId::from(2usize)),
+            2,
+            bounds.x + bounds.width,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+        ));
+        press_tiled_window(&mut state, &mut dispatcher, window);
+        move_pointer_to(
+            &mut state,
+            &mut dispatcher,
+            (bounds.x + bounds.width + bounds.width / 2) as f64,
+            (bounds.y + bounds.height / 2) as f64,
+            160,
+        );
+        state.advance_visual_animations(std::time::Instant::now());
+
+        let visual = window_visual(&state, window);
+        assert_eq!(visual, layout_rect(&state, window));
+        assert!(visual.x + visual.width > bounds.x + bounds.width);
+        assert_eq!(state.root_surface_workspace(root(&state, window)), Some(workspace));
+    }
+
+    #[test]
+    fn tiled_drag_pickup_during_a_drop_warps_to_the_new_preview() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let window = map_toplevel_on_active_output(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(404),
+            XdgSurfaceId::from(414),
+            XdgToplevelId::from(424),
+            944,
+            0,
+            0,
+            200,
+            100,
+        );
+        arm_settled_window_geometry(&mut state);
+        enable_window_move_animation(&mut state);
+        enable_move_window_binding(&mut state);
+        let tile = layout_rect(&state, window);
+        press_tiled_window(&mut state, &mut dispatcher, window);
+        let bounds = output_bounds_for_surface(&state, root(&state, window));
+        move_pointer_to(
+            &mut state,
+            &mut dispatcher,
+            bounds.x as f64 + bounds.width as f64 / 2.0,
+            bounds.y as f64 + bounds.height as f64 / 2.0,
+            150,
+        );
+        let now = std::time::Instant::now();
+        state.advance_visual_animations(now);
+        state.advance_visual_animations(now + std::time::Duration::from_millis(100));
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 0, 180);
+        let geometry = state.committed_root_geometry(root(&state, window)).unwrap();
+        let surface = geometry.surface_bounds_global().unwrap();
+        let visual_now = window_visual(&state, window);
+        let pointer = crate::render::map_layout_point(
+            geometry.layout_rect_global,
+            visual_now,
+            (
+                surface.x as f64 + surface.width as f64 / 2.0,
+                surface.y as f64 + surface.height as f64 / 2.0,
+            ),
+        );
+        state.seat.pointer_pos = pointer;
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 200);
+        assert!(state.seat.pointer_interactive_grab.is_some(), "second press missed the window");
+        move_pointer_to(&mut state, &mut dispatcher, pointer.0 + 90.0, pointer.1, 210);
+        state.advance_visual_animations(now + std::time::Duration::from_millis(120));
+
+        let visual = window_visual(&state, window);
+        assert_eq!(visual, layout_rect(&state, window));
+        assert!(visual.width < tile.width);
+        assert!(state.is_floating_root_surface(root(&state, window)));
+    }
+
     #[test]
     fn tiled_drag_client_loss_does_not_restore_the_preview_into_the_tree() {
         let mut state = state_for_tests();

@@ -121,6 +121,8 @@ pub(crate) fn apply_pointer_interactive_grab(
             frame_from_root,
             ..
         } => {
+            // The pickup animation plays only while the pointer stays put. Motion samples the
+            // pointer-centered preview and warps to it, matching Hyprland's warpPositionSize.
             let root_pos =
                 preview_root_for_pointer(state.seat.pointer_pos, preview_size, frame_from_root);
             place_grabbed_root(state, dispatcher, root_surface, root_pos);
@@ -300,8 +302,17 @@ fn settle_tiled_drag(
     } else if mapped {
         restore_tiled_drag_origin(state, root_surface, origin);
     }
-    if state.retile_root_surface_after_drag(root_surface) {
+    let retiled = state.retile_root_surface_after_drag(root_surface);
+    if retiled {
         dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
+    }
+    if cancel && mapped && retiled {
+        // Cancel, session lock, and session pause put the window back on its tile immediately.
+        // A normal drop leaves the windows animation that retile just recorded.
+        state.sync_window_geometry_goal(
+            root_surface,
+            crate::visual_animation::WindowGeometryMotion::Warp,
+        );
     }
 }
 
@@ -627,9 +638,11 @@ fn pickup_tiled_drag(
     surface.set_root_position(root_pos.0, root_pos.1);
     drop(surface);
     state.mark_root_geometry_dirty(root_surface);
+    // Tile to preview uses the windows animation. Hyprland does the same by assigning
+    // m_realPosition and m_realSize when the tiled window becomes floating.
     state.sync_window_geometry_goal(
         root_surface,
-        crate::visual_animation::WindowGeometryMotion::Warp,
+        crate::visual_animation::WindowGeometryMotion::Layout,
     );
     dispatch_client_action(
         dispatcher,
