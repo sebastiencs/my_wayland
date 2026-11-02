@@ -209,9 +209,9 @@ pub(crate) fn focus_after_client_disconnect(state: &mut State, dispatcher: &mut 
         refresh_keyboard_focus(state, dispatcher);
         return;
     };
-    if let Some(candidate) = mru_focus_candidate_for_workspace(state, workspace_id)
-        .or_else(|| topmost_focus_candidate_for_workspace(state, workspace_id))
-        .or_else(|| pointer_focus_candidate_for_workspace(state, workspace_id))
+    if let Some(candidate) = mru_focus_candidate_for_workspace(state, workspace_id, None)
+        .or_else(|| topmost_focus_candidate_for_workspace(state, workspace_id, None))
+        .or_else(|| pointer_focus_candidate_for_workspace(state, workspace_id, None))
     {
         set_keyboard_focus(state, dispatcher, Some(candidate));
         return;
@@ -219,9 +219,92 @@ pub(crate) fn focus_after_client_disconnect(state: &mut State, dispatcher: &mut 
     refresh_keyboard_focus(state, dispatcher);
 }
 
+/// The workspace window that currently owns the keyboard, captured before it is unmapped.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ClosedWindowFocus {
+    pub closed: Resolved<WlSurfaceId>,
+    pub workspace_id: crate::state::WorkspaceId,
+}
+
+/// `Some` when `surface` is the focused workspace window. Safe while that surface is grabbed:
+/// a managed toplevel is its own root and is not `try_ref`'d.
+pub(crate) fn focused_window_close(
+    state: &State,
+    surface: Resolved<WlSurfaceId>,
+) -> Option<ClosedWindowFocus> {
+    if state.session_lock.input_gated() {
+        return None;
+    }
+    if !state.managed_root_surfaces.contains_key(&surface) {
+        return None;
+    }
+    let focus = state.seat.keyboard_focus()?;
+    let root = state.root_surface_for_surface(focus.surface)?;
+    if root != surface {
+        return None;
+    }
+    let workspace_id = state.root_surface_workspace(surface)?;
+    Some(ClosedWindowFocus { closed: surface, workspace_id })
+}
+
+/// Pointer refresh, then a same-workspace successor when the closed surface owned the keyboard.
+/// A destroy that leaves the keyboard on some other live surface does not move it.
+pub(crate) fn refocus_after_surface_destroy(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    closed_window: Option<ClosedWindowFocus>,
+) {
+    refresh_pointer_focus(state, dispatcher, monotonic_time_msec(), false);
+    if let Some(close) = closed_window {
+        focus_after_focused_window_close(state, dispatcher, close);
+        return;
+    }
+    let keyboard_surface_gone = state
+        .seat
+        .keyboard_focus()
+        .is_some_and(|focus| !focus.surface.exists(state));
+    if keyboard_surface_gone {
+        refresh_keyboard_focus(state, dispatcher);
+    }
+}
+
+pub(crate) fn refocus_after_focused_window_unmap(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    close: ClosedWindowFocus,
+) {
+    refresh_pointer_focus(state, dispatcher, monotonic_time_msec(), false);
+    focus_after_focused_window_close(state, dispatcher, close);
+}
+
+/// Window under the pointer on the closed window's workspace, then focus history, then the
+/// topmost remaining window. The closed window is skipped. Hyprland's `input:focus_on_close`
+/// tries the cursor first; the history step is the same list sway keeps per workspace.
+fn focus_after_focused_window_close(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    close: ClosedWindowFocus,
+) {
+    if state.session_lock.input_gated() {
+        refresh_keyboard_focus(state, dispatcher);
+        return;
+    }
+    let excluding = Some(close.closed);
+    if let Some(candidate) =
+        pointer_focus_candidate_for_workspace(state, close.workspace_id, excluding)
+            .or_else(|| mru_focus_candidate_for_workspace(state, close.workspace_id, excluding))
+            .or_else(|| topmost_focus_candidate_for_workspace(state, close.workspace_id, excluding))
+    {
+        set_keyboard_focus(state, dispatcher, Some(candidate));
+        return;
+    }
+    set_keyboard_focus(state, dispatcher, None);
+}
+
 fn mru_focus_candidate_for_workspace(
     state: &State,
     workspace_id: crate::state::WorkspaceId,
+    excluding: Option<Resolved<WlSurfaceId>>,
 ) -> Option<SurfaceFocus> {
     let mut seen = BTreeSet::new();
     for focus in state.seat.keyboard_focus_history() {
@@ -229,6 +312,9 @@ fn mru_focus_candidate_for_workspace(
             .root_surface_for_surface(focus.surface)
             .unwrap_or(focus.surface);
         if !seen.insert(root_surface) {
+            continue;
+        }
+        if Some(root_surface) == excluding {
             continue;
         }
         if !focus_candidate_matches_workspace(state, root_surface, workspace_id) {
@@ -242,6 +328,7 @@ fn mru_focus_candidate_for_workspace(
 fn topmost_focus_candidate_for_workspace(
     state: &State,
     workspace_id: crate::state::WorkspaceId,
+    excluding: Option<Resolved<WlSurfaceId>>,
 ) -> Option<SurfaceFocus> {
     let scene = state.build_scene_model();
     let order = state.build_workspace_focus_order(&scene, workspace_id, None);
@@ -249,18 +336,25 @@ fn topmost_focus_candidate_for_workspace(
         .roots_front_to_back
         .into_iter()
         .rev()
-        .find(|surface| focus_candidate_matches_workspace(state, *surface, workspace_id))
+        .find(|surface| {
+            Some(*surface) != excluding
+                && focus_candidate_matches_workspace(state, *surface, workspace_id)
+        })
         .map(SurfaceFocus::new)
 }
 
 fn pointer_focus_candidate_for_workspace(
     state: &State,
     workspace_id: crate::state::WorkspaceId,
+    excluding: Option<Resolved<WlSurfaceId>>,
 ) -> Option<SurfaceFocus> {
     let pointer_focus = state.seat.pointer_focus.map(|focus| focus.target)?;
     let root_surface = state
         .root_surface_for_surface(pointer_focus.surface)
         .unwrap_or(pointer_focus.surface);
+    if Some(root_surface) == excluding {
+        return None;
+    }
     focus_candidate_matches_workspace(state, root_surface, workspace_id)
         .then_some(SurfaceFocus::new(root_surface))
 }
@@ -707,7 +801,13 @@ mod tests {
         wayland_objects::wl_surface::WlSurface,
     };
 
-    use super::topmost_focus_candidate_for_workspace;
+    use {
+        super::{
+            refocus_after_surface_destroy, set_keyboard_focus,
+            topmost_focus_candidate_for_workspace, ClosedWindowFocus,
+        },
+        crate::{input::SurfaceFocus, runner::Dispatcher},
+    };
 
     fn insert_root(
         state: &mut crate::state::State,
@@ -741,9 +841,107 @@ mod tests {
         state.managed_root_surfaces.get_mut(&lower).unwrap().mapped = true;
         state.managed_root_surfaces.get_mut(&upper).unwrap().mapped = true;
 
-        let candidate =
-            topmost_focus_candidate_for_workspace(&state, workspace_id).expect("focus candidate");
+        let candidate = topmost_focus_candidate_for_workspace(&state, workspace_id, None)
+            .expect("focus candidate");
         assert_eq!(candidate.surface, upper);
+    }
+
+    fn place_window(
+        state: &mut crate::state::State,
+        raw: u32,
+        workspace_id: crate::state::WorkspaceId,
+        x: i32,
+        y: i32,
+    ) -> crate::clients::Resolved<WlSurfaceId> {
+        let surface = insert_root(state, raw);
+        state
+            .objects
+            .get_mut(surface.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_map(crate::state::ObjectId::from(raw as usize), x, y, 30, 30);
+        let _ = state.assign_root_surface_to_workspace(surface, workspace_id);
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .mapped = true;
+        surface
+    }
+
+    struct ThreeWindows {
+        workspace_id: crate::state::WorkspaceId,
+        older: crate::clients::Resolved<WlSurfaceId>,
+        under_pointer: crate::clients::Resolved<WlSurfaceId>,
+        closing: crate::clients::Resolved<WlSurfaceId>,
+    }
+
+    fn three_windows(state: &mut crate::state::State) -> ThreeWindows {
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 100, 100));
+        let workspace_id = state.active_workspace_for_output(output_id).unwrap();
+        let older = place_window(state, 81, workspace_id, 0, 0);
+        let under_pointer = place_window(state, 82, workspace_id, 40, 0);
+        let closing = place_window(state, 83, workspace_id, 0, 50);
+        state
+            .workspaces
+            .try_get_mut(workspace_id)
+            .unwrap()
+            .layout
+            .floating
+            .stack = vec![older, under_pointer, closing];
+        ThreeWindows { workspace_id, older, under_pointer, closing }
+    }
+
+    fn close_of(windows: &ThreeWindows) -> ClosedWindowFocus {
+        ClosedWindowFocus { closed: windows.closing, workspace_id: windows.workspace_id }
+    }
+
+    #[test]
+    fn closing_focused_window_prefers_the_window_under_the_pointer() {
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        let windows = three_windows(&mut state);
+        set_keyboard_focus(&mut state, &mut dispatcher, Some(SurfaceFocus::new(windows.older)));
+        set_keyboard_focus(&mut state, &mut dispatcher, Some(SurfaceFocus::new(windows.closing)));
+        state.seat.pointer_pos = (50.0, 10.0);
+
+        refocus_after_surface_destroy(&mut state, &mut dispatcher, Some(close_of(&windows)));
+
+        assert_eq!(
+            state.seat.keyboard_focus().map(|focus| focus.surface),
+            Some(windows.under_pointer)
+        );
+    }
+
+    #[test]
+    fn closing_focused_window_uses_history_when_the_pointer_misses_every_window() {
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        let windows = three_windows(&mut state);
+        set_keyboard_focus(&mut state, &mut dispatcher, Some(SurfaceFocus::new(windows.older)));
+        set_keyboard_focus(&mut state, &mut dispatcher, Some(SurfaceFocus::new(windows.closing)));
+        state.seat.pointer_pos = (90.0, 90.0);
+
+        refocus_after_surface_destroy(&mut state, &mut dispatcher, Some(close_of(&windows)));
+
+        assert_eq!(state.seat.keyboard_focus().map(|focus| focus.surface), Some(windows.older));
+    }
+
+    #[test]
+    fn closing_focused_window_uses_the_topmost_window_when_history_has_no_other() {
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        let windows = three_windows(&mut state);
+        set_keyboard_focus(&mut state, &mut dispatcher, Some(SurfaceFocus::new(windows.closing)));
+        state.seat.pointer_pos = (90.0, 90.0);
+
+        refocus_after_surface_destroy(&mut state, &mut dispatcher, Some(close_of(&windows)));
+
+        assert_eq!(
+            state.seat.keyboard_focus().map(|focus| focus.surface),
+            Some(windows.under_pointer)
+        );
     }
 }
 

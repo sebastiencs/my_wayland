@@ -73,7 +73,8 @@ fn should_focus_new_toplevel_on_map(state: &State, root_surface: Resolved<WlSurf
 
 enum PostWlSurface {
     FocusNewToplevel { root_surface: Resolved<WlSurfaceId> },
-    ClearFocusAfterDestroy,
+    ClearFocusAfterDestroy { closed_window: Option<crate::input::focus::ClosedWindowFocus> },
+    FocusSuccessorAfterClose(crate::input::focus::ClosedWindowFocus),
 }
 
 impl PostAction for PostWlSurface {
@@ -93,8 +94,15 @@ impl PostAction for PostWlSurface {
                     );
                 }
             }
-            PostWlSurface::ClearFocusAfterDestroy => {
-                crate::seat::refresh_scene_focus(state, dispatcher);
+            PostWlSurface::ClearFocusAfterDestroy { closed_window } => {
+                crate::input::focus::refocus_after_surface_destroy(
+                    state,
+                    dispatcher,
+                    closed_window,
+                );
+            }
+            PostWlSurface::FocusSuccessorAfterClose(close) => {
+                crate::input::focus::refocus_after_focused_window_unmap(state, dispatcher, close);
             }
         }
     }
@@ -2208,6 +2216,13 @@ impl WlSurface {
                     dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
                 }
             }
+            if !is_mapped {
+                if let Some(close) =
+                    crate::input::focus::focused_window_close(state, resolved_surface)
+                {
+                    dispatcher.dispatch_post_action(PostWlSurface::FocusSuccessorAfterClose(close));
+                }
+            }
         }
 
         if changed || needs_frame {
@@ -2904,8 +2919,9 @@ impl WlSurface {
             }
         }
         self.cleanup_extension_objects();
+        let closed_window = crate::input::focus::focused_window_close(state, object);
         state.unregister_root_surface(object);
-        dispatcher.dispatch_post_action(PostWlSurface::ClearFocusAfterDestroy);
+        dispatcher.dispatch_post_action(PostWlSurface::ClearFocusAfterDestroy { closed_window });
         crate::idle_inhibit::queue_refresh(dispatcher);
         use crate::wayland_objects::wl_display::WlDisplay;
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
@@ -3090,6 +3106,7 @@ mod tests {
             clients::{Client, ClientId, ClientManagerAction, RawEvent, RawRequest, Resolved},
             cursor::CursorSourceRef,
             drm::VisualAnimationPumpAction,
+            input::{focus::set_keyboard_focus, SurfaceFocus},
             io_uring::model::IoUringAction,
             object::{Object, RequestResult},
             protocol_generated::{
@@ -3952,6 +3969,128 @@ mod tests {
         }
         assert_eq!(state.closing_snapshots.len(), 1);
         assert_eq!(state.closing_snapshots[0].source(), focused);
+    }
+
+    fn surface_origin(state: &State, surface_object_id: ObjectId) -> (i32, i32) {
+        let bounds = state
+            .objects
+            .get(surface_object_id)
+            .downcast_ref::<WlSurface>()
+            .unwrap()
+            .global_logical_bounds()
+            .unwrap();
+        (bounds.x, bounds.y)
+    }
+
+    #[test]
+    fn destroying_the_focused_toplevel_focuses_another_window_on_its_workspace() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(5usize));
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+        let closing_id = map_closing_candidate(&mut state, &mut client, &mut dispatcher, 250);
+        let remaining_id = map_closing_candidate(&mut state, &mut client, &mut dispatcher, 260);
+        let closing = root(&state, closing_id);
+        let remaining = root(&state, remaining_id);
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            set_keyboard_focus(
+                &mut state,
+                &mut client_dispatcher,
+                Some(SurfaceFocus::new(remaining)),
+            );
+            set_keyboard_focus(
+                &mut state,
+                &mut client_dispatcher,
+                Some(SurfaceFocus::new(closing)),
+            );
+        }
+        let (x, y) = surface_origin(&state, closing_id);
+        state.seat.pointer_pos = (x as f64 + 1.0, y as f64 + 1.0);
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            {
+                let mut surface = state.objects.grab_object::<WlSurface>(closing_id);
+                surface.delete_self(&mut client, &mut state, &mut client_dispatcher);
+            }
+            client_dispatcher.drain_post_actions(&mut client, &mut state);
+        }
+        assert_eq!(state.seat.keyboard_focus().map(|focus| focus.surface), Some(remaining));
+    }
+
+    #[test]
+    fn destroying_an_unfocused_toplevel_keeps_keyboard_focus() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(5usize));
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+        let closing_id = map_closing_candidate(&mut state, &mut client, &mut dispatcher, 270);
+        let focused_id = map_closing_candidate(&mut state, &mut client, &mut dispatcher, 280);
+        let focused = root(&state, focused_id);
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            set_keyboard_focus(
+                &mut state,
+                &mut client_dispatcher,
+                Some(SurfaceFocus::new(focused)),
+            );
+        }
+        let (x, y) = surface_origin(&state, closing_id);
+        state.seat.pointer_pos = (x as f64 + 1.0, y as f64 + 1.0);
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            {
+                let mut surface = state.objects.grab_object::<WlSurface>(closing_id);
+                surface.delete_self(&mut client, &mut state, &mut client_dispatcher);
+            }
+            client_dispatcher.drain_post_actions(&mut client, &mut state);
+        }
+        assert_eq!(state.seat.keyboard_focus().map(|focus| focus.surface), Some(focused));
+    }
+
+    #[test]
+    fn null_buffer_unmap_of_the_focused_toplevel_focuses_another_window() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(5usize));
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+        let closing_id = map_closing_candidate(&mut state, &mut client, &mut dispatcher, 290);
+        let remaining_id = map_closing_candidate(&mut state, &mut client, &mut dispatcher, 300);
+        let closing = root(&state, closing_id);
+        let remaining = root(&state, remaining_id);
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            set_keyboard_focus(
+                &mut state,
+                &mut client_dispatcher,
+                Some(SurfaceFocus::new(remaining)),
+            );
+            set_keyboard_focus(
+                &mut state,
+                &mut client_dispatcher,
+                Some(SurfaceFocus::new(closing)),
+            );
+        }
+        {
+            let surface = state
+                .objects
+                .get_mut(closing_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.pending.buffer = Some(None);
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            {
+                let mut surface = state.objects.grab_object::<WlSurface>(closing_id);
+                surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
+            }
+            client_dispatcher.drain_post_actions(&mut client, &mut state);
+        }
+        assert_eq!(state.seat.keyboard_focus().map(|focus| focus.surface), Some(remaining));
     }
 
     #[test]
