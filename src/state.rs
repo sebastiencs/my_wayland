@@ -27,7 +27,8 @@ use crate::{
     seat::SeatState,
     tiling::{self, TiledResizeState, WorkspaceLayout},
     visual_animation::{
-        resolve_window_visual, FocusVisualAnimation, RetainedClosingSnapshot, WindowLifecycleAnim,
+        resolve_window_visual, FocusVisualAnimation, GeometryTiming, RetainedClosingSnapshot,
+        WindowGeometryAnimation, WindowGeometryMotion, WindowLifecycleAnim,
         WindowLifecycleAnimation, WindowVisualBase, WorkspaceGroupTransition, WorkspaceMotion,
         WorkspaceTransitionAdvance, WorkspaceTransitionDirection,
     },
@@ -440,6 +441,7 @@ pub struct ManagedRootSurfaceState {
     pub restore_floating_state_on_next_configure: bool,
     pub focus_animation: FocusVisualAnimation,
     pub lifecycle_animation: WindowLifecycleAnimation,
+    pub geometry_animation: WindowGeometryAnimation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1451,7 +1453,10 @@ impl State {
         let initial_animation = FocusVisualAnimation::settled(self.focus_visual_base(surface));
         self.managed_root_surfaces
             .entry(surface)
-            .and_modify(|managed| managed.workspace_id = workspace_id)
+            .and_modify(|managed| {
+                managed.workspace_id = workspace_id;
+                managed.geometry_animation.prefer_relocation();
+            })
             .or_insert(ManagedRootSurfaceState {
                 workspace_id,
                 mode: ManagedWindowMode::Tiled,
@@ -1462,6 +1467,7 @@ impl State {
                 restore_floating_state_on_next_configure: false,
                 focus_animation: initial_animation,
                 lifecycle_animation: WindowLifecycleAnimation::idle(),
+                geometry_animation: WindowGeometryAnimation::unarmed(),
             });
         self.mark_root_geometry_dirty(surface);
         true
@@ -1704,6 +1710,25 @@ impl State {
         self.output_id_for_surface_object(surface, &surface_ref)
             .and_then(|output_id| output_usable_bounds_with_snapshot(self, output_id, snapshot))
             .map(|bounds| (bounds.width, bounds.height))
+    }
+
+    pub(crate) fn sync_window_geometry_goal(
+        &mut self,
+        surface: Resolved<WlSurfaceId>,
+        motion: WindowGeometryMotion,
+    ) {
+        if !self.managed_root_surfaces.contains_key(&surface) {
+            return;
+        }
+        let Some(geometry) = self.ensure_root_geometry_fresh(surface) else {
+            return;
+        };
+        let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
+            return;
+        };
+        managed
+            .geometry_animation
+            .set_goal(geometry.layout_rect_global, motion);
     }
 
     pub fn mark_root_geometry_dirty(&mut self, surface: Resolved<WlSurfaceId>) {
@@ -2004,6 +2029,14 @@ impl State {
         let opening = self.config.animations.opening();
         let focus_duration = focus.duration();
         let open_duration = opening.duration();
+        let windows = self
+            .config
+            .animations
+            .node(crate::animation_config::AnimationNode::Windows);
+        let layout_motion =
+            GeometryTiming { duration: windows.duration(), easing: windows.easing() };
+        let moving = self.config.animations.moving();
+        let moving_motion = GeometryTiming { duration: moving.duration(), easing: moving.easing() };
         let surfaces = self
             .managed_root_surfaces
             .keys()
@@ -2030,6 +2063,9 @@ impl State {
             managed
                 .lifecycle_animation
                 .advance_with_easing(open_duration, opening.easing(), now);
+            managed
+                .geometry_animation
+                .advance(now, layout_motion, moving_motion);
             let next = composed_window_style(
                 managed.focus_animation.current(),
                 managed.lifecycle_animation.sample(),
@@ -2039,8 +2075,9 @@ impl State {
                     damaged_rects.push(rect);
                 }
             }
-            has_active_animations |=
-                managed.focus_animation.is_active() || managed.lifecycle_animation.is_active();
+            has_active_animations |= managed.focus_animation.is_active()
+                || managed.lifecycle_animation.is_active()
+                || managed.geometry_animation.is_active();
         }
         let closing = self.config.animations.closing();
         let close_duration = closing.duration();
@@ -2612,6 +2649,7 @@ impl State {
                     restore_floating_state_on_next_configure: false,
                     focus_animation: initial_animation,
                     lifecycle_animation: WindowLifecycleAnimation::idle(),
+                    geometry_animation: WindowGeometryAnimation::unarmed(),
                 });
         } else {
             {
@@ -2761,7 +2799,7 @@ impl State {
             self.mark_root_geometry_dirty(surface);
         }
         tiling::mark_workspace_dirty(self, workspace_id);
-        self.relayout_dirty_workspaces();
+        tiling::relayout_dirty_workspaces_with_motion(self, WindowGeometryMotion::Relocation);
     }
 
     fn restore_root_surface_floating_state(
@@ -2775,6 +2813,7 @@ impl State {
         wl_surface.set_root_position(remembered_state.root_pos.0, remembered_state.root_pos.1);
         drop(wl_surface);
         self.mark_root_geometry_dirty(surface);
+        self.sync_window_geometry_goal(surface, WindowGeometryMotion::Layout);
         true
     }
 

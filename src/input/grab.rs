@@ -165,6 +165,10 @@ pub(crate) fn apply_pointer_interactive_grab(
             surface.set_root_position(x, y);
             drop(surface);
             state.mark_root_geometry_dirty(root_surface);
+            state.sync_window_geometry_goal(
+                root_surface,
+                crate::visual_animation::WindowGeometryMotion::Warp,
+            );
             let new_bounds = interactive_damage_rect(state, root_surface);
             dispatch_client_action(
                 dispatcher,
@@ -569,6 +573,10 @@ fn pickup_tiled_drag(
     surface.set_root_position(root_pos.0, root_pos.1);
     drop(surface);
     state.mark_root_geometry_dirty(root_surface);
+    state.sync_window_geometry_goal(
+        root_surface,
+        crate::visual_animation::WindowGeometryMotion::Warp,
+    );
     dispatch_client_action(
         dispatcher,
         root_surface.client_id(),
@@ -672,6 +680,10 @@ fn place_grabbed_root(
     surface.set_root_position(root_pos.0, root_pos.1);
     drop(surface);
     state.mark_root_geometry_dirty(root_surface);
+    state.sync_window_geometry_goal(
+        root_surface,
+        crate::visual_animation::WindowGeometryMotion::Warp,
+    );
     let new_bounds = interactive_damage_rect(state, root_surface);
     dispatch_client_action(
         dispatcher,

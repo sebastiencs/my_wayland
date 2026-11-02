@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use crate::region::RectI;
+
 use super::track::{Easing, RetargetableTrack, TrackStatus, UnitValue};
 
 /// Appearance sampled from logical window state before lifecycle scaling.
@@ -232,16 +234,301 @@ fn scale_alpha(alpha: u8, factor: UnitValue) -> u8 {
     factor.lerp_u8(0, alpha)
 }
 
+/// Why the logical window rectangle changed.
+///
+/// Layout changes animate through the `windows` node. Moving a window onto another workspace or
+/// output animates its position through `windowsMove` and its size through `windows`. Pointer
+/// motion snaps both axes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowGeometryMotion {
+    Layout,
+    Relocation,
+    Warp,
+}
+
+/// Duration and curve captured for one geometry axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeometryTiming {
+    pub duration: Duration,
+    pub easing: Easing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WindowBox {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl WindowBox {
+    fn from_rect(rect: RectI) -> Self {
+        Self {
+            x: f64::from(rect.x),
+            y: f64::from(rect.y),
+            width: f64::from(rect.width),
+            height: f64::from(rect.height),
+        }
+    }
+
+    fn rounded(self) -> Option<RectI> {
+        RectI::new(
+            round_i32(self.x),
+            round_i32(self.y),
+            round_i32(self.width).max(0),
+            round_i32(self.height).max(0),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PositionClass {
+    Layout,
+    Relocation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PendingGeometry {
+    rect: RectI,
+    motion: WindowGeometryMotion,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AxisAnimation {
+    from_x: f64,
+    from_y: f64,
+    goal_x: f64,
+    goal_y: f64,
+    current_x: f64,
+    current_y: f64,
+    track: RetargetableTrack,
+    active: bool,
+}
+
+impl AxisAnimation {
+    fn settled(x: f64, y: f64) -> Self {
+        Self {
+            from_x: x,
+            from_y: y,
+            goal_x: x,
+            goal_y: y,
+            current_x: x,
+            current_y: y,
+            track: RetargetableTrack::settled(UnitValue::ONE),
+            active: false,
+        }
+    }
+
+    fn goal_is(self, x: f64, y: f64) -> bool {
+        self.goal_x == x && self.goal_y == y
+    }
+
+    fn warp(&mut self, x: f64, y: f64) {
+        *self = Self::settled(x, y);
+    }
+
+    fn retarget(&mut self, x: f64, y: f64, now: Instant, timing: GeometryTiming) {
+        if timing.duration.is_zero() || (self.current_x == x && self.current_y == y) {
+            self.warp(x, y);
+            return;
+        }
+        self.from_x = self.current_x;
+        self.from_y = self.current_y;
+        self.goal_x = x;
+        self.goal_y = y;
+        self.track = RetargetableTrack::start_timed(
+            UnitValue::ZERO,
+            UnitValue::ONE,
+            now,
+            timing.duration,
+            timing.easing,
+        );
+        self.active = !timing.duration.is_zero();
+    }
+
+    fn advance(&mut self, now: Instant, timing: GeometryTiming) {
+        if !self.active {
+            return;
+        }
+        if timing.duration.is_zero() {
+            self.warp(self.goal_x, self.goal_y);
+            return;
+        }
+        if timing.duration != self.track.duration() || timing.easing != self.track.easing() {
+            self.track
+                .retarget_timed(UnitValue::ONE, now, timing.duration, timing.easing);
+        }
+        let sample = self.track.sample_mut(now);
+        self.current_x = lerp_axis(self.from_x, self.goal_x, sample.value);
+        self.current_y = lerp_axis(self.from_y, self.goal_y, sample.value);
+        if sample.status == TrackStatus::Settled {
+            self.current_x = self.goal_x;
+            self.current_y = self.goal_y;
+            self.active = false;
+        }
+    }
+}
+
+/// Animated window position and size.
+///
+/// The logical layout rectangle is the goal. Each axis keeps its own sample, so a size change
+/// leaves an in-flight move running. The first valid rectangle snaps, and later goals are applied
+/// by [`Self::advance`] so the animation pump remains the clock.
+#[derive(Clone, Copy, Debug)]
+pub struct WindowGeometryAnimation {
+    armed: bool,
+    position: AxisAnimation,
+    size: AxisAnimation,
+    position_class: PositionClass,
+    relocation_pending: bool,
+    pending: Option<PendingGeometry>,
+}
+
+impl WindowGeometryAnimation {
+    pub fn unarmed() -> Self {
+        Self {
+            armed: false,
+            position: AxisAnimation::settled(0.0, 0.0),
+            size: AxisAnimation::settled(0.0, 0.0),
+            position_class: PositionClass::Layout,
+            relocation_pending: false,
+            pending: None,
+        }
+    }
+
+    pub fn is_armed(self) -> bool {
+        self.armed
+    }
+
+    pub fn is_active(self) -> bool {
+        self.position.active || self.size.active
+    }
+
+    /// The next layout-driven goal should use the relocation position node.
+    pub fn prefer_relocation(&mut self) {
+        self.relocation_pending = true;
+    }
+
+    /// Record a new logical rectangle. Equal goals do not restart a running animation.
+    pub fn set_goal(&mut self, rect: RectI, mut motion: WindowGeometryMotion) {
+        if rect.width <= 0 || rect.height <= 0 {
+            return;
+        }
+        if self.relocation_pending {
+            self.relocation_pending = false;
+            if motion == WindowGeometryMotion::Layout {
+                motion = WindowGeometryMotion::Relocation;
+            }
+        }
+        if self.armed && self.pending.is_none() && self.goal_is(rect) {
+            let settled = !self.position.active && !self.size.active;
+            if motion != WindowGeometryMotion::Warp || settled {
+                return;
+            }
+        }
+        self.pending = Some(PendingGeometry { rect, motion });
+    }
+
+    pub fn goal_rect(self) -> Option<RectI> {
+        if let Some(pending) = self.pending {
+            return Some(pending.rect);
+        }
+        self.armed.then(|| {
+            RectI::new(
+                round_i32(self.position.goal_x),
+                round_i32(self.position.goal_y),
+                round_i32(self.size.goal_x),
+                round_i32(self.size.goal_y),
+            )
+            .expect("armed geometry goal")
+        })
+    }
+
+    pub fn visual_rect(self) -> Option<RectI> {
+        if !self.armed {
+            return None;
+        }
+        WindowBox {
+            x: self.position.current_x,
+            y: self.position.current_y,
+            width: self.size.current_x,
+            height: self.size.current_y,
+        }
+        .rounded()
+    }
+
+    pub fn advance(&mut self, now: Instant, layout: GeometryTiming, moving: GeometryTiming) {
+        if let Some(pending) = self.pending.take() {
+            self.apply_goal(pending, now, layout, moving);
+        }
+        let position_timing =
+            if self.position_class == PositionClass::Relocation { moving } else { layout };
+        self.position.advance(now, position_timing);
+        self.size.advance(now, layout);
+    }
+
+    fn goal_is(self, rect: RectI) -> bool {
+        let goal = WindowBox::from_rect(rect);
+        self.position.goal_is(goal.x, goal.y) && self.size.goal_is(goal.width, goal.height)
+    }
+
+    fn apply_goal(
+        &mut self,
+        pending: PendingGeometry,
+        now: Instant,
+        layout: GeometryTiming,
+        moving: GeometryTiming,
+    ) {
+        let goal = WindowBox::from_rect(pending.rect);
+        if !self.armed || pending.motion == WindowGeometryMotion::Warp {
+            self.position.warp(goal.x, goal.y);
+            self.size.warp(goal.width, goal.height);
+            self.position_class = PositionClass::Layout;
+            self.armed = true;
+            return;
+        }
+        if !self.position.goal_is(goal.x, goal.y) {
+            let (timing, class) = if pending.motion == WindowGeometryMotion::Relocation {
+                (moving, PositionClass::Relocation)
+            } else {
+                (layout, PositionClass::Layout)
+            };
+            self.position_class = class;
+            self.position.retarget(goal.x, goal.y, now, timing);
+        }
+        if !self.size.goal_is(goal.width, goal.height) {
+            self.size.retarget(goal.width, goal.height, now, layout);
+        }
+        self.armed = true;
+    }
+}
+
+fn lerp_axis(from: f64, to: f64, progress: UnitValue) -> f64 {
+    from + (to - from) * progress.as_f64()
+}
+
+fn round_i32(value: f64) -> i32 {
+    let rounded = value.round();
+    if rounded >= f64::from(i32::MAX) {
+        i32::MAX
+    } else if rounded <= f64::from(i32::MIN) {
+        i32::MIN
+    } else {
+        rounded as i32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
     use {
         super::{
-            interpolate_window_visual, resolve_window_visual, FocusVisualAnimation,
-            WindowLifecycleAnim, WindowLifecycleAnimation, WindowVisualBase,
+            interpolate_window_visual, resolve_window_visual, Easing, FocusVisualAnimation,
+            GeometryTiming, WindowGeometryAnimation, WindowGeometryMotion, WindowLifecycleAnim,
+            WindowLifecycleAnimation, WindowVisualBase,
         },
-        crate::visual_animation::UnitValue,
+        crate::{region::RectI, visual_animation::UnitValue},
     };
 
     fn inactive() -> WindowVisualBase {
@@ -480,5 +767,103 @@ mod tests {
             lifecycle.advance(Duration::from_millis(100), mid_time + Duration::from_millis(50)),
             WindowLifecycleAnim::Opening { progress: half() }
         );
+    }
+
+    fn linear(millis: u64) -> GeometryTiming {
+        GeometryTiming {
+            duration: Duration::from_millis(millis),
+            easing: Easing::Linear,
+        }
+    }
+
+    fn rect(x: i32, y: i32, width: i32, height: i32) -> RectI {
+        RectI::new(x, y, width, height).unwrap()
+    }
+
+    #[test]
+    fn first_rectangle_snaps_instead_of_starting_at_the_origin() {
+        let now = Instant::now();
+        let mut geometry = WindowGeometryAnimation::unarmed();
+        geometry.set_goal(rect(40, 50, 200, 100), WindowGeometryMotion::Layout);
+        assert!(geometry.visual_rect().is_none());
+        assert_eq!(geometry.goal_rect(), Some(rect(40, 50, 200, 100)));
+
+        geometry.advance(now, linear(400), linear(400));
+        assert_eq!(geometry.visual_rect(), Some(rect(40, 50, 200, 100)));
+        assert!(!geometry.is_active());
+    }
+
+    #[test]
+    fn position_and_size_retarget_independently() {
+        let now = Instant::now();
+        let mut geometry = WindowGeometryAnimation::unarmed();
+        geometry.set_goal(rect(0, 0, 100, 40), WindowGeometryMotion::Layout);
+        geometry.advance(now, linear(100), linear(400));
+
+        geometry.set_goal(rect(80, 0, 100, 40), WindowGeometryMotion::Layout);
+        geometry.advance(now, linear(100), linear(400));
+        assert_eq!(geometry.visual_rect(), Some(rect(0, 0, 100, 40)));
+
+        geometry.advance(now + Duration::from_millis(50), linear(100), linear(400));
+        assert_eq!(geometry.visual_rect(), Some(rect(40, 0, 100, 40)));
+
+        geometry.set_goal(rect(80, 0, 140, 40), WindowGeometryMotion::Layout);
+        geometry.advance(now + Duration::from_millis(50), linear(100), linear(400));
+        geometry.advance(now + Duration::from_millis(100), linear(100), linear(400));
+        let mid_size = geometry.visual_rect().unwrap();
+        assert_eq!(mid_size.x, 80);
+        assert_eq!(mid_size.width, 120);
+    }
+
+    #[test]
+    fn relocation_uses_the_moving_duration_for_position_only() {
+        let now = Instant::now();
+        let mut geometry = WindowGeometryAnimation::unarmed();
+        geometry.set_goal(rect(0, 0, 20, 20), WindowGeometryMotion::Layout);
+        geometry.advance(now, linear(100), linear(200));
+
+        geometry.set_goal(rect(40, 0, 60, 20), WindowGeometryMotion::Relocation);
+        geometry.advance(now, linear(100), linear(200));
+        geometry.advance(now + Duration::from_millis(100), linear(100), linear(200));
+        let sampled = geometry.visual_rect().unwrap();
+        assert_eq!(sampled.x, 20);
+        assert_eq!(sampled.width, 60);
+        assert!(geometry.is_active());
+    }
+
+    #[test]
+    fn equal_goal_does_not_restart_and_warp_snaps() {
+        let now = Instant::now();
+        let mut geometry = WindowGeometryAnimation::unarmed();
+        geometry.set_goal(rect(0, 0, 10, 10), WindowGeometryMotion::Layout);
+        geometry.advance(now, linear(100), linear(100));
+        geometry.set_goal(rect(30, 0, 10, 10), WindowGeometryMotion::Layout);
+        geometry.advance(now, linear(100), linear(100));
+        geometry.set_goal(rect(30, 0, 10, 10), WindowGeometryMotion::Layout);
+        geometry.advance(now + Duration::from_millis(50), linear(100), linear(100));
+        assert_eq!(geometry.visual_rect(), Some(rect(15, 0, 10, 10)));
+
+        geometry.set_goal(rect(30, 0, 10, 10), WindowGeometryMotion::Warp);
+        geometry.advance(now + Duration::from_millis(50), linear(100), linear(100));
+        assert_eq!(geometry.visual_rect(), Some(rect(30, 0, 10, 10)));
+        assert!(!geometry.is_active());
+    }
+
+    #[test]
+    fn rounded_visual_rect_is_stable_at_the_same_sample() {
+        let now = Instant::now();
+        let mut geometry = WindowGeometryAnimation::unarmed();
+        geometry.set_goal(rect(0, 0, 10, 10), WindowGeometryMotion::Layout);
+        geometry.advance(now, linear(100), linear(100));
+        geometry.set_goal(rect(1, 0, 11, 10), WindowGeometryMotion::Layout);
+        geometry.advance(now, linear(100), linear(100));
+        let mid = now + Duration::from_millis(50);
+        geometry.advance(mid, linear(100), linear(100));
+        let first = geometry.visual_rect();
+        geometry.advance(mid, linear(100), linear(100));
+        assert_eq!(first, geometry.visual_rect());
+        assert_eq!(first, Some(rect(1, 0, 11, 10)));
+        geometry.advance(now + Duration::from_millis(100), linear(100), linear(100));
+        assert_eq!(geometry.visual_rect(), geometry.goal_rect());
     }
 }

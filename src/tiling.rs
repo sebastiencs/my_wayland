@@ -7,6 +7,7 @@ use crate::{
     region::RectI,
     root_geometry::{self, CommittedRootGeometry},
     state::{ManagedWindowMode, ObjectId, State, WorkspaceId},
+    visual_animation::WindowGeometryMotion,
     wayland_objects::{
         wl_surface::{Role, WlSurface},
         xdg_surface::xdg_toplevel::{ToplevelDecorationMode, XdgToplevel},
@@ -1356,6 +1357,13 @@ pub fn mark_workspace_dirty(state: &mut State, workspace_id: WorkspaceId) {
 }
 
 pub fn relayout_dirty_workspaces(state: &mut State) -> Vec<Resolved<WlSurfaceId>> {
+    relayout_dirty_workspaces_with_motion(state, WindowGeometryMotion::Layout)
+}
+
+pub fn relayout_dirty_workspaces_with_motion(
+    state: &mut State,
+    motion: WindowGeometryMotion,
+) -> Vec<Resolved<WlSurfaceId>> {
     let workspace_ids = state
         .workspace_ids()
         .into_iter()
@@ -1430,10 +1438,14 @@ pub fn relayout_dirty_workspaces(state: &mut State) -> Vec<Resolved<WlSurfaceId>
             drop(surface);
             state.mark_root_geometry_dirty(operation.surface_object_id);
         }
-        for surface in workspace_surface_ids {
-            if !state.is_tiled_root_surface(surface) && !state.root_surface_is_fullscreen(surface) {
-                state.mark_root_geometry_dirty(surface);
+        for surface in &workspace_surface_ids {
+            if !state.is_tiled_root_surface(*surface) && !state.root_surface_is_fullscreen(*surface)
+            {
+                state.mark_root_geometry_dirty(*surface);
             }
+        }
+        for surface in workspace_surface_ids {
+            state.sync_window_geometry_goal(surface, motion);
         }
     }
     opened
@@ -2401,6 +2413,85 @@ mod tests {
             (80, 60),
         );
         root(state, surface_object_id)
+    }
+
+    #[test]
+    fn layout_changes_sample_a_visual_box_and_keep_the_logical_goal() {
+        let mut state = state_for_tests();
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::Windows, 200);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::Windows);
+        let surface = live_toplevel(&mut state);
+        state.relayout_dirty_workspaces();
+        let now = std::time::Instant::now();
+        state.advance_visual_animations(now);
+        let initial = state
+            .committed_root_geometry(surface)
+            .unwrap()
+            .layout_rect_global;
+        assert_eq!(
+            state
+                .managed_root_surfaces
+                .get(&surface)
+                .unwrap()
+                .geometry_animation
+                .visual_rect(),
+            Some(initial)
+        );
+
+        assert!(state.set_root_surface_floating(surface, true));
+        {
+            let mut wl_surface = surface.try_grab(&mut state).unwrap();
+            wl_surface.set_root_position(initial.x + 80, initial.y + 40);
+        }
+        state.mark_root_geometry_dirty(surface);
+        state.sync_window_geometry_goal(
+            surface,
+            crate::visual_animation::WindowGeometryMotion::Layout,
+        );
+        let goal = state
+            .committed_root_geometry(surface)
+            .unwrap()
+            .layout_rect_global;
+        assert_ne!(goal, initial);
+
+        state.advance_visual_animations(now);
+        let started = state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .geometry_animation;
+        assert_eq!(started.goal_rect(), Some(goal));
+        assert_eq!(started.visual_rect(), Some(initial));
+
+        state.advance_visual_animations(now + std::time::Duration::from_millis(100));
+        let mid = state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .geometry_animation
+            .visual_rect()
+            .unwrap();
+        assert_ne!(mid, goal);
+        assert_ne!(mid, initial);
+        assert_eq!(
+            state
+                .committed_root_geometry(surface)
+                .unwrap()
+                .layout_rect_global,
+            goal
+        );
+        if initial.x != goal.x {
+            assert!(mid.x > initial.x.min(goal.x) && mid.x < initial.x.max(goal.x));
+        }
+        if initial.y != goal.y {
+            assert!(mid.y > initial.y.min(goal.y) && mid.y < initial.y.max(goal.y));
+        }
     }
 
     #[test]

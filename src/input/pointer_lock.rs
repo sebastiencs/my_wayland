@@ -368,7 +368,10 @@ mod tests {
         },
         state::{ManagedRootSurfaceState, ManagedWindowMode, ObjectId, State, WorkspaceId},
         test_support::{state_for_tests, test_client_and_dispatcher},
-        visual_animation::{FocusVisualAnimation, WindowLifecycleAnimation, WindowVisualBase},
+        visual_animation::{
+            FocusVisualAnimation, WindowGeometryAnimation, WindowLifecycleAnimation,
+            WindowVisualBase,
+        },
         wayland_objects::{
             pointer_constraint::{ConstraintLifetime, ConstraintStatus, SurfacePointerConstraint},
             wl_pointer::WlPointer,
@@ -510,6 +513,7 @@ mod tests {
                     border_alpha: 0,
                 }),
                 lifecycle_animation: WindowLifecycleAnimation::idle(),
+                geometry_animation: WindowGeometryAnimation::unarmed(),
             },
         );
         maybe_activate_pointer_lock(&mut setup.state, &mut setup.dispatcher);
