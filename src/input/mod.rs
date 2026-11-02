@@ -17,7 +17,7 @@ pub(crate) use {
     grab::{
         abort_pointer_interactive_grab, apply_interaction_intent, apply_pointer_interactive_grab,
         finish_pointer_interactive_grab, recover_pointer_after_interactive_grab_loss,
-        resize_cursor_icon_names, tiled_resize_active_root_surfaces,
+        resize_cursor_icon_names, tiled_drag_tracks_surface, tiled_resize_active_root_surfaces,
     },
     interaction::{
         begin_decoration_pointer_action, begin_pointer_binding, decoration_hover_cursor_icon_names,

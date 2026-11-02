@@ -2534,6 +2534,19 @@ impl State {
         true
     }
 
+    /// Returns a drag preview to tiled mode without storing the preview geometry.
+    pub fn retile_root_surface_after_drag(&mut self, surface: Resolved<WlSurfaceId>) -> bool {
+        let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
+            return false;
+        };
+        let workspace_id = managed.workspace_id;
+        managed.mode = ManagedWindowMode::Tiled;
+        managed.restore_floating_state_on_next_configure = false;
+        tiling::mark_workspace_dirty(self, workspace_id);
+        self.relayout_dirty_workspaces();
+        true
+    }
+
     pub fn set_root_surface_fullscreen(
         &mut self,
         surface: Resolved<WlSurfaceId>,

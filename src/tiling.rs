@@ -311,11 +311,52 @@ impl WorkspaceLayout {
         *self = extracted.previous;
     }
 
+    /// Clones the layout when `surface_object_id` is one of several tiled windows.
+    ///
+    /// The window stays in the tree. A sole tiled window has nothing to restore.
+    pub fn capture_tiled_drag_origin(
+        &self,
+        surface_object_id: Resolved<WlSurfaceId>,
+    ) -> Option<ExtractedTiledLeaf> {
+        if !self.is_tiled_surface(surface_object_id) || self.tiled_scene_order().len() <= 1 {
+            return None;
+        }
+        Some(ExtractedTiledLeaf { surface_object_id, previous: self.clone() })
+    }
+
+    /// Splits the tiled leaf under the pointer and inserts `surface_object_id` beside it.
+    ///
+    /// The dragged window must already be absent from the tree. A point inside a tiled
+    /// rect selects that leaf. Empty space selects the nearest remaining tiled rect.
+    /// Floating windows are not destinations.
+    pub fn place_dragged_tiled_leaf(
+        &mut self,
+        surface_object_id: Resolved<WlSurfaceId>,
+        pointer_x: f64,
+        pointer_y: f64,
+        precise_mouse_move: bool,
+        split_ratio: f32,
+    ) -> bool {
+        let Some(destination) = self.tiled_leaf_at_point(pointer_x, pointer_y) else {
+            return false;
+        };
+        let Some(rect) = self.tiled_rect(destination) else {
+            return false;
+        };
+        let (axis, dragged_is_first) =
+            tiled_drop_side(rect, pointer_x, pointer_y, precise_mouse_move);
+        self.split_leaf_for_drag(
+            destination,
+            surface_object_id,
+            axis,
+            dragged_is_first,
+            split_ratio,
+        )
+    }
+
     /// Splits the tiled leaf under `pointer` and inserts the extracted window beside it.
     ///
-    /// A point inside a tiled rect selects that leaf. Empty space selects the nearest
-    /// remaining tiled rect. Floating windows are not destinations. On failure the
-    /// extracted window is returned so the caller can restore it.
+    /// On failure the extracted window is returned so the caller can restore it.
     pub fn drop_extracted_tiled_leaf(
         &mut self,
         extracted: ExtractedTiledLeaf,
@@ -324,19 +365,11 @@ impl WorkspaceLayout {
         precise_mouse_move: bool,
         split_ratio: f32,
     ) -> Result<(), ExtractedTiledLeaf> {
-        let Some(destination) = self.tiled_leaf_at_point(pointer_x, pointer_y) else {
-            return Err(extracted);
-        };
-        let Some(rect) = self.tiled_rect(destination) else {
-            return Err(extracted);
-        };
-        let (axis, dragged_is_first) =
-            tiled_drop_side(rect, pointer_x, pointer_y, precise_mouse_move);
-        if self.split_leaf_for_drag(
-            destination,
+        if self.place_dragged_tiled_leaf(
             extracted.surface_object_id,
-            axis,
-            dragged_is_first,
+            pointer_x,
+            pointer_y,
+            precise_mouse_move,
             split_ratio,
         ) {
             Ok(())

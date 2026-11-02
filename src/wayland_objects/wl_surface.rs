@@ -75,6 +75,7 @@ enum PostWlSurface {
     FocusNewToplevel { root_surface: Resolved<WlSurfaceId> },
     ClearFocusAfterDestroy { closed_window: Option<crate::input::focus::ClosedWindowFocus> },
     FocusSuccessorAfterClose(crate::input::focus::ClosedWindowFocus),
+    CancelTiledDrag,
 }
 
 impl PostAction for PostWlSurface {
@@ -103,6 +104,9 @@ impl PostAction for PostWlSurface {
             }
             PostWlSurface::FocusSuccessorAfterClose(close) => {
                 crate::input::focus::refocus_after_focused_window_unmap(state, dispatcher, close);
+            }
+            PostWlSurface::CancelTiledDrag => {
+                crate::input::abort_pointer_interactive_grab(state, dispatcher, 0);
             }
         }
     }
@@ -2221,6 +2225,9 @@ impl WlSurface {
                     crate::input::focus::focused_window_close(state, resolved_surface)
                 {
                     dispatcher.dispatch_post_action(PostWlSurface::FocusSuccessorAfterClose(close));
+                }
+                if crate::input::tiled_drag_tracks_surface(state, resolved_surface) {
+                    dispatcher.dispatch_post_action(PostWlSurface::CancelTiledDrag);
                 }
             }
         }

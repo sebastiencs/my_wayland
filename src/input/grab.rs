@@ -5,10 +5,12 @@ use crate::{
     cursor::CursorSourceRef,
     drm::{request_active_output, request_outputs_for_points, request_outputs_for_rects},
     protocol_generated::{xdg_toplevel::ResizeEdge, WlSurfaceId, XdgToplevelId},
+    region::RectI,
     root_geometry::{CommittedRootGeometry, WindowTargetGeometry},
     runner::Dispatcher,
     seat::{dispatch_client_action, dispatch_client_event, refresh_pointer_focus, SeatClientEvent},
     state::State,
+    tiling::ExtractedTiledLeaf,
     wayland_objects::xdg_surface::xdg_toplevel::InteractiveSizeConstraints,
 };
 
@@ -114,17 +116,18 @@ pub(crate) fn apply_pointer_interactive_grab(
         ActiveGrabState::MoveTiled {
             root_surface,
             picked_up: true,
-            grab_pointer,
-            grab_geometry,
+            preview_size,
+            frame_from_root,
+            source_output_bounds,
             ..
         } => {
-            move_grabbed_root(
-                state,
-                dispatcher,
-                root_surface,
-                grab_pointer,
-                grab_geometry.root_pos,
+            let root_pos = preview_root_for_pointer(
+                state.seat.pointer_pos,
+                preview_size,
+                frame_from_root,
+                source_output_bounds,
             );
+            place_grabbed_root(state, dispatcher, root_surface, root_pos);
         }
         ActiveGrabState::Resize {
             root_surface,
@@ -228,27 +231,7 @@ pub(crate) fn finish_pointer_interactive_grab(
     dispatcher: &mut Dispatcher,
     time: u32,
 ) {
-    let Some(grab) = state.seat.pointer_interactive_grab else {
-        return;
-    };
-    let was_tiled_resize = matches!(grab, ActiveGrabState::ResizeTiled { .. });
-    if let ActiveGrabState::Resize { root_surface, xdg_toplevel, last_size, .. } = grab {
-        dispatch_client_action(
-            dispatcher,
-            root_surface.client_id(),
-            ClientAction::InteractiveResizeConfigure {
-                xdg_toplevel,
-                width: last_size.0,
-                height: last_size.1,
-                resizing: false,
-            },
-        );
-    }
-    state.seat.clear_pointer_interactive_grab();
-    if was_tiled_resize {
-        dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
-    }
-    end_compositor_pointer_grab(state, dispatcher, time);
+    let _ = settle_pointer_interactive_grab(state, dispatcher, time, false);
 }
 
 pub(crate) fn abort_pointer_interactive_grab(
@@ -256,17 +239,112 @@ pub(crate) fn abort_pointer_interactive_grab(
     dispatcher: &mut Dispatcher,
     time: u32,
 ) -> bool {
-    let was_tiled_resize =
-        matches!(state.seat.pointer_interactive_grab, Some(ActiveGrabState::ResizeTiled { .. }));
-    if state.seat.pointer_interactive_grab.is_none() {
+    settle_pointer_interactive_grab(state, dispatcher, time, true)
+}
+
+fn settle_pointer_interactive_grab(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    time: u32,
+    cancel: bool,
+) -> bool {
+    let Some(grab) = state.seat.pointer_interactive_grab else {
         return false;
+    };
+    if !cancel {
+        if let ActiveGrabState::Resize { root_surface, xdg_toplevel, last_size, .. } = grab {
+            dispatch_client_action(
+                dispatcher,
+                root_surface.client_id(),
+                ClientAction::InteractiveResizeConfigure {
+                    xdg_toplevel,
+                    width: last_size.0,
+                    height: last_size.1,
+                    resizing: false,
+                },
+            );
+        }
     }
+    let origin = state.seat.tiled_drag_origin.take();
+    let was_tiled_resize = matches!(grab, ActiveGrabState::ResizeTiled { .. });
     state.seat.clear_pointer_interactive_grab();
+    if let ActiveGrabState::MoveTiled { root_surface, picked_up, .. } = grab {
+        settle_tiled_drag(state, dispatcher, root_surface, picked_up, origin, cancel);
+    }
     if was_tiled_resize {
         dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
     }
     end_compositor_pointer_grab(state, dispatcher, time);
     true
+}
+
+fn settle_tiled_drag(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    root_surface: Resolved<WlSurfaceId>,
+    picked_up: bool,
+    origin: Option<ExtractedTiledLeaf>,
+    cancel: bool,
+) {
+    if !picked_up {
+        return;
+    }
+    let mapped = root_surface
+        .try_ref(state)
+        .is_some_and(|surface| surface.has_committed_buffer());
+    if mapped && !cancel {
+        let placed = place_dragged_window(state, root_surface);
+        if !placed {
+            restore_tiled_drag_origin(state, root_surface, origin);
+        }
+    } else if mapped {
+        restore_tiled_drag_origin(state, root_surface, origin);
+    }
+    if state.retile_root_surface_after_drag(root_surface) {
+        dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
+    }
+}
+
+fn place_dragged_window(state: &mut State, surface: Resolved<WlSurfaceId>) -> bool {
+    let (pointer_x, pointer_y) = state.seat.pointer_pos;
+    let precise_mouse_move = state.config.tiling.drag.precise_mouse_move;
+    let split_ratio = state.config.tiling.drag.split_ratio.get();
+    let Some(workspace_id) = state.root_surface_workspace(surface) else {
+        return false;
+    };
+    let Some(workspace) = state.workspaces.try_get_mut(workspace_id) else {
+        return false;
+    };
+    workspace.layout.place_dragged_tiled_leaf(
+        surface,
+        pointer_x,
+        pointer_y,
+        precise_mouse_move,
+        split_ratio,
+    )
+}
+
+fn restore_tiled_drag_origin(
+    state: &mut State,
+    surface: Resolved<WlSurfaceId>,
+    origin: Option<ExtractedTiledLeaf>,
+) {
+    let Some(origin) = origin else {
+        return;
+    };
+    let Some(workspace_id) = state.root_surface_workspace(surface) else {
+        return;
+    };
+    if let Some(workspace) = state.workspaces.try_get_mut(workspace_id) {
+        workspace.layout.restore_extracted_tiled_leaf(origin);
+    }
+}
+
+pub(crate) fn tiled_drag_tracks_surface(state: &State, surface: Resolved<WlSurfaceId>) -> bool {
+    matches!(
+        state.seat.pointer_interactive_grab,
+        Some(ActiveGrabState::MoveTiled { root_surface, .. }) if root_surface == surface
+    )
 }
 
 pub(crate) fn tiled_resize_active_root_surfaces(state: &State) -> BTreeSet<Resolved<WlSurfaceId>> {
@@ -393,6 +471,9 @@ fn start_tiled_drag(
         picked_up: false,
         grab_pointer: pointer,
         grab_geometry: initial_geometry,
+        preview_size: (0, 0),
+        frame_from_root: (0, 0),
+        source_output_bounds: RectI { x: 0, y: 0, width: 0, height: 0 },
     });
     if threshold <= 0 {
         pickup_tiled_drag(
@@ -461,16 +542,41 @@ fn pickup_tiled_drag(
         };
         built = rebuilt;
     }
+    let frame_from_root = (frame.x - built.root_pos.0, frame.y - built.root_pos.1);
+    let preview_size = (frame.width, frame.height);
+    let source_output_bounds = source_output_bounds(state, root_surface);
+    let root_pos =
+        preview_root_for_pointer(pointer, preview_size, frame_from_root, source_output_bounds);
+    state.seat.tiled_drag_origin = state
+        .root_surface_workspace(root_surface)
+        .and_then(|workspace_id| state.workspaces.try_get(workspace_id))
+        .and_then(|workspace| workspace.layout.capture_tiled_drag_origin(root_surface));
     if !state.float_tiled_root_surface_for_drag(root_surface) {
         abort_pointer_interactive_grab(state, dispatcher, 0);
         return;
     }
+    let mut grab_geometry = grab_geometry;
+    grab_geometry.root_pos = root_pos;
+    state.seat.pointer_interactive_grab = Some(ActiveGrabState::MoveTiled {
+        root_surface,
+        xdg_toplevel,
+        size_constraints,
+        decoration_mode,
+        origin_pointer: pointer,
+        threshold: state.config.tiling.drag.threshold,
+        picked_up: true,
+        grab_pointer: pointer,
+        grab_geometry,
+        preview_size,
+        frame_from_root,
+        source_output_bounds,
+    });
     let old_bounds = interactive_damage_rect(state, root_surface);
     let Some(mut surface) = root_surface.try_grab(state) else {
         abort_pointer_interactive_grab(state, dispatcher, 0);
         return;
     };
-    surface.set_root_position(built.root_pos.0, built.root_pos.1);
+    surface.set_root_position(root_pos.0, root_pos.1);
     drop(surface);
     state.mark_root_geometry_dirty(root_surface);
     dispatch_client_action(
@@ -494,19 +600,49 @@ fn pickup_tiled_drag(
     } else {
         request_active_output(state, dispatcher);
     }
-    let mut grab_geometry = grab_geometry;
-    grab_geometry.root_pos = built.root_pos;
-    state.seat.pointer_interactive_grab = Some(ActiveGrabState::MoveTiled {
-        root_surface,
-        xdg_toplevel,
-        size_constraints,
-        decoration_mode,
-        origin_pointer: pointer,
-        threshold: state.config.tiling.drag.threshold,
-        picked_up: true,
-        grab_pointer: pointer,
-        grab_geometry,
-    });
+}
+
+fn preview_root_for_pointer(
+    pointer: (f64, f64),
+    preview_size: (i32, i32),
+    frame_from_root: (i32, i32),
+    bounds: RectI,
+) -> (i32, i32) {
+    let frame_x = clamp_span(
+        (pointer.0 - preview_size.0 as f64 / 2.0).round() as i32,
+        preview_size.0,
+        bounds.x,
+        bounds.width,
+    );
+    let frame_y = clamp_span(
+        (pointer.1 - preview_size.1 as f64 / 2.0).round() as i32,
+        preview_size.1,
+        bounds.y,
+        bounds.height,
+    );
+    (frame_x.saturating_sub(frame_from_root.0), frame_y.saturating_sub(frame_from_root.1))
+}
+
+fn clamp_span(origin: i32, length: i32, bounds_origin: i32, bounds_length: i32) -> i32 {
+    let length = length.max(0);
+    let bounds_length = bounds_length.max(0);
+    if length >= bounds_length {
+        return bounds_origin;
+    }
+    origin.clamp(bounds_origin, bounds_origin + bounds_length - length)
+}
+
+fn source_output_bounds(state: &State, surface: Resolved<WlSurfaceId>) -> RectI {
+    state
+        .root_surface_workspace(surface)
+        .and_then(|workspace_id| state.workspace_output_id(workspace_id))
+        .and_then(|output_id| state.output_bounds(output_id))
+        .unwrap_or(RectI {
+            x: i32::MIN / 4,
+            y: i32::MIN / 4,
+            width: i32::MAX / 2,
+            height: i32::MAX / 2,
+        })
 }
 
 fn scaled_tiled_preview_frame(
@@ -555,12 +691,26 @@ fn move_grabbed_root(
 ) {
     let dx = (state.seat.pointer_pos.0 - initial_pointer_pos.0).round() as i32;
     let dy = (state.seat.pointer_pos.1 - initial_pointer_pos.1).round() as i32;
+    place_grabbed_root(
+        state,
+        dispatcher,
+        root_surface,
+        (initial_root_pos.0 + dx, initial_root_pos.1 + dy),
+    );
+}
+
+fn place_grabbed_root(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    root_surface: Resolved<WlSurfaceId>,
+    root_pos: (i32, i32),
+) {
     let old_bounds = interactive_damage_rect(state, root_surface);
     let Some(mut surface) = root_surface.try_grab(state) else {
         abort_pointer_interactive_grab(state, dispatcher, 0);
         return;
     };
-    surface.set_root_position(initial_root_pos.0 + dx, initial_root_pos.1 + dy);
+    surface.set_root_position(root_pos.0, root_pos.1);
     drop(surface);
     state.mark_root_geometry_dirty(root_surface);
     let new_bounds = interactive_damage_rect(state, root_surface);
@@ -774,5 +924,24 @@ mod tests {
         assert!(!super::tiled_drag_threshold_reached((0.0, 0.0), (3.0, 4.0), 5));
         assert!(super::tiled_drag_threshold_reached((0.0, 0.0), (3.0, 4.0), 4));
         assert!(super::tiled_drag_threshold_reached((10.0, 10.0), (10.0, 21.0), 10));
+    }
+
+    #[test]
+    fn tiled_drag_preview_frame_stays_inside_the_source_output() {
+        let bounds = RectI { x: 0, y: 10, width: 100, height: 80 };
+        let size = (40, 20);
+        assert_eq!(
+            super::preview_root_for_pointer((1000.0, 1000.0), size, (0, 0), bounds),
+            (60, 70)
+        );
+        assert_eq!(super::preview_root_for_pointer((0.0, 0.0), size, (0, 0), bounds), (0, 10));
+        assert_eq!(
+            super::preview_root_for_pointer((1000.0, 1000.0), size, (2, 3), bounds),
+            (58, 67)
+        );
+        assert_eq!(
+            super::preview_root_for_pointer((50.0, 50.0), (200, 200), (0, 0), bounds),
+            (bounds.x, bounds.y)
+        );
     }
 }
