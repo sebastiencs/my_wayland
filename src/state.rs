@@ -2499,6 +2499,41 @@ impl State {
         changed
     }
 
+    /// Removes a tiled window from the split tree without applying its remembered
+    /// floating geometry. The drag preview supplies the temporary size and position.
+    pub fn float_tiled_root_surface_for_drag(&mut self, surface: Resolved<WlSurfaceId>) -> bool {
+        if !self.is_tiled_root_surface(surface) {
+            return false;
+        }
+        let Some(workspace_id) = self
+            .managed_root_surfaces
+            .get(&surface)
+            .map(|managed| managed.workspace_id)
+            .or_else(|| self.root_surface_workspace(surface))
+        else {
+            return false;
+        };
+        let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
+            return false;
+        };
+        managed.mode = ManagedWindowMode::Floating;
+        managed.fullscreen = false;
+        managed.restore_floating_state_on_next_configure = false;
+        if let Some(workspace) = self.workspaces.try_get_mut(workspace_id) {
+            if workspace
+                .layout
+                .fullscreen
+                .as_ref()
+                .is_some_and(|fullscreen| fullscreen.surface_object_id == surface)
+            {
+                workspace.layout.set_fullscreen(None);
+            }
+        }
+        tiling::mark_workspace_dirty(self, workspace_id);
+        self.relayout_dirty_workspaces();
+        true
+    }
+
     pub fn set_root_surface_fullscreen(
         &mut self,
         surface: Resolved<WlSurfaceId>,

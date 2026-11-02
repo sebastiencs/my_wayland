@@ -103,14 +103,13 @@ pub(crate) struct WindowHit {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct InteractionStartOptions {
     pub prepare_window: bool,
-    pub promote_tiled_on_move: bool,
 }
 
 pub(crate) const POINTER_INTERACTION_START_OPTIONS: InteractionStartOptions =
-    InteractionStartOptions { prepare_window: true, promote_tiled_on_move: true };
+    InteractionStartOptions { prepare_window: true };
 
 pub(crate) const PROTOCOL_INTERACTION_START_OPTIONS: InteractionStartOptions =
-    InteractionStartOptions { prepare_window: false, promote_tiled_on_move: false };
+    InteractionStartOptions { prepare_window: false };
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ActiveGrab {
@@ -133,6 +132,19 @@ pub(crate) enum ActiveGrab {
         edges: u32,
         initial_pointer_pos: (f64, f64),
         resize_state: TiledResizeState,
+    },
+    /// Compositor move of a tiled window. The window stays tiled until the pointer
+    /// travels past `threshold`, then it becomes a temporary floating preview.
+    MoveTiled {
+        root_surface: Resolved<WlSurfaceId>,
+        xdg_toplevel: Resolved<XdgToplevelId>,
+        size_constraints: InteractiveSizeConstraints,
+        decoration_mode: ToplevelDecorationMode,
+        origin_pointer: (f64, f64),
+        threshold: i32,
+        picked_up: bool,
+        grab_pointer: (f64, f64),
+        grab_geometry: WindowTargetGeometry,
     },
 }
 
