@@ -47,6 +47,7 @@ pub enum OutputScaleSetting {
 pub struct RuntimeConfig {
     path: PathBuf,
     pub general: GeneralConfig,
+    pub tiling: TilingConfig,
     pub decorations: DecorationsConfig,
     pub effects: EffectsConfig,
     pub animations: AnimationsConfig,
@@ -63,6 +64,58 @@ pub struct GeneralConfig {
     pub inner_gap: i32,
     pub decoration_insets: DecorationInsets,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TilingConfig {
+    pub drag: TilingDragConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TilingDragConfig {
+    /// Logical pixels the pointer must move before a tiled window is picked up.
+    /// Zero picks the window up on the first motion, matching Hyprland's default.
+    pub threshold: i32,
+    /// A wide or tall destination tile chooses the split axis when this is false.
+    /// The pointer quadrant chooses left, right, top, or bottom when this is true.
+    pub precise_mouse_move: bool,
+    /// Hyprland dwindle ratio. `1.0` is an even split, clamped to `0.1..=1.9`.
+    pub split_ratio: SplitRatio,
+}
+
+#[derive(Clone, Copy, Debug, PartialOrd)]
+pub struct SplitRatio(f32);
+
+impl SplitRatio {
+    pub const DEFAULT: Self = Self(1.0);
+    pub const MIN: f32 = 0.1;
+    pub const MAX: f32 = 1.9;
+
+    pub fn sanitize(raw: f32) -> Self {
+        if raw.is_finite() {
+            Self(raw.clamp(Self::MIN, Self::MAX))
+        } else {
+            Self::DEFAULT
+        }
+    }
+
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for SplitRatio {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl PartialEq for SplitRatio {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for SplitRatio {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -348,12 +401,27 @@ pub enum ConfigWatcherAction {
 #[serde(default, deny_unknown_fields)]
 struct ConfigFile {
     general: GeneralConfigFile,
+    tiling: TilingConfigFile,
     decorations: DecorationsConfigFile,
     effects: EffectsConfigFile,
     animations: AnimationsConfigFile,
     bindings: BTreeMap<String, ActionFile>,
     mouse_bindings: BTreeMap<String, MouseBindingAction>,
     output: OutputConfigFile,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct TilingConfigFile {
+    drag: TilingDragConfigFile,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct TilingDragConfigFile {
+    threshold: i32,
+    precise_mouse_move: bool,
+    split_ratio: f32,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -611,6 +679,13 @@ impl RuntimeConfig {
                 inner_gap: sanitize_non_negative_i32(parsed.general.inner_gap),
                 decoration_insets: sanitize_decoration_insets(parsed.general.decoration_insets),
             },
+            tiling: TilingConfig {
+                drag: TilingDragConfig {
+                    threshold: sanitize_non_negative_i32(parsed.tiling.drag.threshold),
+                    precise_mouse_move: parsed.tiling.drag.precise_mouse_move,
+                    split_ratio: SplitRatio::sanitize(parsed.tiling.drag.split_ratio),
+                },
+            },
             decorations: DecorationsConfig {
                 xdg: XdgDecorationConfig {
                     no_protocol: parsed.decorations.xdg.no_protocol,
@@ -640,6 +715,7 @@ impl RuntimeConfig {
                 inner_gap: 0,
                 decoration_insets: DecorationInsets::default(),
             },
+            tiling: TilingConfig::default(),
             decorations: DecorationsConfig::default(),
             effects: EffectsConfig::default(),
             animations: AnimationsConfig::default(),
@@ -691,6 +767,33 @@ impl RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self::defaults_with_path(default_config_path())
+    }
+}
+
+impl Default for TilingConfig {
+    fn default() -> Self {
+        Self { drag: TilingDragConfig::default() }
+    }
+}
+
+impl Default for TilingDragConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 0,
+            precise_mouse_move: false,
+            split_ratio: SplitRatio::DEFAULT,
+        }
+    }
+}
+
+impl Default for TilingDragConfigFile {
+    fn default() -> Self {
+        let defaults = TilingDragConfig::default();
+        Self {
+            threshold: defaults.threshold,
+            precise_mouse_move: defaults.precise_mouse_move,
+            split_ratio: defaults.split_ratio.get(),
+        }
     }
 }
 
@@ -2480,6 +2583,53 @@ mod tests {
                 ("Ctrl+mouse:right", MouseBindingAction::ResizeWindow),
             ]
         );
+        assert_eq!(config.tiling.drag, TilingDragConfig::default());
+    }
+
+    #[test]
+    fn omitted_tiling_drag_uses_hyprland_defaults() {
+        let xkb = Xkb::new();
+        let config =
+            RuntimeConfig::parse_for_test("[general]\ncursor_theme = \"default\"\n", &xkb).unwrap();
+        assert_eq!(config.tiling.drag, TilingDragConfig::default());
+        assert_eq!(config.tiling.drag.threshold, 0);
+        assert!(!config.tiling.drag.precise_mouse_move);
+        assert_eq!(config.tiling.drag.split_ratio.get(), 1.0);
+    }
+
+    #[test]
+    fn tiling_drag_settings_reload_and_out_of_range_values_clamp() {
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::parse_for_test(
+            r#"
+            [tiling.drag]
+            threshold = 12
+            precise_mouse_move = true
+            split_ratio = 1.4
+            "#,
+            &xkb,
+        )
+        .unwrap();
+        assert_eq!(config.tiling.drag.threshold, 12);
+        assert!(config.tiling.drag.precise_mouse_move);
+        assert_eq!(config.tiling.drag.split_ratio.get(), 1.4);
+
+        let clamped = RuntimeConfig::parse_for_test(
+            r#"
+            [tiling.drag]
+            threshold = -4
+            split_ratio = 4.0
+            "#,
+            &xkb,
+        )
+        .unwrap();
+        assert_eq!(clamped.tiling.drag.threshold, 0);
+        assert!(!clamped.tiling.drag.precise_mouse_move);
+        assert_eq!(clamped.tiling.drag.split_ratio.get(), SplitRatio::MAX);
+
+        let low_ratio =
+            RuntimeConfig::parse_for_test("[tiling.drag]\nsplit_ratio = 0.0\n", &xkb).unwrap();
+        assert_eq!(low_ratio.tiling.drag.split_ratio.get(), SplitRatio::MIN);
     }
 
     #[test]

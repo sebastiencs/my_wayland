@@ -19,6 +19,15 @@ right = 5
 bottom = 5
 left = 5
 
+# Mouse move of a tiled window.
+# threshold is logical pixels before the window is picked up; 0 picks it up immediately.
+# precise_mouse_move false splits a wide tile left/right and a tall tile top/bottom.
+# true uses the pointer quadrant. split_ratio 1.0 is an even split, clamped to 0.1..=1.9.
+[tiling.drag]
+threshold = 0
+precise_mouse_move = false
+split_ratio = 1.0
+
 # Root-window border styling used by the pass-based effects pipeline.
 [decorations.border]
 thickness = 0
