@@ -4367,6 +4367,19 @@ mod xdg_seat_tests {
         (stayed, dragged)
     }
 
+    fn set_server_side_decoration(state: &mut State, object_id: ObjectId) {
+        let toplevel_object_id = state
+            .objects
+            .try_ref_object::<WlSurface>(object_id)
+            .unwrap()
+            .xdg_surface()
+            .and_then(|xdg_surface| state.xdg_toplevel(xdg_surface))
+            .unwrap()
+            .object_id();
+        let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_object_id);
+        toplevel.test_set_decoration_mode(ToplevelDecorationMode::ServerSide);
+    }
+
     fn press_tiled_window(state: &mut State, dispatcher: &mut Dispatcher, object_id: ObjectId) {
         let tile = layout_rect(state, object_id);
         state.seat.pointer_pos = (tile.x as f64 + 10.0, tile.y as f64 + 10.0);
@@ -4724,6 +4737,218 @@ mod xdg_seat_tests {
     }
 
     #[test]
+    fn tiled_drag_titlebar_press_drops_back_into_the_source_split() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (stayed, dragged) = map_drag_pair(&mut state, &mut client, &mut client_dispatcher);
+        enable_move_window_binding(&mut state);
+        state.config.general.decoration_insets.top = 12;
+        state.config.general.decoration_insets.left = 4;
+        state.config.general.decoration_insets.right = 4;
+        state.config.general.decoration_insets.bottom = 4;
+        set_server_side_decoration(&mut state, dragged);
+        let workspace_id = state.root_surface_workspace(root(&state, dragged)).unwrap();
+        crate::tiling::mark_workspace_dirty(&mut state, workspace_id);
+        state.relayout_dirty_workspaces();
+        ensure_test_root_geometry(&mut state, stayed);
+        ensure_test_root_geometry(&mut state, dragged);
+        let frame = layout_rect(&state, dragged);
+        state.seat.pointer_pos = (frame.x as f64 + 10.0, frame.y as f64 + 4.0);
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 210);
+
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::MoveTiled { picked_up: true, .. })
+        ));
+        let stayed_tile = layout_rect(&state, stayed);
+        move_pointer_to(
+            &mut state,
+            &mut dispatcher,
+            stayed_tile.x as f64 + stayed_tile.width as f64 - 20.0,
+            stayed_tile.y as f64 + stayed_tile.height as f64 / 2.0,
+            220,
+        );
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 0, 230);
+
+        assert!(state.seat.pointer_interactive_grab.is_none());
+        assert!(state.is_tiled_root_surface(root(&state, dragged)));
+        let (axis, children) = tiled_split(&state, root(&state, dragged));
+        assert_eq!(axis, crate::tiling::SplitAxis::Horizontal);
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[1].0, root(&state, dragged));
+    }
+
+    #[test]
+    fn tiled_drag_release_wraps_a_nested_destination() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let first = map_toplevel_on_active_output(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(305),
+            XdgSurfaceId::from(315),
+            XdgToplevelId::from(325),
+            935,
+            0,
+            0,
+            100,
+            80,
+        );
+        let second = map_toplevel_on_active_output(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(306),
+            XdgSurfaceId::from(316),
+            XdgToplevelId::from(326),
+            936,
+            0,
+            0,
+            100,
+            80,
+        );
+        let nested = map_toplevel_on_active_output(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(307),
+            XdgSurfaceId::from(317),
+            XdgToplevelId::from(327),
+            937,
+            0,
+            0,
+            100,
+            80,
+        );
+        enable_move_window_binding(&mut state);
+        let (before_axis, before_children) = tiled_split(&state, root(&state, nested));
+        assert_eq!(before_axis, crate::tiling::SplitAxis::Vertical);
+        assert_eq!(before_children.len(), 2);
+        press_tiled_window(&mut state, &mut dispatcher, nested);
+        let destination = layout_rect(&state, first);
+        move_pointer_to(
+            &mut state,
+            &mut dispatcher,
+            destination.x as f64 + destination.width as f64 / 2.0,
+            destination.y as f64 + destination.height as f64 - 10.0,
+            240,
+        );
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 0, 250);
+
+        assert!(state.is_tiled_root_surface(root(&state, first)));
+        assert!(state.is_tiled_root_surface(root(&state, second)));
+        let (axis, children) = tiled_split(&state, root(&state, nested));
+        assert_eq!(axis, crate::tiling::SplitAxis::Vertical);
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].0, root(&state, first));
+        assert_eq!(children[1].0, root(&state, nested));
+    }
+
+    #[test]
+    fn tiled_drag_gaps_still_split_the_tile_under_the_pointer() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (stayed, dragged) = map_drag_pair(&mut state, &mut client, &mut client_dispatcher);
+        enable_move_window_binding(&mut state);
+        state.config.general.outer_gap = 20;
+        state.config.general.inner_gap = 12;
+        let workspace_id = state.root_surface_workspace(root(&state, stayed)).unwrap();
+        crate::tiling::mark_workspace_dirty(&mut state, workspace_id);
+        state.relayout_dirty_workspaces();
+        ensure_test_root_geometry(&mut state, stayed);
+        ensure_test_root_geometry(&mut state, dragged);
+        press_tiled_window(&mut state, &mut dispatcher, dragged);
+        let stayed_tile = layout_rect(&state, stayed);
+        move_pointer_to(
+            &mut state,
+            &mut dispatcher,
+            stayed_tile.x as f64 + stayed_tile.width as f64 - 20.0,
+            stayed_tile.y as f64 + stayed_tile.height as f64 / 2.0,
+            260,
+        );
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 0, 270);
+
+        assert!(state.is_tiled_root_surface(root(&state, dragged)));
+        let (axis, children) = tiled_split(&state, root(&state, dragged));
+        assert_eq!(axis, crate::tiling::SplitAxis::Horizontal);
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[1].0, root(&state, dragged));
+    }
+
+    #[test]
+    fn tiled_drag_release_on_another_output_stays_on_the_source_workspace() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (stayed, dragged) = map_drag_pair(&mut state, &mut client, &mut client_dispatcher);
+        enable_move_window_binding(&mut state);
+        let workspace_id = state.root_surface_workspace(root(&state, dragged)).unwrap();
+        let bounds = output_bounds_for_surface(&state, root(&state, dragged));
+        state.insert_output(test_output_with_crtc_name(
+            BackendOutputRef::new(DrmId::from(2usize)),
+            2,
+            bounds.x + bounds.width,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+        ));
+        press_tiled_window(&mut state, &mut dispatcher, dragged);
+        move_pointer_to(
+            &mut state,
+            &mut dispatcher,
+            (bounds.x + bounds.width + bounds.width / 2) as f64,
+            (bounds.y + bounds.height / 2) as f64,
+            280,
+        );
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 0, 290);
+
+        assert!(state.seat.pointer_interactive_grab.is_none());
+        assert_eq!(state.root_surface_workspace(root(&state, dragged)), Some(workspace_id));
+        assert!(state.is_tiled_root_surface(root(&state, dragged)));
+        assert!(state.is_tiled_root_surface(root(&state, stayed)));
+        let (_, children) = tiled_split(&state, root(&state, dragged));
+        assert_eq!(children.len(), 2);
+    }
+
+    #[test]
+    fn tiled_drag_preview_clamps_to_max_size() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        let (_stayed, dragged) = map_drag_pair(&mut state, &mut client, &mut client_dispatcher);
+        let dragged_toplevel = state
+            .objects
+            .try_ref_object::<WlSurface>(dragged)
+            .unwrap()
+            .xdg_surface()
+            .and_then(|xdg_surface| state.xdg_toplevel(xdg_surface))
+            .unwrap()
+            .object_id();
+        {
+            let mut toplevel = state.objects.grab_object::<XdgToplevel>(dragged_toplevel);
+            toplevel.test_set_interactive_size_constraints(None, Some((80, 60)));
+        }
+        enable_move_window_binding(&mut state);
+        press_tiled_window(&mut state, &mut dispatcher, dragged);
+
+        assert!(state.is_floating_root_surface(root(&state, dragged)));
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            client.client_id(),
+            |action| {
+                matches!(
+                    action,
+                    ClientAction::InteractiveResizeConfigure { width, height, .. }
+                        if *width == 80 && *height == 60
+                )
+            }
+        ));
+    }
+
+    #[test]
     fn tiled_drag_pickup_lets_the_other_tile_fill_the_old_slot_and_clamps_to_min_size() {
         let mut state = state_for_tests();
         let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
@@ -4833,7 +5058,9 @@ mod xdg_seat_tests {
             Some(super::PointerInteractiveGrab::Move { .. })
         ));
         handle_pointer_motion(&mut state, &mut dispatcher, 12.0, -4.0, 12.0, -4.0, 110, 110_000);
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 0, 120);
 
+        assert!(state.seat.pointer_interactive_grab.is_none());
         let surface = state
             .objects
             .try_ref_object::<WlSurface>(wl_surface_object_id)
@@ -4886,6 +5113,15 @@ mod xdg_seat_tests {
             Some(super::PointerInteractiveGrab::Move { .. })
         ));
         assert!(state.is_tiled_root_surface(root(&state, wl_surface_object_id)));
+        handle_pointer_motion(&mut state, &mut dispatcher, 15.0, 8.0, 15.0, 8.0, 130, 130_000);
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Move { .. })
+        ));
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 0, 140);
+        assert!(state.seat.pointer_interactive_grab.is_none());
+        assert!(state.is_tiled_root_surface(root(&state, wl_surface_object_id)));
+        assert!(!state.is_floating_root_surface(root(&state, wl_surface_object_id)));
     }
 
     #[test]
