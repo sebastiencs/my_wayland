@@ -1597,26 +1597,30 @@ pub mod xdg_toplevel {
                     let _seat = client.resolve_or_disconnect(seat, state, dispatcher)?;
                     let xdg_surface = self.xdg_surface.rref(state);
                     let surface = xdg_surface.wl_surface();
-                    if surface.try_ref(state).is_none() {
+                    let Some(surface_ref) = surface.try_ref(state) else {
                         return Ok(());
-                    }
+                    };
                     let root_surface = state.root_surface_for_surface(surface).unwrap_or(surface);
                     let Some(xdg_toplevel) = client.resolve(self.id, state) else {
                         return Ok(());
                     };
-                    // The move runs after this request returns. Pickup builds geometry
-                    // from the toplevel, which is still grabbed for the duration of `on`.
-                    dispatcher.dispatch_post_action(PostXdgToplevel::RequestMove {
-                        client_id: client.client_id(),
+                    if !crate::input::request_toplevel_move(
+                        state,
+                        dispatcher,
+                        client.client_id(),
                         surface,
                         serial,
                         root_surface,
                         xdg_toplevel,
-                        configure_decoration_mode: self.decoration_mode_for_configure(),
-                        size_constraints: self.interactive_size_constraints(),
-                        is_maximized: self.is_maximized(),
-                        is_fullscreen: state.root_surface_is_fullscreen(root_surface),
-                    });
+                        self.decoration_mode_for_configure(),
+                        self.is_maximized(),
+                        state.root_surface_is_fullscreen(root_surface),
+                    ) {
+                        log::debug!(
+                            "xdg_toplevel.move ignored due to invalid pointer grab serial {}",
+                            serial
+                        );
+                    }
                 }
                 Resize { seat, serial, edges } => {
                     if edges == proto_xdg_toplevel::ResizeEdge::None as u32 {
@@ -1761,17 +1765,6 @@ pub mod xdg_toplevel {
     }
 
     enum PostXdgToplevel {
-        RequestMove {
-            client_id: ClientId,
-            surface: Resolved<WlSurfaceId>,
-            serial: u32,
-            root_surface: Resolved<WlSurfaceId>,
-            xdg_toplevel: Resolved<XdgToplevelId>,
-            configure_decoration_mode: ToplevelDecorationMode,
-            size_constraints: InteractiveSizeConstraints,
-            is_maximized: bool,
-            is_fullscreen: bool,
-        },
         RequestResize {
             client_id: ClientId,
             surface: Resolved<WlSurfaceId>,
@@ -1794,36 +1787,6 @@ pub mod xdg_toplevel {
             dispatcher: &mut ClientDispatcher,
         ) {
             match *self {
-                PostXdgToplevel::RequestMove {
-                    client_id,
-                    surface,
-                    serial,
-                    root_surface,
-                    xdg_toplevel,
-                    configure_decoration_mode,
-                    size_constraints,
-                    is_maximized,
-                    is_fullscreen,
-                } => {
-                    if !crate::input::request_toplevel_move(
-                        state,
-                        dispatcher,
-                        client_id,
-                        surface,
-                        serial,
-                        root_surface,
-                        xdg_toplevel,
-                        configure_decoration_mode,
-                        size_constraints,
-                        is_maximized,
-                        is_fullscreen,
-                    ) {
-                        log::debug!(
-                            "xdg_toplevel.move ignored due to invalid pointer grab serial {}",
-                            serial
-                        );
-                    }
-                }
                 PostXdgToplevel::RequestResize {
                     client_id,
                     surface,

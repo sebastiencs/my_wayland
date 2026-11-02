@@ -1834,23 +1834,13 @@ impl State {
 
         let managed_state =
             root_surface.and_then(|surface| self.managed_root_surfaces.get(&surface));
-        let tiled_drag =
-            root_surface.is_some_and(|surface| self.seat.tiled_drag_root() == Some(surface));
         let selected_policy = if requested_mode.is_none() {
             policy.unset_mode
         } else if managed_state.is_some_and(|managed| managed.fullscreen)
             || root_surface.is_some_and(|surface| self.root_surface_is_fullscreen(surface))
         {
             policy.fullscreen
-        } else if tiled_drag
-            || managed_state.is_some_and(|managed| managed.mode == ManagedWindowMode::Tiled)
-        {
-            // The drag float is only the preview. Policy stays the tiled one so a
-            // client that asked for client-side decorations keeps the server frame
-            // it had in the tree. Hyprland leaves decoration alone while
-            // m_draggingTiled is set. GTK calculators commit a different
-            // window-geometry origin once they draw their own frame, and the drop
-            // then misses the tile.
+        } else if managed_state.is_some_and(|managed| managed.mode == ManagedWindowMode::Tiled) {
             policy.tiled
         } else if managed_state.is_some_and(|managed| managed.mode == ManagedWindowMode::Floating) {
             policy.floating

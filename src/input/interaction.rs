@@ -79,7 +79,6 @@ pub(crate) fn request_toplevel_move(
     root_surface: Resolved<WlSurfaceId>,
     xdg_toplevel: Resolved<XdgToplevelId>,
     configure_decoration_mode: crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode,
-    size_constraints: InteractiveSizeConstraints,
     is_maximized: bool,
     is_fullscreen: bool,
 ) -> bool {
@@ -97,7 +96,7 @@ pub(crate) fn request_toplevel_move(
         root_surface,
         WindowRoleSnapshot::XdgToplevel {
             xdg_toplevel,
-            size_constraints,
+            size_constraints: InteractiveSizeConstraints::default(),
             is_maximized,
             is_fullscreen,
             decoration_mode: configure_decoration_mode,
