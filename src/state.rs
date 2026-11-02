@@ -1968,6 +1968,24 @@ impl State {
         }
     }
 
+    fn geometry_sample_influence(
+        &self,
+        surface: Resolved<WlSurfaceId>,
+        layout_rect: RectI,
+    ) -> Option<RectI> {
+        let mut visual = self.root_surface_visual_state(surface)?;
+        let logical = self.committed_root_geometry(surface)?.layout_rect_global;
+        let border = self.config.decorations.border;
+        crate::render::place_visual_frame(
+            &mut visual,
+            logical,
+            layout_rect,
+            border.rounding.max(0),
+            border.rounding_power,
+        );
+        Some(visual.influence_bounds())
+    }
+
     pub fn root_surface_visual_damage_rect(&self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
         self.root_surface_visual_state(surface)
             .map(|visual| visual.influence_bounds())
@@ -2050,6 +2068,10 @@ impl State {
             }
             let goal = self.focus_visual_base(surface);
             let damage_rect = self.root_surface_visual_damage_rect(surface);
+            let before_visual = self
+                .managed_root_surfaces
+                .get(&surface)
+                .and_then(|managed| managed.geometry_animation.visual_rect());
             let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
                 continue;
             };
@@ -2075,9 +2097,19 @@ impl State {
                     damaged_rects.push(rect);
                 }
             }
+            let after_visual = managed.geometry_animation.visual_rect();
+            let geometry_active = managed.geometry_animation.is_active();
             has_active_animations |= managed.focus_animation.is_active()
                 || managed.lifecycle_animation.is_active()
-                || managed.geometry_animation.is_active();
+                || geometry_active;
+            drop(managed);
+            if before_visual != after_visual {
+                for sample in [before_visual, after_visual].into_iter().flatten() {
+                    if let Some(rect) = self.geometry_sample_influence(surface, sample) {
+                        damaged_rects.push(rect);
+                    }
+                }
+            }
         }
         let closing = self.config.animations.closing();
         let close_duration = closing.duration();

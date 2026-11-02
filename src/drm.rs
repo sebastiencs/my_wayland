@@ -6723,8 +6723,36 @@ fn render_composed_entry(
     {
         return;
     }
-    let visual_state = state.root_surface_visual_state(root_surface);
+    let logical_layout = state
+        .committed_root_geometry(root_surface)
+        .map(|geometry| geometry.layout_rect_global);
+    let visual_layout = state
+        .managed_root_surfaces
+        .get(&root_surface)
+        .and_then(|managed| managed.geometry_animation.visual_rect());
+    let geometry_scale = match (logical_layout, visual_layout) {
+        (Some(logical), Some(visual))
+            if logical != visual && logical.width > 0 && logical.height > 0 =>
+        {
+            Some((logical, visual))
+        }
+        _ => None,
+    };
+    let mut visual_state = state.root_surface_visual_state(root_surface);
+    if let Some((logical, visual)) = geometry_scale {
+        if let Some(visual_state) = visual_state.as_mut() {
+            let border = state.config.decorations.border;
+            crate::render::place_visual_frame(
+                visual_state,
+                logical,
+                visual,
+                border.rounding.max(0),
+                border.rounding_power,
+            );
+        }
+    }
     let allow_direct_scanout = entry.allow_direct_scanout
+        && geometry_scale.is_none()
         && motion.is_identity()
         && !workspace_transition_blocks_scanout(state, root_surface);
     let root_clip = visual_state.and_then(|visual| visual.clip);
@@ -6753,7 +6781,21 @@ fn render_composed_entry(
     push_scene_item_frame_elements(frame_elements, item_start..items.len());
     push_root_surface_effect_elements(frame_elements, visual_state, FramePhase::OverWindow);
     push_root_surface_effect_elements(frame_elements, visual_state, FramePhase::Overlay);
+    if let Some((logical, visual)) = geometry_scale {
+        scale_scene_items_into_visual_box(&mut items[item_start..], logical, visual);
+    }
     apply_workspace_motion(&mut items[item_start..], &mut frame_elements[effect_start..], motion);
+}
+
+fn scale_scene_items_into_visual_box(items: &mut [SceneItem], logical: RectI, visual: RectI) {
+    for item in items {
+        item.state.bounds = crate::render::map_layout_rect(logical, visual, item.state.bounds);
+        item.damage = DamageRegion::from_rect(item.state.bounds);
+        item.opaque = false;
+        item.opaque_region.clear();
+        item.direct_scanout = None;
+        item.sample_damage_padding = item.sample_damage_padding.max(1);
+    }
 }
 
 fn translate_recorded_frame_elements(

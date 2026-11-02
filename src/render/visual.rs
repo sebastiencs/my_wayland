@@ -106,6 +106,83 @@ pub fn shadow_geometry(clip: RootSurfaceClip, style: ShadowVisualStyle) -> Optio
     Some(ShadowGeometry { bounds, inner_rect, shadow_range })
 }
 
+/// Map `rect` from the logical layout rectangle into the sampled visual rectangle.
+///
+/// The layout rectangle itself maps exactly. Other rectangles, including popups that stick out,
+/// scale around its origin.
+pub fn map_layout_rect(logical: RectI, visual: RectI, rect: RectI) -> RectI {
+    if logical.width <= 0 || logical.height <= 0 || rect == logical {
+        return if rect == logical { visual } else { rect };
+    }
+    let scale_x = f64::from(visual.width) / f64::from(logical.width);
+    let scale_y = f64::from(visual.height) / f64::from(logical.height);
+    let x = f64::from(visual.x) + (f64::from(rect.x) - f64::from(logical.x)) * scale_x;
+    let y = f64::from(visual.y) + (f64::from(rect.y) - f64::from(logical.y)) * scale_y;
+    RectI::new(
+        round_to_i32(x),
+        round_to_i32(y),
+        round_to_i32(f64::from(rect.width) * scale_x).max(0),
+        round_to_i32(f64::from(rect.height) * scale_y).max(0),
+    )
+    .unwrap_or(rect)
+}
+
+/// Move a window's decorations onto `visual_layout` without scaling their pixel thickness.
+///
+/// The client surfaces use [`map_layout_rect`]. The border inset, corner radius, and shadow spread
+/// stay in pixels, matching the way Hyprland redraws chrome around `m_realSize`.
+pub fn place_visual_frame(
+    visual: &mut RootSurfaceVisualState,
+    logical_layout: RectI,
+    visual_layout: RectI,
+    corner_radius: i32,
+    rounding_power: crate::config::RoundingPower,
+) {
+    if logical_layout.width <= 0 || logical_layout.height <= 0 || logical_layout == visual_layout {
+        return;
+    }
+    let outer = visual.outer_rect;
+    let content = visual.content_rect;
+    let visual_outer = map_layout_rect(logical_layout, visual_layout, outer);
+    let left = content.x.saturating_sub(outer.x);
+    let top = content.y.saturating_sub(outer.y);
+    let right = outer.x2().saturating_sub(content.x2());
+    let bottom = outer.y2().saturating_sub(content.y2());
+    let content_inside = content.x >= outer.x
+        && content.y >= outer.y
+        && content.x2() <= outer.x2()
+        && content.y2() <= outer.y2();
+    visual.outer_rect = visual_outer;
+    visual.content_rect = if content_inside {
+        inset_rect(visual_outer, left, top, right, bottom).unwrap_or(visual_outer)
+    } else {
+        map_layout_rect(logical_layout, visual_layout, content)
+    };
+    if visual.clip.is_some() {
+        visual.clip = Some(RootSurfaceClip::new(visual.outer_rect, corner_radius, rounding_power));
+    }
+}
+
+fn inset_rect(outer: RectI, left: i32, top: i32, right: i32, bottom: i32) -> Option<RectI> {
+    let width = outer.width.saturating_sub(left.saturating_add(right));
+    let height = outer.height.saturating_sub(top.saturating_add(bottom));
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    RectI::new(outer.x.saturating_add(left), outer.y.saturating_add(top), width, height)
+}
+
+fn round_to_i32(value: f64) -> i32 {
+    let rounded = value.round();
+    if rounded >= f64::from(i32::MAX) {
+        i32::MAX
+    } else if rounded <= f64::from(i32::MIN) {
+        i32::MIN
+    } else {
+        rounded as i32
+    }
+}
+
 impl RootSurfaceVisualState {
     pub fn has_visible_decoration_ring(self) -> bool {
         self.outer_rect != self.content_rect
@@ -225,5 +302,46 @@ mod tests {
         };
 
         assert!(visual.has_visible_decoration_ring());
+    }
+
+    #[test]
+    fn layout_mapping_scales_attached_popups_and_keeps_the_frame_exact() {
+        let logical = RectI::new(10, 20, 100, 80).unwrap();
+        let visual = RectI::new(30, 40, 50, 40).unwrap();
+        assert_eq!(super::map_layout_rect(logical, visual, logical), visual);
+        let popup = RectI::new(110, 20, 20, 16).unwrap();
+        assert_eq!(
+            super::map_layout_rect(logical, visual, popup),
+            RectI::new(80, 40, 10, 8).unwrap()
+        );
+    }
+
+    #[test]
+    fn placed_frame_keeps_border_thickness_and_corner_radius() {
+        let mut visual = RootSurfaceVisualState {
+            outer_rect: RectI::new(0, 0, 100, 80).unwrap(),
+            content_rect: RectI::new(4, 6, 92, 70).unwrap(),
+            clip: Some(RootSurfaceClip::new(
+                RectI::new(0, 0, 100, 80).unwrap(),
+                12,
+                RoundingPower::DEFAULT,
+            )),
+            border: None,
+            border_alpha: u8::MAX,
+            shadow: None,
+            shadow_alpha: u8::MAX,
+            effects: SurfaceEffectStyle { blur: None, opacity_alpha: u8::MAX, dim_alpha: 0 },
+        };
+        let logical = visual.outer_rect;
+        super::place_visual_frame(
+            &mut visual,
+            logical,
+            RectI::new(10, 20, 40, 30).unwrap(),
+            12,
+            RoundingPower::DEFAULT,
+        );
+        assert_eq!(visual.outer_rect, RectI::new(10, 20, 40, 30).unwrap());
+        assert_eq!(visual.content_rect, RectI::new(14, 26, 32, 20).unwrap());
+        assert_eq!(visual.clip.unwrap().corner_radius, 12);
     }
 }

@@ -2469,7 +2469,7 @@ mod tests {
         assert_eq!(started.goal_rect(), Some(goal));
         assert_eq!(started.visual_rect(), Some(initial));
 
-        state.advance_visual_animations(now + std::time::Duration::from_millis(100));
+        let moved = state.advance_visual_animations(now + std::time::Duration::from_millis(100));
         let mid = state
             .managed_root_surfaces
             .get(&surface)
@@ -2492,6 +2492,11 @@ mod tests {
         if initial.y != goal.y {
             assert!(mid.y > initial.y.min(goal.y) && mid.y < initial.y.max(goal.y));
         }
+        assert!(moved
+            .damaged_rects
+            .iter()
+            .any(|rect| rect.intersects(initial)));
+        assert!(moved.damaged_rects.iter().any(|rect| rect.intersects(mid)));
     }
 
     #[test]
