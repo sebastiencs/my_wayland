@@ -150,4 +150,6 @@ fake_obj! {
     { zwp_tablet_v2, ZwpTabletV2 },
     { zwp_tablet_tool_v2, ZwpTabletToolV2 },
     { zwp_tablet_seat_v2, ZwpTabletSeatV2 },
+    { zwlr_foreign_toplevel_manager_v1, ZwlrForeignToplevelManagerV1 },
+    { zwlr_foreign_toplevel_handle_v1, ZwlrForeignToplevelHandleV1 },
 }

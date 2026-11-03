@@ -126,6 +126,8 @@ wayland_id! {
   ExtWorkspaceManagerV1Id,
   ExtWorkspaceGroupHandleV1Id,
   ExtWorkspaceHandleV1Id,
+  ZwlrForeignToplevelManagerV1Id,
+  ZwlrForeignToplevelHandleV1Id,
   ZwlrScreencopyManagerV1Id,
   ZwlrScreencopyFrameV1Id,
   ZwlrGammaControlManagerV1Id,
@@ -15344,6 +15346,356 @@ pub mod ext_workspace_handle_v1 {
         Remove = 4,
         /// Assign request is available,
         Assign = 8,
+    }
+}
+
+/// List and control opened apps
+///
+/// The purpose of this protocol is to enable the creation of taskbars
+/// and docks by providing them with a list of opened applications and
+/// letting them request certain actions on them, like maximizing, etc.
+///
+/// After a client binds the zwlr_foreign_toplevel_manager_v1, each opened
+/// toplevel window will be sent via the toplevel event
+pub mod zwlr_foreign_toplevel_manager_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1
+    {
+        const INTERFACE_NAME: &'static str = "zwlr_foreign_toplevel_manager_v1";
+        const INTERFACE_VERSION: u32 = 3;
+    }
+    impl crate::object::IdToObject for ZwlrForeignToplevelManagerV1Id {
+        type Object =
+            crate::wayland_objects::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1
+    {
+        type Id = ZwlrForeignToplevelManagerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Stop sending events
+        ///
+        /// Indicates the client no longer wishes to receive events for new toplevels.
+        /// However the compositor may emit further toplevel_created events, until
+        /// the finished event is emitted.
+        ///
+        /// The client must not send any more requests after this one.
+        Stop,
+    }
+    impl Parser
+        for crate::wayland_objects::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Stop,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// A toplevel has been created
+        ///
+        /// This event is emitted whenever a new toplevel window is created. It
+        /// is emitted for all toplevels, regardless of the app that has created
+        /// them.
+        ///
+        /// All initial details of the toplevel(title, app_id, states, etc.) will
+        /// be sent immediately after this event via the corresponding events in
+        /// zwlr_foreign_toplevel_handle_v1.
+        Toplevel { toplevel: ZwlrForeignToplevelHandleV1Id },
+        /// The compositor has finished with the toplevel manager
+        ///
+        /// This event indicates that the compositor is done sending events to the
+        /// zwlr_foreign_toplevel_manager_v1. The server will destroy the object
+        /// immediately after sending this request, so it will become invalid and
+        /// the client should free any resources associated with it.
+        Finished,
+    }
+    impl EventWriter
+        for crate::wayland_objects::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Toplevel { toplevel } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(toplevel);
+                    raw
+                }
+                Finished {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// An opened toplevel
+///
+/// A zwlr_foreign_toplevel_handle_v1 object represents an opened toplevel
+/// window. Each app may have multiple opened toplevels.
+///
+/// Each toplevel has a list of outputs it is visible on, conveyed to the
+/// client with the output_enter and output_leave events.
+pub mod zwlr_foreign_toplevel_handle_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1
+    {
+        const INTERFACE_NAME: &'static str = "zwlr_foreign_toplevel_handle_v1";
+        const INTERFACE_VERSION: u32 = 3;
+    }
+    impl crate::object::IdToObject for ZwlrForeignToplevelHandleV1Id {
+        type Object =
+            crate::wayland_objects::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1
+    {
+        type Id = ZwlrForeignToplevelHandleV1Id;
+    }
+    /// Minimum interface version for the `set_fullscreen` message (XML `since` / `version`).
+    pub const SET_FULLSCREEN_SINCE: u32 = 2;
+    /// Minimum interface version for the `unset_fullscreen` message (XML `since` / `version`).
+    pub const UNSET_FULLSCREEN_SINCE: u32 = 2;
+    #[derive(Debug)]
+    pub enum Request {
+        /// Requests that the toplevel be maximized
+        ///
+        /// Requests that the toplevel be maximized. If the maximized state actually
+        /// changes, this will be indicated by the state event.
+        SetMaximized,
+        /// Requests that the toplevel be unmaximized
+        ///
+        /// Requests that the toplevel be unmaximized. If the maximized state actually
+        /// changes, this will be indicated by the state event.
+        UnsetMaximized,
+        /// Requests that the toplevel be minimized
+        ///
+        /// Requests that the toplevel be minimized. If the minimized state actually
+        /// changes, this will be indicated by the state event.
+        SetMinimized,
+        /// Requests that the toplevel be unminimized
+        ///
+        /// Requests that the toplevel be unminimized. If the minimized state actually
+        /// changes, this will be indicated by the state event.
+        UnsetMinimized,
+        /// Activate the toplevel
+        ///
+        /// Request that this toplevel be activated on the given seat.
+        /// There is no guarantee the toplevel will be actually activated.
+        Activate { seat: WlSeatId },
+        /// Request that the toplevel be closed
+        ///
+        /// Send a request to the toplevel to close itself. The compositor would
+        /// typically use a shell-specific method to carry out this request, for
+        /// example by sending the xdg_toplevel.close event. However, this gives
+        /// no guarantees the toplevel will actually be destroyed. If and when
+        /// this happens, the zwlr_foreign_toplevel_handle_v1.closed event will
+        /// be emitted.
+        Close,
+        /// The rectangle which represents the toplevel
+        ///
+        /// The rectangle of the surface specified in this request corresponds to
+        /// the place where the app using this protocol represents the given toplevel.
+        /// It can be used by the compositor as a hint for some operations, e.g
+        /// minimizing. The client is however not required to set this, in which
+        /// case the compositor is free to decide some default value.
+        ///
+        /// If the client specifies more than one rectangle, only the last one is
+        /// considered.
+        ///
+        /// The dimensions are given in surface-local coordinates.
+        /// Setting width=height=0 removes the already-set rectangle.
+        SetRectangle { surface: WlSurfaceId, x: i32, y: i32, width: i32, height: i32 },
+        /// Destroy the zwlr_foreign_toplevel_handle_v1 object
+        ///
+        /// Destroys the zwlr_foreign_toplevel_handle_v1 object.
+        ///
+        /// This request should be called either when the client does not want to
+        /// use the toplevel anymore or after the closed event to finalize the
+        /// destruction of the object.
+        Destroy,
+        /// Request that the toplevel be fullscreened
+        ///
+        /// Requests that the toplevel be fullscreened on the given output. If the
+        /// fullscreen state and/or the outputs the toplevel is visible on actually
+        /// change, this will be indicated by the state and output_enter/leave
+        /// events.
+        ///
+        /// The output parameter is only a hint to the compositor. Also, if output
+        /// is NULL, the compositor should decide which output the toplevel will be
+        /// fullscreened on, if at all.
+        SetFullscreen { output: WlOutputId },
+        /// Request that the toplevel be unfullscreened
+        ///
+        /// Requests that the toplevel be unfullscreened. If the fullscreen state
+        /// actually changes, this will be indicated by the state event.
+        UnsetFullscreen,
+    }
+    impl Parser
+        for crate::wayland_objects::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetMaximized,
+                1 => UnsetMaximized,
+                2 => SetMinimized,
+                3 => UnsetMinimized,
+                4 => Activate { seat: req.id()? },
+                5 => Close,
+                6 => SetRectangle {
+                    surface: req.id()?,
+                    x: req.int()?,
+                    y: req.int()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                7 => Destroy,
+                8 => SetFullscreen { output: req.id()? },
+                9 => UnsetFullscreen,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    /// Minimum interface version for the `parent` message (XML `since` / `version`).
+    pub const PARENT_SINCE: u32 = 3;
+    #[derive(Debug)]
+    pub enum Event {
+        /// Title change
+        ///
+        /// This event is emitted whenever the title of the toplevel changes.
+        Title { title: String },
+        /// App-id change
+        ///
+        /// This event is emitted whenever the app-id of the toplevel changes.
+        AppId { app_id: String },
+        /// Toplevel entered an output
+        ///
+        /// This event is emitted whenever the toplevel becomes visible on
+        /// the given output. A toplevel may be visible on multiple outputs.
+        OutputEnter { output: WlOutputId },
+        /// Toplevel left an output
+        ///
+        /// This event is emitted whenever the toplevel stops being visible on
+        /// the given output. It is guaranteed that an entered-output event
+        /// with the same output has been emitted before this event.
+        OutputLeave { output: WlOutputId },
+        /// The toplevel state changed
+        ///
+        /// This event is emitted immediately after the zlw_foreign_toplevel_handle_v1
+        /// is created and each time the toplevel state changes, either because of a
+        /// compositor action or because of a request in this protocol.
+        State { state: Array },
+        /// All information about the toplevel has been sent
+        ///
+        /// This event is sent after all changes in the toplevel state have been
+        /// sent.
+        ///
+        /// This allows changes to the zwlr_foreign_toplevel_handle_v1 properties
+        /// to be seen as atomic, even if they happen via multiple events.
+        Done,
+        /// This toplevel has been destroyed
+        ///
+        /// This event means the toplevel has been destroyed. It is guaranteed there
+        /// won't be any more events for this zwlr_foreign_toplevel_handle_v1. The
+        /// toplevel itself becomes inert so any requests will be ignored except the
+        /// destroy request.
+        Closed,
+        /// Parent change
+        ///
+        /// This event is emitted whenever the parent of the toplevel changes.
+        ///
+        /// No event is emitted when the parent handle is destroyed by the client.
+        Parent { parent: ZwlrForeignToplevelHandleV1Id },
+    }
+    impl EventWriter
+        for crate::wayland_objects::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Title { title } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.string(title);
+                    raw
+                }
+                AppId { app_id } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.string(app_id);
+                    raw
+                }
+                OutputEnter { output } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 1);
+                    raw.id(output);
+                    raw
+                }
+                OutputLeave { output } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.id(output);
+                    raw
+                }
+                State { state } => {
+                    let mut raw = RawEvent::new(self.id(), 4, 1);
+                    raw.array(state);
+                    raw
+                }
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 5, 0);
+                    raw
+                }
+                Closed {} => {
+                    let mut raw = RawEvent::new(self.id(), 6, 0);
+                    raw
+                }
+                Parent { parent } => {
+                    let mut raw = RawEvent::new(self.id(), 7, 1);
+                    raw.id(parent);
+                    raw
+                }
+            }
+        }
+    }
+    /// Types of states on the toplevel
+    ///
+    /// The different states that a toplevel can have. These have the same meaning
+    /// as the states with the same names defined in xdg-toplevel
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum State {
+        /// The toplevel is maximized,
+        Maximized = 0,
+        /// The toplevel is minimized,
+        Minimized = 1,
+        /// The toplevel is active,
+        Activated = 2,
+        /// The toplevel is fullscreen,
+        Fullscreen = 3,
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// The provided rectangle is invalid,
+        InvalidRectangle = 0,
     }
 }
 

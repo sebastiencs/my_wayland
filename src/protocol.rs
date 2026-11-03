@@ -406,7 +406,7 @@ pub fn gen() -> std::io::Result<()> {
         "/usr/share/wayland-protocols/staging/ext-workspace/ext-workspace-v1.xml",
 
         // "/usr/share/wlr-protocols/unstable/wlr-data-control-unstable-v1.xml",
-        // "/usr/share/wlr-protocols/unstable/wlr-foreign-toplevel-management-unstable-v1.xml",
+        "/usr/share/wlr-protocols/unstable/wlr-foreign-toplevel-management-unstable-v1.xml",
         // "/usr/share/wlr-protocols/unstable/wlr-input-inhibitor-unstable-v1.xml",
         // "/usr/share/wlr-protocols/unstable/wlr-output-management-unstable-v1.xml",
         "/usr/share/wlr-protocols/unstable/wlr-screencopy-unstable-v1.xml",
