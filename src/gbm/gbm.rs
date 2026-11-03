@@ -150,6 +150,36 @@ impl GbmDevice {
         }
     }
 
+    pub(crate) fn try_create_bo_with_modifiers(
+        &self,
+        width: u32,
+        height: u32,
+        format: drm::buffer::DrmFourcc,
+        flags: UseFlags,
+        modifiers: &[Modifier],
+    ) -> Option<BufferObject> {
+        if modifiers.is_empty() {
+            return None;
+        }
+        let flags = flags & !UseFlags::LINEAR;
+        let bo = unsafe {
+            sys::gbm_bo_create_with_modifiers2(
+                self.gbm_device,
+                width,
+                height,
+                format as u32,
+                utils::ptr_or_null(modifiers) as _,
+                modifiers.len() as _,
+                flags.bits(),
+            )
+        };
+        if bo.is_null() {
+            None
+        } else {
+            Some(BufferObject { bo, dmabuf: Some(make_dmabuf(bo)) })
+        }
+    }
+
     fn allocate_bo(
         &self,
         width: u32,

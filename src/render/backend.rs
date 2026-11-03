@@ -102,6 +102,8 @@ pub enum RendererError {
     AcquireWaitFailed,
     #[error("fence wait failed")]
     FenceWaitFailed,
+    #[error("not implemented: {0}")]
+    NotImplemented(&'static str),
 }
 
 /// Backend-owned image. Sampling stays inside the renderer that created it.

@@ -3,6 +3,7 @@ mod factory;
 pub mod gles;
 pub mod recipe;
 pub mod visual;
+mod vulkan;
 
 #[cfg(test)]
 mod mock;

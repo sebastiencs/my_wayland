@@ -485,7 +485,7 @@ fn fullscreen_client_buffer_can_be_composited() {
 }
 
 #[test]
-fn factory_uses_opengl_and_rejects_vulkan() {
+fn factory_prefers_opengl_and_constructs_vulkan_when_the_device_can() {
     let Some(device) = device() else {
         eprintln!("skipping GLES smoke: no DRM render node");
         return;
@@ -496,7 +496,16 @@ fn factory_uses_opengl_and_rejects_vulkan() {
     let auto =
         create_renderer(RendererSelection::Auto, &device.gbm, &device.gbm).expect("auto renderer");
     assert_eq!(auto.api(), GraphicsApi::OpenGl);
-    let error = create_renderer(RendererSelection::Vulkan, &device.gbm, &device.gbm)
-        .expect_err("vulkan is not implemented");
-    assert!(error.contains("not implemented"));
+    match create_renderer(RendererSelection::Vulkan, &device.gbm, &device.gbm) {
+        Ok(vulkan) => {
+            assert_eq!(vulkan.api(), GraphicsApi::Vulkan);
+            assert!(vulkan.capabilities().explicit_sync);
+        }
+        Err(error) => {
+            assert!(
+                !error.contains("not implemented"),
+                "vulkan startup should name the missing capability: {error}"
+            );
+        }
+    }
 }
