@@ -1,6 +1,8 @@
-use khronos_types::gl;
+use std::rc::Rc;
 
 use crate::{region::DamageRegion, state::RootSurfaceClip, transform::Mat3};
+
+use super::Texture;
 
 use super::visual::{BlurVisualStyle, BorderGradient, RoundedRing, ShadowVisualStyle};
 
@@ -19,7 +21,7 @@ pub enum TextureMask {
 #[derive(Clone, Debug)]
 pub struct TextureElement {
     pub source: TextureSource,
-    pub texture: gl::Uint,
+    pub texture: Rc<dyn Texture>,
     pub x: i32,
     pub y: i32,
     pub width: i32,

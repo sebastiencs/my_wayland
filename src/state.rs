@@ -2337,7 +2337,7 @@ impl State {
 }
 
 fn release_closing_snapshot(state: &mut State, snapshot: RetainedClosingSnapshot) {
-    if snapshot.texture_id() != 0 {
+    if snapshot.requires_device_context_on_drop() {
         if let Some(drm) = state.drm.try_get(snapshot.drm_id()) {
             drm.bind_context();
         }

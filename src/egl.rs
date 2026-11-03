@@ -1,9 +1,11 @@
 use std::{
+    any::Any,
     cell::OnceCell,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ffi::CStr,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     ptr,
+    rc::Rc,
     time::Duration,
 };
 
@@ -26,7 +28,7 @@ use crate::{
     region::{DamageRegion, RectI},
     render::{
         shadow_geometry, BlurVisualStyle, EffectElement, FrameElement, OutputFrameRecipe,
-        TextureMask, TextureSource,
+        RenderDeviceId, Texture, TextureMask, TextureSource,
     },
     state::RootSurfaceClip,
     transform::{Mat3, OutputPresentationTransform},
@@ -526,8 +528,8 @@ impl Drop for EglImage {
 }
 
 impl EglImage {
-    pub fn into_texture(self) -> Result<GlTexture, ()> {
-        GlTexture::import_image(self)
+    pub fn into_texture(self, device_id: RenderDeviceId) -> Result<GlTexture, ()> {
+        GlTexture::import_image(self, device_id)
     }
 }
 
@@ -536,6 +538,7 @@ pub struct GlTexture {
     image: Option<EglImage>,
     texture: gl::Uint,
     delete_on_drop: bool,
+    device_id: RenderDeviceId,
 }
 
 impl Drop for GlTexture {
@@ -548,6 +551,29 @@ impl Drop for GlTexture {
         }
         self.image.take();
     }
+}
+
+impl Texture for GlTexture {
+    fn requires_device_context_on_drop(&self) -> bool {
+        self.delete_on_drop && self.texture != 0
+    }
+}
+
+/// GL name for a texture created by `device_id`. A foreign backend or device returns `None`.
+fn gl_texture_name(texture: &dyn Texture, device_id: RenderDeviceId) -> Option<gl::Uint> {
+    let Some(texture) = (texture as &dyn Any).downcast_ref::<GlTexture>() else {
+        log::error!("renderer received a texture from a different backend");
+        return None;
+    };
+    if texture.device_id != device_id {
+        log::error!(
+            "renderer received a texture from DRM device {:?} while drawing for {:?}",
+            texture.device_id,
+            device_id
+        );
+        return None;
+    }
+    Some(texture.texture)
 }
 
 pub type RenderItemMask = TextureMask;
@@ -563,7 +589,7 @@ pub fn image_target(external_only: bool) -> gl::Enum {
 }
 
 impl GlTexture {
-    pub fn import_image(image: EglImage) -> Result<GlTexture, ()> {
+    pub fn import_image(image: EglImage, device_id: RenderDeviceId) -> Result<GlTexture, ()> {
         let target = image_target(image.external_only);
         let texture = unsafe {
             let mut texture = 0;
@@ -578,7 +604,7 @@ impl GlTexture {
             gl::BindTexture(target, 0);
             texture
         };
-        Ok(GlTexture { image: Some(image), texture, delete_on_drop: true })
+        Ok(GlTexture { image: Some(image), texture, delete_on_drop: true, device_id })
     }
 
     pub fn import_shm(
@@ -587,6 +613,7 @@ impl GlTexture {
         height: usize,
         stride: usize,
         format: &Format,
+        device_id: RenderDeviceId,
     ) -> Result<GlTexture, ()> {
         let target = gl::TEXTURE_2D as gl::Enum;
         let texture = unsafe {
@@ -614,10 +641,15 @@ impl GlTexture {
             gl::BindTexture(target, 0);
             texture
         };
-        Ok(Self { image: None, texture, delete_on_drop: true })
+        Ok(Self { image: None, texture, delete_on_drop: true, device_id })
     }
 
-    pub fn from_rgba(pixels: &[u8], width: i32, height: i32) -> Result<GlTexture, ()> {
+    pub fn from_rgba(
+        pixels: &[u8],
+        width: i32,
+        height: i32,
+        device_id: RenderDeviceId,
+    ) -> Result<GlTexture, ()> {
         if width <= 0 || height <= 0 {
             return Err(());
         }
@@ -658,16 +690,7 @@ impl GlTexture {
             gl::BindTexture(target, 0);
             texture
         };
-        Ok(Self { image: None, texture, delete_on_drop: true })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_inert() -> Self {
-        Self { image: None, texture: 0, delete_on_drop: false }
-    }
-
-    pub fn texture_id(&self) -> gl::Uint {
-        self.texture
+        Ok(Self { image: None, texture, delete_on_drop: true, device_id })
     }
 }
 
@@ -678,6 +701,7 @@ pub struct EglRenderBuffer {
     width: i32,
     height: i32,
     format: &'static Format,
+    device_id: RenderDeviceId,
     pub renderbuffer_object: gl::GLuint,
 }
 
@@ -710,6 +734,7 @@ impl EglRenderBuffer {
             display: self.display,
             width: self.width,
             height: self.height,
+            device_id: self.device_id,
             render_buffer: self,
             framebuffer_object,
             texture_program: OnceCell::new(),
@@ -727,13 +752,14 @@ pub struct EglFrameBuffer {
     display: egl::EGLDisplay,
     pub width: i32,
     pub height: i32,
+    device_id: RenderDeviceId,
     render_buffer: EglRenderBuffer,
     pub framebuffer_object: gl::GLuint,
     texture_program: OnceCell<Result<TextureProgram, String>>,
     blur_program: OnceCell<Result<BlurProgram, String>>,
     border_program: OnceCell<Result<BorderProgram, String>>,
     shadow_program: OnceCell<Result<ShadowProgram, String>>,
-    dim_texture: OnceCell<GlTexture>,
+    dim_texture: OnceCell<Rc<GlTexture>>,
 }
 
 impl Drop for EglFrameBuffer {
@@ -810,7 +836,7 @@ impl TextureFrameBuffer {
         Some(Self { width, height, framebuffer_object, texture })
     }
 
-    fn into_texture(mut self) -> GlTexture {
+    fn into_texture(mut self, device_id: RenderDeviceId) -> GlTexture {
         let texture = self.texture;
         let framebuffer_object = self.framebuffer_object;
         self.texture = 0;
@@ -821,7 +847,7 @@ impl TextureFrameBuffer {
                 gl::DeleteFramebuffers(1, &framebuffer_object);
             }
         }
-        GlTexture { image: None, texture, delete_on_drop: true }
+        GlTexture { image: None, texture, delete_on_drop: true, device_id }
     }
 }
 
@@ -1025,13 +1051,24 @@ impl EglFrameBuffer {
             .map_err(String::as_str)
     }
 
-    fn dim_texture(&self) -> Option<&GlTexture> {
+    fn dim_texture(&self) -> Option<Rc<dyn Texture>> {
         if let Some(texture) = self.dim_texture.get() {
-            return Some(texture);
+            return Some(Rc::clone(texture) as Rc<dyn Texture>);
         }
-        let texture = GlTexture::from_rgba(&[0, 0, 0, u8::MAX], 1, 1).ok()?;
-        let _ = self.dim_texture.set(texture);
-        self.dim_texture.get()
+        let texture = GlTexture::from_rgba(&[0, 0, 0, u8::MAX], 1, 1, self.device_id)
+            .ok()
+            .map(Rc::new)?;
+        let _ = self.dim_texture.set(Rc::clone(&texture));
+        Some(texture)
+    }
+
+    fn borrowed_texture(&self, name: gl::Uint) -> Rc<dyn Texture> {
+        Rc::new(GlTexture {
+            image: None,
+            texture: name,
+            delete_on_drop: false,
+            device_id: self.device_id,
+        })
     }
 
     fn scissor_y(
@@ -1244,7 +1281,11 @@ impl EglFrameBuffer {
                 } else {
                     gl::Disable(gl::BLEND as _);
                 }
-                gl::BindTexture(gl::TEXTURE_2D as _, item.texture);
+                let Some(texture_name) = gl_texture_name(item.texture.as_ref(), self.device_id)
+                else {
+                    continue;
+                };
+                gl::BindTexture(gl::TEXTURE_2D as _, texture_name);
                 gl::UniformMatrix3fv(program.transform_location, 1, 0, transform.as_ptr());
                 gl::UniformMatrix3fv(program.tex_transform_location, 1, 0, tex_transform.as_ptr());
                 gl::Uniform2f(program.item_size_location, item.width as f32, item.height as f32);
@@ -1548,7 +1589,7 @@ impl EglFrameBuffer {
             &damage,
             presentation_transform,
         );
-        Some(framebuffer.into_texture())
+        Some(framebuffer.into_texture(self.device_id))
     }
 
     /// Draw a window into another framebuffer and clear that target to transparent first.
@@ -1654,7 +1695,7 @@ impl EglFrameBuffer {
                             };
                             let item = RenderItem {
                                 source: TextureSource::Texture,
-                                texture: texture.texture,
+                                texture: self.borrowed_texture(texture.texture),
                                 x: blur_bounds.x,
                                 y: blur_bounds.y,
                                 width: blur_bounds.width,
@@ -1726,7 +1767,7 @@ impl EglFrameBuffer {
                             };
                             let item = RenderItem {
                                 source: TextureSource::Texture,
-                                texture: texture.texture_id(),
+                                texture,
                                 x: clip.outer_rect.x,
                                 y: clip.outer_rect.y,
                                 width: clip.outer_rect.width,
@@ -2313,6 +2354,19 @@ mod tests {
         assert_eq!(color[2], 0.0);
         assert!((color[3] - 0.25196466).abs() < 0.0001);
     }
+
+    #[test]
+    fn gl_texture_name_rejects_another_backend_and_another_drm_device() {
+        let device_id = super::RenderDeviceId::next();
+        let texture =
+            super::GlTexture { image: None, texture: 7, delete_on_drop: false, device_id };
+
+        assert_eq!(super::gl_texture_name(&texture, device_id), Some(7));
+        assert!(super::gl_texture_name(&texture, super::RenderDeviceId::next()).is_none());
+        assert!(
+            super::gl_texture_name(crate::render::inert_texture().as_ref(), device_id).is_none()
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -2326,9 +2380,14 @@ pub struct EglContext {
     formats: HashMap<DrmFourcc, EglFormat>,
     pub opengl_formats: HashMap<DrmFourcc, OpenGlFormat>,
     opengl_extensions: BTreeSet<String>,
+    device_id: RenderDeviceId,
 }
 
 impl EglContext {
+    pub fn device_id(&self) -> RenderDeviceId {
+        self.device_id
+    }
+
     pub fn bind(&self) {
         let _ = self
             .egl
@@ -2408,6 +2467,7 @@ impl EglContext {
             formats,
             opengl_formats,
             opengl_extensions,
+            device_id: RenderDeviceId::next(),
         })
     }
 
@@ -2522,6 +2582,7 @@ impl EglContext {
             width: dmabuf.width,
             height: dmabuf.height,
             format: dmabuf.format,
+            device_id: self.device_id,
             renderbuffer_object,
         }
     }

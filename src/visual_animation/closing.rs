@@ -1,16 +1,16 @@
-use std::time::{Duration, Instant};
-
-use khronos_types::gl;
+use std::{
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 #[cfg(test)]
-use std::{cell::Cell, rc::Rc};
+use std::cell::Cell;
 
 use crate::{
     clients::Resolved,
-    egl::GlTexture,
     protocol_generated::WlSurfaceId,
     region::RectI,
-    render::{BlurVisualStyle, RoundedRing},
+    render::{BlurVisualStyle, RoundedRing, Texture},
     state::{DrmId, WorkspaceId},
 };
 
@@ -113,7 +113,7 @@ impl ClosingSnapshotAnimation {
 pub struct RetainedClosingSnapshot {
     animation: ClosingSnapshotAnimation,
     drm_id: DrmId,
-    texture: GlTexture,
+    texture: Rc<dyn Texture>,
     #[cfg(test)]
     release_probe: Option<Rc<Cell<u32>>>,
 }
@@ -135,7 +135,7 @@ impl RetainedClosingSnapshot {
         bounds: RectI,
         blur: Option<FrozenClosingBlur>,
         drm_id: DrmId,
-        texture: GlTexture,
+        texture: Rc<dyn Texture>,
     ) -> Self {
         Self {
             animation: ClosingSnapshotAnimation::start(id, source, workspace_id, bounds, blur),
@@ -203,8 +203,12 @@ impl RetainedClosingSnapshot {
         self.drm_id
     }
 
-    pub(crate) fn texture_id(&self) -> gl::Uint {
-        self.texture.texture_id()
+    pub(crate) fn texture(&self) -> Rc<dyn Texture> {
+        Rc::clone(&self.texture)
+    }
+
+    pub(crate) fn requires_device_context_on_drop(&self) -> bool {
+        self.texture.requires_device_context_on_drop()
     }
 
     /// Samples absolute time. `true` means the fade finished and the caller must drop this record.
@@ -270,7 +274,7 @@ impl RetainedClosingSnapshot {
         let snapshot = Self {
             animation: ClosingSnapshotAnimation::start(id, source, None, bounds, None),
             drm_id,
-            texture: GlTexture::test_inert(),
+            texture: crate::render::inert_texture(),
             release_probe: Some(Rc::clone(&probe)),
         };
         (snapshot, probe)

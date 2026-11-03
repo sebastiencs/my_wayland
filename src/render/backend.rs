@@ -2,13 +2,19 @@
 //!
 //! This module defines the contract only. The GLES call sites still draw through
 //! [`crate::egl::EglFrameBuffer`] until a later phase implements [`Renderer`].
-//! [`crate::render::TextureElement`] still carries a GL texture name; the recipe
-//! becomes handle-neutral in the next phase.
+//! Recipe textures are [`Texture`] handles. A GLES texture records the DRM device
+//! that created it, and that backend rejects a handle from another device.
 //!
 //! An acquire fence is waited on separately from dma-buf import so direct scanout
 //! can hand that fence to KMS without importing the buffer.
 
-use std::{fmt::Debug, os::fd::OwnedFd, rc::Rc};
+use std::{
+    any::Any,
+    fmt::Debug,
+    os::fd::OwnedFd,
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use drm::buffer::DrmFourcc;
 
@@ -19,6 +25,17 @@ use crate::{
     sync::AcquireSync,
     transform::OutputPresentationTransform,
 };
+
+/// Identifies the DRM device whose renderer created a texture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RenderDeviceId(u64);
+
+impl RenderDeviceId {
+    pub(crate) fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphicsApi {
@@ -86,7 +103,22 @@ pub enum RendererError {
 }
 
 /// Backend-owned image. Sampling stays inside the renderer that created it.
-pub trait Texture: Debug {}
+pub trait Texture: Debug + Any {
+    /// Dropping the texture deletes a GPU object, so its device context must be current.
+    fn requires_device_context_on_drop(&self) -> bool {
+        false
+    }
+}
+
+/// GPU-free texture for tests that build recipes without rendering.
+#[derive(Debug)]
+pub struct InertTexture;
+
+impl Texture for InertTexture {}
+
+pub fn inert_texture() -> Rc<dyn Texture> {
+    Rc::new(InertTexture)
+}
 
 /// Color target for an output or an offscreen image.
 pub trait RenderTarget: Debug {

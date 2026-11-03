@@ -7,6 +7,7 @@ use crate::{
     egl::{EglContext, GlTexture},
     object::{Object, Parser, RequestResult},
     protocol_generated::{wl_buffer, WaylandId, WlBufferId},
+    render::Texture,
     state::{GrabbedObject, ObjectId, State},
     sync::PlainRelease,
     transform,
@@ -23,12 +24,12 @@ enum BufferBacking {
         stride: usize,
         format: &'static Format,
         mem: Rc<SharedMemory>,
-        texture: Option<GlTexture>,
+        texture: Option<Rc<dyn Texture>>,
     },
     Dmabuf {
         dmabuf: DmaBuf,
         y_inverted: bool,
-        texture: Option<GlTexture>,
+        texture: Option<Rc<dyn Texture>>,
     },
 }
 
@@ -257,7 +258,7 @@ impl WlBuffer {
         &mut self,
         egl: &EglContext,
         sync: &crate::sync::SurfaceSyncState,
-    ) -> Option<u32> {
+    ) -> Option<Rc<dyn Texture>> {
         match &mut self.backing {
             BufferBacking::Shm { offset, width, height, format, stride, mem, texture } => {
                 // wl_shm contents can change between commits while the wl_buffer object stays alive,
@@ -269,14 +270,18 @@ impl WlBuffer {
                     *height,
                     *stride,
                     format,
+                    egl.device_id(),
                 ) {
-                    Ok(imported) => *texture = Some(imported),
+                    Ok(imported) => {
+                        let imported: Rc<dyn Texture> = Rc::new(imported);
+                        *texture = Some(Rc::clone(&imported));
+                        return Some(imported);
+                    }
                     Err(()) => {
                         log::warn!("failed to upload shm wl_buffer {:?}", self.id);
                         return None;
                     }
                 }
-                Some(texture.as_ref()?.texture_id())
             }
             BufferBacking::Dmabuf { dmabuf, y_inverted, texture } => {
                 if !sync.acquire.is_none() {
@@ -288,8 +293,8 @@ impl WlBuffer {
                 }
                 if texture.is_none() {
                     let image = egl.import_dmabuf(dmabuf);
-                    match image.into_texture() {
-                        Ok(imported) => *texture = Some(imported),
+                    match image.into_texture(egl.device_id()) {
+                        Ok(imported) => *texture = Some(Rc::new(imported)),
                         Err(()) => {
                             log::warn!("failed to import dma-buf wl_buffer {:?}", self.id);
                             return None;
@@ -297,7 +302,7 @@ impl WlBuffer {
                     }
                 }
                 let _ = y_inverted;
-                Some(texture.as_ref()?.texture_id())
+                Some(Rc::clone(texture.as_ref()?))
             }
         }
     }

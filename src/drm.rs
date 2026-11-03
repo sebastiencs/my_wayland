@@ -34,7 +34,7 @@ use crate::{
     region::{DamageRegion, RectI},
     render::{
         rounded_ring, EffectElement, FrameElement, FramePhase, OutputFrameRecipe,
-        RootSurfaceVisualState, RoundedRing, TextureElement, TextureMask, TextureSource,
+        RootSurfaceVisualState, RoundedRing, Texture, TextureElement, TextureMask, TextureSource,
     },
     runner::{isolate_session_fault, Dispatcher, Model, ModelInstanceId, SessionFault},
     scene::{ComposedEntry, CompositionTier, OutputCompositionView},
@@ -258,8 +258,7 @@ enum SceneItemMask {
 struct SceneItem {
     state: SceneItemState,
     mask: SceneItemMask,
-    texture: gl::Uint,
-    owned_texture: Option<GlTexture>,
+    texture: Rc<dyn Texture>,
     damage: DamageRegion,
     sample_damage_padding: i32,
     state_has_alpha: bool,
@@ -2624,7 +2623,7 @@ impl Drm {
         let image = egl.import_dmabuf(dmabuf);
         let gl_framebuffer = egl.make_fb_from_image(&image, dmabuf);
         gl_framebuffer.clear();
-        let texture = image.into_texture().unwrap();
+        let texture = image.into_texture(egl.device_id()).unwrap();
 
         Ok(RenderBuffer { bo, drm_fb, gl_framebuffer, texture })
     }
@@ -4970,8 +4969,8 @@ fn collect_protected_scene(
 fn lock_blank_item(drm: &Drm, bounds: RectI, red: bool) -> Option<SceneItem> {
     drm.egl_context.bind();
     let pixels: [u8; 4] = if red { [255, 0, 0, 255] } else { [0, 0, 0, 255] };
-    let texture = GlTexture::from_rgba(&pixels, 1, 1).ok()?;
-    let texture_id = texture.texture_id();
+    let texture = GlTexture::from_rgba(&pixels, 1, 1, drm.egl_context.device_id()).ok()?;
+    let texture: Rc<dyn Texture> = Rc::new(texture);
     Some(SceneItem {
         state: SceneItemState {
             key: SceneItemKey::LockBlank,
@@ -4983,8 +4982,7 @@ fn lock_blank_item(drm: &Drm, bounds: RectI, red: bool) -> Option<SceneItem> {
             mask: SceneItemMask::None,
         },
         mask: SceneItemMask::None,
-        texture: texture_id,
-        owned_texture: Some(texture),
+        texture,
         damage: DamageRegion::from_rect(bounds),
         sample_damage_padding: 0,
         state_has_alpha: false,
@@ -5218,6 +5216,7 @@ fn effect_transition_requires_full_redraw(has_effects: bool, had_effects_last_fr
 
 fn collect_named_cursor_render_item(
     state: &mut crate::state::State,
+    drm_id: DrmId,
     output_bounds: RectI,
     now_msec: u32,
 ) -> Option<(SceneItem, Option<u32>)> {
@@ -5233,9 +5232,12 @@ fn collect_named_cursor_render_item(
                 return None;
             }
 
+            state.drm.get(drm_id).bind_context();
+            let device_id = state.drm.get(drm_id).egl_context.device_id();
             let texture =
-                GlTexture::from_rgba(&image.pixels_rgba, image.width, image.height).ok()?;
-            let texture_id = texture.texture_id();
+                GlTexture::from_rgba(&image.pixels_rgba, image.width, image.height, device_id)
+                    .ok()?;
+            let texture: Rc<dyn Texture> = Rc::new(texture);
             Some((
                 SceneItem {
                     state: SceneItemState {
@@ -5248,8 +5250,7 @@ fn collect_named_cursor_render_item(
                         mask: SceneItemMask::None,
                     },
                     mask: SceneItemMask::None,
-                    texture: texture_id,
-                    owned_texture: Some(texture),
+                    texture,
                     damage: DamageRegion::from_rect(bounds),
                     sample_damage_padding: 0,
                     state_has_alpha: true,
@@ -5487,7 +5488,6 @@ fn push_scene_items_from_snapshots(
             },
             mask,
             texture,
-            owned_texture: None,
             damage,
             sample_damage_padding,
             state_has_alpha: buffer.format().has_alpha,
@@ -5606,7 +5606,7 @@ fn collect_software_cursor_items(
     retired_candidates: &mut Vec<RetiredBufferCandidate>,
 ) -> (Vec<SceneItem>, Option<u32>) {
     if let Some((item, next_frame_in_msec)) =
-        collect_named_cursor_render_item(state, output_bounds, frame_time_msec)
+        collect_named_cursor_render_item(state, drm_id, output_bounds, frame_time_msec)
     {
         return (vec![item], next_frame_in_msec);
     }
@@ -6136,7 +6136,7 @@ fn realize_closing_capture(
     let texture = realize_closing_texture(state, &plan).or_else(|| {
         #[cfg(test)]
         if state.realize_closing_snapshots_in_tests {
-            return Some(GlTexture::test_inert());
+            return Some(crate::render::inert_texture());
         }
         #[cfg(not(test))]
         {
@@ -6161,7 +6161,10 @@ fn realize_closing_capture(
     ))
 }
 
-fn realize_closing_texture(state: &mut State, plan: &ClosingCapturePlan) -> Option<GlTexture> {
+fn realize_closing_texture(
+    state: &mut State,
+    plan: &ClosingCapturePlan,
+) -> Option<Rc<dyn Texture>> {
     let (objects, drm_map) = (&mut state.objects, &state.drm);
     let drm = drm_map.try_get(plan.drm_id)?;
     drm.bind_context();
@@ -6175,17 +6178,21 @@ fn realize_closing_texture(state: &mut State, plan: &ClosingCapturePlan) -> Opti
     }
     let elements = closing_capture_elements(plan, &uploaded);
     let output = drm.output(plan.crtc_id)?;
-    output.render_buffer().gl_framebuffer.capture_transparent(
-        &elements,
-        plan.bounds.width,
-        plan.bounds.height,
-        plan.presentation_transform,
-    )
+    output
+        .render_buffer()
+        .gl_framebuffer
+        .capture_transparent(
+            &elements,
+            plan.bounds.width,
+            plan.bounds.height,
+            plan.presentation_transform,
+        )
+        .map(|texture| Rc::new(texture) as Rc<dyn Texture>)
 }
 
 fn closing_capture_elements(
     plan: &ClosingCapturePlan,
-    uploaded: &[(gl::Uint, transform::Mat3)],
+    uploaded: &[(Rc<dyn Texture>, transform::Mat3)],
 ) -> Vec<FrameElement> {
     let mut elements = Vec::new();
     for effect in &plan.effects {
@@ -6220,7 +6227,7 @@ fn closing_capture_elements(
             phase: FramePhase::Content,
             element: TextureElement {
                 source: TextureSource::Texture,
-                texture: *texture,
+                texture: Rc::clone(texture),
                 x: surface.x,
                 y: surface.y,
                 width: surface.width,
@@ -6294,8 +6301,7 @@ fn append_closing_snapshots(
                 mask: SceneItemMask::None,
             },
             mask: SceneItemMask::None,
-            texture: snapshot.texture_id(),
-            owned_texture: None,
+            texture: snapshot.texture(),
             damage: DamageRegion::from_rect(bounds),
             sample_damage_padding: 0,
             state_has_alpha: true,
@@ -6533,7 +6539,7 @@ fn collect_dnd_render_items(
 fn scene_item_to_texture_element(item: &SceneItem) -> TextureElement {
     TextureElement {
         source: TextureSource::Texture,
-        texture: item.texture,
+        texture: Rc::clone(&item.texture),
         x: item.state.bounds.x,
         y: item.state.bounds.y,
         width: item.state.bounds.width,
@@ -7727,8 +7733,7 @@ mod window_animation_tests {
                 mask: super::SceneItemMask::RoundedClip { clip },
             },
             mask: super::SceneItemMask::RoundedClip { clip },
-            texture: 0,
-            owned_texture: None,
+            texture: crate::render::inert_texture(),
             damage: crate::region::DamageRegion::from_rect(bounds),
             sample_damage_padding: 0,
             state_has_alpha: false,
@@ -8121,7 +8126,7 @@ mod closing_capture_tests {
                 alpha: 220,
             }),
             DrmId::from(0usize),
-            crate::egl::GlTexture::test_inert(),
+            crate::render::inert_texture(),
         );
         state.closing_snapshots.push(snapshot);
         let mut items = Vec::new();
@@ -8174,7 +8179,7 @@ mod closing_capture_tests {
                     RectI::new(200, 8, 400, 16).unwrap(),
                     None,
                     DrmId::from(0usize),
-                    crate::egl::GlTexture::test_inert(),
+                    crate::render::inert_texture(),
                 ));
         }
         let mut items = Vec::new();
@@ -8243,7 +8248,7 @@ mod closing_capture_tests {
                 captured,
                 None,
                 DrmId::from(0usize),
-                crate::egl::GlTexture::test_inert(),
+                crate::render::inert_texture(),
             ));
         state.advance_visual_animations(now + std::time::Duration::from_millis(50));
         assert_eq!(state.closing_snapshots[0].visual_bounds(), captured);
@@ -8401,8 +8406,7 @@ mod render_recipe_tests {
                 mask: SceneItemMask::RoundedClip { clip },
             },
             mask: SceneItemMask::RoundedClip { clip },
-            texture: 0,
-            owned_texture: None,
+            texture: crate::render::inert_texture(),
             damage: DamageRegion::from_rect(item_bounds),
             sample_damage_padding: 0,
             state_has_alpha: false,
@@ -8535,8 +8539,7 @@ mod render_recipe_tests {
                     mask: SceneItemMask::None,
                 },
                 mask: SceneItemMask::None,
-                texture: 11,
-                owned_texture: None,
+                texture: crate::render::inert_texture(),
                 damage: DamageRegion::from_rect(bounds_a),
                 sample_damage_padding: 0,
                 state_has_alpha: true,
@@ -8564,8 +8567,7 @@ mod render_recipe_tests {
                     mask: SceneItemMask::None,
                 },
                 mask: SceneItemMask::None,
-                texture: 22,
-                owned_texture: None,
+                texture: crate::render::inert_texture(),
                 damage: DamageRegion::from_rect(bounds_b),
                 sample_damage_padding: 0,
                 state_has_alpha: true,
@@ -8726,8 +8728,7 @@ mod render_recipe_tests {
                 mask: SceneItemMask::None,
             },
             mask: SceneItemMask::None,
-            texture: 7,
-            owned_texture: None,
+            texture: crate::render::inert_texture(),
             damage: DamageRegion::from_rect(item_bounds),
             sample_damage_padding: 0,
             state_has_alpha: true,
@@ -8882,8 +8883,7 @@ mod presentation_timing_tests {
                 mask: SceneItemMask::None,
             },
             mask: SceneItemMask::None,
-            texture: 0,
-            owned_texture: None,
+            texture: crate::render::inert_texture(),
             damage: DamageRegion::from_rect(bounds),
             sample_damage_padding: 0,
             state_has_alpha: true,

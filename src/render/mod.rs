@@ -4,8 +4,9 @@ pub mod visual;
 
 pub use {
     backend::{
-        FormatSupport, GraphicsApi, OffscreenTarget, RenderCompletion, RenderFrame, RenderSyncMode,
-        RenderTarget, Renderer, RendererCapabilities, RendererError, ShmImage, Texture,
+        inert_texture, FormatSupport, GraphicsApi, InertTexture, OffscreenTarget, RenderCompletion,
+        RenderDeviceId, RenderFrame, RenderSyncMode, RenderTarget, Renderer, RendererCapabilities,
+        RendererError, ShmImage, Texture,
     },
     recipe::{
         EffectElement, FrameElement, FramePhase, OutputFrameRecipe, TextureElement, TextureMask,
