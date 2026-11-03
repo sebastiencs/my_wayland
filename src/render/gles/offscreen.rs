@@ -3,8 +3,14 @@ use std::ptr;
 use khronos_types::gl;
 
 use {
-    super::{import::GlTexture, readback::read_flip_y_framebuffer, resources::EglFrameBuffer},
-    crate::render::{OutputFrameRecipe, RenderDeviceId},
+    super::{
+        import::GlTexture, pipeline::GlesDraw, readback::read_flip_y_framebuffer,
+        resources::EglFrameBuffer,
+    },
+    crate::{
+        render::{FrameElement, OutputFrameRecipe, RenderDeviceId},
+        transform::OutputPresentationTransform,
+    },
 };
 
 #[derive(Debug)]
@@ -86,6 +92,21 @@ pub(crate) struct OffscreenColorTarget {
 impl OffscreenColorTarget {
     pub(crate) fn new(width: i32, height: i32) -> Option<Self> {
         TextureFrameBuffer::new(width, height).map(|framebuffer| Self { framebuffer })
+    }
+
+    pub(super) fn render_elements(
+        &self,
+        draw: &GlesDraw,
+        elements: &[FrameElement],
+        presentation_transform: OutputPresentationTransform,
+    ) {
+        draw.paint_transparent_target(
+            self.framebuffer.framebuffer_object,
+            self.framebuffer.width,
+            self.framebuffer.height,
+            elements,
+            presentation_transform,
+        );
     }
 
     pub(crate) fn render_recipe(&self, renderer: &EglFrameBuffer, recipe: &OutputFrameRecipe) {

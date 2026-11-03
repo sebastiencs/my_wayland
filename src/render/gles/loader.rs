@@ -1,4 +1,4 @@
-use std::ffi::CStr;
+use std::{ffi::CStr, sync::Mutex};
 
 use khronos_types::{egl, gl};
 
@@ -331,31 +331,25 @@ impl EGL {
     }
 }
 
-pub fn init() -> Result<EGL, String> {
-    let egl = EGL::new()?;
-    egl.bind_api(egl::OPENGL_ES_API)
-        .map_err(|error| format!("eglBindAPI: {error:?}"))?;
-    Ok(egl)
+static EGL_INSTANCE: Mutex<Option<EGL>> = Mutex::new(None);
 
-    // let egl = unsafe {
-    //     egl::DynamicInstance::<EGL1_5>::load_required()
-    //         .expect("Unable to load libEGL.so or libEGL.so.1")
-    // };
+pub fn init() -> Result<(), String> {
+    let mut slot = EGL_INSTANCE.lock().expect("EGL init lock");
+    if slot.is_none() {
+        let egl = EGL::new()?;
+        egl.bind_api(egl::OPENGL_ES_API)
+            .map_err(|error| format!("eglBindAPI: {error:?}"))?;
+        *slot = Some(egl);
+    }
+    Ok(())
+}
 
-    // let egl: EglInstance = Arc::new(egl);
-
-    // egl.bind_api(khronos_egl::OPENGL_ES_API)
-    //     .expect("unable to select OpenGL API");
-
-    // egl
-
-    // dbg!(query_extensions().unwrap());
-    // dbg!(query_version().unwrap());
-
-    // egl::bind_api(egl::EGL_OPENGL_ES_API).expect("EGL bind_api failed");
-
-    // let extensions: BTreeSet<&'static str> = query_extensions().unwrap().split(' ').collect();
-    // dbg!(extensions);
+pub(super) fn initialized_egl() -> Result<EGL, String> {
+    EGL_INSTANCE
+        .lock()
+        .expect("EGL init lock")
+        .clone()
+        .ok_or_else(|| "EGL is not initialized".to_string())
 }
 
 #[derive(Copy, Clone, Debug)]

@@ -707,7 +707,7 @@ impl Udev {
 
         eprintln!("DRM TAKEN {:?}", device.devnode());
 
-        let drm = match Drm::create_drm(fd, device, &state.egl) {
+        let drm = match Drm::create_drm(fd, device) {
             Ok(drm) => drm,
             Err(error) => {
                 if from_resume {

@@ -14,7 +14,7 @@ use crate::{
     },
     region::RectI,
     render::{
-        gles::EGL, BlurVisualStyle, BorderGradient, BorderVisualStyle, RootSurfaceVisualState,
+        BlurVisualStyle, BorderGradient, BorderVisualStyle, RootSurfaceVisualState,
         ShadowVisualStyle, SurfaceEffectStyle,
     },
     root_geometry::{self, CommittedRootGeometry, DecorationFrameLayout},
@@ -878,7 +878,6 @@ pub struct State {
     pub presentation: PresentationSubsystem,
     pub globals: Globals,
     pub activation_tokens: ActivationTokenStore,
-    pub egl: EGL,
     pub config: RuntimeConfig,
     pub seat: SeatState,
     pub keyboard: KeyboardState,

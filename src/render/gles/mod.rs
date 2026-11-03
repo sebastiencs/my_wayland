@@ -8,17 +8,11 @@ mod renderer;
 mod resources;
 mod sync;
 
-pub use renderer::GlesRenderer;
-
-pub use {
-    context::EglContext,
-    import::GlTexture,
-    loader::{init, EGL},
-    resources::EglFrameBuffer,
-};
-
-pub(crate) use offscreen::OffscreenColorTarget;
+pub use {loader::init, renderer::GlesRenderer};
 
 pub use crate::render::{RenderCompletion, TextureMask as RenderItemMask};
+
+#[cfg(test)]
+mod smoke;
 
 pub type RenderItem = crate::render::TextureElement;

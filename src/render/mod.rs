@@ -3,6 +3,9 @@ pub mod gles;
 pub mod recipe;
 pub mod visual;
 
+#[cfg(test)]
+mod mock;
+
 pub use {
     backend::{
         inert_texture, FormatSupport, GraphicsApi, InertTexture, OffscreenTarget, RenderCompletion,

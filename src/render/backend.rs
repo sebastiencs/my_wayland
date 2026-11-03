@@ -1,8 +1,7 @@
 //! Renderer boundary shared by the OpenGL and Vulkan backends.
 //!
-//! GLES implements this contract on [`crate::render::gles::GlesRenderer`]. Output
-//! drawing still calls [`crate::render::gles::EglFrameBuffer`] directly until a
-//! later phase routes those call sites through [`Renderer`].
+//! GLES implements this contract on [`crate::render::gles::GlesRenderer`]. Callers
+//! outside that module draw, import, and read back through [`Renderer`].
 //! Recipe textures are [`Texture`] handles. A GLES texture records the DRM device
 //! that created it, and that backend rejects a handle from another device.
 //!
@@ -101,6 +100,8 @@ pub enum RendererError {
     ReadbackFailed,
     #[error("acquire wait failed")]
     AcquireWaitFailed,
+    #[error("fence wait failed")]
+    FenceWaitFailed,
 }
 
 /// Backend-owned image. Sampling stays inside the renderer that created it.
@@ -154,6 +155,11 @@ pub struct RenderFrame<'a> {
     pub preserve_contents: bool,
     pub presentation_transform: OutputPresentationTransform,
     pub sync_mode: RenderSyncMode,
+    /// Blur padding uses this size instead of the target size.
+    ///
+    /// Output rendering leaves this empty and measures blur against the target.
+    /// Window capture sets it to the output size.
+    pub blur_reference: Option<(i32, i32)>,
 }
 
 /// One renderer for one DRM device.
@@ -201,11 +207,14 @@ pub trait Renderer: Debug {
     ) -> Result<(), RendererError>;
 
     /// Draw `elements` into a new transparent texture of `width` by `height`.
+    ///
+    /// `blur_reference` is the output size blur padding is measured against.
     fn capture_transparent(
         &mut self,
         elements: &[FrameElement],
         width: i32,
         height: i32,
+        blur_reference: (i32, i32),
         presentation_transform: OutputPresentationTransform,
     ) -> Result<Rc<dyn Texture>, RendererError>;
 
@@ -214,6 +223,12 @@ pub trait Renderer: Debug {
     /// Import does not wait. Direct scanout skips this call and passes the
     /// fence to KMS instead.
     fn wait_acquire(&mut self, acquire: &AcquireSync) -> Result<(), RendererError>;
+
+    /// Make this device current so a later drop can delete its GPU resources.
+    fn make_current(&self);
+
+    /// Wait for a fence previously returned by [`Renderer::render`].
+    fn wait_fence(&mut self, fence: OwnedFd) -> Result<(), RendererError>;
 }
 
 #[cfg(test)]

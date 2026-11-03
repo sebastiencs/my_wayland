@@ -133,6 +133,23 @@ impl GbmDevice {
         BufferObject { bo, dmabuf: Some(dmabuf) }
     }
 
+    pub(crate) fn try_create_bo_with_size(
+        &self,
+        width: u32,
+        height: u32,
+        format: drm::buffer::DrmFourcc,
+        flags: UseFlags,
+    ) -> Option<BufferObject> {
+        let bo = unsafe {
+            sys::gbm_bo_create(self.gbm_device, width, height, format as u32, flags.bits())
+        };
+        if bo.is_null() {
+            None
+        } else {
+            Some(BufferObject { bo, dmabuf: Some(make_dmabuf(bo)) })
+        }
+    }
+
     fn allocate_bo(
         &self,
         width: u32,

@@ -1,18 +1,20 @@
 use std::{
     any::Any,
     collections::HashMap,
-    os::fd::AsFd,
+    os::fd::{AsFd, OwnedFd},
     rc::{Rc, Weak},
 };
 
 use crate::{
     dmabuf::{DmaBuf, DmaBufId},
+    gbm::GbmDevice,
     region::RectI,
     render::{
-        FormatSupport, GraphicsApi, OffscreenTarget, RenderCompletion, RenderFrame, RenderTarget,
-        Renderer, RendererCapabilities, RendererError, ShmImage, Texture,
+        FormatSupport, FrameElement, GraphicsApi, OffscreenTarget, RenderCompletion, RenderFrame,
+        RenderTarget, Renderer, RendererCapabilities, RendererError, ShmImage, Texture,
     },
     sync::AcquireSync,
+    transform::OutputPresentationTransform,
 };
 
 use super::{
@@ -21,9 +23,6 @@ use super::{
 };
 
 /// GLES 2 renderer for one DRM device.
-///
-/// Output presentation still calls [`EglFrameBuffer`] directly. This type is the
-/// implementation behind [`Renderer`] for the later call-site switch.
 #[derive(Debug)]
 pub struct GlesRenderer {
     context: EglContext,
@@ -38,12 +37,13 @@ impl GlesRenderer {
         Self { context, capabilities, dmabuf_textures: HashMap::new() }
     }
 
-    pub fn context(&self) -> &EglContext {
-        &self.context
+    pub fn from_gbm(gbm: &GbmDevice) -> Result<Self, String> {
+        let egl = super::loader::initialized_egl()?;
+        Ok(Self::new(EglContext::make(&egl, gbm)?))
     }
 
-    pub fn into_context(self) -> EglContext {
-        self.context
+    pub(super) fn context(&self) -> &EglContext {
+        &self.context
     }
 
     fn draw(&self, width: i32, height: i32) -> GlesDraw<'_> {
@@ -190,6 +190,7 @@ impl Renderer for GlesRenderer {
                 .into_texture(self.context.device_id())
                 .map_err(|_| RendererError::ImportFailed)?,
         );
+        framebuffer.clear();
         Ok(Box::new(framebuffer))
     }
 
@@ -209,23 +210,31 @@ impl Renderer for GlesRenderer {
         target: &mut dyn RenderTarget,
         frame: RenderFrame<'_>,
     ) -> Result<RenderCompletion, RendererError> {
-        let Some(framebuffer) = target.as_any_mut().downcast_mut::<EglFrameBuffer>() else {
+        self.context.bind();
+        if let Some(framebuffer) = target.as_any_mut().downcast_mut::<EglFrameBuffer>() {
+            let projection = crate::transform::output_projection(
+                framebuffer.width as f32,
+                framebuffer.height as f32,
+                frame.presentation_transform,
+            );
+            return Ok(framebuffer.render(
+                frame.recipe,
+                projection,
+                frame.sync_mode,
+                frame.damage,
+                frame.preserve_contents,
+                frame.presentation_transform,
+            ));
+        }
+        let Some(offscreen) = target.as_any().downcast_ref::<OffscreenColorTarget>() else {
             return Err(RendererError::RenderFailed);
         };
-        self.context.bind();
-        let projection = crate::transform::output_projection(
-            framebuffer.width as f32,
-            framebuffer.height as f32,
-            frame.presentation_transform,
-        );
-        Ok(framebuffer.render(
-            frame.recipe,
-            projection,
-            frame.sync_mode,
-            frame.damage,
-            frame.preserve_contents,
-            frame.presentation_transform,
-        ))
+        let (reference_width, reference_height) = frame
+            .blur_reference
+            .unwrap_or((offscreen.width(), offscreen.height()));
+        let draw = self.draw(reference_width, reference_height);
+        offscreen.render_elements(&draw, &frame.recipe.elements, frame.presentation_transform);
+        Ok(RenderCompletion::blocking_fallback())
     }
 
     fn readback(
@@ -252,18 +261,28 @@ impl Renderer for GlesRenderer {
 
     fn capture_transparent(
         &mut self,
-        elements: &[crate::render::FrameElement],
+        elements: &[FrameElement],
         width: i32,
         height: i32,
-        presentation_transform: crate::transform::OutputPresentationTransform,
+        blur_reference: (i32, i32),
+        presentation_transform: OutputPresentationTransform,
     ) -> Result<Rc<dyn Texture>, RendererError> {
-        // Blur padding uses the capture size. The live output path still measures
-        // blur against the output framebuffer that owns the snapshot.
         self.context.bind();
-        self.draw(width, height)
+        self.draw(blur_reference.0, blur_reference.1)
             .capture_transparent(elements, width, height, presentation_transform)
             .map(|texture| Rc::new(texture) as Rc<dyn Texture>)
             .ok_or(RendererError::RenderFailed)
+    }
+
+    fn make_current(&self) {
+        self.context.bind();
+    }
+
+    fn wait_fence(&mut self, fence: OwnedFd) -> Result<(), RendererError> {
+        self.context.bind();
+        self.context
+            .wait_on_native_fence(fence)
+            .map_err(|_| RendererError::FenceWaitFailed)
     }
 
     fn wait_acquire(&mut self, acquire: &AcquireSync) -> Result<(), RendererError> {

@@ -33,10 +33,9 @@ use crate::{
     object::Object,
     region::{DamageRegion, RectI},
     render::{
-        gles::{EglContext, EglFrameBuffer, GlTexture, GlesRenderer, EGL},
-        rounded_ring, EffectElement, FrameElement, FramePhase, OutputFrameRecipe, RenderTarget,
-        Renderer, RootSurfaceVisualState, RoundedRing, ShmImage, Texture, TextureElement,
-        TextureMask, TextureSource,
+        gles::GlesRenderer, rounded_ring, EffectElement, FrameElement, FramePhase,
+        OutputFrameRecipe, RenderFrame, RenderTarget, Renderer, RootSurfaceVisualState,
+        RoundedRing, ShmImage, Texture, TextureElement, TextureMask, TextureSource,
     },
     runner::{isolate_session_fault, Dispatcher, Model, ModelInstanceId, SessionFault},
     scene::{ComposedEntry, CompositionTier, OutputCompositionView},
@@ -173,7 +172,7 @@ impl Drop for Drm {
         // Output buffers drop while the renderer and GBM device are still alive:
         // GPU target, then DRM framebuffer, then GBM BO. The renderer field then
         // terminates EGL, and the GBM device drops after that.
-        self.renderer.context().bind();
+        self.renderer.make_current();
         self.outputs.clear();
     }
 }
@@ -629,6 +628,10 @@ impl AsRawFd for DrmFd {
 }
 
 impl DrmFd {
+    pub(crate) fn from_owned(fd: OwnedFd) -> Self {
+        Self { fd: Rc::new(fd) }
+    }
+
     pub fn try_create_lease(&self) -> std::io::Result<DrmFd> {
         const DRM_IOCTL_MODE_CREATE_LEASE: usize = 0xC6;
         nix::ioctl_readwrite!(
@@ -928,7 +931,7 @@ pub struct InFormat {
 
 impl Drm {
     pub(crate) fn bind_context(&self) {
-        self.renderer.context().bind();
+        self.renderer.make_current();
     }
 
     fn output(&self, drm_crtc_id: u32) -> Option<&DrmOutput> {
@@ -1258,7 +1261,7 @@ impl Drm {
         }
     }
 
-    pub fn create_drm(fd: OwnedFd, device: udev::Device, egl: &EGL) -> Result<Self, String> {
+    pub fn create_drm(fd: OwnedFd, device: udev::Device) -> Result<Self, String> {
         let drm = DrmFd { fd: Rc::new(fd) };
         set_nonblocking(drm.as_raw_fd()).map_err(|error| format!("set nonblocking: {error}"))?;
         match drm.set_client_capability(drm::ClientCapability::UniversalPlanes, true) {
@@ -1296,7 +1299,7 @@ impl Drm {
         );
 
         let gbm = GbmDevice::new(&drm).map_err(|error| format!("gbm: {error}"))?;
-        let mut renderer = GlesRenderer::new(EglContext::make(egl, &gbm)?);
+        let mut renderer = GlesRenderer::from_gbm(&gbm)?;
         let outputs = Self::init_drm_outputs(&drm, &mut renderer, &gbm, &resources);
         if outputs.is_empty() {
             return Err("no usable connector".into());
@@ -1675,32 +1678,48 @@ impl Drm {
 
     pub fn supported_dmabuf_read_formats(&self) -> Vec<(&'static Format, BTreeSet<Modifier>)> {
         self.renderer
-            .context()
-            .opengl_formats
-            .values()
-            .map(|format| (format.format, format.read_modifiers.clone()))
+            .capabilities()
+            .sample_formats
+            .iter()
+            .filter_map(|format| {
+                let mapped = *FORMATS_MAP.get(&format.fourcc)?;
+                let modifiers = format.modifiers.iter().copied().map(Modifier).collect();
+                Some((mapped, modifiers))
+            })
             .collect()
     }
 
     fn render_output(
-        &self,
+        &mut self,
         drm_crtc_id: u32,
         recipe: &OutputFrameRecipe,
         damage: &DamageRegion,
         preserve_contents: bool,
-    ) -> crate::render::gles::RenderCompletion {
-        let output = self
-            .output(drm_crtc_id)
+    ) -> crate::render::RenderCompletion {
+        let Drm { renderer, outputs, .. } = self;
+        let output = outputs
+            .get_mut(&drm_crtc_id)
             .expect("missing DRM output pipeline for render");
-        let projection = output.render_projection();
-        output.render_buffer().gles_target().render(
-            recipe,
-            projection,
-            output.render_sync_mode,
-            damage,
-            preserve_contents,
-            output.presentation_transform,
-        )
+        let presentation_transform = output.presentation_transform;
+        let sync_mode = output.render_sync_mode;
+        let target = output.pipeline.render_buffer_mut().target_mut();
+        match renderer.render(
+            target,
+            RenderFrame {
+                recipe,
+                damage,
+                preserve_contents,
+                presentation_transform,
+                sync_mode,
+                blur_reference: None,
+            },
+        ) {
+            Ok(completion) => completion,
+            Err(error) => {
+                log::error!("output render failed: {error}");
+                crate::render::RenderCompletion::blocking_fallback()
+            }
+        }
     }
 
     fn collect_cursor_plane_candidate(
@@ -2463,9 +2482,8 @@ impl Drm {
         };
         let (hdisplay, vdisplay) = mode.size();
         let (primary_plane, plane_modifiers) = in_use.primary_plane();
-        let render_sync_mode = if renderer.context().supports_native_render_fence()
-            && primary_plane.supports_explicit_sync()
-        {
+        let explicit_sync = renderer.capabilities().explicit_sync;
+        let render_sync_mode = if explicit_sync && primary_plane.supports_explicit_sync() {
             log::info!(
                 "Using explicit compositor sync: connector={} plane={:?} in_fence_fd={:?}",
                 in_use.connector.interface_name,
@@ -2475,10 +2493,10 @@ impl Drm {
             RenderSyncMode::ExplicitInFence
         } else {
             log::warn!(
-                "Falling back to blocking GL sync: connector={} plane={:?} egl_native_fence={} plane_in_fence_fd={}",
+                "Falling back to blocking GL sync: connector={} plane={:?} renderer_explicit_sync={} plane_in_fence_fd={}",
                 in_use.connector.interface_name,
                 primary_plane.handle,
-                renderer.context().supports_native_render_fence(),
+                explicit_sync,
                 primary_plane.supports_explicit_sync()
             );
             RenderSyncMode::BlockingFinishFallback
@@ -2633,13 +2651,9 @@ impl Drm {
         };
         let width = dmabuf.width;
         let height = dmabuf.height;
-        let mut target = renderer.import_output_target(dmabuf).map_err(|error| {
+        let target = renderer.import_output_target(dmabuf).map_err(|error| {
             std::io::Error::other(format!("renderer output import failed: {error}"))
         })?;
-        let Some(framebuffer) = target.as_any_mut().downcast_mut::<EglFrameBuffer>() else {
-            return Err(std::io::Error::other("output target is not a GLES framebuffer"));
-        };
-        framebuffer.clear();
 
         Ok(RenderBuffer {
             width,
@@ -3165,11 +3179,12 @@ struct RenderBuffer {
 }
 
 impl RenderBuffer {
-    fn gles_target(&self) -> &EglFrameBuffer {
-        self.target
-            .as_any()
-            .downcast_ref()
-            .expect("output target is a GLES framebuffer")
+    fn target(&self) -> &dyn RenderTarget {
+        &**self.target
+    }
+
+    fn target_mut(&mut self) -> &mut dyn RenderTarget {
+        &mut **self.target
     }
 }
 
@@ -3915,28 +3930,28 @@ impl Model for DrmOutputModel {
 }
 
 fn read_output_capture_copies(
-    drm: &Drm,
+    drm: &mut Drm,
     drm_crtc_id: u32,
     specs: Vec<crate::capture::OutputCopySpec>,
     cursor: Option<&crate::capture::CaptureCursorImage>,
 ) -> Vec<crate::capture::RenderedOutputCopy> {
-    let Some(output) = drm.output(drm_crtc_id) else {
+    let Drm { renderer, outputs, .. } = drm;
+    let Some(output) = outputs.get(&drm_crtc_id) else {
         return Vec::new();
     };
-    let framebuffer = output.render_buffer().gles_target();
+    let target = output.pipeline.render_buffer().target();
     specs
         .into_iter()
         .map(|spec| {
             let len = spec.stride.saturating_mul(spec.rect.height.max(0) as usize);
             let mut bytes = vec![0u8; len];
-            let read_ok = framebuffer.read_top_left(
-                spec.rect.x,
-                spec.rect.y,
-                spec.rect.width,
-                spec.rect.height,
-                spec.stride,
-                &mut bytes,
-            );
+            let read_ok =
+                match RectI::new(spec.rect.x, spec.rect.y, spec.rect.width, spec.rect.height) {
+                    Some(rect) => renderer
+                        .readback(target, rect, spec.stride, &mut bytes)
+                        .is_ok(),
+                    None => false,
+                };
             if read_ok && spec.cursor == crate::capture::CaptureCursor::Painted {
                 if let Some(cursor) = cursor {
                     crate::capture::blend_cursor_into_copy(
@@ -4112,22 +4127,48 @@ fn render_prepared_toplevels(
             translate_scene_items(&mut items, -bounds.x, -bounds.y);
             translate_recorded_frame_elements(&mut elements, -bounds.x, -bounds.y);
             let recipe = build_output_frame_recipe(&items, &elements);
-            let Some(target) =
-                crate::render::gles::OffscreenColorTarget::new(bounds.width, bounds.height)
-            else {
-                return failed(bounds.width, bounds.height);
-            };
             wait_scene_acquires(drm, &items);
-            let Some(renderer) = drm
+            let (reference_width, reference_height) = drm
                 .output(drm_crtc_id)
-                .map(|output| output.render_buffer().gles_target())
-            else {
+                .map(|output| {
+                    let buffer = output.render_buffer();
+                    (buffer.width, buffer.height)
+                })
+                .unwrap_or((bounds.width, bounds.height));
+            let mut target = match drm
+                .renderer
+                .create_offscreen_target(bounds.width, bounds.height)
+            {
+                Ok(target) => target,
+                Err(_) => return failed(bounds.width, bounds.height),
+            };
+            let Some(capture_rect) = RectI::new(0, 0, bounds.width, bounds.height) else {
                 return failed(bounds.width, bounds.height);
             };
-            target.render_recipe(renderer, &recipe);
+            let damage = DamageRegion::from_rect(capture_rect);
+            if drm
+                .renderer
+                .render(
+                    &mut *target,
+                    RenderFrame {
+                        recipe: &recipe,
+                        damage: &damage,
+                        preserve_contents: false,
+                        presentation_transform: OutputPresentationTransform::FlipY,
+                        sync_mode: RenderSyncMode::BlockingFinishFallback,
+                        blur_reference: Some((reference_width, reference_height)),
+                    },
+                )
+                .is_err()
+            {
+                return failed(bounds.width, bounds.height);
+            }
             let stride = (bounds.width as usize).saturating_mul(4);
             let mut bytes = vec![0u8; stride.saturating_mul(bounds.height.max(0) as usize)];
-            let read_ok = target.read_top_left(stride, &mut bytes);
+            let read_ok = drm
+                .renderer
+                .readback(&*target, capture_rect, stride, &mut bytes)
+                .is_ok();
             let damage = item
                 .snapshots
                 .iter()
@@ -4535,10 +4576,8 @@ impl DrmOutputModel {
                                         if let Some(in_fence_fd) =
                                             fallback_render_completion.in_fence_fd
                                         {
-                                            if let Err(wait_error) = drm
-                                                .renderer
-                                                .context()
-                                                .wait_on_native_fence(in_fence_fd)
+                                            if let Err(wait_error) =
+                                                drm.renderer.wait_fence(in_fence_fd)
                                             {
                                                 log::warn!(
                                                     "failed to wait on compositor render fence after fallback submit failure: {:?}",
@@ -4586,9 +4625,7 @@ impl DrmOutputModel {
                             );
                             if !render_completion.used_blocking_fallback {
                                 if let Some(in_fence_fd) = render_completion.in_fence_fd {
-                                    if let Err(wait_error) =
-                                        drm.renderer.context().wait_on_native_fence(in_fence_fd)
-                                    {
+                                    if let Err(wait_error) = drm.renderer.wait_fence(in_fence_fd) {
                                         log::warn!(
                                             "failed to wait on compositor render fence after submit failure: {:?}",
                                             wait_error
@@ -4628,9 +4665,7 @@ impl DrmOutputModel {
                         );
                         if !render_completion.used_blocking_fallback {
                             if let Some(in_fence_fd) = render_completion.in_fence_fd {
-                                if let Err(wait_error) =
-                                    drm.renderer.context().wait_on_native_fence(in_fence_fd)
-                                {
+                                if let Err(wait_error) = drm.renderer.wait_fence(in_fence_fd) {
                                     log::warn!(
                                     "failed to wait on compositor render fence after submit failure: {:?}",
                                     wait_error
@@ -4958,7 +4993,7 @@ fn collect_protected_scene(
 ) -> (Vec<SceneItem>, Vec<RecordedFrameElement>, Vec<DeferredRelease>) {
     let red = matches!(state.session_lock.blank(), Some(crate::session_lock::LockBlank::Red));
     let blank = {
-        let drm = state.drm.get(drm_id);
+        let drm = state.drm.get_mut(drm_id);
         lock_blank_item(drm, global_bounds, red)
     };
     let mut snapshots = Vec::new();
@@ -5015,11 +5050,9 @@ fn collect_protected_scene(
     (items, frame_elements, deferred_releases)
 }
 
-fn lock_blank_item(drm: &Drm, bounds: RectI, red: bool) -> Option<SceneItem> {
-    drm.renderer.context().bind();
+fn lock_blank_item(drm: &mut Drm, bounds: RectI, red: bool) -> Option<SceneItem> {
     let pixels: [u8; 4] = if red { [255, 0, 0, 255] } else { [0, 0, 0, 255] };
-    let texture = GlTexture::from_rgba(&pixels, 1, 1, drm.renderer.context().device_id()).ok()?;
-    let texture: Rc<dyn Texture> = Rc::new(texture);
+    let texture = drm.renderer.upload_rgba(&pixels, 1, 1).ok()?;
     Some(SceneItem {
         state: SceneItemState {
             key: SceneItemKey::LockBlank,
@@ -5281,12 +5314,12 @@ fn collect_named_cursor_render_item(
                 return None;
             }
 
-            state.drm.get(drm_id).bind_context();
-            let device_id = state.drm.get(drm_id).renderer.context().device_id();
-            let texture =
-                GlTexture::from_rgba(&image.pixels_rgba, image.width, image.height, device_id)
-                    .ok()?;
-            let texture: Rc<dyn Texture> = Rc::new(texture);
+            let texture = state
+                .drm
+                .get_mut(drm_id)
+                .renderer
+                .upload_rgba(&image.pixels_rgba, image.width, image.height)
+                .ok()?;
             Some((
                 SceneItem {
                     state: SceneItemState {
@@ -6262,17 +6295,19 @@ fn realize_closing_texture(
         uploaded.push((texture, tex_transform));
     }
     let elements = closing_capture_elements(plan, &uploaded);
-    let output = drm.output(plan.crtc_id)?;
-    output
-        .render_buffer()
-        .gles_target()
+    let (reference_width, reference_height) = {
+        let buffer = drm.output(plan.crtc_id)?.render_buffer();
+        (buffer.width, buffer.height)
+    };
+    drm.renderer
         .capture_transparent(
             &elements,
             plan.bounds.width,
             plan.bounds.height,
+            (reference_width, reference_height),
             plan.presentation_transform,
         )
-        .map(|texture| Rc::new(texture) as Rc<dyn Texture>)
+        .ok()
 }
 
 fn closing_capture_elements(

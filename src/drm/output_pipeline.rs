@@ -107,6 +107,10 @@ impl OutputPipeline {
         &self.buffers[self.core.render_buffer_index]
     }
 
+    pub(super) fn render_buffer_mut(&mut self) -> &mut RenderBuffer {
+        &mut self.buffers[self.core.render_buffer_index]
+    }
+
     pub(super) fn render_buffer_index(&self) -> usize {
         self.core.render_buffer_index
     }

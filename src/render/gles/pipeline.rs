@@ -596,30 +596,11 @@ impl EglFrameBuffer {
         height: i32,
         recipe: &OutputFrameRecipe,
     ) {
-        if width <= 0 || height <= 0 {
-            return;
-        }
-        unsafe {
-            gl::BindFramebuffer(gl::FRAMEBUFFER as _, framebuffer);
-            gl::Viewport(0, 0, width, height);
-            gl::Disable(gl::SCISSOR_TEST as _);
-            gl::ClearColor(0.0, 0.0, 0.0, 0.0);
-            gl::Clear(gl::COLOR_BUFFER_BIT as _);
-        }
-        let Some(damage) = RectI::new(0, 0, width, height).map(DamageRegion::from_rect) else {
-            return;
-        };
-        self.draw().render_frame_elements_to_target(
+        self.draw().paint_transparent_target(
             framebuffer,
             width,
             height,
             &recipe.elements,
-            crate::transform::output_projection(
-                width as f32,
-                height as f32,
-                OutputPresentationTransform::FlipY,
-            ),
-            &damage,
             OutputPresentationTransform::FlipY,
         );
     }
@@ -638,6 +619,43 @@ impl EglFrameBuffer {
 }
 
 impl GlesDraw<'_> {
+    pub(super) fn paint_transparent_target(
+        &self,
+        framebuffer: gl::GLuint,
+        width: i32,
+        height: i32,
+        elements: &[FrameElement],
+        presentation_transform: OutputPresentationTransform,
+    ) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER as _, framebuffer);
+            gl::Viewport(0, 0, width, height);
+            gl::Disable(gl::SCISSOR_TEST as _);
+            gl::ClearColor(0.0, 0.0, 0.0, 0.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT as _);
+        }
+        let Some(damage) = RectI::new(0, 0, width, height).map(DamageRegion::from_rect) else {
+            return;
+        };
+        let projection = crate::transform::output_projection(
+            width as f32,
+            height as f32,
+            presentation_transform,
+        );
+        self.render_frame_elements_to_target(
+            framebuffer,
+            width,
+            height,
+            elements,
+            projection,
+            &damage,
+            presentation_transform,
+        );
+    }
+
     pub(super) fn capture_transparent(
         &self,
         elements: &[FrameElement],
