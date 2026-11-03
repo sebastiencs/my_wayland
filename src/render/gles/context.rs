@@ -34,7 +34,6 @@ pub struct EglContext {
     extensions: BTreeSet<String>,
     config: egl::EGLConfig,
     context: egl::EGLContext,
-    pub gbm: GbmDevice,
     formats: HashMap<DrmFourcc, EglFormat>,
     pub opengl_formats: HashMap<DrmFourcc, OpenGlFormat>,
     opengl_extensions: BTreeSet<String>,
@@ -53,7 +52,7 @@ impl EglContext {
             .make_current(self.display, None, None, Some(self.context));
     }
 
-    pub fn make(egl: &EGL, gbm: GbmDevice) -> Result<Self, String> {
+    pub fn make(egl: &EGL, gbm: &GbmDevice) -> Result<Self, String> {
         let display = egl
             .get_platform_display(EGL_PLATFORM_GBM_KHR, gbm.gbm_device, &[egl::NONE as _])
             .map_err(|error| format!("platform display: {error:?}"))?;
@@ -122,7 +121,6 @@ impl EglContext {
             extensions,
             config,
             context,
-            gbm,
             formats,
             opengl_formats,
             opengl_extensions,
@@ -321,8 +319,8 @@ impl Drop for EglContext {
     fn drop(&mut self) {
         // Context and display go away after the caller has dropped textures,
         // images, and framebuffers. Shared programs are deleted while this
-        // context is still current. The GBM device is destroyed by its own
-        // field drop, which runs after this body.
+        // context is still current. The GBM device that created the display
+        // outlives this context and is destroyed by its owner afterward.
         if self.display != egl::NO_DISPLAY && self.context != egl::NO_CONTEXT {
             let _ = self
                 .egl

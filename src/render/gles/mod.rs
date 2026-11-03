@@ -8,7 +8,6 @@ mod renderer;
 mod resources;
 mod sync;
 
-#[allow(unused_imports)]
 pub use renderer::GlesRenderer;
 
 pub use {

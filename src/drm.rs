@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    mem::ManuallyDrop,
     num::NonZeroU32,
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
     rc::Rc,
@@ -24,7 +25,7 @@ use {
 use crate::{
     cursor::{CursorImage, CursorImageContentKey, CursorSourceRef},
     dmabuf::DmaBuf,
-    gbm::{BufferObject, UseFlags},
+    gbm::{BufferObject, GbmDevice, UseFlags},
     io_uring::{
         model::IoUringAction,
         ring::{PollCompleted, ReadWriteCompleted, RingId},
@@ -32,9 +33,10 @@ use crate::{
     object::Object,
     region::{DamageRegion, RectI},
     render::{
-        gles::{EglContext, EglFrameBuffer, GlTexture, EGL},
-        rounded_ring, EffectElement, FrameElement, FramePhase, OutputFrameRecipe,
-        RootSurfaceVisualState, RoundedRing, Texture, TextureElement, TextureMask, TextureSource,
+        gles::{EglContext, EglFrameBuffer, GlTexture, GlesRenderer, EGL},
+        rounded_ring, EffectElement, FrameElement, FramePhase, OutputFrameRecipe, RenderTarget,
+        Renderer, RootSurfaceVisualState, RoundedRing, Texture, TextureElement, TextureMask,
+        TextureSource,
     },
     runner::{isolate_session_fault, Dispatcher, Model, ModelInstanceId, SessionFault},
     scene::{ComposedEntry, CompositionTier, OutputCompositionView},
@@ -156,8 +158,9 @@ pub struct Drm {
     fd: DrmFd,
     device: udev::Device,
     resources: DrmResources,
-    egl_context: EglContext,
     pub outputs: BTreeMap<u32, DrmOutput>,
+    renderer: GlesRenderer,
+    gbm: GbmDevice,
     driver: Driver,
     supports_syncobj_timeline: bool,
     supports_syncobj_eventfd: bool,
@@ -167,10 +170,10 @@ pub struct Drm {
 
 impl Drop for Drm {
     fn drop(&mut self) {
-        // Framebuffers, textures, and buffer objects drop while the EGL
-        // context and GBM device are still alive. The context field then
-        // terminates the display, and the GBM device drops after that.
-        self.egl_context.bind();
+        // Output buffers drop while the renderer and GBM device are still alive:
+        // GPU target, then DRM framebuffer, then GBM BO. The renderer field then
+        // terminates EGL, and the GBM device drops after that.
+        self.renderer.context().bind();
         self.outputs.clear();
     }
 }
@@ -462,8 +465,8 @@ impl DrmOutput {
     }
 
     fn output_bounds(&self) -> RectI {
-        let framebuffer = &self.render_buffer().gl_framebuffer;
-        RectI::new(0, 0, framebuffer.width, framebuffer.height)
+        let buffer = self.render_buffer();
+        RectI::new(0, 0, buffer.width, buffer.height)
             .expect("framebuffer dimensions must be non-negative")
     }
 
@@ -530,10 +533,10 @@ impl DrmOutput {
     }
 
     fn render_projection(&self) -> transform::Mat3 {
-        let framebuffer = &self.render_buffer().gl_framebuffer;
+        let buffer = self.render_buffer();
         transform::output_projection(
-            framebuffer.width as f32,
-            framebuffer.height as f32,
+            buffer.width as f32,
+            buffer.height as f32,
             self.presentation_transform,
         )
     }
@@ -925,7 +928,7 @@ pub struct InFormat {
 
 impl Drm {
     pub(crate) fn bind_context(&self) {
-        self.egl_context.bind();
+        self.renderer.context().bind();
     }
 
     fn output(&self, drm_crtc_id: u32) -> Option<&DrmOutput> {
@@ -1292,9 +1295,9 @@ impl Drm {
             resources.planes.len()
         );
 
-        let gbm = crate::gbm::GbmDevice::new(&drm).map_err(|error| format!("gbm: {error}"))?;
-        let egl_context = EglContext::make(egl, gbm)?;
-        let outputs = Self::init_drm_outputs(&drm, &egl_context, &resources);
+        let gbm = GbmDevice::new(&drm).map_err(|error| format!("gbm: {error}"))?;
+        let mut renderer = GlesRenderer::new(EglContext::make(egl, &gbm)?);
+        let outputs = Self::init_drm_outputs(&drm, &mut renderer, &gbm, &resources);
         if outputs.is_empty() {
             return Err("no usable connector".into());
         }
@@ -1310,9 +1313,10 @@ impl Drm {
             fd: drm,
             device,
             resources,
-            egl_context,
-            driver,
             outputs,
+            renderer,
+            gbm,
+            driver,
             supports_syncobj_timeline,
             supports_syncobj_eventfd,
             event_generation: 0,
@@ -1670,7 +1674,8 @@ impl Drm {
     }
 
     pub fn supported_dmabuf_read_formats(&self) -> Vec<(&'static Format, BTreeSet<Modifier>)> {
-        self.egl_context
+        self.renderer
+            .context()
             .opengl_formats
             .values()
             .map(|format| (format.format, format.read_modifiers.clone()))
@@ -1688,7 +1693,7 @@ impl Drm {
             .output(drm_crtc_id)
             .expect("missing DRM output pipeline for render");
         let projection = output.render_projection();
-        output.render_buffer().gl_framebuffer.render(
+        output.render_buffer().gles_target().render(
             recipe,
             projection,
             output.render_sync_mode,
@@ -2312,7 +2317,7 @@ impl Drm {
         plane_format: &PlaneFormat,
     ) -> Option<CursorPlaneBuffer> {
         let (fb_width, fb_height) = self.fixed_cursor_plane_size();
-        let bo = self.egl_context.gbm.create_bo_with_size_no_export(
+        let bo = self.gbm.create_bo_with_size_no_export(
             fb_width,
             fb_height,
             DrmFourcc::Argb8888,
@@ -2428,7 +2433,8 @@ impl Drm {
 
     fn init_drm_outputs(
         drm: &DrmFd,
-        egl: &EglContext,
+        renderer: &mut GlesRenderer,
+        gbm: &GbmDevice,
         drm_resources: &DrmResources,
     ) -> BTreeMap<u32, DrmOutput> {
         let DrmResources { planes, crtcs, connectors, .. } = drm_resources;
@@ -2436,7 +2442,7 @@ impl Drm {
         for in_use in Self::find_valid_connectors(connectors, crtcs, planes) {
             let drm_crtc_id = in_use.crtc_id();
             let name = in_use.connector.interface_name.clone();
-            match Self::init_drm_output(drm, egl, in_use) {
+            match Self::init_drm_output(drm, renderer, gbm, in_use) {
                 Ok(output) => {
                     outputs.insert(drm_crtc_id, output);
                 }
@@ -2448,7 +2454,8 @@ impl Drm {
 
     fn init_drm_output(
         drm: &DrmFd,
-        egl: &EglContext,
+        renderer: &mut GlesRenderer,
+        gbm: &GbmDevice,
         in_use: ConnectorInUse,
     ) -> Result<DrmOutput, String> {
         let Some(mode) = in_use.connector.preferred_mode.as_ref() else {
@@ -2456,7 +2463,7 @@ impl Drm {
         };
         let (hdisplay, vdisplay) = mode.size();
         let (primary_plane, plane_modifiers) = in_use.primary_plane();
-        let render_sync_mode = if egl.supports_native_render_fence()
+        let render_sync_mode = if renderer.context().supports_native_render_fence()
             && primary_plane.supports_explicit_sync()
         {
             log::info!(
@@ -2471,7 +2478,7 @@ impl Drm {
                 "Falling back to blocking GL sync: connector={} plane={:?} egl_native_fence={} plane_in_fence_fd={}",
                 in_use.connector.interface_name,
                 primary_plane.handle,
-                egl.supports_native_render_fence(),
+                renderer.context().supports_native_render_fence(),
                 primary_plane.supports_explicit_sync()
             );
             RenderSyncMode::BlockingFinishFallback
@@ -2489,9 +2496,9 @@ impl Drm {
         let mut changes = control::atomic::AtomicModeReq::new();
 
         let buffers: [_; 2] = [
-            Self::make_render_buffer(drm, egl, &in_use, false)
+            Self::make_render_buffer(drm, renderer, gbm, &in_use, false)
                 .map_err(|error| format!("render buffer #0: {error}"))?,
-            Self::make_render_buffer(drm, egl, &in_use, false)
+            Self::make_render_buffer(drm, renderer, gbm, &in_use, false)
                 .map_err(|error| format!("render buffer #1: {error}"))?,
         ];
 
@@ -2569,7 +2576,8 @@ impl Drm {
 
     fn make_render_buffer(
         drm: &DrmFd,
-        egl: &EglContext,
+        renderer: &mut GlesRenderer,
+        gbm: &GbmDevice,
         in_use: &ConnectorInUse,
         is_cursor: bool,
     ) -> std::io::Result<RenderBuffer> {
@@ -2578,16 +2586,25 @@ impl Drm {
             return Err(std::io::Error::other("connector has no mode"));
         };
 
-        let Some(opengl_format) = egl.opengl_formats.get(&DrmFourcc::Xrgb8888) else {
-            return Err(std::io::Error::other("EGL has no XRGB8888 format"));
+        let modifiers: Vec<_> = {
+            let Some(format) = renderer
+                .capabilities()
+                .render_formats
+                .iter()
+                .find(|format| format.fourcc == DrmFourcc::Xrgb8888)
+            else {
+                return Err(std::io::Error::other("renderer has no XRGB8888 render format"));
+            };
+            format
+                .modifiers
+                .iter()
+                .copied()
+                .map(Modifier)
+                .filter(|modifier| plane_modifiers.contains(modifier))
+                .collect()
         };
-        let modifiers: Vec<_> = opengl_format
-            .write_modifiers
-            .intersection(plane_modifiers)
-            .copied()
-            .collect();
         if modifiers.is_empty() {
-            return Err(std::io::Error::other("no modifiers shared by EGL and the plane"));
+            return Err(std::io::Error::other("no modifiers shared by the renderer and the plane"));
         }
 
         let mut flags = UseFlags::RENDERING | UseFlags::SCANOUT;
@@ -2595,7 +2612,7 @@ impl Drm {
             flags |= UseFlags::LINEAR;
         }
 
-        let bo = egl.gbm.create_bo(&mode, flags, &modifiers);
+        let bo = gbm.create_bo(&mode, flags, &modifiers);
         let Some(dmabuf) = bo.dmabuf() else {
             return Err(std::io::Error::other("GBM buffer did not export a dmabuf"));
         };
@@ -2614,12 +2631,23 @@ impl Drm {
                 return Err(error);
             }
         };
-        let image = egl.import_dmabuf(dmabuf);
-        let gl_framebuffer = egl.make_fb_from_image(&image, dmabuf);
-        gl_framebuffer.clear();
-        let texture = image.into_texture(egl.device_id()).unwrap();
+        let width = dmabuf.width;
+        let height = dmabuf.height;
+        let mut target = renderer.import_output_target(dmabuf).map_err(|error| {
+            std::io::Error::other(format!("renderer output import failed: {error}"))
+        })?;
+        let Some(framebuffer) = target.as_any_mut().downcast_mut::<EglFrameBuffer>() else {
+            return Err(std::io::Error::other("output target is not a GLES framebuffer"));
+        };
+        framebuffer.clear();
 
-        Ok(RenderBuffer { bo, drm_fb, gl_framebuffer, texture })
+        Ok(RenderBuffer {
+            width,
+            height,
+            target: ManuallyDrop::new(target),
+            drm_fb: ManuallyDrop::new(drm_fb),
+            bo: ManuallyDrop::new(bo),
+        })
     }
 
     fn add_framebuffer_for_bo(drm: &DrmFd, bo: &BufferObject) -> std::io::Result<DrmFrameBuffer> {
@@ -3126,13 +3154,33 @@ fn close_gem_handles(fd: &DrmFd, handles: &[u32]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// One scanout buffer. Drop deletes the GPU target, then the DRM framebuffer, then the GBM BO.
 #[derive(Debug)]
 struct RenderBuffer {
-    /// Keeps the GBM BO (and dma-buf fds) alive while the DRM FB / EGL image / texture exist.
-    bo: crate::gbm::BufferObject,
-    drm_fb: DrmFrameBuffer,
-    gl_framebuffer: EglFrameBuffer,
-    texture: GlTexture,
+    width: i32,
+    height: i32,
+    target: ManuallyDrop<Box<dyn RenderTarget>>,
+    drm_fb: ManuallyDrop<DrmFrameBuffer>,
+    bo: ManuallyDrop<BufferObject>,
+}
+
+impl RenderBuffer {
+    fn gles_target(&self) -> &EglFrameBuffer {
+        self.target
+            .as_any()
+            .downcast_ref()
+            .expect("output target is a GLES framebuffer")
+    }
+}
+
+impl Drop for RenderBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            ManuallyDrop::drop(&mut self.target);
+            ManuallyDrop::drop(&mut self.drm_fb);
+            ManuallyDrop::drop(&mut self.bo);
+        }
+    }
 }
 
 /// Store and reassemble DRM event bytes from `read(2)` / io_uring reads.
@@ -3875,7 +3923,7 @@ fn read_output_capture_copies(
     let Some(output) = drm.output(drm_crtc_id) else {
         return Vec::new();
     };
-    let framebuffer = &output.render_buffer().gl_framebuffer;
+    let framebuffer = output.render_buffer().gles_target();
     specs
         .into_iter()
         .map(|spec| {
@@ -4070,7 +4118,7 @@ fn render_prepared_toplevels(
             };
             let Some(renderer) = drm
                 .output(drm_crtc_id)
-                .map(|output| &output.render_buffer().gl_framebuffer)
+                .map(|output| output.render_buffer().gles_target())
             else {
                 return failed(bounds.width, bounds.height);
             };
@@ -4483,8 +4531,10 @@ impl DrmOutputModel {
                                         if let Some(in_fence_fd) =
                                             fallback_render_completion.in_fence_fd
                                         {
-                                            if let Err(wait_error) =
-                                                drm.egl_context.wait_on_native_fence(in_fence_fd)
+                                            if let Err(wait_error) = drm
+                                                .renderer
+                                                .context()
+                                                .wait_on_native_fence(in_fence_fd)
                                             {
                                                 log::warn!(
                                                     "failed to wait on compositor render fence after fallback submit failure: {:?}",
@@ -4533,7 +4583,7 @@ impl DrmOutputModel {
                             if !render_completion.used_blocking_fallback {
                                 if let Some(in_fence_fd) = render_completion.in_fence_fd {
                                     if let Err(wait_error) =
-                                        drm.egl_context.wait_on_native_fence(in_fence_fd)
+                                        drm.renderer.context().wait_on_native_fence(in_fence_fd)
                                     {
                                         log::warn!(
                                             "failed to wait on compositor render fence after submit failure: {:?}",
@@ -4575,7 +4625,7 @@ impl DrmOutputModel {
                         if !render_completion.used_blocking_fallback {
                             if let Some(in_fence_fd) = render_completion.in_fence_fd {
                                 if let Err(wait_error) =
-                                    drm.egl_context.wait_on_native_fence(in_fence_fd)
+                                    drm.renderer.context().wait_on_native_fence(in_fence_fd)
                                 {
                                     log::warn!(
                                     "failed to wait on compositor render fence after submit failure: {:?}",
@@ -4962,9 +5012,9 @@ fn collect_protected_scene(
 }
 
 fn lock_blank_item(drm: &Drm, bounds: RectI, red: bool) -> Option<SceneItem> {
-    drm.egl_context.bind();
+    drm.renderer.context().bind();
     let pixels: [u8; 4] = if red { [255, 0, 0, 255] } else { [0, 0, 0, 255] };
-    let texture = GlTexture::from_rgba(&pixels, 1, 1, drm.egl_context.device_id()).ok()?;
+    let texture = GlTexture::from_rgba(&pixels, 1, 1, drm.renderer.context().device_id()).ok()?;
     let texture: Rc<dyn Texture> = Rc::new(texture);
     Some(SceneItem {
         state: SceneItemState {
@@ -5228,7 +5278,7 @@ fn collect_named_cursor_render_item(
             }
 
             state.drm.get(drm_id).bind_context();
-            let device_id = state.drm.get(drm_id).egl_context.device_id();
+            let device_id = state.drm.get(drm_id).renderer.context().device_id();
             let texture =
                 GlTexture::from_rgba(&image.pixels_rgba, image.width, image.height, device_id)
                     .ok()?;
@@ -5407,7 +5457,8 @@ fn push_scene_items_from_snapshots(
         };
         opaque_region.intersect_rect(bounds);
         opaque_region.intersect_rect(output_bounds);
-        let Some(texture) = buffer.prepare_texture(&drm.egl_context, &surface_state.sync) else {
+        let Some(texture) = buffer.prepare_texture(&drm.renderer.context(), &surface_state.sync)
+        else {
             log::warn!(
                 "collect_render_items: no prepared texture for buffer={:?}",
                 surface_state.buffer
@@ -6167,7 +6218,7 @@ fn realize_closing_texture(
     for surface in &plan.surfaces {
         let mut obj = objects.grab(surface.buffer.object_id());
         let buffer = obj.downcast_mut::<WlBuffer>()?;
-        let texture = buffer.prepare_texture(&drm.egl_context, &surface.sync)?;
+        let texture = buffer.prepare_texture(&drm.renderer.context(), &surface.sync)?;
         let tex_transform = buffer.base_tex_transform().mul(surface.tex_transform);
         uploaded.push((texture, tex_transform));
     }
@@ -6175,7 +6226,7 @@ fn realize_closing_texture(
     let output = drm.output(plan.crtc_id)?;
     output
         .render_buffer()
-        .gl_framebuffer
+        .gles_target()
         .capture_transparent(
             &elements,
             plan.bounds.width,
