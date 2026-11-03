@@ -276,11 +276,14 @@ mod tests {
         super::*,
         crate::{
             capture,
-            clients::{Client, ClientAction, ClientId, DataControlSourceEvent, RawEvent, Resolved},
+            clients::{
+                Client, ClientAction, ClientId, DataControlSourceEvent, DataSourceClientEvent,
+                PrimarySelectionSourceEvent, RawEvent, Resolved,
+            },
             globals::Global,
             protocol_generated::{
-                WaylandId, WlDataDeviceId, WlSeatId, WlSurfaceId, ZwlrDataControlDeviceV1Id,
-                ZwlrDataControlManagerV1Id, ZwlrDataControlSourceV1Id,
+                WaylandId, WlDataDeviceId, WlDataSourceId, WlSeatId, WlSurfaceId,
+                ZwlrDataControlDeviceV1Id, ZwlrDataControlManagerV1Id, ZwlrDataControlSourceV1Id,
                 ZwpPrimarySelectionDeviceV1Id, ZwpPrimarySelectionSourceV1Id,
             },
             runner::Model,
@@ -288,6 +291,7 @@ mod tests {
             test_support::state_for_tests,
             wayland_objects::{
                 wl_data_device::WlDataDevice,
+                wl_data_source::WlDataSource,
                 wl_seat::WlSeat,
                 wl_surface::WlSurface,
                 zwlr_data_control_manager_v1::{
@@ -947,5 +951,471 @@ mod tests {
             .unwrap();
         assert_ne!(state.seat.primary_selection_serial(), first);
         assert!(state.seat.primary_selection_source().is_none());
+    }
+
+    fn register_data_control(client: &mut Client, state: &mut crate::state::State, version: u32) {
+        client.insert_object(
+            state,
+            ZwlrDataControlDeviceV1::new(
+                ZwlrDataControlDeviceV1Id::from(30),
+                WlSeatId::from(10),
+                version,
+            ),
+        );
+        state.seat.register_data_control_device(Resolved::new(
+            client.client_id(),
+            ZwlrDataControlDeviceV1Id::from(30),
+            client.object_id(ZwlrDataControlDeviceV1Id::from(30)),
+        ));
+    }
+
+    fn focus_client(client: &mut Client, state: &mut crate::state::State) {
+        client.insert_object(state, WlSurface::new(WlSurfaceId::from(40), client.client_id(), 6));
+        let mut setup = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut setup);
+        set_keyboard_focus_from_surface(
+            state,
+            &mut client_dispatcher,
+            Some(SurfaceFocus::new(Resolved::new(
+                client.client_id(),
+                WlSurfaceId::from(40),
+                client.object_id(WlSurfaceId::from(40)),
+            ))),
+        );
+    }
+
+    #[test]
+    fn focused_wl_selection_reaches_data_control_devices() {
+        let mut state = state_for_tests();
+        let mut app = Client::new_for_tests(ClientId::from_raw(1));
+        let mut clipboard = Client::new_for_tests(ClientId::from_raw(2));
+        let mut unfocused = Client::new_for_tests(ClientId::from_raw(3));
+        app.insert_object(&mut state, WlSeat::new(WlSeatId::from(10)));
+        app.insert_object(
+            &mut state,
+            WlDataDevice::new(WlDataDeviceId::from(50), WlSeatId::from(10), 3),
+        );
+        state.seat.register_data_device(Resolved::new(
+            app.client_id(),
+            WlDataDeviceId::from(50),
+            app.object_id(WlDataDeviceId::from(50)),
+        ));
+        app.insert_object(
+            &mut state,
+            WlDataSource::new(WlDataSourceId::from(61), app.client_id(), 3),
+        );
+        focus_client(&mut app, &mut state);
+        register_data_control(&mut clipboard, &mut state, 2);
+        unfocused.insert_object(
+            &mut state,
+            WlDataDevice::new(WlDataDeviceId::from(50), WlSeatId::from(10), 3),
+        );
+        state.seat.register_data_device(Resolved::new(
+            unfocused.client_id(),
+            WlDataDeviceId::from(50),
+            unfocused.object_id(WlDataDeviceId::from(50)),
+        ));
+        state.seat.record_client_serial(app.client_id(), 7);
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = app.test_dispatcher(&mut dispatcher);
+            app.grab_object(WlDataDeviceId::from(50), &mut state)
+                .on(
+                    &mut app,
+                    &mut state,
+                    ids(WlDataDeviceId::from(50), 1, &[61, 7]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        assert!(dispatcher.test_has_queued_action_for(
+            clipboard.client_id(),
+            |action: &ClientAction| matches!(action, ClientAction::RefreshDataControlSelection)
+        ));
+        assert!(!dispatcher.test_has_queued_action_for(
+            unfocused.client_id(),
+            |action: &ClientAction| matches!(action, ClientAction::RefreshDataDeviceSelection)
+        ));
+        clipboard
+            .process(&mut state, ClientAction::RefreshDataControlSelection, &mut dispatcher)
+            .unwrap();
+        assert!(clipboard
+            .ref_object(ZwlrDataControlDeviceV1Id::from(30), &state)
+            .selection_offer()
+            .is_some());
+    }
+
+    #[test]
+    fn data_control_selection_cancels_the_previous_wl_source() {
+        let mut state = state_for_tests();
+        let mut app = Client::new_for_tests(ClientId::from_raw(1));
+        let mut clipboard = Client::new_for_tests(ClientId::from_raw(2));
+        app.insert_object(&mut state, WlSeat::new(WlSeatId::from(10)));
+        app.insert_object(
+            &mut state,
+            WlDataDevice::new(WlDataDeviceId::from(50), WlSeatId::from(10), 3),
+        );
+        app.insert_object(
+            &mut state,
+            WlDataSource::new(WlDataSourceId::from(61), app.client_id(), 3),
+        );
+        focus_client(&mut app, &mut state);
+        state.seat.record_client_serial(app.client_id(), 7);
+        register_data_control(&mut clipboard, &mut state, 2);
+        clipboard.insert_object(
+            &mut state,
+            ZwlrDataControlSourceV1::new(ZwlrDataControlSourceV1Id::from(60), 1),
+        );
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = app.test_dispatcher(&mut dispatcher);
+            app.grab_object(WlDataDeviceId::from(50), &mut state)
+                .on(
+                    &mut app,
+                    &mut state,
+                    ids(WlDataDeviceId::from(50), 1, &[61, 7]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+            let mut client_dispatcher = clipboard.test_dispatcher(&mut dispatcher);
+            clipboard
+                .grab_object(ZwlrDataControlDeviceV1Id::from(30), &mut state)
+                .on(
+                    &mut clipboard,
+                    &mut state,
+                    ids(ZwlrDataControlDeviceV1Id::from(30), 0, &[60]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        assert!(dispatcher.test_has_queued_action_for(
+            app.client_id(),
+            |action: &ClientAction| matches!(
+                action,
+                ClientAction::DataSourceEvent { event: DataSourceClientEvent::Cancelled, .. }
+            )
+        ));
+        assert!(matches!(
+            state.seat.selection_source(),
+            Some(crate::state::SelectionSourceState::DataControl(_))
+        ));
+    }
+
+    #[test]
+    fn wl_selection_cancels_the_previous_data_control_source() {
+        let mut state = state_for_tests();
+        let mut clipboard = Client::new_for_tests(ClientId::from_raw(1));
+        let mut app = Client::new_for_tests(ClientId::from_raw(2));
+        clipboard.insert_object(&mut state, WlSeat::new(WlSeatId::from(10)));
+        register_data_control(&mut clipboard, &mut state, 2);
+        clipboard.insert_object(
+            &mut state,
+            ZwlrDataControlSourceV1::new(ZwlrDataControlSourceV1Id::from(60), 1),
+        );
+        app.insert_object(
+            &mut state,
+            WlDataDevice::new(WlDataDeviceId::from(50), WlSeatId::from(10), 3),
+        );
+        app.insert_object(
+            &mut state,
+            WlDataSource::new(WlDataSourceId::from(61), app.client_id(), 3),
+        );
+        focus_client(&mut app, &mut state);
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = clipboard.test_dispatcher(&mut dispatcher);
+            clipboard
+                .grab_object(ZwlrDataControlDeviceV1Id::from(30), &mut state)
+                .on(
+                    &mut clipboard,
+                    &mut state,
+                    ids(ZwlrDataControlDeviceV1Id::from(30), 0, &[60]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        let serial = state.seat.selection_serial().wrapping_add(1);
+        state.seat.record_client_serial(app.client_id(), serial);
+        {
+            let mut client_dispatcher = app.test_dispatcher(&mut dispatcher);
+            app.grab_object(WlDataDeviceId::from(50), &mut state)
+                .on(
+                    &mut app,
+                    &mut state,
+                    ids(WlDataDeviceId::from(50), 1, &[61, serial]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        assert!(dispatcher.test_has_queued_action_for(
+            clipboard.client_id(),
+            |action: &ClientAction| matches!(
+                action,
+                ClientAction::DataControlSourceEvent {
+                    event: DataControlSourceEvent::Cancelled,
+                    ..
+                }
+            )
+        ));
+        assert!(matches!(
+            state.seat.selection_source(),
+            Some(crate::state::SelectionSourceState::WlData(_))
+        ));
+    }
+
+    #[test]
+    fn zwp_primary_selection_reaches_version_two_devices_only() {
+        let mut state = state_for_tests();
+        let mut app = Client::new_for_tests(ClientId::from_raw(1));
+        let mut version_two = Client::new_for_tests(ClientId::from_raw(2));
+        let mut version_one = Client::new_for_tests(ClientId::from_raw(3));
+        app.insert_object(&mut state, WlSeat::new(WlSeatId::from(10)));
+        app.insert_object(
+            &mut state,
+            ZwpPrimarySelectionDeviceV1::new(
+                ZwpPrimarySelectionDeviceV1Id::from(30),
+                WlSeatId::from(10),
+                1,
+            ),
+        );
+        app.insert_object(
+            &mut state,
+            ZwpPrimarySelectionSourceV1::new(ZwpPrimarySelectionSourceV1Id::from(70), 1),
+        );
+        register_data_control(&mut version_two, &mut state, 2);
+        register_data_control(&mut version_one, &mut state, 1);
+        state.seat.record_client_serial(app.client_id(), 10);
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = app.test_dispatcher(&mut dispatcher);
+            app.grab_object(ZwpPrimarySelectionDeviceV1Id::from(30), &mut state)
+                .on(
+                    &mut app,
+                    &mut state,
+                    ids(ZwpPrimarySelectionDeviceV1Id::from(30), 0, &[70, 10]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        version_one
+            .process(&mut state, ClientAction::RefreshDataControlPrimarySelection, &mut dispatcher)
+            .unwrap();
+        assert!(!capture::test_sent(
+            &dispatcher,
+            u32::from(ZwlrDataControlDeviceV1Id::from(30)),
+            3
+        ));
+        version_two
+            .process(&mut state, ClientAction::RefreshDataControlPrimarySelection, &mut dispatcher)
+            .unwrap();
+        let offer = version_two
+            .ref_object(ZwlrDataControlDeviceV1Id::from(30), &state)
+            .primary_offer()
+            .unwrap();
+        assert!(capture::test_sent_arg(
+            &dispatcher,
+            u32::from(ZwlrDataControlDeviceV1Id::from(30)),
+            3,
+            u32::from(offer.wayland_id())
+        ));
+    }
+
+    #[test]
+    fn data_control_primary_selection_cancels_the_previous_zwp_source() {
+        let mut state = state_for_tests();
+        let mut app = Client::new_for_tests(ClientId::from_raw(1));
+        let mut clipboard = Client::new_for_tests(ClientId::from_raw(2));
+        app.insert_object(&mut state, WlSeat::new(WlSeatId::from(10)));
+        app.insert_object(
+            &mut state,
+            ZwpPrimarySelectionDeviceV1::new(
+                ZwpPrimarySelectionDeviceV1Id::from(30),
+                WlSeatId::from(10),
+                1,
+            ),
+        );
+        app.insert_object(
+            &mut state,
+            ZwpPrimarySelectionSourceV1::new(ZwpPrimarySelectionSourceV1Id::from(70), 1),
+        );
+        register_data_control(&mut clipboard, &mut state, 2);
+        clipboard.insert_object(
+            &mut state,
+            ZwlrDataControlSourceV1::new(ZwlrDataControlSourceV1Id::from(60), 1),
+        );
+        state.seat.record_client_serial(app.client_id(), 10);
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = app.test_dispatcher(&mut dispatcher);
+            app.grab_object(ZwpPrimarySelectionDeviceV1Id::from(30), &mut state)
+                .on(
+                    &mut app,
+                    &mut state,
+                    ids(ZwpPrimarySelectionDeviceV1Id::from(30), 0, &[70, 10]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+            let mut client_dispatcher = clipboard.test_dispatcher(&mut dispatcher);
+            clipboard
+                .grab_object(ZwlrDataControlDeviceV1Id::from(30), &mut state)
+                .on(
+                    &mut clipboard,
+                    &mut state,
+                    ids(ZwlrDataControlDeviceV1Id::from(30), 2, &[60]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        assert!(dispatcher.test_has_queued_action_for(
+            app.client_id(),
+            |action: &ClientAction| matches!(
+                action,
+                ClientAction::PrimarySelectionSourceEvent {
+                    event: PrimarySelectionSourceEvent::Cancelled,
+                    ..
+                }
+            )
+        ));
+        assert!(matches!(
+            state.seat.primary_selection_source(),
+            Some(crate::state::PrimarySelectionSourceState::DataControl(_))
+        ));
+    }
+
+    #[test]
+    fn data_control_source_disconnect_clears_the_clipboard_and_skips_the_owner() {
+        let mut state = state_for_tests();
+        let mut owner = Client::new_for_tests(ClientId::from_raw(1));
+        let mut watcher = Client::new_for_tests(ClientId::from_raw(2));
+        let mut focused = Client::new_for_tests(ClientId::from_raw(3));
+        owner.insert_object(&mut state, WlSeat::new(WlSeatId::from(10)));
+        register_data_control(&mut owner, &mut state, 2);
+        owner.insert_object(
+            &mut state,
+            ZwlrDataControlSourceV1::new(ZwlrDataControlSourceV1Id::from(60), 1),
+        );
+        register_data_control(&mut watcher, &mut state, 2);
+        focused.insert_object(
+            &mut state,
+            WlDataDevice::new(WlDataDeviceId::from(50), WlSeatId::from(10), 3),
+        );
+        state.seat.register_data_device(Resolved::new(
+            focused.client_id(),
+            WlDataDeviceId::from(50),
+            focused.object_id(WlDataDeviceId::from(50)),
+        ));
+        focus_client(&mut focused, &mut state);
+        {
+            let mut setup = Dispatcher::default();
+            let mut client_dispatcher = owner.test_dispatcher(&mut setup);
+            owner
+                .grab_object(ZwlrDataControlDeviceV1Id::from(30), &mut state)
+                .on(
+                    &mut owner,
+                    &mut state,
+                    ids(ZwlrDataControlDeviceV1Id::from(30), 0, &[60]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = owner.test_dispatcher(&mut dispatcher);
+            owner
+                .grab_object(ZwlrDataControlSourceV1Id::from(60), &mut state)
+                .on_client_disconnect(&mut owner, &mut state, &mut client_dispatcher);
+        }
+        assert!(state.seat.selection_source().is_none());
+        assert!(dispatcher.test_has_queued_action_for(
+            watcher.client_id(),
+            |action: &ClientAction| matches!(action, ClientAction::RefreshDataControlSelection)
+        ));
+        assert!(dispatcher.test_has_queued_action_for(
+            focused.client_id(),
+            |action: &ClientAction| matches!(action, ClientAction::RefreshDataDeviceSelection)
+        ));
+        assert!(!dispatcher.test_has_queued_action_for(
+            owner.client_id(),
+            |action: &ClientAction| matches!(action, ClientAction::RefreshDataControlSelection)
+        ));
+    }
+
+    #[test]
+    fn primary_source_disconnect_clears_the_primary_selection_and_skips_the_owner() {
+        let mut state = state_for_tests();
+        let mut owner = Client::new_for_tests(ClientId::from_raw(1));
+        let mut watcher = Client::new_for_tests(ClientId::from_raw(2));
+        let mut focused = Client::new_for_tests(ClientId::from_raw(3));
+        owner.insert_object(&mut state, WlSeat::new(WlSeatId::from(10)));
+        owner.insert_object(
+            &mut state,
+            ZwpPrimarySelectionDeviceV1::new(
+                ZwpPrimarySelectionDeviceV1Id::from(30),
+                WlSeatId::from(10),
+                1,
+            ),
+        );
+        owner.insert_object(
+            &mut state,
+            ZwpPrimarySelectionSourceV1::new(ZwpPrimarySelectionSourceV1Id::from(70), 1),
+        );
+        register_data_control(&mut watcher, &mut state, 2);
+        focused.insert_object(
+            &mut state,
+            ZwpPrimarySelectionDeviceV1::new(
+                ZwpPrimarySelectionDeviceV1Id::from(30),
+                WlSeatId::from(10),
+                1,
+            ),
+        );
+        state.seat.register_primary_selection_device(Resolved::new(
+            focused.client_id(),
+            ZwpPrimarySelectionDeviceV1Id::from(30),
+            focused.object_id(ZwpPrimarySelectionDeviceV1Id::from(30)),
+        ));
+        focus_client(&mut focused, &mut state);
+        state.seat.record_client_serial(owner.client_id(), 10);
+        {
+            let mut setup = Dispatcher::default();
+            let mut client_dispatcher = owner.test_dispatcher(&mut setup);
+            owner
+                .grab_object(ZwpPrimarySelectionDeviceV1Id::from(30), &mut state)
+                .on(
+                    &mut owner,
+                    &mut state,
+                    ids(ZwpPrimarySelectionDeviceV1Id::from(30), 0, &[70, 10]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = owner.test_dispatcher(&mut dispatcher);
+            owner
+                .grab_object(ZwpPrimarySelectionSourceV1Id::from(70), &mut state)
+                .on_client_disconnect(&mut owner, &mut state, &mut client_dispatcher);
+        }
+        assert!(state.seat.primary_selection_source().is_none());
+        assert!(dispatcher.test_has_queued_action_for(
+            watcher.client_id(),
+            |action: &ClientAction| matches!(
+                action,
+                ClientAction::RefreshDataControlPrimarySelection
+            )
+        ));
+        assert!(dispatcher.test_has_queued_action_for(
+            focused.client_id(),
+            |action: &ClientAction| matches!(action, ClientAction::RefreshPrimarySelection)
+        ));
+        assert!(!dispatcher.test_has_queued_action_for(
+            owner.client_id(),
+            |action: &ClientAction| {
+                matches!(
+                    action,
+                    ClientAction::RefreshPrimarySelection
+                        | ClientAction::RefreshDataControlPrimarySelection
+                )
+            }
+        ));
     }
 }
