@@ -2533,6 +2533,20 @@ impl<'a> ClientDispatcher<'a> {
         code: u32,
         message: impl AsRef<str>,
     ) {
+        // The raw event skips `EventWriter::send_event`, so the error would otherwise
+        // never show up in the client trace.
+        let (proc, pid) = match self.command.as_ref() {
+            Some(info) => (&*info.command, info.cred.pid),
+            None => ("UNKNOWN", 0),
+        };
+        let target = format!("out {:?}-{}-{}", proc, pid, self.client_id.0);
+        log::warn!(
+            target: &target,
+            "[1] wl_display::Error {{ object_id: WaylandId({}), code: {}, message: {:?} }}",
+            u32::from(object_id),
+            code,
+            message.as_ref()
+        );
         let mut raw = RawEvent::new(WaylandId::from(1u32), 0, 3);
         raw.id(object_id);
         raw.uint(code);
@@ -2845,9 +2859,10 @@ impl Model for Client {
                     .map(|entry| entry.object_id)
                 else {
                     log::warn!(
-                        "unknown Wayland object id {:?} from client {:?}",
+                        "unknown Wayland object id {:?} from client {:?} (request opcode {})",
                         request.object_id(),
-                        self.id
+                        self.id,
+                        request.request_id
                     );
                     self.protocol_violation_disconnect(
                         &mut dispatcher,
