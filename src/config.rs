@@ -57,6 +57,29 @@ pub struct RuntimeConfig {
     output_scales: BTreeMap<String, OutputScaleSetting>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RendererSelection {
+    OpenGl,
+    Auto,
+    Vulkan,
+}
+
+impl fmt::Display for RendererSelection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::OpenGl => "opengl",
+            Self::Auto => "auto",
+            Self::Vulkan => "vulkan",
+        })
+    }
+}
+
+impl Default for RendererSelection {
+    fn default() -> Self {
+        Self::OpenGl
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GeneralConfig {
     pub cursor_theme: String,
@@ -64,6 +87,7 @@ pub struct GeneralConfig {
     pub outer_gap: i32,
     pub inner_gap: i32,
     pub decoration_insets: DecorationInsets,
+    pub renderer: RendererSelection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -517,6 +541,7 @@ struct GeneralConfigFile {
     outer_gap: i32,
     inner_gap: i32,
     decoration_insets: DecorationInsets,
+    renderer: String,
 }
 
 impl RuntimeConfig {
@@ -628,6 +653,7 @@ impl RuntimeConfig {
                 outer_gap: sanitize_non_negative_i32(parsed.general.outer_gap),
                 inner_gap: sanitize_non_negative_i32(parsed.general.inner_gap),
                 decoration_insets: sanitize_decoration_insets(parsed.general.decoration_insets),
+                renderer: parse_renderer(&parsed.general.renderer)?,
             },
             tiling: TilingConfig {
                 drag: TilingDragConfig {
@@ -664,6 +690,7 @@ impl RuntimeConfig {
                 outer_gap: 0,
                 inner_gap: 0,
                 decoration_insets: DecorationInsets::default(),
+                renderer: RendererSelection::OpenGl,
             },
             tiling: TilingConfig::default(),
             decorations: DecorationsConfig::default(),
@@ -861,6 +888,18 @@ impl Default for GeneralConfigFile {
             outer_gap: GeneralConfig::default_outer_gap(),
             inner_gap: GeneralConfig::default_inner_gap(),
             decoration_insets: DecorationInsets::default(),
+            renderer: RendererSelection::default().to_string(),
+        }
+    }
+}
+
+fn parse_renderer(raw: &str) -> anyhow::Result<RendererSelection> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "opengl" => Ok(RendererSelection::OpenGl),
+        "auto" => Ok(RendererSelection::Auto),
+        "vulkan" => Ok(RendererSelection::Vulkan),
+        _ => {
+            bail!("invalid general.renderer `{raw}`; expected \"opengl\", \"auto\", or \"vulkan\"")
         }
     }
 }
@@ -1164,7 +1203,16 @@ pub fn reload_from_disk(
     trigger: ReloadTrigger,
 ) -> anyhow::Result<bool> {
     let path = state.config.path().to_path_buf();
-    let next = RuntimeConfig::load_from_path(&path, &state.xkb)?;
+    let mut next = RuntimeConfig::load_from_path(&path, &state.xkb)?;
+    if next.general.renderer != state.config.general.renderer {
+        log::warn!(
+            "general.renderer is {requested} in {path} and the running renderer is {running}; restart the compositor to change it",
+            requested = next.general.renderer,
+            path = path.display(),
+            running = state.config.general.renderer,
+        );
+        next.general.renderer = state.config.general.renderer;
+    }
     let changed = state.config != next;
     state.config = next;
     apply_general_settings(state, dispatcher);
@@ -2181,6 +2229,83 @@ mod tests {
 
         let error = config.unwrap_err();
         assert!(error.to_string().contains("duplicate mouse binding"));
+    }
+
+    #[test]
+    fn renderer_defaults_to_opengl_and_accepts_auto_and_vulkan() {
+        let xkb = Xkb::new();
+        let omitted = RuntimeConfig::parse_for_test("[general]\ncursor_size = 24\n", &xkb).unwrap();
+        assert_eq!(omitted.general.renderer, RendererSelection::OpenGl);
+
+        let auto = RuntimeConfig::parse_for_test("[general]\nrenderer = \"AuTo\"\n", &xkb).unwrap();
+        assert_eq!(auto.general.renderer, RendererSelection::Auto);
+
+        let vulkan =
+            RuntimeConfig::parse_for_test("[general]\nrenderer = \"vulkan\"\n", &xkb).unwrap();
+        assert_eq!(vulkan.general.renderer, RendererSelection::Vulkan);
+
+        let error =
+            RuntimeConfig::parse_for_test("[general]\nrenderer = \"metal\"\n", &xkb).unwrap_err();
+        assert!(error.to_string().contains("general.renderer"));
+    }
+
+    #[test]
+    fn reload_keeps_running_renderer_and_applies_other_settings() {
+        let temp_dir = mktemp::Temp::new_dir().unwrap();
+        let path = temp_dir.to_path_buf().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+            [general]
+            renderer = "opengl"
+            outer_gap = 4
+            "#,
+        )
+        .unwrap();
+
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::load_from_path(&path, &xkb).unwrap();
+        let mut state = state_for_tests_with_config(config);
+        state.config.path = path.clone();
+        let mut dispatcher = Dispatcher::default();
+
+        fs::write(
+            &path,
+            r#"
+            [general]
+            renderer = "vulkan"
+            outer_gap = 16
+            "#,
+        )
+        .unwrap();
+
+        let changed =
+            reload_from_disk(&mut state, &mut dispatcher, ReloadTrigger::ManualBinding).unwrap();
+
+        assert!(changed);
+        assert_eq!(state.config.general.renderer, RendererSelection::OpenGl);
+        assert_eq!(state.config.general.outer_gap, 16);
+    }
+
+    #[test]
+    fn reload_ignores_a_renderer_only_change() {
+        let temp_dir = mktemp::Temp::new_dir().unwrap();
+        let path = temp_dir.to_path_buf().join("config.toml");
+        fs::write(&path, "[general]\nrenderer = \"auto\"\n").unwrap();
+
+        let xkb = Xkb::new();
+        let config = RuntimeConfig::load_from_path(&path, &xkb).unwrap();
+        let mut state = state_for_tests_with_config(config);
+        state.config.path = path.clone();
+        let mut dispatcher = Dispatcher::default();
+
+        fs::write(&path, "[general]\nrenderer = \"vulkan\"\n").unwrap();
+
+        let changed =
+            reload_from_disk(&mut state, &mut dispatcher, ReloadTrigger::ManualBinding).unwrap();
+
+        assert!(!changed);
+        assert_eq!(state.config.general.renderer, RendererSelection::Auto);
     }
 
     #[test]

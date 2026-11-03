@@ -33,9 +33,9 @@ use crate::{
     object::Object,
     region::{DamageRegion, RectI},
     render::{
-        gles::GlesRenderer, rounded_ring, EffectElement, FrameElement, FramePhase,
-        OutputFrameRecipe, RenderFrame, RenderTarget, Renderer, RootSurfaceVisualState,
-        RoundedRing, ShmImage, Texture, TextureElement, TextureMask, TextureSource,
+        create_renderer, rounded_ring, EffectElement, FrameElement, FramePhase, OutputFrameRecipe,
+        RenderFrame, RenderTarget, Renderer, RootSurfaceVisualState, RoundedRing, ShmImage,
+        Texture, TextureElement, TextureMask, TextureSource,
     },
     runner::{isolate_session_fault, Dispatcher, Model, ModelInstanceId, SessionFault},
     scene::{ComposedEntry, CompositionTier, OutputCompositionView},
@@ -158,7 +158,7 @@ pub struct Drm {
     device: udev::Device,
     resources: DrmResources,
     pub outputs: BTreeMap<u32, DrmOutput>,
-    renderer: GlesRenderer,
+    renderer: Box<dyn Renderer>,
     gbm: GbmDevice,
     driver: Driver,
     supports_syncobj_timeline: bool,
@@ -1261,7 +1261,11 @@ impl Drm {
         }
     }
 
-    pub fn create_drm(fd: OwnedFd, device: udev::Device) -> Result<Self, String> {
+    pub fn create_drm(
+        fd: OwnedFd,
+        device: udev::Device,
+        selection: crate::config::RendererSelection,
+    ) -> Result<Self, String> {
         let drm = DrmFd { fd: Rc::new(fd) };
         set_nonblocking(drm.as_raw_fd()).map_err(|error| format!("set nonblocking: {error}"))?;
         match drm.set_client_capability(drm::ClientCapability::UniversalPlanes, true) {
@@ -1299,8 +1303,8 @@ impl Drm {
         );
 
         let gbm = GbmDevice::new(&drm).map_err(|error| format!("gbm: {error}"))?;
-        let mut renderer = GlesRenderer::from_gbm(&gbm)?;
-        let outputs = Self::init_drm_outputs(&drm, &mut renderer, &gbm, &resources);
+        let mut renderer = create_renderer(selection, &drm, &gbm)?;
+        let outputs = Self::init_drm_outputs(&drm, renderer.as_mut(), &gbm, &resources);
         if outputs.is_empty() {
             return Err("no usable connector".into());
         }
@@ -2452,7 +2456,7 @@ impl Drm {
 
     fn init_drm_outputs(
         drm: &DrmFd,
-        renderer: &mut GlesRenderer,
+        renderer: &mut dyn Renderer,
         gbm: &GbmDevice,
         drm_resources: &DrmResources,
     ) -> BTreeMap<u32, DrmOutput> {
@@ -2473,7 +2477,7 @@ impl Drm {
 
     fn init_drm_output(
         drm: &DrmFd,
-        renderer: &mut GlesRenderer,
+        renderer: &mut dyn Renderer,
         gbm: &GbmDevice,
         in_use: ConnectorInUse,
     ) -> Result<DrmOutput, String> {
@@ -2594,7 +2598,7 @@ impl Drm {
 
     fn make_render_buffer(
         drm: &DrmFd,
-        renderer: &mut GlesRenderer,
+        renderer: &mut dyn Renderer,
         gbm: &GbmDevice,
         in_use: &ConnectorInUse,
         is_cursor: bool,

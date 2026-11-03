@@ -6,6 +6,11 @@
 cursor_theme = "default"
 cursor_size = 24
 
+# Renderer used for each DRM device. Omitted means "opengl".
+# "auto" tries OpenGL first. "vulkan" is accepted and fails device startup until that backend exists.
+# Changing this requires a restart; a running compositor keeps its current renderer.
+renderer = "opengl"
+
 # Tiling gaps (logical pixels). Outer gap shrinks the tiling region inside the usable area;
 # inner gap is space between sibling tiles. Fullscreen ignores gaps.
 outer_gap = 10

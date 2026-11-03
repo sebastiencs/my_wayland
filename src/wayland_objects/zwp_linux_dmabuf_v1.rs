@@ -31,6 +31,7 @@ impl Global for ZwpLinuxDmabufV1Global {
         _version: u32,
         dispatcher: &mut ClientDispatcher,
     ) {
+        // Version 3 sends one list. It is the first DRM device's sampleable formats.
         let supported_formats = state
             .drm
             .iter()

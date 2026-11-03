@@ -1,10 +1,13 @@
 pub mod backend;
+mod factory;
 pub mod gles;
 pub mod recipe;
 pub mod visual;
 
 #[cfg(test)]
 mod mock;
+
+pub use factory::create_renderer;
 
 pub use {
     backend::{

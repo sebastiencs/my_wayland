@@ -3,14 +3,14 @@ use std::{fs::OpenOptions, os::fd::OwnedFd, path::PathBuf, rc::Rc};
 use drm::buffer::DrmFourcc;
 
 use crate::{
-    config::RoundingPower,
+    config::{RendererSelection, RoundingPower},
     drm::DrmFd,
     gbm::{GbmDevice, UseFlags},
     region::{DamageRegion, RectI},
     render::{
-        gles::GlesRenderer, EffectElement, FrameElement, FramePhase, OutputFrameRecipe,
-        RenderFrame, RenderSyncMode, Renderer, ShmImage, Texture, TextureElement, TextureMask,
-        TextureSource,
+        create_renderer, gles::GlesRenderer, EffectElement, FrameElement, FramePhase, GraphicsApi,
+        OutputFrameRecipe, RenderFrame, RenderSyncMode, Renderer, ShmImage, Texture,
+        TextureElement, TextureMask, TextureSource,
     },
     state::RootSurfaceClip,
     transform::{Mat3, OutputPresentationTransform},
@@ -482,4 +482,21 @@ fn fullscreen_client_buffer_can_be_composited() {
         .readback(&*target, RectI::new(0, 0, 2, 2).unwrap(), 8, &mut read)
         .expect("readback");
     assert_eq!(pixel(&read, 8, 0, 0), [255, 128, 0, 255]);
+}
+
+#[test]
+fn factory_uses_opengl_and_rejects_vulkan() {
+    let Some(device) = device() else {
+        eprintln!("skipping GLES smoke: no DRM render node");
+        return;
+    };
+    let opengl = create_renderer(RendererSelection::OpenGl, &device.gbm, &device.gbm)
+        .expect("opengl renderer");
+    assert_eq!(opengl.api(), GraphicsApi::OpenGl);
+    let auto =
+        create_renderer(RendererSelection::Auto, &device.gbm, &device.gbm).expect("auto renderer");
+    assert_eq!(auto.api(), GraphicsApi::OpenGl);
+    let error = create_renderer(RendererSelection::Vulkan, &device.gbm, &device.gbm)
+        .expect_err("vulkan is not implemented");
+    assert!(error.contains("not implemented"));
 }
