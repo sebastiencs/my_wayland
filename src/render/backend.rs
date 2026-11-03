@@ -6,8 +6,8 @@
 //! Recipe textures are [`Texture`] handles. A GLES texture records the DRM device
 //! that created it, and that backend rejects a handle from another device.
 //!
-//! An acquire fence is waited on separately from dma-buf import so direct scanout
-//! can hand that fence to KMS without importing the buffer.
+//! An acquire fence is waited on separately from dma-buf import. Direct scanout
+//! passes that fence to KMS and does not wait in the renderer.
 
 use std::{
     any::Any,

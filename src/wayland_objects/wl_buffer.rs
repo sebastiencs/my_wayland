@@ -6,10 +6,6 @@ use crate::{
     drm::{Format, ARGB8888},
     object::{Object, Parser, RequestResult},
     protocol_generated::{wl_buffer, WaylandId, WlBufferId},
-    render::{
-        gles::{EglContext, GlTexture},
-        Texture,
-    },
     state::{GrabbedObject, ObjectId, State},
     sync::PlainRelease,
     transform,
@@ -26,13 +22,21 @@ enum BufferBacking {
         stride: usize,
         format: &'static Format,
         mem: Rc<SharedMemory>,
-        texture: Option<Rc<dyn Texture>>,
     },
     Dmabuf {
         dmabuf: DmaBuf,
         y_inverted: bool,
-        texture: Option<Rc<dyn Texture>>,
     },
+}
+
+/// One shared-memory sample. The bytes are borrowed from the buffer's pool.
+#[derive(Debug)]
+pub(crate) struct ShmSample<'a> {
+    pub bytes: &'a [u8],
+    pub width: i32,
+    pub height: i32,
+    pub stride: usize,
+    pub fourcc: drm::buffer::DrmFourcc,
 }
 
 #[derive(Debug)]
@@ -177,7 +181,6 @@ impl WlBuffer {
                     .map_err(|_| WlBufferError::InvalidParams)?,
                 format,
                 mem,
-                texture: None,
             },
         })
     }
@@ -188,7 +191,7 @@ impl WlBuffer {
             id,
             owner_client_id,
             destroyed: false,
-            backing: BufferBacking::Dmabuf { dmabuf, y_inverted, texture: None },
+            backing: BufferBacking::Dmabuf { dmabuf, y_inverted },
         })
     }
 
@@ -256,57 +259,24 @@ impl WlBuffer {
         }
     }
 
-    pub fn prepare_texture(
-        &mut self,
-        egl: &EglContext,
-        sync: &crate::sync::SurfaceSyncState,
-    ) -> Option<Rc<dyn Texture>> {
-        match &mut self.backing {
-            BufferBacking::Shm { offset, width, height, format, stride, mem, texture } => {
-                // wl_shm contents can change between commits while the wl_buffer object stays alive,
-                // so conservatively re-upload the texture every time we sample it.
-                let bytes = stride.saturating_mul(*height);
-                match GlTexture::import_shm(
-                    mem.clone().slice_at(*offset, bytes),
-                    *width,
-                    *height,
-                    *stride,
-                    format,
-                    egl.device_id(),
-                ) {
-                    Ok(imported) => {
-                        let imported: Rc<dyn Texture> = Rc::new(imported);
-                        *texture = Some(Rc::clone(&imported));
-                        return Some(imported);
-                    }
-                    Err(()) => {
-                        log::warn!("failed to upload shm wl_buffer {:?}", self.id);
-                        return None;
-                    }
-                }
-            }
-            BufferBacking::Dmabuf { dmabuf, y_inverted, texture } => {
-                if !sync.acquire.is_none() {
-                    log::debug!(
-                        "applying explicit acquire wait before sampling dma-buf wl_buffer={:?}",
-                        self.id
-                    );
-                    sync.acquire.wait_for_renderer(egl);
-                }
-                if texture.is_none() {
-                    let image = egl.import_dmabuf(dmabuf);
-                    match image.into_texture(egl.device_id()) {
-                        Ok(imported) => *texture = Some(Rc::new(imported)),
-                        Err(()) => {
-                            log::warn!("failed to import dma-buf wl_buffer {:?}", self.id);
-                            return None;
-                        }
-                    }
-                }
-                let _ = y_inverted;
-                Some(Rc::clone(texture.as_ref()?))
-            }
+    /// Shared-memory pixels for one sample. The client can rewrite them between commits.
+    pub(crate) fn shm_sample(&self) -> Option<ShmSample<'_>> {
+        let BufferBacking::Shm { offset, width, height, stride, format, mem } = &self.backing
+        else {
+            return None;
+        };
+        let bytes = stride.saturating_mul(*height);
+        let end = offset.checked_add(bytes)?;
+        if end > mem.len() {
+            return None;
         }
+        Some(ShmSample {
+            bytes: mem.bytes_at(*offset, bytes),
+            width: *width as i32,
+            height: *height as i32,
+            stride: *stride,
+            fourcc: format.drm,
+        })
     }
 
     /// Accept an SHM `XRGB8888` or `ARGB8888` destination for one capture.
@@ -403,7 +373,6 @@ impl WlBuffer {
                 stride,
                 format: ARGB8888,
                 mem,
-                texture: None,
             },
         }
     }

@@ -2,7 +2,7 @@ use std::{os::fd::OwnedFd, sync::atomic::AtomicUsize};
 
 use crate::drm::{Format, Modifier};
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct DmaBufId(usize);
 
 impl DmaBufId {

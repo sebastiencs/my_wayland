@@ -35,8 +35,8 @@ use crate::{
     render::{
         gles::{EglContext, EglFrameBuffer, GlTexture, GlesRenderer, EGL},
         rounded_ring, EffectElement, FrameElement, FramePhase, OutputFrameRecipe, RenderTarget,
-        Renderer, RootSurfaceVisualState, RoundedRing, Texture, TextureElement, TextureMask,
-        TextureSource,
+        Renderer, RootSurfaceVisualState, RoundedRing, ShmImage, Texture, TextureElement,
+        TextureMask, TextureSource,
     },
     runner::{isolate_session_fault, Dispatcher, Model, ModelInstanceId, SessionFault},
     scene::{ComposedEntry, CompositionTier, OutputCompositionView},
@@ -4011,8 +4011,9 @@ fn sample_pending_toplevel_captures(
         });
     }
     let rendered = {
-        let drm = state.drm.get(drm_id);
-        render_prepared_toplevels(&mut state.objects, drm, drm_crtc_id, &prepared)
+        let (objects, drm_map) = (&mut state.objects, &mut state.drm);
+        let drm = drm_map.get_mut(drm_id);
+        render_prepared_toplevels(objects, drm, drm_crtc_id, &prepared)
     };
     let timestamp = crate::capture::capture_timestamp_now();
     for mut item in rendered {
@@ -4041,7 +4042,7 @@ fn sample_pending_toplevel_captures(
 
 fn render_prepared_toplevels(
     objects: &mut Box<crate::state::IndexMap<ObjectId, Box<dyn Object>>>,
-    drm: &Drm,
+    drm: &mut Drm,
     drm_crtc_id: u32,
     prepared: &[PreparedToplevelCapture],
 ) -> Vec<RenderedToplevelCapture> {
@@ -4116,6 +4117,7 @@ fn render_prepared_toplevels(
             else {
                 return failed(bounds.width, bounds.height);
             };
+            wait_scene_acquires(drm, &items);
             let Some(renderer) = drm
                 .output(drm_crtc_id)
                 .map(|output| output.render_buffer().gles_target())
@@ -4363,6 +4365,7 @@ impl DrmOutputModel {
                 );
                 Some(releases)
             } else {
+                wait_scene_acquires(drm, &items);
                 let recipe = build_output_frame_recipe(&items, &frame_elements);
                 let render_started_at = Instant::now();
                 let render_completion =
@@ -4449,6 +4452,7 @@ impl DrmOutputModel {
                                 None,
                                 protected,
                             );
+                            wait_scene_acquires(drm, &fallback_plan.items);
                             let fallback_recipe = build_output_frame_recipe(
                                 &fallback_plan.items,
                                 &fallback_plan.frame_elements,
@@ -4986,8 +4990,8 @@ fn collect_protected_scene(
     }
     let surface_start = items.len();
     {
-        let (objects, drm_map) = (&mut state.objects, &state.drm);
-        let drm = drm_map.get(drm_id);
+        let (objects, drm_map) = (&mut state.objects, &mut state.drm);
+        let drm = drm_map.get_mut(drm_id);
         let drm_fd = drm.fd();
         push_scene_items_from_snapshots(
             &mut items,
@@ -5411,10 +5415,45 @@ fn rgba_to_drm_argb8888(
     dst
 }
 
+fn import_client_texture(drm: &mut Drm, buffer: &WlBuffer) -> Option<Rc<dyn Texture>> {
+    if let Some(dmabuf) = buffer.dmabuf() {
+        return match drm.renderer.import_dmabuf(dmabuf) {
+            Ok(texture) => Some(texture),
+            Err(error) => {
+                log::warn!("failed to import dma-buf wl_buffer: {error}");
+                None
+            }
+        };
+    }
+    let Some(sample) = buffer.shm_sample() else {
+        log::warn!("shm wl_buffer has no readable pixels");
+        return None;
+    };
+    match drm.renderer.import_shm(ShmImage {
+        bytes: sample.bytes,
+        width: sample.width,
+        height: sample.height,
+        stride: sample.stride,
+        fourcc: sample.fourcc,
+    }) {
+        Ok(texture) => Some(texture),
+        Err(error) => {
+            log::warn!("failed to upload shm wl_buffer: {error}");
+            None
+        }
+    }
+}
+
+fn wait_scene_acquires(drm: &mut Drm, items: &[SceneItem]) {
+    for item in items {
+        let _ = drm.renderer.wait_acquire(&item.sync.acquire);
+    }
+}
+
 fn push_scene_items_from_snapshots(
     items: &mut Vec<SceneItem>,
     objects: &mut Box<crate::state::IndexMap<ObjectId, Box<dyn Object>>>,
-    drm: &Drm,
+    drm: &mut Drm,
     drm_fd: &DrmFd,
     drm_crtc_id: u32,
     output_bounds: RectI,
@@ -5457,8 +5496,7 @@ fn push_scene_items_from_snapshots(
         };
         opaque_region.intersect_rect(bounds);
         opaque_region.intersect_rect(output_bounds);
-        let Some(texture) = buffer.prepare_texture(&drm.renderer.context(), &surface_state.sync)
-        else {
+        let Some(texture) = import_client_texture(drm, buffer) else {
             log::warn!(
                 "collect_render_items: no prepared texture for buffer={:?}",
                 surface_state.buffer
@@ -5660,8 +5698,8 @@ fn collect_software_cursor_items(
         return (Vec::new(), None);
     }
     let cursor_snapshots = collect_cursor_surface_snapshots(state, retired_candidates);
-    let (objects, drm_map) = (&mut state.objects, &state.drm);
-    let drm = drm_map.get(drm_id);
+    let (objects, drm_map) = (&mut state.objects, &mut state.drm);
+    let drm = drm_map.get_mut(drm_id);
     let drm_fd = drm.fd();
     let mut items = Vec::new();
     push_scene_items_from_snapshots(
@@ -6211,14 +6249,15 @@ fn realize_closing_texture(
     state: &mut State,
     plan: &ClosingCapturePlan,
 ) -> Option<Rc<dyn Texture>> {
-    let (objects, drm_map) = (&mut state.objects, &state.drm);
-    let drm = drm_map.try_get(plan.drm_id)?;
+    let (objects, drm_map) = (&mut state.objects, &mut state.drm);
+    let drm = drm_map.try_get_mut(plan.drm_id)?;
     drm.bind_context();
     let mut uploaded = Vec::new();
     for surface in &plan.surfaces {
         let mut obj = objects.grab(surface.buffer.object_id());
         let buffer = obj.downcast_mut::<WlBuffer>()?;
-        let texture = buffer.prepare_texture(&drm.renderer.context(), &surface.sync)?;
+        let _ = drm.renderer.wait_acquire(&surface.sync.acquire);
+        let texture = import_client_texture(drm, buffer)?;
         let tex_transform = buffer.base_tex_transform().mul(surface.tex_transform);
         uploaded.push((texture, tex_transform));
     }
@@ -6564,8 +6603,8 @@ fn collect_dnd_render_items(
         retired_candidates,
         &mut snapshots,
     );
-    let (objects, drm_map) = (&mut state.objects, &state.drm);
-    let drm = drm_map.get(drm_id);
+    let (objects, drm_map) = (&mut state.objects, &mut state.drm);
+    let drm = drm_map.get_mut(drm_id);
     let drm_fd = drm.fd();
     push_scene_items_from_snapshots(
         items,
@@ -6868,8 +6907,8 @@ fn render_composed_entry(
     }
     let mut snapshots = Vec::new();
     collect_surface_snapshots(state, root_surface, 0, 0, true, retired_candidates, &mut snapshots);
-    let (objects, drm_map) = (&mut state.objects, &state.drm);
-    let drm = drm_map.get(drm_id);
+    let (objects, drm_map) = (&mut state.objects, &mut state.drm);
+    let drm = drm_map.get_mut(drm_id);
     let drm_fd = drm.fd();
     let item_start = items.len();
     push_scene_items_from_snapshots(

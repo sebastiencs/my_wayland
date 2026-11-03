@@ -1,7 +1,12 @@
-use std::{any::Any, rc::Rc};
+use std::{
+    any::Any,
+    collections::HashMap,
+    os::fd::AsFd,
+    rc::{Rc, Weak},
+};
 
 use crate::{
-    dmabuf::DmaBuf,
+    dmabuf::{DmaBuf, DmaBufId},
     region::RectI,
     render::{
         FormatSupport, GraphicsApi, OffscreenTarget, RenderCompletion, RenderFrame, RenderTarget,
@@ -23,12 +28,14 @@ use super::{
 pub struct GlesRenderer {
     context: EglContext,
     capabilities: RendererCapabilities,
+    /// Live imports of client dma-bufs. Weak entries die with the last scene item or snapshot.
+    dmabuf_textures: HashMap<DmaBufId, Weak<dyn Texture>>,
 }
 
 impl GlesRenderer {
     pub fn new(context: EglContext) -> Self {
         let capabilities = capabilities_from(&context);
-        Self { context, capabilities }
+        Self { context, capabilities, dmabuf_textures: HashMap::new() }
     }
 
     pub fn context(&self) -> &EglContext {
@@ -129,12 +136,20 @@ impl Renderer for GlesRenderer {
     }
 
     fn import_dmabuf(&mut self, source: &DmaBuf) -> Result<Rc<dyn Texture>, RendererError> {
+        self.dmabuf_textures
+            .retain(|_, texture| texture.strong_count() > 0);
+        if let Some(texture) = self.dmabuf_textures.get(&source.id).and_then(Weak::upgrade) {
+            return Ok(texture);
+        }
         self.context.bind();
         let image = self.context.import_dmabuf(source);
-        image
+        let texture = image
             .into_texture(self.context.device_id())
             .map(|texture| Rc::new(texture) as Rc<dyn Texture>)
-            .map_err(|_| RendererError::ImportFailed)
+            .map_err(|_| RendererError::ImportFailed)?;
+        self.dmabuf_textures
+            .insert(source.id, Rc::downgrade(&texture));
+        Ok(texture)
     }
 
     fn import_shm(&mut self, image: ShmImage<'_>) -> Result<Rc<dyn Texture>, RendererError> {
@@ -252,7 +267,21 @@ impl Renderer for GlesRenderer {
     }
 
     fn wait_acquire(&mut self, acquire: &AcquireSync) -> Result<(), RendererError> {
-        acquire.wait_for_renderer(&self.context);
+        let Ok(Some(sync_file)) = acquire.prepare_wait_fd() else {
+            return Ok(());
+        };
+        self.context.bind();
+        if let Err(error) = self.context.wait_on_native_fence(sync_file) {
+            log::warn!(
+                "renderer explicit acquire wait failed, falling back to CPU wait: {:?}",
+                error
+            );
+            if let Ok(Some(sync_file)) = acquire.prepare_wait_fd() {
+                if let Err(wait_error) = crate::sync::wait_sync_file_cpu(sync_file.as_fd()) {
+                    log::warn!("renderer explicit acquire CPU wait also failed: {:?}", wait_error);
+                }
+            }
+        }
         Ok(())
     }
 }
