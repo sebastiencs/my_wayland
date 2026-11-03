@@ -920,7 +920,13 @@ impl Client {
     ) {
         let object_id = self.objects.remove(&id).unwrap().object_id;
         state.remove_object(object_id);
-        wl_display.send_event(wl_display::Event::DeleteId { id: id.into() }, dispatcher);
+        // `delete_id` exists so the client can reuse *client-allocated* ids. Server-created
+        // objects (ids from MIN_SERVER_ID up) are never announced with it: libwayland's
+        // client drops its map entry when the proxy is destroyed, so a later delete_id
+        // references an unknown id, which some clients (Firefox) treat as fatal.
+        if u32::from(id) < MIN_SERVER_ID {
+            wl_display.send_event(wl_display::Event::DeleteId { id: id.into() }, dispatcher);
+        }
     }
 
     pub(crate) fn dismiss_popup_ids(
