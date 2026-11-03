@@ -76,6 +76,10 @@ pub mod zwp_linux_buffer_params_v1;
 pub mod zwp_linux_dmabuf_v1;
 pub mod zwp_locked_pointer_v1;
 pub mod zwp_pointer_constraints_v1;
+pub mod zwp_primary_selection_device_manager_v1;
+pub mod zwp_primary_selection_device_v1;
+pub mod zwp_primary_selection_offer_v1;
+pub mod zwp_primary_selection_source_v1;
 pub mod zwp_relative_pointer_manager_v1;
 pub mod zwp_relative_pointer_v1;
 pub mod zxdg_decoration_manager_v1;
@@ -156,10 +160,6 @@ fake_obj! {
     { zwp_tablet_v2, ZwpTabletV2 },
     { zwp_tablet_tool_v2, ZwpTabletToolV2 },
     { zwp_tablet_seat_v2, ZwpTabletSeatV2 },
-    { zwp_primary_selection_device_manager_v1, ZwpPrimarySelectionDeviceManagerV1 },
-    { zwp_primary_selection_device_v1, ZwpPrimarySelectionDeviceV1 },
-    { zwp_primary_selection_offer_v1, ZwpPrimarySelectionOfferV1 },
-    { zwp_primary_selection_source_v1, ZwpPrimarySelectionSourceV1 },
     { ext_data_control_manager_v1, ExtDataControlManagerV1 },
     { ext_data_control_device_v1, ExtDataControlDeviceV1 },
     { ext_data_control_source_v1, ExtDataControlSourceV1 },

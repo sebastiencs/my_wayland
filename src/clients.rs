@@ -25,7 +25,7 @@ use crate::{
         ExtWorkspaceManagerV1Id, HyprlandCtmControlManagerV1Id, WaylandId, WlCallbackId,
         WlDataOfferId, WlDataSourceId, WlOutputId, WlRegistryId, WlSurfaceId,
         WpPresentationFeedbackId, XdgPopupId, XdgToplevelId, ZwlrDataControlSourceV1Id,
-        ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id, ZxdgOutputV1Id,
+        ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id, ZwpPrimarySelectionSourceV1Id, ZxdgOutputV1Id,
     },
     region::RectI,
     runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
@@ -44,6 +44,9 @@ use crate::{
         zwlr_data_control_offer_v1::{create_data_control_offer, destroy_data_control_offer},
         zwlr_gamma_control_v1::ZwlrGammaControlV1,
         zwlr_layer_surface_v1::relayout_client_layer_surfaces,
+        zwp_primary_selection_offer_v1::{
+            create_primary_selection_offer, destroy_primary_selection_offer,
+        },
         zxdg_output_v1::ZxdgOutputV1,
     },
 };
@@ -456,6 +459,7 @@ pub enum ClientAction {
     },
     RefreshDataDeviceSelection,
     RefreshDataControlSelection,
+    RefreshPrimarySelection,
     DataDeviceDragEnter {
         serial: u32,
         surface: Resolved<WlSurfaceId>,
@@ -473,6 +477,10 @@ pub enum ClientAction {
     DataControlSourceEvent {
         source: Resolved<ZwlrDataControlSourceV1Id>,
         event: DataControlSourceEvent,
+    },
+    PrimarySelectionSourceEvent {
+        source: Resolved<ZwpPrimarySelectionSourceV1Id>,
+        event: PrimarySelectionSourceEvent,
     },
     DataSourceEvent {
         source: Resolved<WlDataSourceId>,
@@ -554,6 +562,12 @@ pub enum ClientAction {
 
 #[derive(Debug)]
 pub enum DataControlSourceEvent {
+    Send { mime_type: String, fd: RawFd },
+    Cancelled,
+}
+
+#[derive(Debug)]
+pub enum PrimarySelectionSourceEvent {
     Send { mime_type: String, fd: RawFd },
     Cancelled,
 }
@@ -1292,6 +1306,32 @@ impl Client {
         }
     }
 
+    fn refresh_primary_selection(&mut self, state: &mut State, dispatcher: &mut ClientDispatcher) {
+        let has_keyboard_focus = state
+            .seat
+            .keyboard_focus()
+            .is_some_and(|focus| focus.client_id() == self.id);
+        let selection = has_keyboard_focus
+            .then(|| state.seat.primary_selection_source())
+            .flatten();
+
+        for device in state.seat.primary_selection_devices(self.id) {
+            if !device.exists(state) {
+                continue;
+            }
+            let previous_offer = device.ref_mut(state).take_selection_offer();
+            if let Some(previous_offer) = previous_offer {
+                destroy_primary_selection_offer(self, state, dispatcher, previous_offer);
+            }
+            let next_offer = selection.and_then(|selection| {
+                create_primary_selection_offer(self, state, dispatcher, device, selection)
+            });
+            let device = device.ref_mut(state);
+            device.set_selection_offer(next_offer);
+            device.send_selection(next_offer, dispatcher);
+        }
+    }
+
     fn handle_data_device_drag_enter(
         &mut self,
         state: &mut State,
@@ -1456,6 +1496,28 @@ impl Client {
                 source.send_send(mime_type, fd, dispatcher);
             }
             DataControlSourceEvent::Cancelled => source.send_cancelled(dispatcher),
+        }
+    }
+
+    fn handle_primary_selection_source_event(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        source: Resolved<ZwpPrimarySelectionSourceV1Id>,
+        event: PrimarySelectionSourceEvent,
+    ) {
+        if !source.exists(state) {
+            if let PrimarySelectionSourceEvent::Send { fd, .. } = event {
+                let _ = unsafe { OwnedFd::from_raw_fd(fd) };
+            }
+            return;
+        }
+        let source = source.ref_mut(state);
+        match event {
+            PrimarySelectionSourceEvent::Send { mime_type, fd } => {
+                source.send_send(mime_type, fd, dispatcher);
+            }
+            PrimarySelectionSourceEvent::Cancelled => source.send_cancelled(dispatcher),
         }
     }
 
@@ -2440,6 +2502,12 @@ impl Model for Client {
             }
             DataControlSourceEvent { source, event } => {
                 self.handle_data_control_source_event(state, &mut dispatcher, source, event);
+            }
+            RefreshPrimarySelection => {
+                self.refresh_primary_selection(state, &mut dispatcher);
+            }
+            PrimarySelectionSourceEvent { source, event } => {
+                self.handle_primary_selection_source_event(state, &mut dispatcher, source, event);
             }
             DataDeviceDragEnter { serial, surface, x, y, source } => {
                 self.handle_data_device_drag_enter(

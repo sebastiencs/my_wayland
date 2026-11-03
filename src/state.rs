@@ -791,6 +791,29 @@ impl SelectionSourceState {
     }
 }
 
+/// Primary selection owner. This is separate from [`SelectionSourceState`].
+///
+/// Data-control and ext-data-control join this enum when those protocols can
+/// set the primary selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrimarySelectionSourceState {
+    Zwp(Resolved<crate::protocol_generated::ZwpPrimarySelectionSourceV1Id>),
+}
+
+impl PrimarySelectionSourceState {
+    pub fn owner_client_id(self) -> ClientId {
+        match self {
+            Self::Zwp(source) => source.client_id(),
+        }
+    }
+
+    pub fn object_id(self) -> ObjectId {
+        match self {
+            Self::Zwp(source) => source.object_id(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DragSource {
     None { initiator_client_id: ClientId },

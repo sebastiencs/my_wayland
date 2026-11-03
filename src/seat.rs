@@ -16,12 +16,13 @@ use crate::{
     protocol_generated::{
         Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlKeyboardId, WlPointerId, WlSeatId,
         WlSurfaceId, XdgPopupId, XdgToplevelId, ZwlrDataControlDeviceV1Id, ZwpConfinedPointerV1Id,
-        ZwpLockedPointerV1Id, ZwpRelativePointerV1Id,
+        ZwpLockedPointerV1Id, ZwpPrimarySelectionDeviceV1Id, ZwpRelativePointerV1Id,
     },
     root_geometry::WindowTargetGeometry,
     runner::Dispatcher,
     state::{
-        DragNegotiationState, DragPhase, DragState, DragTargetState, SelectionSourceState, State,
+        DragNegotiationState, DragPhase, DragState, DragTargetState, PrimarySelectionSourceState,
+        SelectionSourceState, State,
     },
     tiling::TiledResizeState,
     wayland_objects::{
@@ -317,8 +318,11 @@ pub struct SeatState {
     client_serials: BTreeMap<ClientId, VecDeque<SerialRange>>,
     data_device_resources: BTreeMap<ClientId, Vec<Resolved<WlDataDeviceId>>>,
     data_control_devices: BTreeMap<ClientId, Vec<Resolved<ZwlrDataControlDeviceV1Id>>>,
+    primary_selection_devices: BTreeMap<ClientId, Vec<Resolved<ZwpPrimarySelectionDeviceV1Id>>>,
     selection_source: Option<SelectionSourceState>,
     selection_serial: u32,
+    primary_selection_source: Option<PrimarySelectionSourceState>,
+    primary_selection_serial: u32,
     active_drag: Option<DragState>,
     pointer_resources: BTreeMap<ClientId, Vec<Resolved<WlPointerId>>>,
     relative_pointers: BTreeMap<Resolved<WlPointerId>, Vec<Resolved<ZwpRelativePointerV1Id>>>,
@@ -355,8 +359,11 @@ impl Default for SeatState {
             client_serials: BTreeMap::default(),
             data_device_resources: BTreeMap::default(),
             data_control_devices: BTreeMap::default(),
+            primary_selection_devices: BTreeMap::default(),
             selection_source: None,
             selection_serial: 0,
+            primary_selection_source: None,
+            primary_selection_serial: 0,
             active_drag: None,
             pointer_resources: BTreeMap::default(),
             relative_pointers: BTreeMap::default(),
@@ -541,6 +548,77 @@ impl SeatState {
             }
             dispatcher.dispatch_to(client_id, ClientAction::RefreshDataControlSelection);
         }
+    }
+
+    pub fn register_primary_selection_device(
+        &mut self,
+        device: Resolved<ZwpPrimarySelectionDeviceV1Id>,
+    ) {
+        let devices = self
+            .primary_selection_devices
+            .entry(device.client_id())
+            .or_default();
+        if !devices.contains(&device) {
+            devices.push(device);
+        }
+    }
+
+    pub fn unregister_primary_selection_device(
+        &mut self,
+        device: Resolved<ZwpPrimarySelectionDeviceV1Id>,
+    ) {
+        remove_resource(&mut self.primary_selection_devices, device.client_id(), device);
+    }
+
+    pub fn primary_selection_devices(
+        &self,
+        client_id: ClientId,
+    ) -> Vec<Resolved<ZwpPrimarySelectionDeviceV1Id>> {
+        self.primary_selection_devices
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Tell the keyboard-focused client's primary-selection devices that the
+    /// selection changed. Unfocused devices keep their current offer until focus
+    /// moves. `skip` is a client whose socket is already going away.
+    pub fn publish_primary_selection(
+        &self,
+        dispatcher: &mut ClientDispatcher,
+        skip: Option<ClientId>,
+    ) {
+        if let Some(focus) = self.keyboard_focus() {
+            if skip != Some(focus.client_id()) {
+                dispatcher.dispatch_to(focus.client_id(), ClientAction::RefreshPrimarySelection);
+            }
+        }
+    }
+
+    pub fn primary_selection_source(&self) -> Option<PrimarySelectionSourceState> {
+        self.primary_selection_source
+    }
+
+    pub fn primary_selection_serial(&self) -> u32 {
+        self.primary_selection_serial
+    }
+
+    pub fn validate_primary_selection_serial(&self, serial: u32) -> bool {
+        let current = self.primary_selection_serial;
+        current == 0 || current.wrapping_sub(serial) >= (u32::MAX / 2)
+    }
+
+    pub fn replace_primary_selection_source(
+        &mut self,
+        source: Option<PrimarySelectionSourceState>,
+        serial: u32,
+    ) -> Option<PrimarySelectionSourceState> {
+        self.primary_selection_serial = serial;
+        std::mem::replace(&mut self.primary_selection_source, source)
+    }
+
+    pub fn set_primary_selection_serial(&mut self, serial: u32) {
+        self.primary_selection_serial = serial;
     }
 
     pub fn pointer_resources(&self, client_id: ClientId) -> Vec<Resolved<WlPointerId>> {
@@ -840,6 +918,7 @@ impl SeatState {
         self.client_serials.remove(&client_id);
         self.data_device_resources.remove(&client_id);
         self.data_control_devices.remove(&client_id);
+        self.primary_selection_devices.remove(&client_id);
         self.pointer_resources.remove(&client_id);
         self.relative_pointers
             .retain(|pointer, _| pointer.client_id() != client_id);
@@ -861,6 +940,12 @@ impl SeatState {
             .is_some_and(|selection| selection.owner_client_id() == client_id)
         {
             self.selection_source = None;
+        }
+        if self
+            .primary_selection_source
+            .is_some_and(|selection| selection.owner_client_id() == client_id)
+        {
+            self.primary_selection_source = None;
         }
         if self
             .pointer_focus

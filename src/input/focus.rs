@@ -659,9 +659,11 @@ fn refresh_selection_focus_clients(
     }
     if let Some(client_id) = old_client {
         dispatcher.dispatch_to(client_id, ClientAction::RefreshDataDeviceSelection);
+        dispatcher.dispatch_to(client_id, ClientAction::RefreshPrimarySelection);
     }
     if let Some(client_id) = new_client {
         dispatcher.dispatch_to(client_id, ClientAction::RefreshDataDeviceSelection);
+        dispatcher.dispatch_to(client_id, ClientAction::RefreshPrimarySelection);
     }
 }
 
