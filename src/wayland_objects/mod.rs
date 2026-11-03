@@ -1,5 +1,9 @@
 #![allow(unused)]
 
+pub mod ext_data_control_device_v1;
+pub mod ext_data_control_manager_v1;
+pub mod ext_data_control_offer_v1;
+pub mod ext_data_control_source_v1;
 pub mod ext_foreign_toplevel_handle_v1;
 pub mod ext_foreign_toplevel_image_capture_source_manager_v1;
 pub mod ext_foreign_toplevel_list_v1;
@@ -160,8 +164,4 @@ fake_obj! {
     { zwp_tablet_v2, ZwpTabletV2 },
     { zwp_tablet_tool_v2, ZwpTabletToolV2 },
     { zwp_tablet_seat_v2, ZwpTabletSeatV2 },
-    { ext_data_control_manager_v1, ExtDataControlManagerV1 },
-    { ext_data_control_device_v1, ExtDataControlDeviceV1 },
-    { ext_data_control_source_v1, ExtDataControlSourceV1 },
-    { ext_data_control_offer_v1, ExtDataControlOfferV1 },
 }

@@ -3,6 +3,7 @@ use crate::{
     protocol_generated::{NewId, WlRegistryId},
     state::{Grab, IndexMap, State},
     wayland_objects::{
+        ext_data_control_manager_v1::ExtDataControlManagerV1Global,
         ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1Global,
         ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1Global,
         ext_idle_notifier_v1::ExtIdleNotifierV1Global,
@@ -99,6 +100,7 @@ impl Globals {
             WlCompositorGlobal::new,
             WlDataDeviceManagerGlobal::new,
             ZwlrDataControlManagerV1Global::new,
+            ExtDataControlManagerV1Global::new,
             ZwpPrimarySelectionDeviceManagerV1Global::new,
             WlFixesGlobal::new,
             WlShmGlobal::new,

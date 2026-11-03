@@ -14,9 +14,10 @@ use crate::{
         WindowHit,
     },
     protocol_generated::{
-        Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlKeyboardId, WlPointerId, WlSeatId,
-        WlSurfaceId, XdgPopupId, XdgToplevelId, ZwlrDataControlDeviceV1Id, ZwpConfinedPointerV1Id,
-        ZwpLockedPointerV1Id, ZwpPrimarySelectionDeviceV1Id, ZwpRelativePointerV1Id,
+        Array, ExtDataControlDeviceV1Id, WlDataDeviceId, WlDataOfferId, WlDataSourceId,
+        WlKeyboardId, WlPointerId, WlSeatId, WlSurfaceId, XdgPopupId, XdgToplevelId,
+        ZwlrDataControlDeviceV1Id, ZwpConfinedPointerV1Id, ZwpLockedPointerV1Id,
+        ZwpPrimarySelectionDeviceV1Id, ZwpRelativePointerV1Id,
     },
     root_geometry::WindowTargetGeometry,
     runner::Dispatcher,
@@ -318,6 +319,7 @@ pub struct SeatState {
     client_serials: BTreeMap<ClientId, VecDeque<SerialRange>>,
     data_device_resources: BTreeMap<ClientId, Vec<Resolved<WlDataDeviceId>>>,
     data_control_devices: BTreeMap<ClientId, Vec<Resolved<ZwlrDataControlDeviceV1Id>>>,
+    ext_data_control_devices: BTreeMap<ClientId, Vec<Resolved<ExtDataControlDeviceV1Id>>>,
     primary_selection_devices: BTreeMap<ClientId, Vec<Resolved<ZwpPrimarySelectionDeviceV1Id>>>,
     selection_source: Option<SelectionSourceState>,
     selection_serial: u32,
@@ -359,6 +361,7 @@ impl Default for SeatState {
             client_serials: BTreeMap::default(),
             data_device_resources: BTreeMap::default(),
             data_control_devices: BTreeMap::default(),
+            ext_data_control_devices: BTreeMap::default(),
             primary_selection_devices: BTreeMap::default(),
             selection_source: None,
             selection_serial: 0,
@@ -530,6 +533,37 @@ impl SeatState {
         self.data_control_devices.keys().copied().collect()
     }
 
+    pub fn register_ext_data_control_device(&mut self, device: Resolved<ExtDataControlDeviceV1Id>) {
+        let devices = self
+            .ext_data_control_devices
+            .entry(device.client_id())
+            .or_default();
+        if !devices.contains(&device) {
+            devices.push(device);
+        }
+    }
+
+    pub fn unregister_ext_data_control_device(
+        &mut self,
+        device: Resolved<ExtDataControlDeviceV1Id>,
+    ) {
+        remove_resource(&mut self.ext_data_control_devices, device.client_id(), device);
+    }
+
+    pub fn ext_data_control_devices(
+        &self,
+        client_id: ClientId,
+    ) -> Vec<Resolved<ExtDataControlDeviceV1Id>> {
+        self.ext_data_control_devices
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn ext_data_control_client_ids(&self) -> Vec<ClientId> {
+        self.ext_data_control_devices.keys().copied().collect()
+    }
+
     /// Tell the focused `wl_data_device` and every data-control device that the clipboard changed.
     /// `skip` is a client whose socket is already going away.
     pub fn publish_clipboard_selection(
@@ -547,6 +581,12 @@ impl SeatState {
                 continue;
             }
             dispatcher.dispatch_to(client_id, ClientAction::RefreshDataControlSelection);
+        }
+        for client_id in self.ext_data_control_client_ids() {
+            if skip == Some(client_id) {
+                continue;
+            }
+            dispatcher.dispatch_to(client_id, ClientAction::RefreshExtDataControlSelection);
         }
     }
 
@@ -600,6 +640,12 @@ impl SeatState {
                 continue;
             }
             dispatcher.dispatch_to(client_id, ClientAction::RefreshDataControlPrimarySelection);
+        }
+        for client_id in self.ext_data_control_client_ids() {
+            if skip == Some(client_id) {
+                continue;
+            }
+            dispatcher.dispatch_to(client_id, ClientAction::RefreshExtDataControlPrimarySelection);
         }
     }
 
@@ -926,6 +972,7 @@ impl SeatState {
         self.client_serials.remove(&client_id);
         self.data_device_resources.remove(&client_id);
         self.data_control_devices.remove(&client_id);
+        self.ext_data_control_devices.remove(&client_id);
         self.primary_selection_devices.remove(&client_id);
         self.pointer_resources.remove(&client_id);
         self.relative_pointers

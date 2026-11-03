@@ -120,6 +120,9 @@ impl PrimarySelectionSourceState {
             Self::DataControl(source) => source
                 .try_ref(state)
                 .map(|source| source.mime_types().to_vec()),
+            Self::Ext(source) => source
+                .try_ref(state)
+                .map(|source| source.mime_types().to_vec()),
         }
     }
 
@@ -143,6 +146,15 @@ impl PrimarySelectionSourceState {
                     },
                 );
             }
+            Self::Ext(source) => {
+                dispatcher.dispatch_to(
+                    source.client_id(),
+                    ClientAction::ExtDataControlSourceEvent {
+                        source,
+                        event: crate::clients::ExtDataControlSourceEvent::Send { mime_type, fd },
+                    },
+                );
+            }
         }
     }
 
@@ -163,6 +175,15 @@ impl PrimarySelectionSourceState {
                     ClientAction::DataControlSourceEvent {
                         source,
                         event: crate::clients::DataControlSourceEvent::Cancelled,
+                    },
+                );
+            }
+            Self::Ext(source) => {
+                dispatcher.dispatch_to(
+                    source.client_id(),
+                    ClientAction::ExtDataControlSourceEvent {
+                        source,
+                        event: crate::clients::ExtDataControlSourceEvent::Cancelled,
                     },
                 );
             }

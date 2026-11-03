@@ -767,12 +767,14 @@ pub enum DataOfferRole {
 
 /// Clipboard selection owner. Drag-and-drop stays on [`DragSource`].
 ///
-/// `DataControl` is the `zwlr_data_control_source_v1` that owns the clipboard.
-/// Primary selection stays a separate seat slot.
+/// `DataControl` is the `zwlr_data_control_source_v1` and `Ext` the
+/// `ext_data_control_source_v1` that own the clipboard. Primary selection stays
+/// a separate seat slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionSourceState {
     WlData(Resolved<WlDataSourceId>),
     DataControl(Resolved<crate::protocol_generated::ZwlrDataControlSourceV1Id>),
+    Ext(Resolved<crate::protocol_generated::ExtDataControlSourceV1Id>),
 }
 
 impl SelectionSourceState {
@@ -780,6 +782,7 @@ impl SelectionSourceState {
         match self {
             Self::WlData(source) => source.client_id(),
             Self::DataControl(source) => source.client_id(),
+            Self::Ext(source) => source.client_id(),
         }
     }
 
@@ -787,17 +790,17 @@ impl SelectionSourceState {
         match self {
             Self::WlData(source) => source.object_id(),
             Self::DataControl(source) => source.object_id(),
+            Self::Ext(source) => source.object_id(),
         }
     }
 }
 
 /// Primary selection owner. This is separate from [`SelectionSourceState`].
-///
-/// Data-control can own this slot. ext-data-control joins the enum later.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrimarySelectionSourceState {
     Zwp(Resolved<crate::protocol_generated::ZwpPrimarySelectionSourceV1Id>),
     DataControl(Resolved<crate::protocol_generated::ZwlrDataControlSourceV1Id>),
+    Ext(Resolved<crate::protocol_generated::ExtDataControlSourceV1Id>),
 }
 
 impl PrimarySelectionSourceState {
@@ -805,6 +808,7 @@ impl PrimarySelectionSourceState {
         match self {
             Self::Zwp(source) => source.client_id(),
             Self::DataControl(source) => source.client_id(),
+            Self::Ext(source) => source.client_id(),
         }
     }
 
@@ -812,6 +816,7 @@ impl PrimarySelectionSourceState {
         match self {
             Self::Zwp(source) => source.object_id(),
             Self::DataControl(source) => source.object_id(),
+            Self::Ext(source) => source.object_id(),
         }
     }
 }

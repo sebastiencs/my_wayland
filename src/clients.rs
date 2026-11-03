@@ -22,10 +22,11 @@ use crate::{
     object::{AbortRequest, IdToObject, Object, ObjectWithId, Parser, ParserError, PostAction},
     protocol_generated::{
         wl_data_device_manager::DndAction, wl_data_offer, wl_display, wl_pointer, Array, Constants,
-        ExtWorkspaceManagerV1Id, HyprlandCtmControlManagerV1Id, WaylandId, WlCallbackId,
-        WlDataOfferId, WlDataSourceId, WlOutputId, WlRegistryId, WlSurfaceId,
-        WpPresentationFeedbackId, XdgPopupId, XdgToplevelId, ZwlrDataControlSourceV1Id,
-        ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id, ZwpPrimarySelectionSourceV1Id, ZxdgOutputV1Id,
+        ExtDataControlSourceV1Id, ExtWorkspaceManagerV1Id, HyprlandCtmControlManagerV1Id,
+        WaylandId, WlCallbackId, WlDataOfferId, WlDataSourceId, WlOutputId, WlRegistryId,
+        WlSurfaceId, WpPresentationFeedbackId, XdgPopupId, XdgToplevelId,
+        ZwlrDataControlSourceV1Id, ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id,
+        ZwpPrimarySelectionSourceV1Id, ZxdgOutputV1Id,
     },
     region::RectI,
     runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
@@ -35,6 +36,10 @@ use crate::{
     sync::AcquireReadyWaiterId,
     udev::Udev,
     wayland_objects::{
+        ext_data_control_offer_v1::{
+            create_ext_data_control_offer, create_ext_data_control_primary_offer,
+            destroy_ext_data_control_offer,
+        },
         ext_workspace_manager_v1::publish_workspace_state_changed,
         hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1,
         wl_data_offer::WlDataOffer,
@@ -463,6 +468,8 @@ pub enum ClientAction {
     RefreshDataDeviceSelection,
     RefreshDataControlSelection,
     RefreshDataControlPrimarySelection,
+    RefreshExtDataControlSelection,
+    RefreshExtDataControlPrimarySelection,
     RefreshPrimarySelection,
     DataDeviceDragEnter {
         serial: u32,
@@ -481,6 +488,10 @@ pub enum ClientAction {
     DataControlSourceEvent {
         source: Resolved<ZwlrDataControlSourceV1Id>,
         event: DataControlSourceEvent,
+    },
+    ExtDataControlSourceEvent {
+        source: Resolved<ExtDataControlSourceV1Id>,
+        event: ExtDataControlSourceEvent,
     },
     PrimarySelectionSourceEvent {
         source: Resolved<ZwpPrimarySelectionSourceV1Id>,
@@ -566,6 +577,12 @@ pub enum ClientAction {
 
 #[derive(Debug)]
 pub enum DataControlSourceEvent {
+    Send { mime_type: String, fd: RawFd },
+    Cancelled,
+}
+
+#[derive(Debug)]
+pub enum ExtDataControlSourceEvent {
     Send { mime_type: String, fd: RawFd },
     Cancelled,
 }
@@ -1338,6 +1355,52 @@ impl Client {
         }
     }
 
+    fn refresh_ext_data_control_selection(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let selection = state.seat.selection_source();
+        for device in state.seat.ext_data_control_devices(self.id) {
+            if !device.exists(state) || device.rref(state).is_inert() {
+                continue;
+            }
+            let previous_offer = device.ref_mut(state).take_selection_offer();
+            if let Some(previous_offer) = previous_offer {
+                destroy_ext_data_control_offer(self, state, dispatcher, previous_offer);
+            }
+            let next_offer = selection.and_then(|selection| {
+                create_ext_data_control_offer(self, state, dispatcher, device, selection)
+            });
+            let device = device.ref_mut(state);
+            device.set_selection_offer(next_offer);
+            device.send_selection(next_offer, dispatcher);
+        }
+    }
+
+    fn refresh_ext_data_control_primary_selection(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let selection = state.seat.primary_selection_source();
+        for device in state.seat.ext_data_control_devices(self.id) {
+            if !device.exists(state) || device.rref(state).is_inert() {
+                continue;
+            }
+            let previous_offer = device.ref_mut(state).take_primary_offer();
+            if let Some(previous_offer) = previous_offer {
+                destroy_ext_data_control_offer(self, state, dispatcher, previous_offer);
+            }
+            let next_offer = selection.and_then(|selection| {
+                create_ext_data_control_primary_offer(self, state, dispatcher, device, selection)
+            });
+            let device = device.ref_mut(state);
+            device.set_primary_offer(next_offer);
+            device.send_primary_selection(next_offer, dispatcher);
+        }
+    }
+
     fn refresh_primary_selection(&mut self, state: &mut State, dispatcher: &mut ClientDispatcher) {
         let has_keyboard_focus = state
             .seat
@@ -1528,6 +1591,28 @@ impl Client {
                 source.send_send(mime_type, fd, dispatcher);
             }
             DataControlSourceEvent::Cancelled => source.send_cancelled(dispatcher),
+        }
+    }
+
+    fn handle_ext_data_control_source_event(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        source: Resolved<ExtDataControlSourceV1Id>,
+        event: ExtDataControlSourceEvent,
+    ) {
+        if !source.exists(state) {
+            if let ExtDataControlSourceEvent::Send { fd, .. } = event {
+                let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+            }
+            return;
+        }
+        let source = source.ref_mut(state);
+        match event {
+            ExtDataControlSourceEvent::Send { mime_type, fd } => {
+                source.send_send(mime_type, fd, dispatcher);
+            }
+            ExtDataControlSourceEvent::Cancelled => source.send_cancelled(dispatcher),
         }
     }
 
@@ -2535,8 +2620,17 @@ impl Model for Client {
             RefreshDataControlPrimarySelection => {
                 self.refresh_data_control_primary_selection(state, &mut dispatcher);
             }
+            RefreshExtDataControlSelection => {
+                self.refresh_ext_data_control_selection(state, &mut dispatcher);
+            }
+            RefreshExtDataControlPrimarySelection => {
+                self.refresh_ext_data_control_primary_selection(state, &mut dispatcher);
+            }
             DataControlSourceEvent { source, event } => {
                 self.handle_data_control_source_event(state, &mut dispatcher, source, event);
+            }
+            ExtDataControlSourceEvent { source, event } => {
+                self.handle_ext_data_control_source_event(state, &mut dispatcher, source, event);
             }
             RefreshPrimarySelection => {
                 self.refresh_primary_selection(state, &mut dispatcher);
