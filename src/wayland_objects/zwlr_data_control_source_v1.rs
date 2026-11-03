@@ -76,7 +76,7 @@ impl Object for ZwlrDataControlSourceV1 {
                         dispatcher,
                         self.id.into(),
                         zwlr_data_control_source_v1::Error::InvalidOffer as u32,
-                        "zwlr_data_control_source_v1.offer after set_selection",
+                        "zwlr_data_control_source_v1.offer after the source was used",
                     );
                     return Ok(());
                 }
@@ -134,6 +134,18 @@ pub(crate) fn destroy_data_control_source(
         state
             .seat
             .publish_clipboard_selection(dispatcher, skip_client);
+    }
+    if state
+        .seat
+        .primary_selection_source()
+        .is_some_and(|selection| selection.object_id() == source.object_id())
+    {
+        state
+            .seat
+            .replace_primary_selection_source(None, state.seat.primary_selection_serial());
+        state
+            .seat
+            .publish_primary_selection(dispatcher, skip_client);
     }
     Ok(())
 }

@@ -1,7 +1,7 @@
-//! `zwlr_data_control_manager_v1`, advertised at version 1.
+//! `zwlr_data_control_manager_v1`, advertised at version 2.
 //!
-//! Version 2 adds primary selection and is left for a later phase. Binding at version 1 still
-//! lets a clipboard manager read and replace the seat selection without keyboard focus.
+//! Version 1 binds still only see the clipboard. Version 2 also receives and
+//! replaces the primary selection, without keyboard focus.
 
 use crate::{
     clients::{Client, ClientAction, ClientDispatcher, RawRequest},
@@ -18,8 +18,9 @@ use crate::{
     },
 };
 
-/// Clipboard only. Primary selection is version 2.
-pub const ADVERTISED_VERSION: u32 = 1;
+/// Clipboard and primary selection. Version 1 clients still bind and never
+/// receive `primary_selection`.
+pub const ADVERTISED_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub struct ZwlrDataControlManagerV1Global;
@@ -85,6 +86,10 @@ impl Object for ZwlrDataControlManagerV1 {
                 state.seat.register_data_control_device(device);
                 dispatcher
                     .dispatch_to(client.client_id(), ClientAction::RefreshDataControlSelection);
+                dispatcher.dispatch_to(
+                    client.client_id(),
+                    ClientAction::RefreshDataControlPrimarySelection,
+                );
             }
             Destroy => {
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());

@@ -580,9 +580,11 @@ impl SeatState {
             .unwrap_or_default()
     }
 
-    /// Tell the keyboard-focused client's primary-selection devices that the
-    /// selection changed. Unfocused devices keep their current offer until focus
-    /// moves. `skip` is a client whose socket is already going away.
+    /// Tell the keyboard-focused `zwp_primary_selection_device_v1` and every
+    /// data-control client that the primary selection changed. Unfocused zwp
+    /// devices keep their current offer until focus moves. The data-control
+    /// refresh skips version-1 devices. `skip` is a client whose socket is
+    /// already going away.
     pub fn publish_primary_selection(
         &self,
         dispatcher: &mut ClientDispatcher,
@@ -592,6 +594,12 @@ impl SeatState {
             if skip != Some(focus.client_id()) {
                 dispatcher.dispatch_to(focus.client_id(), ClientAction::RefreshPrimarySelection);
             }
+        }
+        for client_id in self.data_control_client_ids() {
+            if skip == Some(client_id) {
+                continue;
+            }
+            dispatcher.dispatch_to(client_id, ClientAction::RefreshDataControlPrimarySelection);
         }
     }
 

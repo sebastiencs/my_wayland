@@ -41,7 +41,10 @@ use crate::{
         wl_display::WlDisplay,
         wl_output::WlOutput,
         wp_presentation_feedback::WpPresentationFeedback,
-        zwlr_data_control_offer_v1::{create_data_control_offer, destroy_data_control_offer},
+        zwlr_data_control_offer_v1::{
+            create_data_control_offer, create_data_control_primary_offer,
+            destroy_data_control_offer,
+        },
         zwlr_gamma_control_v1::ZwlrGammaControlV1,
         zwlr_layer_surface_v1::relayout_client_layer_surfaces,
         zwp_primary_selection_offer_v1::{
@@ -459,6 +462,7 @@ pub enum ClientAction {
     },
     RefreshDataDeviceSelection,
     RefreshDataControlSelection,
+    RefreshDataControlPrimarySelection,
     RefreshPrimarySelection,
     DataDeviceDragEnter {
         serial: u32,
@@ -1303,6 +1307,34 @@ impl Client {
             let device = device.ref_mut(state);
             device.set_selection_offer(next_offer);
             device.send_selection(next_offer, dispatcher);
+        }
+    }
+
+    fn refresh_data_control_primary_selection(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let selection = state.seat.primary_selection_source();
+        for device in state.seat.data_control_devices(self.id) {
+            if !device.exists(state) || device.rref(state).is_inert() {
+                continue;
+            }
+            if device.rref(state).version()
+                < crate::protocol_generated::zwlr_data_control_device_v1::PRIMARY_SELECTION_SINCE
+            {
+                continue;
+            }
+            let previous_offer = device.ref_mut(state).take_primary_offer();
+            if let Some(previous_offer) = previous_offer {
+                destroy_data_control_offer(self, state, dispatcher, previous_offer);
+            }
+            let next_offer = selection.and_then(|selection| {
+                create_data_control_primary_offer(self, state, dispatcher, device, selection)
+            });
+            let device = device.ref_mut(state);
+            device.set_primary_offer(next_offer);
+            device.send_primary_selection(next_offer, dispatcher);
         }
     }
 
@@ -2499,6 +2531,9 @@ impl Model for Client {
             }
             RefreshDataControlSelection => {
                 self.refresh_data_control_selection(state, &mut dispatcher);
+            }
+            RefreshDataControlPrimarySelection => {
+                self.refresh_data_control_primary_selection(state, &mut dispatcher);
             }
             DataControlSourceEvent { source, event } => {
                 self.handle_data_control_source_event(state, &mut dispatcher, source, event);

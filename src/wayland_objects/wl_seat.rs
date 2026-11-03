@@ -126,13 +126,16 @@ fn finish_data_control_devices(
         if !finish {
             continue;
         }
-        let offer = {
+        let (offer, primary_offer) = {
             let mut device_obj = device.ref_mut(state);
             device_obj.finish(dispatcher);
-            device_obj.take_selection_offer()
+            (device_obj.take_selection_offer(), device_obj.take_primary_offer())
         };
         state.seat.unregister_data_control_device(device);
         if let Some(offer) = offer {
+            destroy_data_control_offer(client, state, dispatcher, offer);
+        }
+        if let Some(offer) = primary_offer {
             destroy_data_control_offer(client, state, dispatcher, offer);
         }
     }

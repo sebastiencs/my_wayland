@@ -117,6 +117,9 @@ impl PrimarySelectionSourceState {
             Self::Zwp(source) => source
                 .try_ref(state)
                 .map(|source| source.mime_types().to_vec()),
+            Self::DataControl(source) => source
+                .try_ref(state)
+                .map(|source| source.mime_types().to_vec()),
         }
     }
 
@@ -131,6 +134,15 @@ impl PrimarySelectionSourceState {
                     },
                 );
             }
+            Self::DataControl(source) => {
+                dispatcher.dispatch_to(
+                    source.client_id(),
+                    ClientAction::DataControlSourceEvent {
+                        source,
+                        event: crate::clients::DataControlSourceEvent::Send { mime_type, fd },
+                    },
+                );
+            }
         }
     }
 
@@ -142,6 +154,15 @@ impl PrimarySelectionSourceState {
                     ClientAction::PrimarySelectionSourceEvent {
                         source,
                         event: crate::clients::PrimarySelectionSourceEvent::Cancelled,
+                    },
+                );
+            }
+            Self::DataControl(source) => {
+                dispatcher.dispatch_to(
+                    source.client_id(),
+                    ClientAction::DataControlSourceEvent {
+                        source,
+                        event: crate::clients::DataControlSourceEvent::Cancelled,
                     },
                 );
             }
