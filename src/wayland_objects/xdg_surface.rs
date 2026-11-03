@@ -727,12 +727,17 @@ pub(crate) fn request_toplevel_close(
     dispatcher: &mut Dispatcher,
     root: Resolved<WlSurfaceId>,
 ) -> bool {
-    let Some(toplevel) = root
+    let Some(xdg_surface) = root
         .try_ref(state)
         .and_then(|surface| surface.xdg_surface())
-        .and_then(|xdg_surface| xdg_surface.try_ref(state))
-        .and_then(|xdg_surface| xdg_surface.toplevel_role())
     else {
+        return false;
+    };
+    let Some(toplevel) = state.xdg_toplevel(xdg_surface).or_else(|| {
+        xdg_surface
+            .try_ref(state)
+            .and_then(|xdg_surface| xdg_surface.toplevel_role())
+    }) else {
         return false;
     };
     dispatcher.dispatch_to(root.client_id(), ClientAction::RequestToplevelClose { toplevel });

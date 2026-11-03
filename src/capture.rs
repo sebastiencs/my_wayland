@@ -2902,6 +2902,22 @@ pub(crate) fn sync_mapped_toplevels(
 }
 
 /// Send every currently mapped toplevel to a wlr manager that just bound.
+/// The root `wl_surface` for a mapped toplevel, when this key still has an XDG toplevel.
+pub(crate) fn root_surface_for_toplevel_key(
+    state: &State,
+    key: ToplevelKey,
+) -> Option<Resolved<WlSurfaceId>> {
+    let toplevel = state
+        .capture
+        .by_xdg
+        .iter()
+        .find(|(_, candidate)| **candidate == key)
+        .map(|(toplevel, _)| *toplevel)?;
+    let xdg_surface = toplevel.try_ref(state)?.xdg_surface();
+    let surface = xdg_surface.try_ref(state)?.wl_surface();
+    Some(state.root_surface_for_surface(surface).unwrap_or(surface))
+}
+
 pub(crate) fn sync_wlr_manager(
     state: &mut State,
     dispatcher: &mut Dispatcher,
@@ -5463,5 +5479,140 @@ mod tests {
         }
         assert!(test_sent_arg(&dispatcher, handle_id, 2, OUTPUT_OBJECT));
         assert!(test_sent(&dispatcher, handle_id, 5));
+    }
+
+    fn attached_wlr_handle(
+        client: &mut crate::clients::Client,
+        state: &mut State,
+        dispatcher: &mut crate::runner::Dispatcher,
+    ) -> (ToplevelKey, Resolved<ZwlrForeignToplevelHandleV1Id>, u32) {
+        use crate::{
+            protocol_generated::ZwlrForeignToplevelManagerV1Id,
+            wayland_objects::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+        };
+        let (_surface, key) = mapped_window(client, state, dispatcher);
+        ZwlrForeignToplevelManagerV1::attach(
+            client,
+            state,
+            dispatcher,
+            ZwlrForeignToplevelManagerV1Id::from(90),
+            3,
+        );
+        test_deliver(client, state, dispatcher);
+        let handle = state
+            .capture
+            .wlr_handles
+            .iter()
+            .find(|slot| slot.key == key)
+            .expect("wlr handle")
+            .handle;
+        let handle_id: u32 = handle.wayland_id().into();
+        (key, handle, handle_id)
+    }
+
+    #[test]
+    fn wlr_handle_requests_focus_close_and_fullscreen() {
+        use crate::{protocol_generated::WlSeatId, wayland_objects::wl_seat::WlSeat};
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let (key, handle, handle_id) =
+            attached_wlr_handle(&mut client, &mut state, &mut dispatcher);
+        let toplevel = state
+            .capture
+            .by_xdg
+            .iter()
+            .find(|(_, mapped)| **mapped == key)
+            .map(|(toplevel, _)| *toplevel)
+            .expect("toplevel");
+        let xdg_surface = toplevel.rref(&state).xdg_surface();
+        state.register_xdg_toplevel_role(xdg_surface, toplevel);
+        client.insert_object(&mut state, WlSeat::new(WlSeatId::from(91)));
+
+        let mut activate = test_request(handle_id, 4, 1);
+        activate.id(WlSeatId::from(91));
+        test_dispatch(&mut client, &mut state, &mut dispatcher, handle.wayland_id(), activate);
+        assert_eq!(
+            state
+                .seat
+                .keyboard_focus
+                .map(|focus| u32::from(focus.surface.wayland_id())),
+            Some(80)
+        );
+        assert!(!toplevel.rref(&state).is_maximized());
+
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            handle.wayland_id(),
+            test_request(handle_id, 0, 0),
+        );
+        assert!(!toplevel.rref(&state).is_maximized());
+
+        let mut fullscreen = test_request(handle_id, 8, 1);
+        fullscreen.id(0u32);
+        test_dispatch(&mut client, &mut state, &mut dispatcher, handle.wayland_id(), fullscreen);
+        assert!(toplevel.rref(&state).is_fullscreen());
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            handle.wayland_id(),
+            test_request(handle_id, 9, 0),
+        );
+        assert!(!toplevel.rref(&state).is_fullscreen());
+
+        let mut rectangle = test_request(handle_id, 6, 5);
+        rectangle.id(crate::protocol_generated::WlSurfaceId::from(80));
+        rectangle.int(1);
+        rectangle.int(2);
+        rectangle.int(0);
+        rectangle.int(0);
+        test_dispatch(&mut client, &mut state, &mut dispatcher, handle.wayland_id(), rectangle);
+        assert!(!test_closed(&dispatcher, &client));
+
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            handle.wayland_id(),
+            test_request(handle_id, 5, 0),
+        );
+        assert!(dispatcher.test_has_queued_action::<ClientAction>(|action| {
+            matches!(action, ClientAction::RequestToplevelClose { .. })
+        }));
+    }
+
+    #[test]
+    fn wlr_set_rectangle_rejects_a_negative_size() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let (_key, handle, handle_id) =
+            attached_wlr_handle(&mut client, &mut state, &mut dispatcher);
+        let mut rectangle = test_request(handle_id, 6, 5);
+        rectangle.id(crate::protocol_generated::WlSurfaceId::from(80));
+        rectangle.int(0);
+        rectangle.int(0);
+        rectangle.int(-1);
+        rectangle.int(4);
+        test_dispatch(&mut client, &mut state, &mut dispatcher, handle.wayland_id(), rectangle);
+        assert!(test_closed(&dispatcher, &client));
+    }
+
+    #[test]
+    fn wlr_closed_handle_ignores_close() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let (key, handle, handle_id) =
+            attached_wlr_handle(&mut client, &mut state, &mut dispatcher);
+        close_toplevel(&mut state, &mut dispatcher, key);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            handle.wayland_id(),
+            test_request(handle_id, 5, 0),
+        );
+        assert!(!dispatcher.test_has_queued_action::<ClientAction>(|action| {
+            matches!(action, ClientAction::RequestToplevelClose { .. })
+        }));
     }
 }

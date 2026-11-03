@@ -2,17 +2,20 @@
 //!
 //! The initial burst is title, app id, `output_enter` for each `wl_output` the client has bound,
 //! the state array, `parent` on version 3, then one `done`. Later changes send the changed events
-//! and one `done`. `closed` is the last event. Requests other than `destroy` are accepted and
-//! ignored until the actions are implemented.
+//! and one `done`. `closed` is the last event. `set_maximized` and `set_minimized`
+//! are ignored. `activate` shows the window's workspace and focuses it. `close`
+//! asks the toplevel to quit. `set_fullscreen` fullscreens it on its current workspace.
 
 use crate::{
     capture::ToplevelKey,
-    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
+    clients::{Client, ClientDispatcher, ClientManagerAction, EventWriter, RawRequest, Resolved},
+    drm::{request_active_output, request_outputs, request_outputs_for_rect},
     object::{Object, Parser, RequestResult},
     protocol_generated::{
-        zwlr_foreign_toplevel_handle_v1, WaylandId, WlOutputId, ZwlrForeignToplevelHandleV1Id,
-        ZwlrForeignToplevelManagerV1Id,
+        zwlr_foreign_toplevel_handle_v1, WaylandId, WlOutputId, WlSurfaceId,
+        ZwlrForeignToplevelHandleV1Id, ZwlrForeignToplevelManagerV1Id,
     },
+    seat::{resolve_activation_target, set_keyboard_focus_from_surface},
     state::{GrabbedObject, State},
     wayland_objects::wl_display::WlDisplay,
 };
@@ -136,6 +139,94 @@ impl ZwlrForeignToplevelHandleV1 {
         }
         client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
     }
+
+    fn activate(&self, state: &mut State, dispatcher: &mut ClientDispatcher) {
+        let Some(root) = crate::capture::root_surface_for_toplevel_key(state, self.key) else {
+            return;
+        };
+        if let Some(workspace_id) = state.root_surface_workspace(root) {
+            if state.activate_workspace(workspace_id) {
+                crate::input::pointer_lock::release_pointer_capture(state, dispatcher);
+                let outputs = state.workspace_output_ids(workspace_id);
+                crate::wayland_objects::ext_workspace_manager_v1::publish_workspace_state_changed(
+                    state, dispatcher, outputs,
+                );
+            }
+        }
+        let Some(focus) = resolve_activation_target(state, root) else {
+            return;
+        };
+        if !state.raise_root_surface(focus.surface) {
+            return;
+        }
+        set_keyboard_focus_from_surface(state, dispatcher, Some(focus));
+        if let Some(bounds) = state
+            .root_surface_for_surface(focus.surface)
+            .and_then(|root_surface| state.root_surface_surface_bounds_global(root_surface))
+        {
+            request_outputs_for_rect(state, bounds, dispatcher);
+        } else {
+            request_active_output(state, dispatcher);
+        }
+    }
+
+    fn close(&self, state: &mut State, dispatcher: &mut ClientDispatcher) {
+        let Some(root) = crate::capture::root_surface_for_toplevel_key(state, self.key) else {
+            return;
+        };
+        let _ =
+            crate::wayland_objects::xdg_surface::request_toplevel_close(state, dispatcher, root);
+    }
+
+    fn fullscreen(&self, state: &mut State, dispatcher: &mut ClientDispatcher, fullscreen: bool) {
+        let Some(root) = crate::capture::root_surface_for_toplevel_key(state, self.key) else {
+            return;
+        };
+        if let Some(xdg_surface) = root
+            .try_ref(state)
+            .and_then(|surface| surface.xdg_surface())
+        {
+            if let Some(toplevel) = state.xdg_toplevel(xdg_surface) {
+                if let Some(toplevel) = toplevel.try_ref_mut(state) {
+                    toplevel.set_requested_fullscreen(fullscreen);
+                }
+            }
+        }
+        let affected_outputs = state
+            .root_surface_workspace(root)
+            .map(|workspace_id| state.workspace_output_ids(workspace_id))
+            .unwrap_or_default();
+        if state.set_root_surface_fullscreen(root, fullscreen) {
+            if !affected_outputs.is_empty() {
+                request_outputs(state, affected_outputs.into_iter(), dispatcher);
+            }
+            crate::seat::refresh_scene_focus(state, dispatcher);
+            dispatcher.dispatch(ClientManagerAction::WorkspaceStateChanged);
+        }
+    }
+
+    fn validate_rectangle(
+        &self,
+        client: &mut Client,
+        state: &State,
+        dispatcher: &mut ClientDispatcher,
+        surface: WlSurfaceId,
+        width: i32,
+        height: i32,
+    ) -> bool {
+        if width < 0 || height < 0 {
+            client.protocol_violation_disconnect(
+                dispatcher,
+                self.id.into(),
+                zwlr_foreign_toplevel_handle_v1::Error::InvalidRectangle as u32,
+                "set_rectangle width and height must be non-negative",
+            );
+            return false;
+        }
+        client
+            .resolve_or_disconnect(surface, state, dispatcher)
+            .is_ok()
+    }
 }
 
 impl Object for ZwlrForeignToplevelHandleV1 {
@@ -151,19 +242,42 @@ impl Object for ZwlrForeignToplevelHandleV1 {
         dispatcher: &mut ClientDispatcher,
     ) -> RequestResult {
         use zwlr_foreign_toplevel_handle_v1::Request::*;
-        match client.parse::<Self>(req, dispatcher)? {
+        let request = client.parse::<Self>(req, dispatcher)?;
+        if self.closed && !matches!(request, Destroy) {
+            return Ok(());
+        }
+        match request {
             Destroy => self.delete_self(client, state, dispatcher),
-            // Activate, close, fullscreen, and maximize are applied in a later phase.
-            // Minimize stays a no-op. set_rectangle will be validated then and stored nowhere.
-            SetMaximized
-            | UnsetMaximized
-            | SetMinimized
-            | UnsetMinimized
-            | Activate { .. }
-            | Close
-            | SetRectangle { .. }
-            | SetFullscreen { .. }
-            | UnsetFullscreen => {}
+            // Sway ignores foreign maximize. Minimize has no compositor state.
+            // set_rectangle is checked and then discarded.
+            SetMaximized | UnsetMaximized | SetMinimized | UnsetMinimized => {}
+            Activate { seat } => {
+                if client
+                    .resolve_or_disconnect(seat, state, dispatcher)
+                    .is_err()
+                {
+                    return Ok(());
+                }
+                self.activate(state, dispatcher);
+            }
+            Close => self.close(state, dispatcher),
+            SetRectangle { surface, x: _, y: _, width, height } => {
+                if !self.validate_rectangle(client, state, dispatcher, surface, width, height) {
+                    return Ok(());
+                }
+            }
+            SetFullscreen { output } => {
+                let output_id: u32 = output.into();
+                if output_id != 0
+                    && client
+                        .resolve_or_disconnect(output, state, dispatcher)
+                        .is_err()
+                {
+                    return Ok(());
+                }
+                self.fullscreen(state, dispatcher, true);
+            }
+            UnsetFullscreen => self.fullscreen(state, dispatcher, false),
         }
         Ok(())
     }
