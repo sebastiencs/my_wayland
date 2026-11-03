@@ -7,7 +7,10 @@ use crate::{
     },
     seat,
     state::{GrabbedObject, SelectionSourceState, State},
-    wayland_objects::{wl_data_source::SourceUse, wl_display::WlDisplay, wl_surface::WlSurface},
+    wayland_objects::{
+        wl_data_offer::WlDataOffer, wl_data_source::SourceUse, wl_display::WlDisplay,
+        wl_surface::WlSurface,
+    },
 };
 
 use crate::clients::{ClientAction, DataSourceClientEvent, EventWriter};
@@ -142,7 +145,7 @@ impl Object for WlDataDevice {
                 }
                 if let Some(offer) = self.selection_offer.take() {
                     if offer.exists(state) {
-                        client.destroy_data_offer(state, dispatcher, offer);
+                        WlDataOffer::make_selection_offer_inert(offer, state);
                     }
                 }
                 if let Some(offer) = self.drag_offer.take() {
@@ -299,7 +302,7 @@ mod tests {
             clients::{Client, ClientAction, ClientId, DataSourceClientEvent, RawEvent, Resolved},
             object::{Object, RequestResult},
             protocol_generated::{WlDataDeviceId, WlDataSourceId, WlSeatId, WlSurfaceId},
-            runner::Dispatcher,
+            runner::{Dispatcher, Model},
             seat::{handle_keyboard_key, set_keyboard_focus_from_surface, SurfaceFocus},
             state::{
                 DataOfferRole, DragNegotiationState, DragPhase, DragSource, DragState,
@@ -314,6 +317,18 @@ mod tests {
 
     fn release_request(data_device_id: WlDataDeviceId) -> crate::clients::RawRequest<'static> {
         let event = RawEvent::new(data_device_id.into(), 2, 0);
+        (&*event.into_bytes()).try_into().unwrap()
+    }
+
+    fn request(
+        object: impl Into<crate::protocol_generated::WaylandId>,
+        opcode: u16,
+        values: &[u32],
+    ) -> crate::clients::RawRequest<'static> {
+        let mut event = RawEvent::new(object.into(), opcode, values.len());
+        for value in values {
+            event.uint(*value);
+        }
         (&*event.into_bytes()).try_into().unwrap()
     }
 
@@ -501,9 +516,93 @@ mod tests {
                     ClientAction::DataSourceEvent {
                         source: queued_source,
                         event: DataSourceClientEvent::DndFinished,
-                    } if queued_source.wayland_id() == source_id
+                    }                     if queued_source.wayland_id() == source_id
                 )
             }
         ));
+    }
+
+    #[test]
+    fn destroying_the_previous_selection_offer_after_a_refresh_is_valid() {
+        let mut state = state_for_tests();
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(1);
+        let data_device_id = WlDataDeviceId::from(2);
+        let (data_device, _) = client
+            .insert_object(&mut state, WlDataDevice::new(data_device_id, WlSeatId::from(2), 3));
+        state.seat.register_data_device(data_device);
+        client.insert_object(
+            &mut state,
+            WlDataSource::new(WlDataSourceId::from(3), client.client_id(), 3),
+        );
+        client.insert_object(
+            &mut state,
+            WlDataSource::new(WlDataSourceId::from(4), client.client_id(), 3),
+        );
+        let surface_id = WlSurfaceId::from(10);
+        client.insert_object(&mut state, WlSurface::new(surface_id, client.client_id(), 6));
+        {
+            let mut setup = Dispatcher::default();
+            let mut setup_dispatcher = client.test_dispatcher(&mut setup);
+            set_keyboard_focus_from_surface(
+                &mut state,
+                &mut setup_dispatcher,
+                Some(SurfaceFocus::new(Resolved::new(
+                    client.client_id(),
+                    surface_id,
+                    client.object_id(surface_id),
+                ))),
+            );
+        }
+        state.seat.record_client_serial(client.client_id(), 40);
+        state.seat.record_client_serial(client.client_id(), 41);
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            client
+                .grab_object(data_device_id, &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    request(data_device_id, 1, &[3, 40]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+            client
+                .grab_object(data_device_id, &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    request(data_device_id, 1, &[4, 41]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        client
+            .process(&mut state, ClientAction::RefreshDataDeviceSelection, &mut dispatcher)
+            .unwrap();
+        let previous_offer = client
+            .ref_object(data_device_id, &state)
+            .selection_offer()
+            .unwrap();
+        client
+            .process(&mut state, ClientAction::RefreshDataDeviceSelection, &mut dispatcher)
+            .unwrap();
+        let current_offer = client
+            .ref_object(data_device_id, &state)
+            .selection_offer()
+            .unwrap();
+        assert_ne!(previous_offer.wayland_id(), current_offer.wayland_id());
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            client
+                .grab_object(previous_offer.wayland_id(), &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    request(previous_offer.wayland_id(), 2, &[]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        assert!(!crate::capture::test_closed(&dispatcher, &client));
     }
 }

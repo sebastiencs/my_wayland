@@ -15,7 +15,7 @@ use crate::{
     },
     state::{GrabbedObject, PrimarySelectionSourceState, SelectionSourceState, State},
     wayland_objects::{
-        ext_data_control_offer_v1::destroy_ext_data_control_offer, wl_display::WlDisplay,
+        ext_data_control_offer_v1::inert_ext_data_control_offer, wl_display::WlDisplay,
     },
 };
 
@@ -157,10 +157,10 @@ impl Object for ExtDataControlDeviceV1 {
                     state.seat.unregister_ext_data_control_device(device);
                 }
                 if let Some(offer) = offer {
-                    destroy_ext_data_control_offer(client, state, dispatcher, offer);
+                    inert_ext_data_control_offer(offer, state);
                 }
                 if let Some(offer) = primary_offer {
-                    destroy_ext_data_control_offer(client, state, dispatcher, offer);
+                    inert_ext_data_control_offer(offer, state);
                 }
                 client.delete_id(&WlDisplay::default(), state, dispatcher, device_id.into());
             }

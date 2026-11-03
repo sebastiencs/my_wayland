@@ -44,6 +44,18 @@ impl ZwpPrimarySelectionOfferV1 {
     }
 }
 
+/// Detach the offer without destroying the Wayland object. The client destroys
+/// the previous offer itself after the next `selection` event, so the id stays
+/// valid until that request arrives. `receive` on an inert offer closes the fd.
+pub(crate) fn inert_primary_selection_offer(
+    offer: Resolved<ZwpPrimarySelectionOfferV1Id>,
+    state: &mut State,
+) {
+    if let Some(mut offer_obj) = offer.try_ref_mut(state) {
+        offer_obj.clear_source();
+    }
+}
+
 impl Object for ZwpPrimarySelectionOfferV1 {
     fn id(&self) -> WaylandId {
         self.id.into()

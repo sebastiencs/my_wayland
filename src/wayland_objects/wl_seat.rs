@@ -118,7 +118,7 @@ fn finish_data_control_devices(
     dispatcher: &mut ClientDispatcher,
     seat_id: WlSeatId,
 ) {
-    use crate::wayland_objects::zwlr_data_control_offer_v1::destroy_data_control_offer;
+    use crate::wayland_objects::zwlr_data_control_offer_v1::inert_data_control_offer;
 
     for device in state.seat.data_control_devices(client.client_id()) {
         let finish = device
@@ -134,10 +134,10 @@ fn finish_data_control_devices(
         };
         state.seat.unregister_data_control_device(device);
         if let Some(offer) = offer {
-            destroy_data_control_offer(client, state, dispatcher, offer);
+            inert_data_control_offer(offer, state);
         }
         if let Some(offer) = primary_offer {
-            destroy_data_control_offer(client, state, dispatcher, offer);
+            inert_data_control_offer(offer, state);
         }
     }
 }
@@ -148,7 +148,7 @@ fn finish_ext_data_control_devices(
     dispatcher: &mut ClientDispatcher,
     seat_id: WlSeatId,
 ) {
-    use crate::wayland_objects::ext_data_control_offer_v1::destroy_ext_data_control_offer;
+    use crate::wayland_objects::ext_data_control_offer_v1::inert_ext_data_control_offer;
 
     for device in state.seat.ext_data_control_devices(client.client_id()) {
         let finish = device
@@ -164,10 +164,10 @@ fn finish_ext_data_control_devices(
         };
         state.seat.unregister_ext_data_control_device(device);
         if let Some(offer) = offer {
-            destroy_ext_data_control_offer(client, state, dispatcher, offer);
+            inert_ext_data_control_offer(offer, state);
         }
         if let Some(offer) = primary_offer {
-            destroy_ext_data_control_offer(client, state, dispatcher, offer);
+            inert_ext_data_control_offer(offer, state);
         }
     }
 }

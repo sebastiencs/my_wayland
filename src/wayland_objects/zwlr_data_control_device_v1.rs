@@ -15,7 +15,7 @@ use crate::{
     },
     state::{GrabbedObject, PrimarySelectionSourceState, SelectionSourceState, State},
     wayland_objects::{
-        wl_display::WlDisplay, zwlr_data_control_offer_v1::destroy_data_control_offer,
+        wl_display::WlDisplay, zwlr_data_control_offer_v1::inert_data_control_offer,
     },
 };
 
@@ -157,10 +157,10 @@ impl Object for ZwlrDataControlDeviceV1 {
                     state.seat.unregister_data_control_device(device);
                 }
                 if let Some(offer) = offer {
-                    destroy_data_control_offer(client, state, dispatcher, offer);
+                    inert_data_control_offer(offer, state);
                 }
                 if let Some(offer) = primary_offer {
-                    destroy_data_control_offer(client, state, dispatcher, offer);
+                    inert_data_control_offer(offer, state);
                 }
                 client.delete_id(&WlDisplay::default(), state, dispatcher, device_id.into());
             }
@@ -951,6 +951,91 @@ mod tests {
             .unwrap();
         assert_ne!(state.seat.primary_selection_serial(), first);
         assert!(state.seat.primary_selection_source().is_none());
+    }
+
+    #[test]
+    fn destroying_the_previous_offer_after_a_new_selection_is_valid() {
+        let mut state = state_for_tests();
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        client.insert_object(&mut state, WlSeat::new(WlSeatId::from(10)));
+        register_data_control(&mut client, &mut state, 2);
+        client.insert_object(
+            &mut state,
+            ZwlrDataControlSourceV1::new(ZwlrDataControlSourceV1Id::from(60), 1),
+        );
+        client.insert_object(
+            &mut state,
+            ZwlrDataControlSourceV1::new(ZwlrDataControlSourceV1Id::from(61), 1),
+        );
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            client
+                .grab_object(ZwlrDataControlSourceV1Id::from(60), &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    offer_mime(ZwlrDataControlSourceV1Id::from(60), "text/plain"),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+            client
+                .grab_object(ZwlrDataControlDeviceV1Id::from(30), &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    ids(ZwlrDataControlDeviceV1Id::from(30), 0, &[60]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+            client
+                .grab_object(ZwlrDataControlSourceV1Id::from(61), &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    offer_mime(ZwlrDataControlSourceV1Id::from(61), "text/html"),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+            client
+                .grab_object(ZwlrDataControlDeviceV1Id::from(30), &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    ids(ZwlrDataControlDeviceV1Id::from(30), 0, &[61]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        client
+            .process(&mut state, ClientAction::RefreshDataControlSelection, &mut dispatcher)
+            .unwrap();
+        let previous_offer = client
+            .ref_object(ZwlrDataControlDeviceV1Id::from(30), &state)
+            .selection_offer()
+            .unwrap();
+        client
+            .process(&mut state, ClientAction::RefreshDataControlSelection, &mut dispatcher)
+            .unwrap();
+        let current_offer = client
+            .ref_object(ZwlrDataControlDeviceV1Id::from(30), &state)
+            .selection_offer()
+            .unwrap();
+        assert_ne!(previous_offer.wayland_id(), current_offer.wayland_id());
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            client
+                .grab_object(previous_offer.wayland_id(), &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    ids(previous_offer.wayland_id(), 1, &[]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        assert!(!capture::test_closed(&dispatcher, &client));
+        assert!(capture::test_sent_arg(&dispatcher, 1, 1, u32::from(previous_offer.wayland_id())));
     }
 
     fn register_data_control(client: &mut Client, state: &mut crate::state::State, version: u32) {

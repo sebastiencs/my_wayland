@@ -38,7 +38,7 @@ use crate::{
     wayland_objects::{
         ext_data_control_offer_v1::{
             create_ext_data_control_offer, create_ext_data_control_primary_offer,
-            destroy_ext_data_control_offer,
+            inert_ext_data_control_offer,
         },
         ext_workspace_manager_v1::publish_workspace_state_changed,
         hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1,
@@ -47,13 +47,12 @@ use crate::{
         wl_output::WlOutput,
         wp_presentation_feedback::WpPresentationFeedback,
         zwlr_data_control_offer_v1::{
-            create_data_control_offer, create_data_control_primary_offer,
-            destroy_data_control_offer,
+            create_data_control_offer, create_data_control_primary_offer, inert_data_control_offer,
         },
         zwlr_gamma_control_v1::ZwlrGammaControlV1,
         zwlr_layer_surface_v1::relayout_client_layer_surfaces,
         zwp_primary_selection_offer_v1::{
-            create_primary_selection_offer, destroy_primary_selection_offer,
+            create_primary_selection_offer, inert_primary_selection_offer,
         },
         zxdg_output_v1::ZxdgOutputV1,
     },
@@ -1259,7 +1258,7 @@ impl Client {
                 data_device.take_selection_offer()
             };
             if let Some(previous_offer) = previous_offer {
-                self.destroy_data_offer(state, dispatcher, previous_offer);
+                WlDataOffer::make_selection_offer_inert(previous_offer, state);
             }
 
             let next_offer = selection_source.and_then(|selection| {
@@ -1316,7 +1315,7 @@ impl Client {
             }
             let previous_offer = device.ref_mut(state).take_selection_offer();
             if let Some(previous_offer) = previous_offer {
-                destroy_data_control_offer(self, state, dispatcher, previous_offer);
+                inert_data_control_offer(previous_offer, state);
             }
             let next_offer = selection.and_then(|selection| {
                 create_data_control_offer(self, state, dispatcher, device, selection)
@@ -1344,7 +1343,7 @@ impl Client {
             }
             let previous_offer = device.ref_mut(state).take_primary_offer();
             if let Some(previous_offer) = previous_offer {
-                destroy_data_control_offer(self, state, dispatcher, previous_offer);
+                inert_data_control_offer(previous_offer, state);
             }
             let next_offer = selection.and_then(|selection| {
                 create_data_control_primary_offer(self, state, dispatcher, device, selection)
@@ -1367,7 +1366,7 @@ impl Client {
             }
             let previous_offer = device.ref_mut(state).take_selection_offer();
             if let Some(previous_offer) = previous_offer {
-                destroy_ext_data_control_offer(self, state, dispatcher, previous_offer);
+                inert_ext_data_control_offer(previous_offer, state);
             }
             let next_offer = selection.and_then(|selection| {
                 create_ext_data_control_offer(self, state, dispatcher, device, selection)
@@ -1390,7 +1389,7 @@ impl Client {
             }
             let previous_offer = device.ref_mut(state).take_primary_offer();
             if let Some(previous_offer) = previous_offer {
-                destroy_ext_data_control_offer(self, state, dispatcher, previous_offer);
+                inert_ext_data_control_offer(previous_offer, state);
             }
             let next_offer = selection.and_then(|selection| {
                 create_ext_data_control_primary_offer(self, state, dispatcher, device, selection)
@@ -1416,7 +1415,7 @@ impl Client {
             }
             let previous_offer = device.ref_mut(state).take_selection_offer();
             if let Some(previous_offer) = previous_offer {
-                destroy_primary_selection_offer(self, state, dispatcher, previous_offer);
+                inert_primary_selection_offer(previous_offer, state);
             }
             let next_offer = selection.and_then(|selection| {
                 create_primary_selection_offer(self, state, dispatcher, device, selection)

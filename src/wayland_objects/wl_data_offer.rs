@@ -61,6 +61,23 @@ impl WlDataOffer {
         self.source = None;
     }
 
+    /// Detach a selection offer without destroying the Wayland object. The client
+    /// still holds a proxy and destroys the previous offer itself after the next
+    /// `selection` event, so the id must stay valid until that request arrives.
+    pub(crate) fn make_selection_offer_inert(offer: Resolved<WlDataOfferId>, state: &mut State) {
+        let source = {
+            let Some(mut offer_obj) = offer.try_ref_mut(state) else {
+                return;
+            };
+            let source = offer_obj.source_object_id();
+            offer_obj.clear_source();
+            source
+        };
+        if let Some(source) = source {
+            state.unregister_data_offer_for_source(source, offer);
+        }
+    }
+
     /// Drag-and-drop source. Selection offers that come from data-control have none.
     pub(crate) fn source(&self) -> Option<Resolved<WlDataSourceId>> {
         match self.source {

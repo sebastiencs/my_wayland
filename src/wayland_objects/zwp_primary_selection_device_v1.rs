@@ -13,7 +13,7 @@ use crate::{
     },
     state::{GrabbedObject, PrimarySelectionSourceState, State},
     wayland_objects::{
-        wl_display::WlDisplay, zwp_primary_selection_offer_v1::destroy_primary_selection_offer,
+        wl_display::WlDisplay, zwp_primary_selection_offer_v1::inert_primary_selection_offer,
     },
 };
 
@@ -107,7 +107,7 @@ impl Object for ZwpPrimarySelectionDeviceV1 {
                     state.seat.unregister_primary_selection_device(device);
                 }
                 if let Some(offer) = offer {
-                    destroy_primary_selection_offer(client, state, dispatcher, offer);
+                    inert_primary_selection_offer(offer, state);
                 }
                 client.delete_id(&WlDisplay::default(), state, dispatcher, device_id.into());
             }
@@ -569,5 +569,89 @@ mod tests {
                 }
             )
         ));
+    }
+
+    #[test]
+    fn destroying_the_previous_offer_after_a_new_selection_is_valid() {
+        let mut state = state_for_tests();
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        insert_device(&mut client, &mut state);
+        insert_source(&mut client, &mut state);
+        client.insert_object(
+            &mut state,
+            ZwpPrimarySelectionSourceV1::new(ZwpPrimarySelectionSourceV1Id::from(61), 1),
+        );
+        focus(&mut client, &mut state, WlSurfaceId::from(40));
+        state.seat.record_client_serial(client.client_id(), 10);
+        state.seat.record_client_serial(client.client_id(), 11);
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            client
+                .grab_object(ZwpPrimarySelectionSourceV1Id::from(60), &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    offer_mime(ZwpPrimarySelectionSourceV1Id::from(60), "text/plain"),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+            client
+                .grab_object(ZwpPrimarySelectionDeviceV1Id::from(30), &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    request(ZwpPrimarySelectionDeviceV1Id::from(30), 0, &[60, 10]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+            client
+                .grab_object(ZwpPrimarySelectionSourceV1Id::from(61), &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    offer_mime(ZwpPrimarySelectionSourceV1Id::from(61), "text/html"),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+            client
+                .grab_object(ZwpPrimarySelectionDeviceV1Id::from(30), &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    request(ZwpPrimarySelectionDeviceV1Id::from(30), 0, &[61, 11]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        client
+            .process(&mut state, ClientAction::RefreshPrimarySelection, &mut dispatcher)
+            .unwrap();
+        let previous_offer = client
+            .ref_object(ZwpPrimarySelectionDeviceV1Id::from(30), &state)
+            .selection_offer()
+            .unwrap();
+        client
+            .process(&mut state, ClientAction::RefreshPrimarySelection, &mut dispatcher)
+            .unwrap();
+        let current_offer = client
+            .ref_object(ZwpPrimarySelectionDeviceV1Id::from(30), &state)
+            .selection_offer()
+            .unwrap();
+        assert_ne!(previous_offer.wayland_id(), current_offer.wayland_id());
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            client
+                .grab_object(previous_offer.wayland_id(), &mut state)
+                .on(
+                    &mut client,
+                    &mut state,
+                    request(previous_offer.wayland_id(), 1, &[]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        assert!(!capture::test_closed(&dispatcher, &client));
+        assert!(capture::test_sent_arg(&dispatcher, 1, 1, u32::from(previous_offer.wayland_id())));
     }
 }

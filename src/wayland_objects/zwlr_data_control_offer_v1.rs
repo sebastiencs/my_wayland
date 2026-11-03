@@ -54,6 +54,19 @@ impl ZwlrDataControlOfferV1 {
     }
 }
 
+/// Detach the offer without destroying the Wayland object. The client destroys
+/// the previous offer itself after the next `selection` or `primary_selection`
+/// event, so the id stays valid until that request arrives. `receive` on an
+/// inert offer closes the fd.
+pub(crate) fn inert_data_control_offer(
+    offer: Resolved<ZwlrDataControlOfferV1Id>,
+    state: &mut State,
+) {
+    if let Some(mut offer_obj) = offer.try_ref_mut(state) {
+        offer_obj.clear_source();
+    }
+}
+
 impl Object for ZwlrDataControlOfferV1 {
     fn id(&self) -> WaylandId {
         self.id.into()
