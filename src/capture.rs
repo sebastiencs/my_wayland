@@ -2394,6 +2394,9 @@ pub fn deliver(client: &mut Client, state: &mut State, dispatcher: &mut ClientDi
     for handle in created {
         send_wlr_initial(client, state, dispatcher, handle);
     }
+    // One `done` for every wlr update in this delivery. wlroots does the same with an idle
+    // callback after the changes from one turn. `closed` is not followed by `done`.
+    let mut wlr_updated = BTreeSet::new();
     for item in rest {
         match item {
             Pending::StopSession(session) => {
@@ -2463,7 +2466,7 @@ pub fn deliver(client: &mut Client, state: &mut State, dispatcher: &mut ClientDi
                         handle.send_title(&title, dispatcher);
                     }
                 }
-                send_wlr_title(client, state, dispatcher, key, &title);
+                send_wlr_title(client, state, dispatcher, key, &title, &mut wlr_updated);
             }
             Pending::Reapp { key, app_id } => {
                 for handle in state.capture.handles_for(key) {
@@ -2471,22 +2474,47 @@ pub fn deliver(client: &mut Client, state: &mut State, dispatcher: &mut ClientDi
                         handle.send_app_id(&app_id, dispatcher);
                     }
                 }
-                send_wlr_app_id(client, state, dispatcher, key, &app_id);
+                send_wlr_app_id(client, state, dispatcher, key, &app_id, &mut wlr_updated);
             }
             Pending::ShellState { key, activated, maximized, fullscreen } => {
-                send_wlr_state(client, state, dispatcher, key, activated, maximized, fullscreen);
+                send_wlr_state(
+                    client,
+                    state,
+                    dispatcher,
+                    key,
+                    activated,
+                    maximized,
+                    fullscreen,
+                    &mut wlr_updated,
+                );
             }
             Pending::OutputEntered { key, output } => {
-                send_wlr_output(client, state, dispatcher, key, output, true);
+                send_wlr_output(client, state, dispatcher, key, output, true, &mut wlr_updated);
             }
             Pending::OutputLeft { key, output } => {
-                send_wlr_output(client, state, dispatcher, key, output, false);
+                send_wlr_output(client, state, dispatcher, key, output, false, &mut wlr_updated);
             }
             Pending::ParentChanged { key, parent } => {
-                send_wlr_parent(client, state, dispatcher, key, parent);
+                send_wlr_parent(client, state, dispatcher, key, parent, &mut wlr_updated);
             }
             // Taken out of `rest` before this loop. Kept so the match stays exhaustive.
             Pending::Announce { .. } => unreachable!("announce is sent in the first pass"),
+        }
+    }
+    for handle in wlr_updated {
+        let closed = state
+            .capture
+            .wlr_handles
+            .iter()
+            .any(|slot| slot.handle == handle && slot.closed);
+        if closed {
+            continue;
+        }
+        let Some(object) = handle.try_ref(state) else {
+            continue;
+        };
+        if !object.is_closed() {
+            object.send_done(dispatcher);
         }
     }
 }
@@ -2651,6 +2679,7 @@ fn send_wlr_title(
     dispatcher: &mut ClientDispatcher,
     key: ToplevelKey,
     title: &str,
+    updated: &mut BTreeSet<Resolved<ZwlrForeignToplevelHandleV1Id>>,
 ) {
     for handle in live_wlr_handles(client, state, key) {
         let Some(object) = handle.try_ref(state) else {
@@ -2660,7 +2689,7 @@ fn send_wlr_title(
             continue;
         }
         object.send_title(title, dispatcher);
-        object.send_done(dispatcher);
+        updated.insert(handle);
     }
 }
 
@@ -2670,6 +2699,7 @@ fn send_wlr_app_id(
     dispatcher: &mut ClientDispatcher,
     key: ToplevelKey,
     app_id: &str,
+    updated: &mut BTreeSet<Resolved<ZwlrForeignToplevelHandleV1Id>>,
 ) {
     for handle in live_wlr_handles(client, state, key) {
         let Some(object) = handle.try_ref(state) else {
@@ -2679,7 +2709,7 @@ fn send_wlr_app_id(
             continue;
         }
         object.send_app_id(app_id, dispatcher);
-        object.send_done(dispatcher);
+        updated.insert(handle);
     }
 }
 
@@ -2691,6 +2721,7 @@ fn send_wlr_state(
     activated: bool,
     maximized: bool,
     fullscreen: bool,
+    updated: &mut BTreeSet<Resolved<ZwlrForeignToplevelHandleV1Id>>,
 ) {
     for handle in live_wlr_handles(client, state, key) {
         let Some(object) = handle.try_ref(state) else {
@@ -2704,7 +2735,7 @@ fn send_wlr_state(
             ZwlrForeignToplevelHandleV1::state_values(version, activated, maximized, fullscreen),
             dispatcher,
         );
-        object.send_done(dispatcher);
+        updated.insert(handle);
     }
 }
 
@@ -2715,6 +2746,7 @@ fn send_wlr_output(
     key: ToplevelKey,
     output: OutputId,
     entered: bool,
+    updated: &mut BTreeSet<Resolved<ZwlrForeignToplevelHandleV1Id>>,
 ) {
     for handle in live_wlr_handles(client, state, key) {
         let Some(object) = handle.try_ref(state) else {
@@ -2738,7 +2770,7 @@ fn send_wlr_output(
                     .send_output_leave(wl_output.wayland_id(), dispatcher);
             }
         }
-        handle.rref(state).send_done(dispatcher);
+        updated.insert(handle);
     }
 }
 
@@ -2748,6 +2780,7 @@ fn send_wlr_parent(
     dispatcher: &mut ClientDispatcher,
     key: ToplevelKey,
     parent: Option<ToplevelKey>,
+    updated: &mut BTreeSet<Resolved<ZwlrForeignToplevelHandleV1Id>>,
 ) {
     for handle in live_wlr_handles(client, state, key) {
         let Some(object) = handle.try_ref(state) else {
@@ -2763,7 +2796,7 @@ fn send_wlr_parent(
             continue;
         };
         object.send_parent(parent, dispatcher);
-        object.send_done(dispatcher);
+        updated.insert(handle);
     }
 }
 
@@ -3022,6 +3055,20 @@ pub(crate) fn test_dispatch<K>(
             &mut client_dispatcher,
         )
         .unwrap();
+}
+
+#[cfg(test)]
+pub(crate) fn test_sent_opcodes(dispatcher: &Dispatcher, object: u32) -> Vec<u32> {
+    use crate::io_uring::model::IoUringAction;
+    let mut opcodes = Vec::new();
+    dispatcher.test_for_each_queued_action::<IoUringAction>(|action| {
+        if let IoUringAction::Sendmsg { buffer, .. } = action {
+            if buffer.len() >= 8 && u32::from_ne_bytes(buffer[0..4].try_into().unwrap()) == object {
+                opcodes.push(u32::from_ne_bytes(buffer[4..8].try_into().unwrap()) & 0xffff);
+            }
+        }
+    });
+    opcodes
 }
 
 #[cfg(test)]
@@ -5339,12 +5386,9 @@ mod tests {
             .handle
             .wayland_id()
             .into();
-        assert!(test_sent(&dispatcher, handle_id, 0));
-        assert!(test_sent(&dispatcher, handle_id, 1));
+        assert_eq!(test_sent_opcodes(&dispatcher, handle_id), vec![0, 1, 2, 4, 7, 5]);
         assert!(test_sent_arg(&dispatcher, handle_id, 2, OUTPUT_OBJECT));
-        assert!(test_sent(&dispatcher, handle_id, 4));
         assert!(test_sent_arg(&dispatcher, handle_id, 7, parent_id));
-        assert!(test_sent(&dispatcher, handle_id, 5));
         assert_eq!(ZwlrForeignToplevelHandleV1::state_values(3, false, true, false), vec![0]);
         assert_eq!(ZwlrForeignToplevelHandleV1::state_values(1, true, true, true), vec![0, 2]);
         assert_eq!(ZwlrForeignToplevelHandleV1::state_values(3, true, true, true), vec![0, 2, 3]);
@@ -5362,7 +5406,7 @@ mod tests {
 
         close_toplevel(&mut state, &mut dispatcher, key);
         test_deliver(&mut client, &mut state, &mut dispatcher);
-        assert!(test_sent(&dispatcher, handle_id, 6));
+        assert_eq!(test_sent_opcodes(&dispatcher, handle_id), vec![0, 1, 2, 4, 7, 5, 6]);
         assert!(state
             .capture
             .wlr_handles
@@ -5477,8 +5521,33 @@ mod tests {
             let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
             replay_wlr_toplevel_output(&client, &state, &mut client_dispatcher, output, wl_output);
         }
+        let opcodes = test_sent_opcodes(&dispatcher, handle_id);
+        assert_eq!(&opcodes[opcodes.len() - 2..], &[2, 5]);
         assert!(test_sent_arg(&dispatcher, handle_id, 2, OUTPUT_OBJECT));
-        assert!(test_sent(&dispatcher, handle_id, 5));
+    }
+
+    #[test]
+    fn wlr_updates_in_one_delivery_share_one_done() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let (key, handle_id) = {
+            let (key, handle, handle_id) =
+                attached_wlr_handle(&mut client, &mut state, &mut dispatcher);
+            let _ = handle;
+            (key, handle_id)
+        };
+        let toplevel = state
+            .capture
+            .by_xdg
+            .iter()
+            .find(|(_, mapped)| **mapped == key)
+            .map(|(toplevel, _)| *toplevel)
+            .expect("toplevel");
+        let before = test_sent_opcodes(&dispatcher, handle_id);
+        retitle_xdg_toplevel(&mut state, &mut dispatcher, toplevel, "Renamed".to_string());
+        note_xdg_shell_state(&mut state, &mut dispatcher, toplevel, true, false);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        let after = test_sent_opcodes(&dispatcher, handle_id);
+        assert_eq!(&after[before.len()..], &[0, 4, 5]);
     }
 
     fn attached_wlr_handle(
