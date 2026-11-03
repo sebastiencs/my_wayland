@@ -1,7 +1,8 @@
 //! Renderer boundary shared by the OpenGL and Vulkan backends.
 //!
-//! This module defines the contract only. The GLES call sites still draw through
-//! [`crate::egl::EglFrameBuffer`] until a later phase implements [`Renderer`].
+//! GLES implements this contract on [`crate::render::gles::GlesRenderer`]. Output
+//! drawing still calls [`crate::render::gles::EglFrameBuffer`] directly until a
+//! later phase routes those call sites through [`Renderer`].
 //! Recipe textures are [`Texture`] handles. A GLES texture records the DRM device
 //! that created it, and that backend rejects a handle from another device.
 //!
@@ -122,6 +123,8 @@ pub fn inert_texture() -> Rc<dyn Texture> {
 
 /// Color target for an output or an offscreen image.
 pub trait RenderTarget: Debug {
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
     fn width(&self) -> i32;
     fn height(&self) -> i32;
 }

@@ -4,7 +4,6 @@ use crate::{
         DecorationInsets, OutputScaleSetting, RoundingPower, RuntimeConfig, XdgDecorationModePolicy,
     },
     drm::Drm,
-    egl::EGL,
     globals::{Global, GlobalName, Globals},
     libinput::Input,
     object::Object,
@@ -15,7 +14,7 @@ use crate::{
     },
     region::RectI,
     render::{
-        BlurVisualStyle, BorderGradient, BorderVisualStyle, RootSurfaceVisualState,
+        gles::EGL, BlurVisualStyle, BorderGradient, BorderVisualStyle, RootSurfaceVisualState,
         ShadowVisualStyle, SurfaceEffectStyle,
     },
     root_geometry::{self, CommittedRootGeometry, DecorationFrameLayout},

@@ -13,9 +13,9 @@ use {
 use crate::{
     clients::{ClientDispatcher, Resolved},
     drm::{request_active_output, request_outputs_for_rect, DrmFd},
-    egl::EglContext,
     io_uring::{model::IoUringAction, ring::RingId},
     protocol_generated::{WlBufferId, WlSurfaceId},
+    render::gles::EglContext,
     runner::{Dispatcher, Model, Redispatcher},
     state::State,
     wayland_objects::wl_buffer::WlBuffer,

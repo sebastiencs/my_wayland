@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use {drm::control::FbCmd2Flags, khronos_types::gl};
+use drm::control::FbCmd2Flags;
 
 use {
     drm::{
@@ -24,7 +24,6 @@ use {
 use crate::{
     cursor::{CursorImage, CursorImageContentKey, CursorSourceRef},
     dmabuf::DmaBuf,
-    egl::{EglContext, EglFrameBuffer, GlTexture, EGL},
     gbm::{BufferObject, UseFlags},
     io_uring::{
         model::IoUringAction,
@@ -33,6 +32,7 @@ use crate::{
     object::Object,
     region::{DamageRegion, RectI},
     render::{
+        gles::{EglContext, EglFrameBuffer, GlTexture, EGL},
         rounded_ring, EffectElement, FrameElement, FramePhase, OutputFrameRecipe,
         RootSurfaceVisualState, RoundedRing, Texture, TextureElement, TextureMask, TextureSource,
     },
@@ -78,8 +78,6 @@ pub struct Format {
     pub external_only_guess: bool,
     pub has_alpha: bool,
     pub wayland_id: u32,
-    pub gl_format: gl::GLint,
-    pub gl_type: gl::GLint,
 }
 
 pub static ARGB8888: &Format = &Format {
@@ -89,8 +87,6 @@ pub static ARGB8888: &Format = &Format {
     external_only_guess: false,
     has_alpha: true,
     wayland_id: 0,
-    gl_format: gl::BGRA_EXT,
-    gl_type: gl::UNSIGNED_BYTE,
 };
 
 pub static XRGB8888: &Format = &Format {
@@ -100,8 +96,6 @@ pub static XRGB8888: &Format = &Format {
     external_only_guess: false,
     has_alpha: false,
     wayland_id: 1,
-    gl_format: gl::BGRA_EXT,
-    gl_type: gl::UNSIGNED_BYTE,
 };
 
 pub static FORMATS: &[Format] = &[*ARGB8888, *XRGB8888];
@@ -1689,7 +1683,7 @@ impl Drm {
         recipe: &OutputFrameRecipe,
         damage: &DamageRegion,
         preserve_contents: bool,
-    ) -> crate::egl::RenderCompletion {
+    ) -> crate::render::gles::RenderCompletion {
         let output = self
             .output(drm_crtc_id)
             .expect("missing DRM output pipeline for render");
@@ -1869,7 +1863,7 @@ impl Drm {
     fn submit_render_buffer(
         &mut self,
         drm_crtc_id: u32,
-        render_completion: &crate::egl::RenderCompletion,
+        render_completion: &crate::render::gles::RenderCompletion,
         damage: &DamageRegion,
         output_id: Option<OutputId>,
         scene: Vec<SceneItemState>,
@@ -4069,7 +4063,8 @@ fn render_prepared_toplevels(
             translate_scene_items(&mut items, -bounds.x, -bounds.y);
             translate_recorded_frame_elements(&mut elements, -bounds.x, -bounds.y);
             let recipe = build_output_frame_recipe(&items, &elements);
-            let Some(target) = crate::egl::OffscreenColorTarget::new(bounds.width, bounds.height)
+            let Some(target) =
+                crate::render::gles::OffscreenColorTarget::new(bounds.width, bounds.height)
             else {
                 return failed(bounds.width, bounds.height);
             };
@@ -8421,7 +8416,7 @@ mod render_recipe_tests {
         let render_item = scene_item_to_texture_element(&items[0]);
         assert_eq!(
             render_item.mask,
-            crate::egl::RenderItemMask::RoundedClip {
+            crate::render::gles::RenderItemMask::RoundedClip {
                 clip: RootSurfaceClip::new(
                     RectI::new(-6, -12, 130, 96).unwrap(),
                     18,

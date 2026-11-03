@@ -171,7 +171,6 @@ mod cursor;
 mod dbus;
 mod dmabuf;
 mod drm;
-mod egl;
 mod gbm;
 mod globals;
 mod idle_inhibit;
@@ -269,7 +268,7 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
     // egl.bind_api(khronos_egl::OPENGL_ES_API)
     //    .expect("unable to select OpenGL API");
 
-    let egl = egl::init().map_err(StartupError::Egl)?;
+    let egl = render::gles::init().map_err(StartupError::Egl)?;
 
     // egl.get_platform_display(EGL_PLATFORM_GBM_KHR, native_display, &[]);
 

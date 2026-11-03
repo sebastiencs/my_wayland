@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod gles;
 pub mod recipe;
 pub mod visual;
 
