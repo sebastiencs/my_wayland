@@ -29,7 +29,21 @@ pub(super) struct VulkanDevice {
     pub(super) graphics_queue_family: u32,
     command_pool: vk::CommandPool,
     /// Command buffers whose GPU work has finished. Jay keeps the same free list.
+    ///
+    /// Interior mutability because a finished `PendingFrame` recycles its
+    /// command buffer from its `Drop`, where only the shared `Rc<VulkanDevice>`
+    /// is reachable. `Rc::get_mut` cannot work while resources hold clones, so
+    /// mutating through `&self` is the only option. The alternative is an
+    /// arena design where the renderer is the sole owner and each frame is
+    /// disposed through an explicit call that has `&mut` access.
     free_commands: RefCell<Vec<vk::CommandBuffer>>,
+    /// Interior mutability because gpu-alloc takes `&mut GpuAllocator`, while
+    /// a `GpuAllocation` frees its memory from its `Drop`, where only the
+    /// shared `Rc<VulkanDevice>` is reachable. `RefCell` cannot hand out a
+    /// `&mut` that outlives the accessor, so this is a raw cell. Sound because
+    /// the renderer is `!Send`/`!Sync` and allocation calls never re-enter.
+    /// The alternative is explicit destruction through the renderer, arena
+    /// style, with every drop site rerouted to a `&mut` renderer call.
     allocator: UnsafeCell<GpuAllocator<vk::DeviceMemory>>,
     pub(super) external_memory: ash::khr::external_memory_fd::Device,
     pub(super) external_semaphore: ash::khr::external_semaphore_fd::Device,
