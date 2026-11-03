@@ -34,6 +34,8 @@ fn set_keyboard_focus_with_snapshot(
 ) {
     let new_focus = normalize_keyboard_focus_with_snapshot(state, new_focus, snapshot);
     if state.seat.keyboard_focus == new_focus {
+        // A remap can publish a new toplevel record while keyboard focus stays put.
+        crate::capture::sync_activated_from_keyboard_focus(state, dispatcher);
         return;
     }
     crate::input::pointer_lock::release_pointer_lock_unless_surface(
@@ -92,6 +94,7 @@ fn set_keyboard_focus_with_snapshot(
     request_outputs_for_rects(state, affected_rects, dispatcher);
     kick_visual_animation_pump(dispatcher);
     refresh_selection_focus_clients(dispatcher, old_focus, new_focus);
+    crate::capture::sync_activated_from_keyboard_focus(state, dispatcher);
     crate::input::pointer_lock::maybe_activate_pointer_lock(state, dispatcher);
     crate::input::pointer_confine::maybe_activate_pointer_confine(state, dispatcher);
 }

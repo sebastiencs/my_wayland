@@ -1874,54 +1874,63 @@ impl Client {
                 requested_decoration_mode,
             ));
 
-            let mut xdg_surface = xdg_surface.grab(state);
-            let mut toplevel = toplevel.grab(state);
-            if let Some(mode) = desired_decoration_mode {
-                toplevel.schedule_decoration_mode(mode);
-            }
-            let tiled_configure_geometry =
-                tiled_geometry
-                    .zip(desired_decoration_mode)
-                    .map(|(geometry, decoration_mode)| {
+            {
+                let mut xdg_surface = xdg_surface.grab(state);
+                let mut toplevel = toplevel.grab(state);
+                if let Some(mode) = desired_decoration_mode {
+                    toplevel.schedule_decoration_mode(mode);
+                }
+                let tiled_configure_geometry = tiled_geometry.zip(desired_decoration_mode).map(
+                    |(geometry, decoration_mode)| {
                         crate::root_geometry::project_configure_geometry(
                             geometry,
                             decoration_mode,
                             state.configured_decoration_insets(),
                         )
-                    });
-            let configure_bounds = tiled_configure_geometry
-                .map(|geometry| geometry.size)
-                .or(surface_configure_bounds);
-            if let Some((geometry, configure_geometry)) =
-                tiled_geometry.zip(tiled_configure_geometry)
+                    },
+                );
+                let configure_bounds = tiled_configure_geometry
+                    .map(|geometry| geometry.size)
+                    .or(surface_configure_bounds);
+                if let Some((geometry, configure_geometry)) =
+                    tiled_geometry.zip(tiled_configure_geometry)
+                {
+                    toplevel.send_tiled_layout_configure(
+                        self,
+                        state,
+                        &mut xdg_surface,
+                        geometry,
+                        configure_geometry,
+                        resizing,
+                        dispatcher,
+                    );
+                } else if let Some(remembered_state) = scheduled_floating_restore {
+                    toplevel.send_interactive_resize_configure(
+                        self,
+                        state,
+                        configure_bounds,
+                        &mut xdg_surface,
+                        remembered_state.configure_size.0,
+                        remembered_state.configure_size.1,
+                        false,
+                        dispatcher,
+                    );
+                } else {
+                    toplevel.schedule_configure(
+                        self,
+                        state,
+                        configure_bounds,
+                        &mut xdg_surface,
+                        dispatcher,
+                    );
+                }
+            }
+            if let Some((maximized, fullscreen)) = toplevel
+                .try_ref(state)
+                .map(|toplevel| toplevel.published_shell_state())
             {
-                toplevel.send_tiled_layout_configure(
-                    self,
-                    state,
-                    &mut xdg_surface,
-                    geometry,
-                    configure_geometry,
-                    resizing,
-                    dispatcher,
-                );
-            } else if let Some(remembered_state) = scheduled_floating_restore {
-                toplevel.send_interactive_resize_configure(
-                    self,
-                    state,
-                    configure_bounds,
-                    &mut xdg_surface,
-                    remembered_state.configure_size.0,
-                    remembered_state.configure_size.1,
-                    false,
-                    dispatcher,
-                );
-            } else {
-                toplevel.schedule_configure(
-                    self,
-                    state,
-                    configure_bounds,
-                    &mut xdg_surface,
-                    dispatcher,
+                crate::capture::note_xdg_shell_state(
+                    state, dispatcher, toplevel, maximized, fullscreen,
                 );
             }
         }
@@ -2091,6 +2100,7 @@ fn refresh_surface_tree_outputs(
         );
         (surface_obj.current_stack().to_vec(), child_base, delta)
     };
+    crate::capture::sync_toplevel_outputs(state, dispatcher, surface);
 
     for output_id in delta.left {
         for output in client.output_object_ids_for_output(state, output_id) {
@@ -2153,6 +2163,7 @@ fn clear_surface_tree_outputs(
         let delta = surface_obj.update_output_membership(Vec::new());
         (surface_obj.current_stack().to_vec(), delta)
     };
+    crate::capture::sync_toplevel_outputs(state, dispatcher, surface);
 
     for output_id in delta.left {
         for output in client.output_object_ids_for_output(state, output_id) {
@@ -2514,18 +2525,32 @@ impl Model for Client {
                         state.configure_bounds_for_surface(wl_surface, None)
                     })
                 };
-                let mut xdg_surface = xdg_surface.grab(state);
-                let mut toplevel = xdg_toplevel.grab(state);
-                toplevel.send_interactive_resize_configure(
-                    self,
-                    state,
-                    configure_bounds,
-                    &mut xdg_surface,
-                    width,
-                    height,
-                    resizing,
-                    &mut dispatcher,
-                );
+                {
+                    let mut xdg_surface = xdg_surface.grab(state);
+                    let mut toplevel = xdg_toplevel.grab(state);
+                    toplevel.send_interactive_resize_configure(
+                        self,
+                        state,
+                        configure_bounds,
+                        &mut xdg_surface,
+                        width,
+                        height,
+                        resizing,
+                        &mut dispatcher,
+                    );
+                }
+                if let Some((maximized, fullscreen)) = xdg_toplevel
+                    .try_ref(state)
+                    .map(|toplevel| toplevel.published_shell_state())
+                {
+                    crate::capture::note_xdg_shell_state(
+                        state,
+                        &mut dispatcher,
+                        xdg_toplevel,
+                        maximized,
+                        fullscreen,
+                    );
+                }
             }
             MsgReceived { mut request } => {
                 let requester_object_id = request.object_id();

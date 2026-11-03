@@ -87,6 +87,7 @@ impl ZxdgToplevelDecorationV1 {
             return;
         }
         toplevel.schedule_configure_with_known_decoration(
+            client,
             self,
             state,
             configure_bounds,

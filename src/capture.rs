@@ -12,7 +12,7 @@ use crate::{
     clients::{Client, ClientAction, ClientDispatcher, ClientId, Resolved},
     protocol_generated::{
         ExtForeignToplevelHandleV1Id, ExtForeignToplevelListV1Id, ExtImageCopyCaptureFrameV1Id,
-        ExtImageCopyCaptureSessionV1Id, WlBufferId, WlPointerId, XdgToplevelId,
+        ExtImageCopyCaptureSessionV1Id, WlBufferId, WlPointerId, WlSurfaceId, XdgToplevelId,
         ZwlrScreencopyFrameV1Id,
     },
     region::RectI,
@@ -112,6 +112,42 @@ struct ToplevelRecord {
     closed: bool,
     title: String,
     app_id: String,
+    /// Keyboard focus is on this toplevel or one of its popups.
+    activated: bool,
+    /// `Maximized` bit last sent in `xdg_toplevel.configure`, including the tiled hint.
+    maximized: bool,
+    fullscreen: bool,
+    /// Outputs whose `wl_surface.enter` set currently contains this toplevel.
+    outputs: BTreeSet<OutputId>,
+    /// Mapped XDG parent. Absent when the parent is unset or not currently mapped.
+    parent: Option<ToplevelKey>,
+}
+
+/// A client watching mapped toplevels. Ext lists ignore shell, output, and parent updates.
+/// wlr managers join this list when that protocol is implemented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToplevelSubscriber {
+    ExtList(Resolved<ExtForeignToplevelListV1Id>),
+}
+
+impl ToplevelSubscriber {
+    fn client_id(self) -> ClientId {
+        match self {
+            Self::ExtList(list) => list.client_id(),
+        }
+    }
+
+    fn ext_list(self) -> Option<Resolved<ExtForeignToplevelListV1Id>> {
+        match self {
+            Self::ExtList(list) => Some(list),
+        }
+    }
+
+    fn is_finished(self, state: &State) -> bool {
+        match self {
+            Self::ExtList(list) => list.try_ref(state).is_none_or(|list| list.is_finished()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -142,14 +178,49 @@ struct ScreencopySlot {
 enum Pending {
     StopSession(Resolved<ExtImageCopyCaptureSessionV1Id>),
     FailExtFrame(Resolved<ExtImageCopyCaptureFrameV1Id>),
-    FinishExtFrame { frame: Resolved<ExtImageCopyCaptureFrameV1Id>, job: CaptureJobId },
+    FinishExtFrame {
+        frame: Resolved<ExtImageCopyCaptureFrameV1Id>,
+        job: CaptureJobId,
+    },
     CursorLeft(Resolved<crate::protocol_generated::ExtImageCopyCaptureCursorSessionV1Id>),
     FailScreencopy(Resolved<ZwlrScreencopyFrameV1Id>),
-    FinishScreencopy { frame: Resolved<ZwlrScreencopyFrameV1Id>, job: CaptureJobId },
+    FinishScreencopy {
+        frame: Resolved<ZwlrScreencopyFrameV1Id>,
+        job: CaptureJobId,
+    },
     CloseHandle(Resolved<ExtForeignToplevelHandleV1Id>),
-    Announce { key: ToplevelKey, title: String, app_id: String },
-    Retitle { key: ToplevelKey, title: String },
-    Reapp { key: ToplevelKey, app_id: String },
+    Announce {
+        key: ToplevelKey,
+        title: String,
+        app_id: String,
+    },
+    Retitle {
+        key: ToplevelKey,
+        title: String,
+    },
+    Reapp {
+        key: ToplevelKey,
+        app_id: String,
+    },
+    /// Full shell state. Ext lists do not send this.
+    ShellState {
+        key: ToplevelKey,
+        activated: bool,
+        maximized: bool,
+        fullscreen: bool,
+    },
+    OutputEntered {
+        key: ToplevelKey,
+        output: OutputId,
+    },
+    OutputLeft {
+        key: ToplevelKey,
+        output: OutputId,
+    },
+    ParentChanged {
+        key: ToplevelKey,
+        parent: Option<ToplevelKey>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -164,7 +235,7 @@ pub struct CaptureRegistry {
     sessions: Vec<SessionSlot>,
     ext_frames: Vec<ExtFrameSlot>,
     screencopy: Vec<ScreencopySlot>,
-    lists: Vec<Resolved<ExtForeignToplevelListV1Id>>,
+    subscribers: Vec<ToplevelSubscriber>,
     handles: Vec<(Resolved<ExtForeignToplevelHandleV1Id>, ToplevelKey)>,
     pending: BTreeMap<ClientId, Vec<Pending>>,
     next_job: u64,
@@ -240,7 +311,7 @@ impl CaptureRegistry {
     }
 
     pub(crate) fn track_list(&mut self, list: Resolved<ExtForeignToplevelListV1Id>) {
-        self.lists.push(list);
+        self.subscribers.push(ToplevelSubscriber::ExtList(list));
     }
 
     pub(crate) fn track_handle(
@@ -267,7 +338,8 @@ impl CaptureRegistry {
     }
 
     pub(crate) fn forget_list(&mut self, list: Resolved<ExtForeignToplevelListV1Id>) {
-        self.lists.retain(|candidate| *candidate != list);
+        self.subscribers
+            .retain(|subscriber| subscriber.ext_list() != Some(list));
         self.announced.retain(|(candidate, _)| *candidate != list);
     }
 
@@ -284,7 +356,8 @@ impl CaptureRegistry {
             .retain(|slot| slot.frame.client_id() != client_id);
         self.screencopy
             .retain(|slot| slot.frame.client_id() != client_id);
-        self.lists.retain(|list| list.client_id() != client_id);
+        self.subscribers
+            .retain(|subscriber| subscriber.client_id() != client_id);
         self.handles
             .retain(|(handle, _)| handle.client_id() != client_id);
         self.announced
@@ -1838,20 +1911,28 @@ pub(crate) fn announce_toplevel(
         .all(|byte| byte.is_ascii() && !byte.is_ascii_control()));
     state.capture.toplevels.insert(
         key,
-        ToplevelRecord { closed: false, title: title.clone(), app_id: app_id.clone() },
+        ToplevelRecord {
+            closed: false,
+            title: title.clone(),
+            app_id: app_id.clone(),
+            activated: false,
+            maximized: false,
+            fullscreen: false,
+            outputs: BTreeSet::new(),
+            parent: None,
+        },
     );
-    let lists = state.capture.lists.clone();
+    let subscribers = state.capture.subscribers.clone();
     let mut clients = BTreeSet::new();
-    for list in lists {
-        let finished = list.try_ref(state).is_none_or(|list| list.is_finished());
-        if finished {
+    for subscriber in subscribers {
+        if subscriber.is_finished(state) {
             continue;
         }
         state.capture.enqueue(
-            list.client_id(),
+            subscriber.client_id(),
             Pending::Announce { key, title: title.clone(), app_id: app_id.clone() },
         );
-        clients.insert(list.client_id());
+        clients.insert(subscriber.client_id());
     }
     dispatch_deliver(dispatcher, clients);
     key
@@ -1872,7 +1953,11 @@ pub(crate) fn close_toplevel(state: &mut State, dispatcher: &mut Dispatcher, key
     state.capture.retain_pending(|item| match item {
         Pending::Announce { key: announced, .. }
         | Pending::Retitle { key: announced, .. }
-        | Pending::Reapp { key: announced, .. } => *announced != key,
+        | Pending::Reapp { key: announced, .. }
+        | Pending::ShellState { key: announced, .. }
+        | Pending::OutputEntered { key: announced, .. }
+        | Pending::OutputLeft { key: announced, .. }
+        | Pending::ParentChanged { key: announced, .. } => *announced != key,
         _ => true,
     });
     state
@@ -1929,7 +2014,267 @@ pub(crate) fn close_toplevel(state: &mut State, dispatcher: &mut Dispatcher, key
         .capture
         .ext_frames
         .retain(|slot| slot.target != target);
+    clients.extend(clear_parent_references(state, dispatcher, key));
     dispatch_deliver(dispatcher, clients);
+}
+
+fn record_mut(state: &mut State, key: ToplevelKey) -> Option<&mut ToplevelRecord> {
+    let record = state.capture.toplevels.get_mut(&key)?;
+    (!record.closed).then_some(record)
+}
+
+fn is_announced(state: &State, key: ToplevelKey) -> bool {
+    state
+        .capture
+        .announced
+        .iter()
+        .any(|(_, announced)| *announced == key)
+}
+
+fn enqueue_if_announced(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    key: ToplevelKey,
+    item: Pending,
+) {
+    if !is_announced(state, key) {
+        return;
+    }
+    let clients: BTreeSet<_> = state
+        .capture
+        .announced
+        .iter()
+        .filter(|(_, announced)| *announced == key)
+        .map(|(list, _)| list.client_id())
+        .collect();
+    for client_id in clients.iter().copied() {
+        state.capture.enqueue(client_id, item.clone());
+    }
+    dispatch_deliver(dispatcher, clients);
+}
+
+fn note_shell_state(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    key: ToplevelKey,
+    maximized: bool,
+    fullscreen: bool,
+) {
+    let activated = {
+        let Some(record) = record_mut(state, key) else {
+            return;
+        };
+        if record.maximized == maximized && record.fullscreen == fullscreen {
+            return;
+        }
+        record.maximized = maximized;
+        record.fullscreen = fullscreen;
+        record.activated
+    };
+    enqueue_if_announced(
+        state,
+        dispatcher,
+        key,
+        Pending::ShellState { key, activated, maximized, fullscreen },
+    );
+}
+
+fn note_parent(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    key: ToplevelKey,
+    parent: Option<ToplevelKey>,
+) {
+    let changed = {
+        let Some(record) = record_mut(state, key) else {
+            return;
+        };
+        if record.parent == parent {
+            return;
+        }
+        record.parent = parent;
+        true
+    };
+    if changed {
+        enqueue_if_announced(state, dispatcher, key, Pending::ParentChanged { key, parent });
+    }
+}
+
+fn clear_parent_references(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    parent: ToplevelKey,
+) -> BTreeSet<ClientId> {
+    let children: Vec<ToplevelKey> = state
+        .capture
+        .toplevels
+        .iter()
+        .filter(|(_, record)| !record.closed && record.parent == Some(parent))
+        .map(|(key, _)| *key)
+        .collect();
+    let mut clients = BTreeSet::new();
+    for child in children {
+        note_parent(state, dispatcher, child, None);
+        if is_announced(state, child) {
+            clients.extend(
+                state
+                    .capture
+                    .announced
+                    .iter()
+                    .filter(|(_, announced)| *announced == child)
+                    .map(|(list, _)| list.client_id()),
+            );
+        }
+    }
+    clients
+}
+
+/// `xdg_toplevel.configure` sent `maximized` and `fullscreen`. Stored even while the window is
+/// still unmapped, then copied onto the record at map.
+pub(crate) fn note_xdg_shell_state(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    toplevel: Resolved<XdgToplevelId>,
+    maximized: bool,
+    fullscreen: bool,
+) {
+    let Some(key) = state.capture.by_xdg.get(&toplevel).copied() else {
+        return;
+    };
+    note_shell_state(state, dispatcher, key, maximized, fullscreen);
+}
+
+pub(crate) fn note_xdg_parent(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    toplevel: Resolved<XdgToplevelId>,
+    parent: Option<Resolved<XdgToplevelId>>,
+) {
+    let Some(key) = state.capture.by_xdg.get(&toplevel).copied() else {
+        return;
+    };
+    let parent_key = parent.and_then(|parent| state.capture.by_xdg.get(&parent).copied());
+    note_parent(state, dispatcher, key, parent_key);
+}
+
+fn adopt_children_of(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    parent: Resolved<XdgToplevelId>,
+    parent_key: ToplevelKey,
+) {
+    let mapped: Vec<Resolved<XdgToplevelId>> = state.capture.by_xdg.keys().copied().collect();
+    let children: Vec<Resolved<XdgToplevelId>> = mapped
+        .into_iter()
+        .filter(|toplevel| {
+            toplevel
+                .try_ref(state)
+                .and_then(|toplevel| toplevel.parent_toplevel())
+                == Some(parent)
+        })
+        .collect();
+    for child in children {
+        if let Some(child_key) = state.capture.by_xdg.get(&child).copied() {
+            note_parent(state, dispatcher, child_key, Some(parent_key));
+        }
+    }
+}
+
+pub(crate) fn sync_activated_from_keyboard_focus(state: &mut State, dispatcher: &mut Dispatcher) {
+    apply_activated(state, dispatcher, keyboard_activated_toplevel(state));
+}
+
+fn apply_activated(state: &mut State, dispatcher: &mut Dispatcher, active: Option<ToplevelKey>) {
+    let changes: Vec<(ToplevelKey, bool)> = state
+        .capture
+        .toplevels
+        .iter()
+        .filter(|(_, record)| !record.closed)
+        .filter_map(|(key, record)| {
+            let activated = Some(*key) == active;
+            (record.activated != activated).then_some((*key, activated))
+        })
+        .collect();
+    for (key, activated) in changes {
+        let item = {
+            let Some(record) = record_mut(state, key) else {
+                continue;
+            };
+            record.activated = activated;
+            Pending::ShellState {
+                key,
+                activated,
+                maximized: record.maximized,
+                fullscreen: record.fullscreen,
+            }
+        };
+        enqueue_if_announced(state, dispatcher, key, item);
+    }
+}
+
+fn keyboard_activated_toplevel(state: &State) -> Option<ToplevelKey> {
+    let focus = state.seat.keyboard_focus()?;
+    let root = state
+        .root_surface_for_surface(focus.surface)
+        .unwrap_or(focus.surface);
+    let xdg_surface = root.try_ref(state)?.xdg_surface()?;
+    let toplevel = state.xdg_toplevel(xdg_surface).or_else(|| {
+        xdg_surface
+            .try_ref(state)
+            .and_then(crate::wayland_objects::xdg_surface::XdgSurface::toplevel_role)
+    })?;
+    state.capture.by_xdg.get(&toplevel).copied()
+}
+
+/// Copy the toplevel root's `wl_surface` output membership. Subsurfaces and popups are ignored.
+pub(crate) fn sync_toplevel_outputs(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    surface: Resolved<WlSurfaceId>,
+) {
+    let Some(xdg_surface) = surface
+        .try_ref(state)
+        .and_then(|surface| surface.xdg_surface())
+    else {
+        return;
+    };
+    let Some(toplevel) = state.xdg_toplevel(xdg_surface).or_else(|| {
+        xdg_surface
+            .try_ref(state)
+            .and_then(crate::wayland_objects::xdg_surface::XdgSurface::toplevel_role)
+    }) else {
+        return;
+    };
+    let Some(key) = state.capture.by_xdg.get(&toplevel).copied() else {
+        return;
+    };
+    let next = surface
+        .try_ref(state)
+        .map(|surface| {
+            surface
+                .output_membership_ids()
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let (entered, left) = {
+        let Some(record) = record_mut(state, key) else {
+            return;
+        };
+        if record.outputs == next {
+            return;
+        }
+        let entered: Vec<OutputId> = next.difference(&record.outputs).copied().collect();
+        let left: Vec<OutputId> = record.outputs.difference(&next).copied().collect();
+        record.outputs = next;
+        (entered, left)
+    };
+    for output in entered {
+        enqueue_if_announced(state, dispatcher, key, Pending::OutputEntered { key, output });
+    }
+    for output in left {
+        enqueue_if_announced(state, dispatcher, key, Pending::OutputLeft { key, output });
+    }
 }
 
 pub fn deliver(client: &mut Client, state: &mut State, dispatcher: &mut ClientDispatcher) {
@@ -2005,6 +2350,11 @@ pub fn deliver(client: &mut Client, state: &mut State, dispatcher: &mut ClientDi
                     }
                 }
             }
+            // Ext lists have no state, output, or parent events. wlr handles consume these later.
+            Pending::ShellState { .. }
+            | Pending::OutputEntered { .. }
+            | Pending::OutputLeft { .. }
+            | Pending::ParentChanged { .. } => {}
         }
     }
 }
@@ -2019,9 +2369,10 @@ fn announce_to_client(
 ) {
     let lists: Vec<_> = state
         .capture
-        .lists
+        .subscribers
         .iter()
         .copied()
+        .filter_map(ToplevelSubscriber::ext_list)
         .filter(|list| list.client_id() == client.client_id())
         .filter(|list| list.try_ref(state).is_some_and(|list| !list.is_finished()))
         .collect();
@@ -2055,6 +2406,15 @@ pub(crate) fn map_xdg_toplevel(
     }
     let key = announce_toplevel(state, dispatcher, title, app_id);
     state.capture.by_xdg.insert(toplevel, key);
+    if let Some(toplevel_ref) = toplevel.try_ref(state) {
+        let (maximized, fullscreen) = toplevel_ref.published_shell_state();
+        let parent = toplevel_ref.parent_toplevel();
+        drop(toplevel_ref);
+        note_shell_state(state, dispatcher, key, maximized, fullscreen);
+        let parent_key = parent.and_then(|parent| state.capture.by_xdg.get(&parent).copied());
+        note_parent(state, dispatcher, key, parent_key);
+    }
+    adopt_children_of(state, dispatcher, toplevel, key);
 }
 
 /// Stop listing and capturing an XDG toplevel that unmapped or was destroyed.
@@ -4399,5 +4759,61 @@ mod tests {
             ),
             Err(CaptureQueueError::Protected)
         );
+    }
+
+    #[test]
+    fn shell_output_and_parent_updates_stay_on_the_record() {
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let (surface, key) = mapped_window(&mut client, &mut state, &mut dispatcher);
+        let toplevel = state
+            .capture
+            .by_xdg
+            .iter()
+            .find(|(_, mapped)| **mapped == key)
+            .map(|(toplevel, _)| *toplevel)
+            .expect("mapped toplevel");
+        note_xdg_shell_state(&mut state, &mut dispatcher, toplevel, true, false);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        assert!(state.capture.toplevels[&key].maximized);
+        assert!(!state.capture.toplevels[&key].fullscreen);
+        assert!(!state.capture.toplevels[&key].closed);
+        assert_eq!(state.capture.toplevels[&key].title, "Terminal");
+        note_xdg_shell_state(&mut state, &mut dispatcher, toplevel, false, true);
+        assert!(!state.capture.toplevels[&key].maximized);
+        assert!(state.capture.toplevels[&key].fullscreen);
+
+        apply_activated(&mut state, &mut dispatcher, Some(key));
+        assert!(state.capture.toplevels[&key].activated);
+        apply_activated(&mut state, &mut dispatcher, None);
+        assert!(!state.capture.toplevels[&key].activated);
+
+        let parent = announce_toplevel(&mut state, &mut dispatcher, "Parent", "parent");
+        let child = announce_toplevel(&mut state, &mut dispatcher, "Child", "child");
+        note_parent(&mut state, &mut dispatcher, child, Some(parent));
+        assert_eq!(state.capture.toplevels[&child].parent, Some(parent));
+        close_toplevel(&mut state, &mut dispatcher, parent);
+        assert_eq!(state.capture.toplevels[&child].parent, None);
+        assert!(!state.capture.toplevels[&child].closed);
+
+        let output = insert_output(&mut client, &mut state);
+        let xdg_surface = surface
+            .ref_mut(&mut state)
+            .xdg_surface()
+            .expect("toplevel surface");
+        state.register_xdg_toplevel_role(xdg_surface, toplevel);
+        surface
+            .ref_mut(&mut state)
+            .update_output_membership(vec![output]);
+        sync_toplevel_outputs(&mut state, &mut dispatcher, surface);
+        assert_eq!(
+            state.capture.toplevels[&key].outputs,
+            std::collections::BTreeSet::from([output])
+        );
+        surface
+            .ref_mut(&mut state)
+            .update_output_membership(Vec::new());
+        sync_toplevel_outputs(&mut state, &mut dispatcher, surface);
+        assert!(state.capture.toplevels[&key].outputs.is_empty());
+        assert!(!state.capture.handles_for(key).is_empty());
     }
 }

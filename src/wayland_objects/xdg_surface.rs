@@ -775,6 +775,10 @@ pub mod xdg_toplevel {
         max_size: Option<(i32, i32)>,
         requested_fullscreen: bool,
         requested_maximized: bool,
+        /// `Maximized` bit last sent in `xdg_toplevel.configure`, including the tiled hint.
+        published_maximized: bool,
+        /// `Fullscreen` bit last sent in `xdg_toplevel.configure`.
+        published_fullscreen: bool,
         current_width: i32,
         current_height: i32,
         current_states: BTreeSet<proto_xdg_toplevel::State>,
@@ -822,6 +826,34 @@ pub mod xdg_toplevel {
         }
     }
 
+    struct SyncPublishedShellState {
+        toplevel: Resolved<XdgToplevelId>,
+    }
+
+    impl PostAction for SyncPublishedShellState {
+        fn execute(
+            self: Box<Self>,
+            _client: &mut Client,
+            state: &mut State,
+            dispatcher: &mut ClientDispatcher,
+        ) {
+            let Some((maximized, fullscreen)) = self
+                .toplevel
+                .try_ref(state)
+                .map(|toplevel| toplevel.published_shell_state())
+            else {
+                return;
+            };
+            crate::capture::note_xdg_shell_state(
+                state,
+                dispatcher,
+                self.toplevel,
+                maximized,
+                fullscreen,
+            );
+        }
+    }
+
     impl XdgToplevel {
         pub fn new(
             id: XdgToplevelId,
@@ -839,6 +871,8 @@ pub mod xdg_toplevel {
                 max_size: None,
                 requested_fullscreen: false,
                 requested_maximized: false,
+                published_maximized: false,
+                published_fullscreen: false,
                 current_width: 0,
                 current_height: 0,
                 current_states: BTreeSet::default(),
@@ -967,13 +1001,14 @@ pub mod xdg_toplevel {
 
         pub(crate) fn schedule_configure(
             &mut self,
-            _client: &Client,
+            client: &Client,
             state: &State,
             configure_bounds: Option<(i32, i32)>,
             xdg_surface: &mut XdgSurface,
             dispatcher: &mut ClientDispatcher,
         ) {
             let states = self.effective_states();
+            self.note_published_shell_state(client, state, dispatcher, &states);
             self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_configure(dispatcher);
             self.send_decoration_configure_if_needed(state, dispatcher);
@@ -988,6 +1023,7 @@ pub mod xdg_toplevel {
 
         pub(crate) fn schedule_configure_with_known_decoration(
             &mut self,
+            client: &Client,
             decoration: &ZxdgToplevelDecorationV1,
             state: &State,
             configure_bounds: Option<(i32, i32)>,
@@ -995,6 +1031,7 @@ pub mod xdg_toplevel {
             dispatcher: &mut ClientDispatcher,
         ) {
             let states = self.effective_states();
+            self.note_published_shell_state(client, state, dispatcher, &states);
             self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_configure(dispatcher);
             decoration.send_configure_mode(self.decoration_mode_for_configure(), dispatcher);
@@ -1075,6 +1112,7 @@ pub mod xdg_toplevel {
             dispatcher: &mut ClientDispatcher,
         ) {
             let states = self.layout_states(tiled_edges, fullscreen, resizing);
+            self.note_published_shell_state(client, state, dispatcher, &states);
             self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_event(
                 proto_xdg_toplevel::Event::Configure {
@@ -1159,6 +1197,36 @@ pub mod xdg_toplevel {
 
         pub fn app_id(&self) -> &str {
             &self.app_id
+        }
+
+        pub(crate) fn published_shell_state(&self) -> (bool, bool) {
+            (self.published_maximized, self.published_fullscreen)
+        }
+
+        pub(crate) fn parent_toplevel(&self) -> Option<Resolved<XdgToplevelId>> {
+            self.parent
+        }
+
+        /// Remember the shell bits just sent to the client. A mapped toplevel copies them onto
+        /// the shared capture record after this handler releases its grabbed objects.
+        fn note_published_shell_state(
+            &mut self,
+            client: &Client,
+            state: &State,
+            dispatcher: &mut ClientDispatcher,
+            states: &[u32],
+        ) {
+            let maximized = states.contains(&(proto_xdg_toplevel::State::Maximized as u32));
+            let fullscreen = states.contains(&(proto_xdg_toplevel::State::Fullscreen as u32));
+            if self.published_maximized == maximized && self.published_fullscreen == fullscreen {
+                return;
+            }
+            self.published_maximized = maximized;
+            self.published_fullscreen = fullscreen;
+            let Some(toplevel) = client.resolve(self.id, state) else {
+                return;
+            };
+            dispatcher.dispatch_post_action(SyncPublishedShellState { toplevel });
         }
 
         pub fn set_decoration_mode(&mut self, mode: ToplevelDecorationMode) -> bool {
@@ -1307,6 +1375,7 @@ pub mod xdg_toplevel {
             } else {
                 states.retain(|state| *state != proto_xdg_toplevel::State::Resizing as u32);
             }
+            self.note_published_shell_state(client, state, dispatcher, &states);
             self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_event(
                 proto_xdg_toplevel::Event::Configure {
@@ -1567,6 +1636,9 @@ pub mod xdg_toplevel {
                         return Ok(());
                     }
                     self.parent = parent;
+                    if let Some(toplevel) = client.resolve(self.id, state) {
+                        crate::capture::note_xdg_parent(state, dispatcher, toplevel, parent);
+                    }
                 }
                 SetTitle { title } => {
                     self.title = title;
