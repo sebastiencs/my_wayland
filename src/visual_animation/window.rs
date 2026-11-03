@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
-use crate::region::RectI;
+use crate::{
+    animation_config::{AnimationStyle, SlideEdge},
+    region::RectI,
+};
 
 use super::track::{Easing, RetargetableTrack, TrackStatus, UnitValue};
 
@@ -253,6 +256,96 @@ pub struct GeometryTiming {
     pub easing: Easing,
 }
 
+/// Pose and clock for the first sample of an opening window.
+///
+/// Passed into geometry advance only while the lifecycle sample is still at the start of
+/// `windowsIn`. A pointer grab passes [`WindowGeometryMotion::Warp`] and skips this pose.
+#[derive(Clone, Copy, Debug)]
+pub struct OpeningIntroduction {
+    pub style: AnimationStyle,
+    pub output: Option<RectI>,
+    pub timing: GeometryTiming,
+}
+
+/// Start pose for `windowsIn` and end pose for `windowsOut`.
+///
+/// Popin shrinks toward the center and stays at least 5px on each axis when the goal is at least
+/// that large. Slide keeps the goal size. Top and bottom park fully outside `output`; left and
+/// right shift by the window's own width. The nearest edge prefers bottom, then left, then right,
+/// then top. Gnomed is a full-width line through the vertical center. A slide with no output, and
+/// any style that is not a window pose, leaves `goal` unchanged. This matches Hyprland's
+/// `animationPopin`, `animationSlide`, and `animationGnomed`.
+pub fn lifecycle_pose(style: AnimationStyle, goal: RectI, output: Option<RectI>) -> RectI {
+    match style {
+        AnimationStyle::Popin { percent } => popin_pose(goal, percent),
+        AnimationStyle::Slide { edge } => slide_pose(goal, edge, output),
+        AnimationStyle::Gnomed => gnomed_pose(goal),
+        AnimationStyle::None | AnimationStyle::Fade | AnimationStyle::SlideFade => goal,
+    }
+}
+
+fn popin_pose(goal: RectI, percent: u8) -> RectI {
+    let width = popin_axis(goal.width, percent);
+    let height = popin_axis(goal.height, percent);
+    let x = round_i32(f64::from(goal.x) + (f64::from(goal.width) - f64::from(width)) / 2.0);
+    let y = round_i32(f64::from(goal.y) + (f64::from(goal.height) - f64::from(height)) / 2.0);
+    RectI::new(x, y, width, height).unwrap_or(goal)
+}
+
+fn popin_axis(goal: i32, percent: u8) -> i32 {
+    let goal = goal.max(0);
+    if goal == 0 {
+        return 0;
+    }
+    let scaled = (f64::from(goal) * f64::from(percent) / 100.0).round();
+    round_i32(scaled.max(5.0).min(f64::from(goal))).clamp(0, goal)
+}
+
+fn slide_pose(goal: RectI, edge: Option<SlideEdge>, output: Option<RectI>) -> RectI {
+    let Some(output) = output else {
+        return goal;
+    };
+    let edge = edge.unwrap_or_else(|| nearest_slide_edge(goal, output));
+    let (x, y) = match edge {
+        SlideEdge::Left => (goal.x.checked_sub(goal.width).unwrap_or(i32::MIN), goal.y),
+        SlideEdge::Right => (goal.x.checked_add(goal.width).unwrap_or(i32::MAX), goal.y),
+        SlideEdge::Top => (goal.x, output.y.checked_sub(goal.height).unwrap_or(i32::MIN)),
+        SlideEdge::Bottom => (goal.x, output.y.checked_add(output.height).unwrap_or(i32::MAX)),
+    };
+    RectI::new(x, y, goal.width, goal.height).unwrap_or(goal)
+}
+
+fn nearest_slide_edge(goal: RectI, output: RectI) -> SlideEdge {
+    let mid_x = f64::from(goal.x) + f64::from(goal.width) / 2.0;
+    let mid_y = f64::from(goal.y) + f64::from(goal.height) / 2.0;
+    let top = mid_y - f64::from(output.y);
+    let right = f64::from(output.x) + f64::from(output.width) - mid_x;
+    let bottom = f64::from(output.y) + f64::from(output.height) - mid_y;
+    let left = mid_x - f64::from(output.x);
+    let min = top.min(right).min(bottom).min(left);
+    if bottom == min {
+        SlideEdge::Bottom
+    } else if left == min {
+        SlideEdge::Left
+    } else if right == min {
+        SlideEdge::Right
+    } else {
+        SlideEdge::Top
+    }
+}
+
+fn gnomed_pose(goal: RectI) -> RectI {
+    let y = round_i32(f64::from(goal.y) + f64::from(goal.height) / 2.0);
+    RectI::new(goal.x, y, goal.width, 0).unwrap_or(goal)
+}
+
+fn style_has_pose(style: AnimationStyle) -> bool {
+    matches!(
+        style,
+        AnimationStyle::Popin { .. } | AnimationStyle::Slide { .. } | AnimationStyle::Gnomed
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct WindowBox {
     x: f64,
@@ -372,8 +465,9 @@ impl AxisAnimation {
 /// Animated window position and size.
 ///
 /// The logical layout rectangle is the goal. Each axis keeps its own sample, so a size change
-/// leaves an in-flight move running. The first valid rectangle snaps, and later goals are applied
-/// by [`Self::advance`] so the animation pump remains the clock.
+/// leaves an in-flight move running. The first valid rectangle snaps, except an opening window,
+/// which starts at [`lifecycle_pose`] and moves to that rectangle on the `windowsIn` clock.
+/// Later goals are applied by [`Self::advance`] so the animation pump remains the clock.
 #[derive(Clone, Copy, Debug)]
 pub struct WindowGeometryAnimation {
     armed: bool,
@@ -382,6 +476,7 @@ pub struct WindowGeometryAnimation {
     position_class: PositionClass,
     relocation_pending: bool,
     pending: Option<PendingGeometry>,
+    introduced: Option<GeometryTiming>,
 }
 
 impl WindowGeometryAnimation {
@@ -393,6 +488,7 @@ impl WindowGeometryAnimation {
             position_class: PositionClass::Layout,
             relocation_pending: false,
             pending: None,
+            introduced: None,
         }
     }
 
@@ -458,13 +554,32 @@ impl WindowGeometryAnimation {
     }
 
     pub fn advance(&mut self, now: Instant, layout: GeometryTiming, moving: GeometryTiming) {
+        self.advance_with_introduction(now, layout, moving, None);
+    }
+
+    pub fn advance_with_introduction(
+        &mut self,
+        now: Instant,
+        layout: GeometryTiming,
+        moving: GeometryTiming,
+        opening: Option<OpeningIntroduction>,
+    ) {
         if let Some(pending) = self.pending.take() {
-            self.apply_goal(pending, now, layout, moving);
+            self.apply_goal(pending, now, layout, moving, opening);
         }
-        let position_timing =
-            if self.position_class == PositionClass::Relocation { moving } else { layout };
+        let position_timing = if let Some(timing) = self.introduced {
+            timing
+        } else if self.position_class == PositionClass::Relocation {
+            moving
+        } else {
+            layout
+        };
+        let size_timing = self.introduced.unwrap_or(layout);
         self.position.advance(now, position_timing);
-        self.size.advance(now, layout);
+        self.size.advance(now, size_timing);
+        if !self.position.active && !self.size.active {
+            self.introduced = None;
+        }
     }
 
     fn goal_is(self, rect: RectI) -> bool {
@@ -478,8 +593,28 @@ impl WindowGeometryAnimation {
         now: Instant,
         layout: GeometryTiming,
         moving: GeometryTiming,
+        opening: Option<OpeningIntroduction>,
     ) {
         let goal = WindowBox::from_rect(pending.rect);
+        if pending.motion != WindowGeometryMotion::Warp {
+            if let Some(opening) = opening.filter(|opening| style_has_pose(opening.style)) {
+                let pose = WindowBox::from_rect(lifecycle_pose(
+                    opening.style,
+                    pending.rect,
+                    opening.output,
+                ));
+                self.position.warp(pose.x, pose.y);
+                self.size.warp(pose.width, pose.height);
+                self.position_class = PositionClass::Layout;
+                self.armed = true;
+                self.introduced = Some(opening.timing);
+                self.position.retarget(goal.x, goal.y, now, opening.timing);
+                self.size
+                    .retarget(goal.width, goal.height, now, opening.timing);
+                return;
+            }
+        }
+        self.introduced = None;
         if !self.armed || pending.motion == WindowGeometryMotion::Warp {
             self.position.warp(goal.x, goal.y);
             self.size.warp(goal.width, goal.height);
@@ -524,11 +659,15 @@ mod tests {
 
     use {
         super::{
-            interpolate_window_visual, resolve_window_visual, Easing, FocusVisualAnimation,
-            GeometryTiming, WindowGeometryAnimation, WindowGeometryMotion, WindowLifecycleAnim,
-            WindowLifecycleAnimation, WindowVisualBase,
+            interpolate_window_visual, lifecycle_pose, resolve_window_visual, Easing,
+            FocusVisualAnimation, GeometryTiming, OpeningIntroduction, WindowGeometryAnimation,
+            WindowGeometryMotion, WindowLifecycleAnim, WindowLifecycleAnimation, WindowVisualBase,
         },
-        crate::{region::RectI, visual_animation::UnitValue},
+        crate::{
+            animation_config::{AnimationStyle, SlideEdge},
+            region::RectI,
+            visual_animation::UnitValue,
+        },
     };
 
     fn inactive() -> WindowVisualBase {
@@ -865,5 +1004,166 @@ mod tests {
         assert_eq!(first, Some(rect(1, 0, 11, 10)));
         geometry.advance(now + Duration::from_millis(100), linear(100), linear(100));
         assert_eq!(geometry.visual_rect(), geometry.goal_rect());
+    }
+
+    fn goal() -> RectI {
+        rect(100, 200, 80, 60)
+    }
+
+    fn output() -> RectI {
+        rect(0, 0, 800, 600)
+    }
+
+    fn intro(style: AnimationStyle, output: Option<RectI>, millis: u64) -> OpeningIntroduction {
+        OpeningIntroduction { style, output, timing: linear(millis) }
+    }
+
+    #[test]
+    fn popin_pose_is_centered_and_clamped_to_five_pixels() {
+        assert_eq!(
+            lifecycle_pose(AnimationStyle::Popin { percent: 87 }, goal(), None),
+            rect(105, 204, 70, 52)
+        );
+        assert_eq!(
+            lifecycle_pose(AnimationStyle::Popin { percent: 0 }, goal(), None),
+            rect(138, 228, 5, 5)
+        );
+        assert_eq!(lifecycle_pose(AnimationStyle::Popin { percent: 100 }, goal(), None), goal());
+        assert_eq!(
+            lifecycle_pose(AnimationStyle::Popin { percent: 0 }, rect(0, 0, 3, 4), None),
+            rect(0, 0, 3, 4)
+        );
+    }
+
+    #[test]
+    fn slide_pose_uses_hyprland_edge_offsets() {
+        let style = |edge| AnimationStyle::Slide { edge: Some(edge) };
+        assert_eq!(
+            lifecycle_pose(style(SlideEdge::Left), goal(), Some(output())),
+            rect(20, 200, 80, 60)
+        );
+        assert_eq!(
+            lifecycle_pose(style(SlideEdge::Right), goal(), Some(output())),
+            rect(180, 200, 80, 60)
+        );
+        assert_eq!(
+            lifecycle_pose(style(SlideEdge::Top), goal(), Some(output())),
+            rect(100, -60, 80, 60)
+        );
+        assert_eq!(
+            lifecycle_pose(style(SlideEdge::Bottom), goal(), Some(output())),
+            rect(100, 600, 80, 60)
+        );
+        assert_eq!(lifecycle_pose(AnimationStyle::Slide { edge: None }, goal(), None), goal());
+    }
+
+    #[test]
+    fn nearest_slide_prefers_bottom_then_left_then_right_then_top() {
+        let style = AnimationStyle::Slide { edge: None };
+        let tied = rect(350, 260, 100, 80);
+        assert_eq!(lifecycle_pose(style, tied, Some(output())), rect(350, 600, 100, 80));
+        let near_left = rect(10, 270, 100, 60);
+        assert_eq!(lifecycle_pose(style, near_left, Some(output())), rect(-90, 270, 100, 60));
+        let near_right = rect(700, 270, 80, 60);
+        assert_eq!(lifecycle_pose(style, near_right, Some(output())), rect(780, 270, 80, 60));
+        let near_top = rect(350, 10, 100, 40);
+        assert_eq!(lifecycle_pose(style, near_top, Some(output())), rect(350, -40, 100, 40));
+    }
+
+    #[test]
+    fn gnomed_pose_is_a_horizontal_line_through_the_center() {
+        assert_eq!(lifecycle_pose(AnimationStyle::Gnomed, goal(), None), rect(100, 230, 80, 0));
+        assert_eq!(lifecycle_pose(AnimationStyle::None, goal(), Some(output())), goal());
+    }
+
+    #[test]
+    fn opening_pose_uses_windows_in_timing_when_layout_timing_is_disabled() {
+        let now = Instant::now();
+        let mut geometry = WindowGeometryAnimation::unarmed();
+        geometry.prefer_relocation();
+        geometry.set_goal(goal(), WindowGeometryMotion::Layout);
+        geometry.advance_with_introduction(
+            now,
+            linear(0),
+            linear(500),
+            Some(intro(AnimationStyle::Popin { percent: 50 }, None, 100)),
+        );
+        assert_eq!(geometry.visual_rect(), Some(rect(120, 215, 40, 30)));
+        assert_eq!(geometry.goal_rect(), Some(goal()));
+        assert!(geometry.is_active());
+
+        geometry.advance_with_introduction(
+            now + Duration::from_millis(50),
+            linear(0),
+            linear(0),
+            None,
+        );
+        let mid = geometry.visual_rect().unwrap();
+        assert_ne!(mid, goal());
+        assert!(geometry.is_active());
+
+        geometry.advance_with_introduction(
+            now + Duration::from_millis(100),
+            linear(0),
+            linear(0),
+            None,
+        );
+        assert_eq!(geometry.visual_rect(), Some(goal()));
+        assert!(!geometry.is_active());
+    }
+
+    #[test]
+    fn warp_during_opening_snaps_to_the_pointer_goal() {
+        let now = Instant::now();
+        let mut geometry = WindowGeometryAnimation::unarmed();
+        geometry.set_goal(goal(), WindowGeometryMotion::Layout);
+        geometry.advance_with_introduction(
+            now,
+            linear(0),
+            linear(0),
+            Some(intro(AnimationStyle::Gnomed, None, 200)),
+        );
+        assert_eq!(geometry.visual_rect(), Some(rect(100, 230, 80, 0)));
+
+        geometry.set_goal(rect(4, 5, 20, 10), WindowGeometryMotion::Warp);
+        geometry.advance_with_introduction(
+            now + Duration::from_millis(20),
+            linear(0),
+            linear(0),
+            Some(intro(AnimationStyle::Gnomed, None, 200)),
+        );
+        assert_eq!(geometry.visual_rect(), Some(rect(4, 5, 20, 10)));
+        assert!(!geometry.is_active());
+    }
+
+    #[test]
+    fn later_layout_goal_leaves_the_opening_pose() {
+        let now = Instant::now();
+        let mut geometry = WindowGeometryAnimation::unarmed();
+        geometry.set_goal(goal(), WindowGeometryMotion::Layout);
+        geometry.advance_with_introduction(
+            now,
+            linear(200),
+            linear(200),
+            Some(intro(AnimationStyle::Slide { edge: Some(SlideEdge::Left) }, Some(output()), 200)),
+        );
+        assert_eq!(geometry.visual_rect(), Some(rect(20, 200, 80, 60)));
+
+        geometry.set_goal(rect(300, 200, 80, 60), WindowGeometryMotion::Layout);
+        geometry.advance_with_introduction(
+            now + Duration::from_millis(100),
+            linear(200),
+            linear(200),
+            None,
+        );
+        assert_eq!(geometry.visual_rect(), Some(rect(20, 200, 80, 60)));
+        geometry.advance_with_introduction(
+            now + Duration::from_millis(200),
+            linear(200),
+            linear(200),
+            None,
+        );
+        assert_eq!(geometry.visual_rect(), Some(rect(160, 200, 80, 60)));
+        assert_eq!(geometry.goal_rect(), Some(rect(300, 200, 80, 60)));
     }
 }

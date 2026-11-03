@@ -31,6 +31,8 @@ struct ClosingSnapshotAnimation {
     source: Resolved<WlSurfaceId>,
     workspace_id: Option<WorkspaceId>,
     bounds: RectI,
+    pose: Option<RectI>,
+    factor: UnitValue,
     blur: Option<FrozenClosingBlur>,
     track: RetargetableTrack,
     cached_alpha: u8,
@@ -51,6 +53,8 @@ impl ClosingSnapshotAnimation {
             source,
             workspace_id,
             bounds,
+            pose: None,
+            factor: UnitValue::ONE,
             blur,
             track: RetargetableTrack::settled(UnitValue::ONE),
             cached_alpha: u8::MAX,
@@ -81,6 +85,7 @@ impl ClosingSnapshotAnimation {
                 .retarget_timed(UnitValue::ZERO, now, duration, easing);
         }
         let sample = self.track.sample_mut(now);
+        self.factor = sample.value;
         self.cached_alpha = sample.value.lerp_u8(0, u8::MAX);
         if sample.status == TrackStatus::Settled {
             self.finish();
@@ -157,6 +162,31 @@ impl RetainedClosingSnapshot {
         self.animation.bounds
     }
 
+    /// Captured rectangle while the close clock is at the start, then the `windowsOut` pose.
+    pub(crate) fn visual_bounds(&self) -> RectI {
+        let Some(pose) = self.animation.pose else {
+            return self.animation.bounds;
+        };
+        lerp_rect(self.animation.bounds, pose, self.animation.factor)
+    }
+
+    /// Union of the captured rectangle, the current sample, and the close pose.
+    ///
+    /// Scheduling keeps the snapshot alive on every output that rectangle still touches.
+    pub(crate) fn motion_bounds(&self) -> RectI {
+        let mut bounds = union_rect(self.bounds(), self.visual_bounds());
+        if let Some(pose) = self.animation.pose {
+            bounds = union_rect(bounds, pose);
+        }
+        bounds
+    }
+
+    pub(crate) fn arm_close_pose(&mut self, pose: RectI) {
+        if self.animation.pose.is_none() {
+            self.animation.pose = Some(pose);
+        }
+    }
+
     pub(crate) fn alpha(&self) -> u8 {
         self.animation.cached_alpha
     }
@@ -189,6 +219,42 @@ impl RetainedClosingSnapshot {
         easing: Easing,
     ) -> bool {
         self.animation.advance(now, duration, easing)
+    }
+}
+
+fn lerp_rect(from: RectI, to: RectI, remain: UnitValue) -> RectI {
+    let remain = remain.as_f64();
+    let mix = |start: i32, end: i32| -> i32 {
+        round_i32(f64::from(start) * remain + f64::from(end) * (1.0 - remain))
+    };
+    RectI::new(
+        mix(from.x, to.x),
+        mix(from.y, to.y),
+        mix(from.width, to.width).max(0),
+        mix(from.height, to.height).max(0),
+    )
+    .unwrap_or(from)
+}
+
+fn union_rect(a: RectI, b: RectI) -> RectI {
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
+    RectI::from_extents(a.x.min(b.x), a.y.min(b.y), a.x2().max(b.x2()), a.y2().max(b.y2()))
+        .unwrap_or(a)
+}
+
+fn round_i32(value: f64) -> i32 {
+    let rounded = value.round();
+    if rounded >= f64::from(i32::MAX) {
+        i32::MAX
+    } else if rounded <= f64::from(i32::MIN) {
+        i32::MIN
+    } else {
+        rounded as i32
     }
 }
 
@@ -283,5 +349,53 @@ mod tests {
         assert!(!snapshot.advance(now + Duration::from_millis(50), Duration::from_millis(400)));
         assert_eq!(snapshot.alpha(), mid);
         assert!(snapshot.is_active());
+    }
+
+    #[test]
+    fn close_pose_moves_from_the_captured_bounds_and_completion_releases_once() {
+        let (mut snapshot, probe) =
+            RetainedClosingSnapshot::test_pending(4, source(), bounds(), DrmId::from(0usize));
+        let pose = crate::visual_animation::lifecycle_pose(
+            crate::animation_config::AnimationStyle::Popin { percent: 87 },
+            bounds(),
+            None,
+        );
+        snapshot.arm_close_pose(pose);
+        let now = Instant::now();
+        let duration = Duration::from_millis(100);
+        assert!(!snapshot.advance(now, duration));
+        assert_eq!(snapshot.visual_bounds(), bounds());
+        assert_eq!(snapshot.bounds(), bounds());
+        assert!(!snapshot.advance(now + Duration::from_millis(50), duration));
+        let mid = snapshot.visual_bounds();
+        assert_ne!(mid, bounds());
+        assert_ne!(mid, pose);
+        assert!(snapshot.motion_bounds().intersects(bounds()));
+        assert!(snapshot.advance(now + duration, duration));
+        drop(snapshot);
+        assert_eq!(probe.get(), 1);
+    }
+
+    #[test]
+    fn slide_close_pose_expands_the_motion_bounds_past_the_capture() {
+        let (mut snapshot, _probe) =
+            RetainedClosingSnapshot::test_pending(5, source(), bounds(), DrmId::from(0usize));
+        let pose = RectI::new(-90, 20, 100, 80).unwrap();
+        snapshot.arm_close_pose(pose);
+        let motion = snapshot.motion_bounds();
+        assert_eq!(motion.x, pose.x);
+        assert_eq!(motion.x2(), bounds().x2());
+        assert_eq!(snapshot.visual_bounds(), bounds());
+    }
+
+    #[test]
+    fn snapshot_without_a_pose_stays_on_the_captured_bounds() {
+        let (mut snapshot, _probe) =
+            RetainedClosingSnapshot::test_pending(6, source(), bounds(), DrmId::from(0usize));
+        let now = Instant::now();
+        assert!(!snapshot.advance(now, Duration::from_millis(100)));
+        assert!(!snapshot.advance(now + Duration::from_millis(50), Duration::from_millis(100)));
+        assert_eq!(snapshot.visual_bounds(), bounds());
+        assert_eq!(snapshot.motion_bounds(), bounds());
     }
 }

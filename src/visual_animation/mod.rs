@@ -20,8 +20,9 @@ pub use {
     closing::{FrozenClosingBlur, RetainedClosingSnapshot},
     track::{CubicBezier, Easing, UnitValue},
     window::{
-        resolve_window_visual, FocusVisualAnimation, GeometryTiming, WindowGeometryAnimation,
-        WindowGeometryMotion, WindowLifecycleAnim, WindowLifecycleAnimation, WindowVisualBase,
+        lifecycle_pose, resolve_window_visual, FocusVisualAnimation, GeometryTiming,
+        OpeningIntroduction, WindowGeometryAnimation, WindowGeometryMotion, WindowLifecycleAnim,
+        WindowLifecycleAnimation, WindowVisualBase,
     },
     workspace::{
         WorkspaceGroupTransition, WorkspaceMotion, WorkspaceTransitionAdvance,

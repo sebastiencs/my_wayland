@@ -2429,6 +2429,7 @@ mod tests {
             .config
             .animations
             .set_linear(crate::animation_config::AnimationNode::Windows);
+        state.config.animations.set_open_duration_msec(0);
         let surface = live_toplevel(&mut state);
         state.relayout_dirty_workspaces();
         let now = std::time::Instant::now();
@@ -2930,6 +2931,161 @@ mod tests {
             crate::visual_animation::WindowLifecycleAnim::Opening {
                 progress: crate::visual_animation::UnitValue::ZERO
             }
+        );
+    }
+
+    fn window_visual(state: &State, surface: crate::clients::Resolved<WlSurfaceId>) -> RectI {
+        state
+            .managed_root_surfaces
+            .get(&surface)
+            .unwrap()
+            .geometry_animation
+            .visual_rect()
+            .unwrap()
+    }
+
+    fn open_style_window(
+        state: &mut State,
+        style: crate::animation_config::AnimationStyle,
+    ) -> (crate::clients::Resolved<WlSurfaceId>, RectI, RectI) {
+        state.config.animations.set_open_duration_msec(200);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::WindowsIn);
+        state
+            .config
+            .animations
+            .set_style(crate::animation_config::AnimationNode::WindowsIn, style);
+        let surface = live_toplevel(state);
+        assert_eq!(state.relayout_dirty_workspaces(), vec![surface]);
+        let goal = state
+            .committed_root_geometry(surface)
+            .unwrap()
+            .layout_rect_global;
+        let output = state
+            .output_bounds(
+                state
+                    .workspace_output_id(state.root_surface_workspace(surface).unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+        (surface, goal, output)
+    }
+
+    #[test]
+    fn opening_starts_at_the_style_pose_and_keeps_the_logical_goal() {
+        use std::time::{Duration, Instant};
+
+        let mut state = state_for_tests();
+        let (surface, goal, output) = open_style_window(
+            &mut state,
+            crate::animation_config::AnimationStyle::Popin { percent: 87 },
+        );
+        let pose = crate::visual_animation::lifecycle_pose(
+            crate::animation_config::AnimationStyle::Popin { percent: 87 },
+            goal,
+            Some(output),
+        );
+        assert_ne!(pose, goal);
+        let now = Instant::now();
+        state.advance_visual_animations(now);
+        assert_eq!(
+            state
+                .committed_root_geometry(surface)
+                .unwrap()
+                .layout_rect_global,
+            goal
+        );
+        assert_eq!(window_visual(&state, surface), pose);
+        assert_eq!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .lifecycle_animation
+                .sample(),
+            crate::visual_animation::WindowLifecycleAnim::Opening {
+                progress: crate::visual_animation::UnitValue::ZERO
+            }
+        );
+
+        state.advance_visual_animations(now + Duration::from_millis(200));
+        assert_eq!(window_visual(&state, surface), goal);
+        assert_eq!(
+            state
+                .committed_root_geometry(surface)
+                .unwrap()
+                .layout_rect_global,
+            goal
+        );
+        assert_eq!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .lifecycle_animation
+                .sample(),
+            crate::visual_animation::WindowLifecycleAnim::Idle
+        );
+    }
+
+    #[test]
+    fn slide_and_gnomed_opening_use_their_start_pose() {
+        use std::time::Instant;
+
+        let mut state = state_for_tests();
+        let (surface, goal, output) = open_style_window(
+            &mut state,
+            crate::animation_config::AnimationStyle::Slide {
+                edge: Some(crate::animation_config::SlideEdge::Left),
+            },
+        );
+        state.advance_visual_animations(Instant::now());
+        assert_eq!(
+            window_visual(&state, surface),
+            crate::visual_animation::lifecycle_pose(
+                crate::animation_config::AnimationStyle::Slide {
+                    edge: Some(crate::animation_config::SlideEdge::Left),
+                },
+                goal,
+                Some(output),
+            )
+        );
+        assert_eq!(window_visual(&state, surface).width, goal.width);
+        assert_eq!(window_visual(&state, surface).x, goal.x - goal.width);
+
+        let mut state = state_for_tests();
+        let (surface, goal, output) =
+            open_style_window(&mut state, crate::animation_config::AnimationStyle::Gnomed);
+        state.advance_visual_animations(Instant::now());
+        assert_eq!(
+            window_visual(&state, surface),
+            crate::visual_animation::lifecycle_pose(
+                crate::animation_config::AnimationStyle::Gnomed,
+                goal,
+                Some(output),
+            )
+        );
+    }
+
+    #[test]
+    fn zero_open_duration_snaps_to_the_logical_goal() {
+        let mut state = state_for_tests();
+        state.config.animations.set_open_duration_msec(0);
+        let surface = live_toplevel(&mut state);
+        assert!(state.relayout_dirty_workspaces().is_empty());
+        let goal = state
+            .committed_root_geometry(surface)
+            .unwrap()
+            .layout_rect_global;
+        state.advance_visual_animations(std::time::Instant::now());
+        assert_eq!(window_visual(&state, surface), goal);
+        assert_eq!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .lifecycle_animation
+                .sample(),
+            crate::visual_animation::WindowLifecycleAnim::Idle
         );
     }
 

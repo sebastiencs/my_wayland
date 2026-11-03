@@ -27,10 +27,11 @@ use crate::{
     seat::SeatState,
     tiling::{self, TiledResizeState, WorkspaceLayout},
     visual_animation::{
-        resolve_window_visual, FocusVisualAnimation, GeometryTiming, RetainedClosingSnapshot,
-        WindowGeometryAnimation, WindowGeometryMotion, WindowLifecycleAnim,
-        WindowLifecycleAnimation, WindowVisualBase, WorkspaceGroupTransition, WorkspaceMotion,
-        WorkspaceTransitionAdvance, WorkspaceTransitionDirection,
+        lifecycle_pose, resolve_window_visual, FocusVisualAnimation, GeometryTiming,
+        OpeningIntroduction, RetainedClosingSnapshot, UnitValue, WindowGeometryAnimation,
+        WindowGeometryMotion, WindowLifecycleAnim, WindowLifecycleAnimation, WindowVisualBase,
+        WorkspaceGroupTransition, WorkspaceMotion, WorkspaceTransitionAdvance,
+        WorkspaceTransitionDirection,
     },
     wayland_objects::{
         wl_surface::WlSurface,
@@ -2141,6 +2142,10 @@ impl State {
                 .managed_root_surfaces
                 .get(&surface)
                 .and_then(|managed| managed.geometry_animation.visual_rect());
+            let output = self
+                .root_surface_workspace(surface)
+                .and_then(|workspace_id| self.workspace_output_id(workspace_id))
+                .and_then(|output_id| self.output_bounds(output_id));
             let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
                 continue;
             };
@@ -2154,9 +2159,25 @@ impl State {
             managed
                 .lifecycle_animation
                 .advance_with_easing(open_duration, opening.easing(), now);
-            managed
-                .geometry_animation
-                .advance(now, layout_motion, moving_motion);
+            let opening_pose = match managed.lifecycle_animation.sample() {
+                WindowLifecycleAnim::Opening { progress } if progress == UnitValue::ZERO => {
+                    Some(OpeningIntroduction {
+                        style: opening.style(),
+                        output,
+                        timing: GeometryTiming {
+                            duration: open_duration,
+                            easing: opening.easing(),
+                        },
+                    })
+                }
+                _ => None,
+            };
+            managed.geometry_animation.advance_with_introduction(
+                now,
+                layout_motion,
+                moving_motion,
+                opening_pose,
+            );
             let next = composed_window_style(
                 managed.focus_animation.current(),
                 managed.lifecycle_animation.sample(),
@@ -2182,15 +2203,38 @@ impl State {
         }
         let closing = self.config.animations.closing();
         let close_duration = closing.duration();
+        let close_style = closing.style();
+        let close_poses = self
+            .closing_snapshots
+            .iter()
+            .map(|snapshot| {
+                if close_duration.is_zero() {
+                    return None;
+                }
+                let output = snapshot
+                    .workspace_id()
+                    .and_then(|workspace_id| self.workspace_output_id(workspace_id))
+                    .and_then(|output_id| self.output_bounds(output_id));
+                Some(lifecycle_pose(close_style, snapshot.bounds(), output))
+            })
+            .collect::<Vec<_>>();
         let mut finished_ids = Vec::new();
-        for snapshot in &mut self.closing_snapshots {
-            if !include_snapshot(snapshot.bounds()) {
+        for (snapshot, pose) in self.closing_snapshots.iter_mut().zip(close_poses) {
+            if let Some(pose) = pose {
+                snapshot.arm_close_pose(pose);
+            }
+            if !include_snapshot(snapshot.motion_bounds()) {
                 continue;
             }
-            let before = snapshot.alpha();
+            let before_alpha = snapshot.alpha();
+            let before_visual = snapshot.visual_bounds();
             let finished = snapshot.advance_with_easing(now, close_duration, closing.easing());
-            if finished || snapshot.alpha() != before {
-                damaged_rects.push(snapshot.bounds());
+            let after_visual = snapshot.visual_bounds();
+            if finished || snapshot.alpha() != before_alpha || before_visual != after_visual {
+                damaged_rects.push(before_visual);
+                if after_visual != before_visual {
+                    damaged_rects.push(after_visual);
+                }
             }
             if snapshot.is_active() {
                 has_active_animations = true;

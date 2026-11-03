@@ -4668,6 +4668,7 @@ mod xdg_seat_tests {
     }
 
     fn arm_settled_window_geometry(state: &mut State) {
+        state.config.animations.set_open_duration_msec(0);
         state.advance_visual_animations(std::time::Instant::now());
     }
 

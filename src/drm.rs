@@ -3625,7 +3625,7 @@ fn active_animation_output_ids(state: &State) -> BTreeSet<OutputId> {
     }
     for snapshot in &state.closing_snapshots {
         if snapshot.is_active() {
-            remember_animation_outputs(state, snapshot.bounds(), &mut output_ids);
+            remember_animation_outputs(state, snapshot.motion_bounds(), &mut output_ids);
         }
     }
     for (_, group) in state.workspace_groups.iter() {
@@ -6266,15 +6266,21 @@ fn append_closing_snapshots(
             continue;
         }
         let alpha = scale_u8(snapshot.alpha(), motion.alpha);
-        let bounds = snapshot.bounds().translate(motion.translation_x, 0);
+        let bounds = snapshot.visual_bounds().translate(motion.translation_x, 0);
         if alpha == 0 || bounds.is_empty() || !bounds.intersects(output_bounds) {
             continue;
         }
         if let Some(blur) = snapshot.blur() {
+            let ring = posed_blur_ring(
+                snapshot.bounds(),
+                snapshot.visual_bounds(),
+                blur.ring,
+                motion.translation_x,
+            );
             frame_elements.push(RecordedFrameElement::Effect {
                 phase: FramePhase::UnderWindow,
                 element: EffectElement::WindowBlurBackdrop {
-                    ring: blur.ring,
+                    ring,
                     style: blur.style,
                     alpha: scale_u8(blur.alpha, alpha),
                 },
@@ -6307,6 +6313,29 @@ fn append_closing_snapshots(
         frame_elements
             .push(RecordedFrameElement::Texture { phase: FramePhase::Content, item_index });
     }
+}
+
+fn posed_blur_ring(
+    captured: RectI,
+    visual: RectI,
+    ring: RoundedRing,
+    translation_x: i32,
+) -> RoundedRing {
+    RoundedRing {
+        outer: posed_clip(captured, visual, ring.outer, translation_x),
+        inner: posed_clip(captured, visual, ring.inner, translation_x),
+    }
+}
+
+fn posed_clip(
+    captured: RectI,
+    visual: RectI,
+    clip: RootSurfaceClip,
+    translation_x: i32,
+) -> RootSurfaceClip {
+    let mapped = crate::render::map_layout_rect(captured, visual, clip.outer_rect)
+        .translate(translation_x, 0);
+    RootSurfaceClip::new(mapped, clip.corner_radius, clip.rounding_power)
 }
 
 fn collect_render_items_for_output_view(
@@ -8190,6 +8219,66 @@ mod closing_capture_tests {
         assert!(items[1].alpha > 0 && items[1].alpha < 255);
         assert!(outgoing_motion.translation_x < 0);
         assert!(incoming_motion.translation_x > 0);
+    }
+
+    #[test]
+    fn closing_pose_is_translated_with_the_workspace_and_then_released() {
+        let mut state = state_for_tests();
+        state.config.animations.set_workspace_duration_msec(200);
+        state.config.animations.set_close_duration_msec(100);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::WindowsOut);
+        let output_id = state.insert_output(test_output_drm0_wh(800, 600));
+        let group_id = state.workspace_group_for_output(output_id).unwrap();
+        let outgoing = state.active_workspace_for_output(output_id).unwrap();
+        let incoming = state.create_workspace(Some(group_id), Some("2".to_string()));
+        assert!(state.activate_workspace(incoming));
+        let now = std::time::Instant::now();
+        state.advance_visual_animations(now);
+        let captured = RectI::new(200, 8, 400, 16).unwrap();
+        state
+            .closing_snapshots
+            .push(crate::visual_animation::RetainedClosingSnapshot::new(
+                31,
+                test_resolved_wl_surface_client1(31),
+                Some(outgoing),
+                captured,
+                None,
+                DrmId::from(0usize),
+                crate::egl::GlTexture::test_inert(),
+            ));
+        state.advance_visual_animations(now + std::time::Duration::from_millis(50));
+        assert_eq!(state.closing_snapshots[0].visual_bounds(), captured);
+        state.advance_visual_animations(now + std::time::Duration::from_millis(100));
+        let visual = state.closing_snapshots[0].visual_bounds();
+        assert_ne!(visual, captured);
+        let motion = state.workspace_motion_for_output(output_id, Some(outgoing));
+        assert!(motion.translation_x < 0);
+
+        let mut items = Vec::new();
+        let mut elements = Vec::new();
+        super::render_workspace_content(
+            &mut state,
+            DrmId::from(0usize),
+            0,
+            output_id,
+            RectI::new(0, 0, 800, 600).unwrap(),
+            &[],
+            &mut items,
+            &mut elements,
+            &mut Vec::new(),
+        );
+        let drawn = items
+            .iter()
+            .find(|item| matches!(item.state.key, SceneItemKey::ClosingSnapshot(31)))
+            .expect("posed snapshot is drawn with its workspace");
+        assert_eq!(drawn.state.bounds.x, visual.x + motion.translation_x);
+        assert_eq!(drawn.state.bounds.y, visual.y);
+
+        state.advance_visual_animations(now + std::time::Duration::from_millis(150));
+        assert!(state.closing_snapshots.is_empty());
     }
 
     #[test]

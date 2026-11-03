@@ -223,6 +223,10 @@ impl AnimationsConfig {
         resolved.bezier = CubicBezier::linear();
     }
 
+    pub fn set_style(&mut self, node: AnimationNode, style: AnimationStyle) {
+        self.nodes.get_mut(&node).expect("animation node").style = style;
+    }
+
     pub fn set_workspace_fade(&mut self, fade: bool) {
         let resolved = self
             .nodes
