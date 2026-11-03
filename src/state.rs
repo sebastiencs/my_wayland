@@ -767,29 +767,26 @@ pub enum DataOfferRole {
 
 /// Clipboard selection owner. Drag-and-drop stays on [`DragSource`].
 ///
-/// Data-control and primary selection join this later as their own variants.
-/// wlroots keeps primary selection on a separate source type as well.
+/// `DataControl` is the `zwlr_data_control_source_v1` that owns the clipboard.
+/// Primary selection stays a separate seat slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionSourceState {
     WlData(Resolved<WlDataSourceId>),
+    DataControl(Resolved<crate::protocol_generated::ZwlrDataControlSourceV1Id>),
 }
 
 impl SelectionSourceState {
     pub fn owner_client_id(self) -> ClientId {
         match self {
             Self::WlData(source) => source.client_id(),
+            Self::DataControl(source) => source.client_id(),
         }
     }
 
     pub fn object_id(self) -> ObjectId {
         match self {
             Self::WlData(source) => source.object_id(),
-        }
-    }
-
-    pub fn wl_data_source(self) -> Resolved<WlDataSourceId> {
-        match self {
-            Self::WlData(source) => source,
+            Self::DataControl(source) => source.object_id(),
         }
     }
 }
@@ -889,9 +886,9 @@ pub struct State {
     pub xdg_toplevel_roles: BTreeMap<Resolved<XdgSurfaceId>, Resolved<XdgToplevelId>>,
     /// Unblocked `hyprland_ctm_control_manager_v1` singleton; new binds are blocked while set.
     pub ctm_control_owner: Option<Resolved<HyprlandCtmControlManagerV1Id>>,
-    /// Offers keyed by their bound `wl_data_source` for teardown without scanning all objects.
-    pub data_offers_by_source:
-        BTreeMap<Resolved<WlDataSourceId>, BTreeSet<Resolved<WlDataOfferId>>>,
+    /// `wl_data_offer`s keyed by the source object, so source teardown can drop them
+    /// without scanning every client.
+    pub data_offers_by_source: BTreeMap<ObjectId, BTreeSet<Resolved<WlDataOfferId>>>,
     pub next_workspace_serial: u32,
     pub backend_syncobj_globals: BTreeMap<DrmId, GlobalName>,
     pub session_active: bool,
@@ -3207,7 +3204,7 @@ impl State {
 
     pub fn register_data_offer_for_source(
         &mut self,
-        source: Resolved<WlDataSourceId>,
+        source: ObjectId,
         offer: Resolved<WlDataOfferId>,
     ) {
         self.data_offers_by_source
@@ -3218,7 +3215,7 @@ impl State {
 
     pub fn unregister_data_offer_for_source(
         &mut self,
-        source: Resolved<WlDataSourceId>,
+        source: ObjectId,
         offer: Resolved<WlDataOfferId>,
     ) {
         if let Some(set) = self.data_offers_by_source.get_mut(&source) {
@@ -3231,7 +3228,7 @@ impl State {
 
     pub fn take_data_offers_for_source(
         &mut self,
-        source: Resolved<WlDataSourceId>,
+        source: ObjectId,
     ) -> Vec<Resolved<WlDataOfferId>> {
         self.data_offers_by_source
             .remove(&source)

@@ -1,0 +1,540 @@
+//! `zwlr_data_control_device_v1` at the version-1 clipboard.
+//!
+//! Selection updates are delivered with or without keyboard focus. `set_selection` does not
+//! check a serial. A source that is already used disconnects the client with `used_source`.
+//! `finished` is sent when the client's `wl_seat` goes away.
+
+use crate::{
+    clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
+    object::{Object, Parser, RequestResult},
+    protocol_generated::{
+        wl_display, zwlr_data_control_device_v1, WaylandId, WlSeatId, ZwlrDataControlDeviceV1Id,
+        ZwlrDataControlOfferV1Id, ZwlrDataControlSourceV1Id,
+    },
+    state::{GrabbedObject, SelectionSourceState, State},
+    wayland_objects::{
+        wl_display::WlDisplay, zwlr_data_control_offer_v1::destroy_data_control_offer,
+    },
+};
+
+#[derive(Debug)]
+pub struct ZwlrDataControlDeviceV1 {
+    id: ZwlrDataControlDeviceV1Id,
+    seat_id: WlSeatId,
+    version: u32,
+    selection_offer: Option<Resolved<ZwlrDataControlOfferV1Id>>,
+    inert: bool,
+}
+
+impl ZwlrDataControlDeviceV1 {
+    pub fn new(id: ZwlrDataControlDeviceV1Id, seat_id: WlSeatId, version: u32) -> Self {
+        Self { id, seat_id, version, selection_offer: None, inert: false }
+    }
+
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    pub fn seat_id(&self) -> WlSeatId {
+        self.seat_id
+    }
+
+    pub fn is_inert(&self) -> bool {
+        self.inert
+    }
+
+    pub fn selection_offer(&self) -> Option<Resolved<ZwlrDataControlOfferV1Id>> {
+        self.selection_offer
+    }
+
+    pub fn take_selection_offer(&mut self) -> Option<Resolved<ZwlrDataControlOfferV1Id>> {
+        self.selection_offer.take()
+    }
+
+    pub fn set_selection_offer(&mut self, offer: Option<Resolved<ZwlrDataControlOfferV1Id>>) {
+        self.selection_offer = offer;
+    }
+
+    pub fn send_data_offer(
+        &self,
+        offer: Resolved<ZwlrDataControlOfferV1Id>,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.send_event(
+            zwlr_data_control_device_v1::Event::DataOffer { id: offer.wayland_id() },
+            dispatcher,
+        );
+    }
+
+    pub fn send_selection(
+        &self,
+        offer: Option<Resolved<ZwlrDataControlOfferV1Id>>,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        self.send_event(
+            zwlr_data_control_device_v1::Event::Selection {
+                id: offer
+                    .map(|offer| offer.wayland_id())
+                    .unwrap_or_else(|| ZwlrDataControlOfferV1Id::from(0u32)),
+            },
+            dispatcher,
+        );
+    }
+
+    pub fn finish(&mut self, dispatcher: &mut ClientDispatcher) {
+        if self.inert {
+            return;
+        }
+        self.inert = true;
+        self.send_event(zwlr_data_control_device_v1::Event::Finished, dispatcher);
+    }
+}
+
+impl Object for ZwlrDataControlDeviceV1 {
+    fn id(&self) -> WaylandId {
+        self.id.into()
+    }
+
+    fn on(
+        mut self: GrabbedObject<Self>,
+        client: &mut Client,
+        state: &mut State,
+        req: RawRequest,
+        dispatcher: &mut ClientDispatcher,
+    ) -> RequestResult {
+        use zwlr_data_control_device_v1::Request::*;
+
+        match client.parse::<Self>(req, dispatcher)? {
+            SetSelection { source } => {
+                if self.inert {
+                    return Ok(());
+                }
+                set_selection(&mut self, client, state, dispatcher, source)?;
+            }
+            Destroy => {
+                let device_id = self.id;
+                let offer = self.selection_offer.take();
+                drop(self);
+                if let Some(device) = client.resolve(device_id, state) {
+                    state.seat.unregister_data_control_device(device);
+                }
+                if let Some(offer) = offer {
+                    destroy_data_control_offer(client, state, dispatcher, offer);
+                }
+                client.delete_id(&WlDisplay::default(), state, dispatcher, device_id.into());
+            }
+            SetPrimarySelection { .. } => {
+                client.protocol_violation_disconnect(
+                    dispatcher,
+                    self.id.into(),
+                    wl_display::Error::InvalidMethod as u32,
+                    "zwlr_data_control_device_v1.set_primary_selection requires version 2",
+                );
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn on_client_disconnect(
+        &mut self,
+        client: &mut Client,
+        state: &mut State,
+        _dispatcher: &mut ClientDispatcher,
+    ) {
+        if let Some(device) = client.resolve(self.id, state) {
+            state.seat.unregister_data_control_device(device);
+        }
+    }
+}
+
+fn set_selection(
+    device: &mut GrabbedObject<ZwlrDataControlDeviceV1>,
+    client: &mut Client,
+    state: &mut State,
+    dispatcher: &mut ClientDispatcher,
+    source: ZwlrDataControlSourceV1Id,
+) -> RequestResult {
+    let next = if u32::from(source) == 0 {
+        None
+    } else {
+        let source = client.resolve_or_disconnect(source, state, dispatcher)?;
+        let Some(mut source_obj) = source.try_ref_mut(state) else {
+            return Ok(());
+        };
+        if !source_obj.try_use() {
+            client.protocol_violation_disconnect(
+                dispatcher,
+                device.id.into(),
+                zwlr_data_control_device_v1::Error::UsedSource as u32,
+                "zwlr_data_control_source_v1 used more than once",
+            );
+            return Ok(());
+        }
+        Some(SelectionSourceState::DataControl(source))
+    };
+
+    let serial = state.seat.next_serial();
+    let previous = state.seat.replace_selection_source(next, serial);
+    if let Some(previous) = previous {
+        previous.cancelled(dispatcher);
+    }
+    state.seat.publish_clipboard_selection(dispatcher, None);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::VecDeque,
+        os::fd::{FromRawFd, OwnedFd},
+    };
+
+    use {
+        super::*,
+        crate::{
+            capture,
+            clients::{Client, ClientAction, ClientId, DataControlSourceEvent, RawEvent, Resolved},
+            globals::Global,
+            protocol_generated::{
+                WaylandId, WlDataDeviceId, WlSeatId, WlSurfaceId, ZwlrDataControlDeviceV1Id,
+                ZwlrDataControlManagerV1Id, ZwlrDataControlSourceV1Id,
+            },
+            runner::Model,
+            seat::{set_keyboard_focus_from_surface, SurfaceFocus},
+            test_support::state_for_tests,
+            wayland_objects::{
+                wl_data_device::WlDataDevice,
+                wl_seat::WlSeat,
+                wl_surface::WlSurface,
+                zwlr_data_control_manager_v1::{
+                    ZwlrDataControlManagerV1, ZwlrDataControlManagerV1Global, ADVERTISED_VERSION,
+                },
+                zwlr_data_control_source_v1::ZwlrDataControlSourceV1,
+            },
+            Dispatcher,
+        },
+    };
+
+    fn ids(object: impl Into<WaylandId>, opcode: u16, values: &[u32]) -> RawRequest<'static> {
+        let mut event = RawEvent::new(object.into(), opcode, values.len());
+        for value in values {
+            event.uint(*value);
+        }
+        (&*event.into_bytes()).try_into().unwrap()
+    }
+
+    fn offer_mime(source: impl Into<WaylandId>, mime: &str) -> RawRequest<'static> {
+        let mut event = RawEvent::new(source.into(), 0, 1);
+        event.string(mime.to_string());
+        (&*event.into_bytes()).try_into().unwrap()
+    }
+
+    fn receive(
+        offer: impl Into<WaylandId>,
+        opcode: u16,
+        mime: &str,
+        fd: i32,
+    ) -> RawRequest<'static> {
+        let mut event = RawEvent::new(offer.into(), opcode, 1);
+        event.string(mime.to_string());
+        let mut request: RawRequest<'static> = (&*event.into_bytes()).try_into().unwrap();
+        request.fds =
+            Some(Box::leak(Box::new(VecDeque::from([unsafe { OwnedFd::from_raw_fd(fd) }]))));
+        request
+    }
+
+    fn dev_null() -> i32 {
+        unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) }
+    }
+
+    fn seat_and_manager(client: &mut Client, state: &mut crate::state::State) {
+        client.insert_object(state, WlSeat::new(WlSeatId::from(10)));
+        client.insert_object(
+            state,
+            ZwlrDataControlManagerV1::new(ZwlrDataControlManagerV1Id::from(20), 1),
+        );
+    }
+
+    #[test]
+    fn advertised_manager_version_is_one() {
+        assert_eq!(ZwlrDataControlManagerV1Global.interface().1, ADVERTISED_VERSION);
+        assert_eq!(ADVERTISED_VERSION, 1);
+    }
+
+    #[test]
+    fn new_device_sends_null_selection_without_keyboard_focus() {
+        let mut state = state_for_tests();
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        seat_and_manager(&mut client, &mut state);
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        client
+            .grab_object(ZwlrDataControlManagerV1Id::from(20), &mut state)
+            .on(
+                &mut client,
+                &mut state,
+                ids(ZwlrDataControlManagerV1Id::from(20), 1, &[30, 10]),
+                &mut client_dispatcher,
+            )
+            .unwrap();
+        drop(client_dispatcher);
+        assert!(dispatcher.test_has_queued_action_for(
+            client.client_id(),
+            |action: &ClientAction| matches!(action, ClientAction::RefreshDataControlSelection)
+        ));
+        client
+            .process(&mut state, ClientAction::RefreshDataControlSelection, &mut dispatcher)
+            .unwrap();
+        let device_id = u32::from(ZwlrDataControlDeviceV1Id::from(30));
+        assert!(capture::test_sent(&dispatcher, device_id, 1));
+        assert!(capture::test_sent_arg(&dispatcher, device_id, 1, 0));
+    }
+
+    #[test]
+    fn unfocused_set_selection_reaches_data_control_and_focused_client() {
+        let mut state = state_for_tests();
+        let mut clipboard = Client::new_for_tests(ClientId::from_raw(1));
+        let mut focused = Client::new_for_tests(ClientId::from_raw(2));
+        seat_and_manager(&mut clipboard, &mut state);
+        focused.insert_object(
+            &mut state,
+            WlSurface::new(WlSurfaceId::from(40), focused.client_id(), 6),
+        );
+        focused.insert_object(
+            &mut state,
+            WlDataDevice::new(WlDataDeviceId::from(50), WlSeatId::from(10), 3),
+        );
+        state.seat.register_data_device(Resolved::new(
+            focused.client_id(),
+            WlDataDeviceId::from(50),
+            focused.object_id(WlDataDeviceId::from(50)),
+        ));
+        {
+            let mut setup = Dispatcher::default();
+            let mut setup_dispatcher = focused.test_dispatcher(&mut setup);
+            set_keyboard_focus_from_surface(
+                &mut state,
+                &mut setup_dispatcher,
+                Some(SurfaceFocus::new(Resolved::new(
+                    focused.client_id(),
+                    WlSurfaceId::from(40),
+                    focused.object_id(WlSurfaceId::from(40)),
+                ))),
+            );
+        }
+        clipboard.insert_object(
+            &mut state,
+            ZwlrDataControlSourceV1::new(ZwlrDataControlSourceV1Id::from(60), 1),
+        );
+        let mut dispatcher = Dispatcher::default();
+        {
+            let mut client_dispatcher = clipboard.test_dispatcher(&mut dispatcher);
+            clipboard
+                .grab_object(ZwlrDataControlSourceV1Id::from(60), &mut state)
+                .on(
+                    &mut clipboard,
+                    &mut state,
+                    offer_mime(ZwlrDataControlSourceV1Id::from(60), "text/plain"),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+            clipboard
+                .grab_object(ZwlrDataControlManagerV1Id::from(20), &mut state)
+                .on(
+                    &mut clipboard,
+                    &mut state,
+                    ids(ZwlrDataControlManagerV1Id::from(20), 1, &[30, 10]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+            clipboard
+                .grab_object(ZwlrDataControlDeviceV1Id::from(30), &mut state)
+                .on(
+                    &mut clipboard,
+                    &mut state,
+                    ids(ZwlrDataControlDeviceV1Id::from(30), 0, &[60]),
+                    &mut client_dispatcher,
+                )
+                .unwrap();
+        }
+        assert!(dispatcher.test_has_queued_action_for(
+            focused.client_id(),
+            |action: &ClientAction| matches!(action, ClientAction::RefreshDataDeviceSelection)
+        ));
+        clipboard
+            .process(&mut state, ClientAction::RefreshDataControlSelection, &mut dispatcher)
+            .unwrap();
+        focused
+            .process(&mut state, ClientAction::RefreshDataDeviceSelection, &mut dispatcher)
+            .unwrap();
+        let device = clipboard.ref_object(ZwlrDataControlDeviceV1Id::from(30), &state);
+        let offer = device.selection_offer().unwrap();
+        let device_id = u32::from(ZwlrDataControlDeviceV1Id::from(30));
+        assert!(capture::test_sent(&dispatcher, device_id, 0));
+        assert!(capture::test_sent(&dispatcher, device_id, 1));
+        assert!(capture::test_sent(&dispatcher, u32::from(offer.wayland_id()), 0));
+        let wl_offer = focused
+            .ref_object(WlDataDeviceId::from(50), &state)
+            .selection_offer()
+            .unwrap();
+        let mut focused_dispatcher = focused.test_dispatcher(&mut dispatcher);
+        focused
+            .grab_object(wl_offer.wayland_id(), &mut state)
+            .on(
+                &mut focused,
+                &mut state,
+                receive(wl_offer.wayland_id(), 1, "text/plain", dev_null()),
+                &mut focused_dispatcher,
+            )
+            .unwrap();
+        assert!(dispatcher.test_has_queued_action_for(
+            clipboard.client_id(),
+            |action: &ClientAction| matches!(
+                action,
+                ClientAction::DataControlSourceEvent {
+                    event: DataControlSourceEvent::Send { mime_type, .. },
+                    ..
+                } if mime_type == "text/plain"
+            )
+        ));
+    }
+
+    #[test]
+    fn second_set_selection_disconnects() {
+        let mut state = state_for_tests();
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        seat_and_manager(&mut client, &mut state);
+        client.insert_object(
+            &mut state,
+            ZwlrDataControlSourceV1::new(ZwlrDataControlSourceV1Id::from(60), 1),
+        );
+        client.insert_object(
+            &mut state,
+            ZwlrDataControlDeviceV1::new(
+                ZwlrDataControlDeviceV1Id::from(30),
+                WlSeatId::from(10),
+                1,
+            ),
+        );
+        state.seat.register_data_control_device(Resolved::new(
+            client.client_id(),
+            ZwlrDataControlDeviceV1Id::from(30),
+            client.object_id(ZwlrDataControlDeviceV1Id::from(30)),
+        ));
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        client
+            .grab_object(ZwlrDataControlDeviceV1Id::from(30), &mut state)
+            .on(
+                &mut client,
+                &mut state,
+                ids(ZwlrDataControlDeviceV1Id::from(30), 0, &[60]),
+                &mut client_dispatcher,
+            )
+            .unwrap();
+        client
+            .grab_object(ZwlrDataControlDeviceV1Id::from(30), &mut state)
+            .on(
+                &mut client,
+                &mut state,
+                ids(ZwlrDataControlDeviceV1Id::from(30), 0, &[60]),
+                &mut client_dispatcher,
+            )
+            .unwrap();
+        assert!(capture::test_closed(&dispatcher, &client));
+    }
+
+    #[test]
+    fn offer_after_set_selection_disconnects() {
+        let mut state = state_for_tests();
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        seat_and_manager(&mut client, &mut state);
+        client.insert_object(
+            &mut state,
+            ZwlrDataControlSourceV1::new(ZwlrDataControlSourceV1Id::from(60), 1),
+        );
+        client.insert_object(
+            &mut state,
+            ZwlrDataControlDeviceV1::new(
+                ZwlrDataControlDeviceV1Id::from(30),
+                WlSeatId::from(10),
+                1,
+            ),
+        );
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        client
+            .grab_object(ZwlrDataControlDeviceV1Id::from(30), &mut state)
+            .on(
+                &mut client,
+                &mut state,
+                ids(ZwlrDataControlDeviceV1Id::from(30), 0, &[60]),
+                &mut client_dispatcher,
+            )
+            .unwrap();
+        client
+            .grab_object(ZwlrDataControlSourceV1Id::from(60), &mut state)
+            .on(
+                &mut client,
+                &mut state,
+                offer_mime(ZwlrDataControlSourceV1Id::from(60), "text/plain"),
+                &mut client_dispatcher,
+            )
+            .unwrap();
+        assert!(capture::test_closed(&dispatcher, &client));
+    }
+
+    #[test]
+    fn set_primary_selection_is_rejected_at_version_one() {
+        let mut state = state_for_tests();
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        seat_and_manager(&mut client, &mut state);
+        client.insert_object(
+            &mut state,
+            ZwlrDataControlDeviceV1::new(
+                ZwlrDataControlDeviceV1Id::from(30),
+                WlSeatId::from(10),
+                1,
+            ),
+        );
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        client
+            .grab_object(ZwlrDataControlDeviceV1Id::from(30), &mut state)
+            .on(
+                &mut client,
+                &mut state,
+                ids(ZwlrDataControlDeviceV1Id::from(30), 2, &[0]),
+                &mut client_dispatcher,
+            )
+            .unwrap();
+        assert!(capture::test_closed(&dispatcher, &client));
+    }
+
+    #[test]
+    fn releasing_the_seat_finishes_the_device() {
+        let mut state = state_for_tests();
+        let mut client = Client::new_for_tests(ClientId::from_raw(1));
+        seat_and_manager(&mut client, &mut state);
+        let mut dispatcher = Dispatcher::default();
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+        client
+            .grab_object(ZwlrDataControlManagerV1Id::from(20), &mut state)
+            .on(
+                &mut client,
+                &mut state,
+                ids(ZwlrDataControlManagerV1Id::from(20), 1, &[30, 10]),
+                &mut client_dispatcher,
+            )
+            .unwrap();
+        client
+            .grab_object(WlSeatId::from(10), &mut state)
+            .on(&mut client, &mut state, ids(WlSeatId::from(10), 3, &[]), &mut client_dispatcher)
+            .unwrap();
+        assert!(capture::test_sent(&dispatcher, u32::from(ZwlrDataControlDeviceV1Id::from(30)), 2));
+        assert!(client
+            .ref_object(ZwlrDataControlDeviceV1Id::from(30), &state)
+            .is_inert());
+    }
+}

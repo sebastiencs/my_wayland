@@ -19,7 +19,7 @@ pub struct WlDataOffer {
     id: WlDataOfferId,
     version: u32,
     role: DataOfferRole,
-    source: Option<Resolved<WlDataSourceId>>,
+    source: Option<SelectionSourceState>,
     finished: bool,
 }
 
@@ -30,7 +30,27 @@ impl WlDataOffer {
         role: DataOfferRole,
         source: Option<Resolved<WlDataSourceId>>,
     ) -> Self {
-        Self { id, version, role, source, finished: false }
+        Self {
+            id,
+            version,
+            role,
+            source: source.map(SelectionSourceState::WlData),
+            finished: false,
+        }
+    }
+
+    pub fn from_selection(
+        id: WlDataOfferId,
+        version: u32,
+        selection: SelectionSourceState,
+    ) -> Self {
+        Self {
+            id,
+            version,
+            role: DataOfferRole::Selection,
+            source: Some(selection),
+            finished: false,
+        }
     }
 
     pub fn source_object_id(&self) -> Option<ObjectId> {
@@ -41,7 +61,15 @@ impl WlDataOffer {
         self.source = None;
     }
 
+    /// Drag-and-drop source. Selection offers that come from data-control have none.
     pub(crate) fn source(&self) -> Option<Resolved<WlDataSourceId>> {
+        match self.source {
+            Some(SelectionSourceState::WlData(source)) => Some(source),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn selection_source(&self) -> Option<SelectionSourceState> {
         self.source
     }
 
@@ -220,11 +248,11 @@ impl Object for WlDataOffer {
                     let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
                     return Ok(());
                 }
-                if let Some(source) = self.source() {
+                if let Some(source) = self.selection_source() {
                     // Be intentionally permissive for compatibility: even if the MIME type
                     // was not previously advertised, forward the request to the source
                     // instead of rejecting it in the compositor.
-                    SelectionSourceState::WlData(source).send(mime_type, fd, dispatcher);
+                    source.send(mime_type, fd, dispatcher);
                 } else {
                     let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
                 }

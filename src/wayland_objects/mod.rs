@@ -57,6 +57,10 @@ pub mod xdg_popup;
 pub mod xdg_positioner;
 pub mod xdg_surface;
 pub mod xdg_wm_base;
+pub mod zwlr_data_control_device_v1;
+pub mod zwlr_data_control_manager_v1;
+pub mod zwlr_data_control_offer_v1;
+pub mod zwlr_data_control_source_v1;
 pub mod zwlr_foreign_toplevel_handle_v1;
 pub mod zwlr_foreign_toplevel_manager_v1;
 pub mod zwlr_gamma_control_manager_v1;
@@ -152,10 +156,6 @@ fake_obj! {
     { zwp_tablet_v2, ZwpTabletV2 },
     { zwp_tablet_tool_v2, ZwpTabletToolV2 },
     { zwp_tablet_seat_v2, ZwpTabletSeatV2 },
-    { zwlr_data_control_manager_v1, ZwlrDataControlManagerV1 },
-    { zwlr_data_control_device_v1, ZwlrDataControlDeviceV1 },
-    { zwlr_data_control_source_v1, ZwlrDataControlSourceV1 },
-    { zwlr_data_control_offer_v1, ZwlrDataControlOfferV1 },
     { zwp_primary_selection_device_manager_v1, ZwpPrimarySelectionDeviceManagerV1 },
     { zwp_primary_selection_device_v1, ZwpPrimarySelectionDeviceV1 },
     { zwp_primary_selection_offer_v1, ZwpPrimarySelectionOfferV1 },

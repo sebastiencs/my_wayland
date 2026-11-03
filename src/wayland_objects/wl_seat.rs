@@ -103,10 +103,38 @@ impl Object for WlSeat {
                 client.insert_object(state, WlTouch::new(id, version));
             }
             Release => {
+                finish_data_control_devices(client, state, dispatcher, self.id);
                 client.delete_id(&WlDisplay::default(), state, dispatcher, self.id.into());
             }
         }
         Ok(())
+    }
+}
+
+fn finish_data_control_devices(
+    client: &mut Client,
+    state: &mut State,
+    dispatcher: &mut ClientDispatcher,
+    seat_id: WlSeatId,
+) {
+    use crate::wayland_objects::zwlr_data_control_offer_v1::destroy_data_control_offer;
+
+    for device in state.seat.data_control_devices(client.client_id()) {
+        let finish = device
+            .try_ref(state)
+            .is_some_and(|device_obj| device_obj.seat_id() == seat_id && !device_obj.is_inert());
+        if !finish {
+            continue;
+        }
+        let offer = {
+            let mut device_obj = device.ref_mut(state);
+            device_obj.finish(dispatcher);
+            device_obj.take_selection_offer()
+        };
+        state.seat.unregister_data_control_device(device);
+        if let Some(offer) = offer {
+            destroy_data_control_offer(client, state, dispatcher, offer);
+        }
     }
 }
 

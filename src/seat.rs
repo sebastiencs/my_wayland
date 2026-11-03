@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    clients::{Client, ClientAction, ClientId, Resolved},
+    clients::{Client, ClientAction, ClientDispatcher, ClientId, Resolved},
     config,
     cursor::{CursorSourceRef, CursorState},
     drm::request_outputs_for_points,
@@ -15,8 +15,8 @@ use crate::{
     },
     protocol_generated::{
         Array, WlDataDeviceId, WlDataOfferId, WlDataSourceId, WlKeyboardId, WlPointerId, WlSeatId,
-        WlSurfaceId, XdgPopupId, XdgToplevelId, ZwpConfinedPointerV1Id, ZwpLockedPointerV1Id,
-        ZwpRelativePointerV1Id,
+        WlSurfaceId, XdgPopupId, XdgToplevelId, ZwlrDataControlDeviceV1Id, ZwpConfinedPointerV1Id,
+        ZwpLockedPointerV1Id, ZwpRelativePointerV1Id,
     },
     root_geometry::WindowTargetGeometry,
     runner::Dispatcher,
@@ -316,6 +316,7 @@ pub struct SeatState {
     pub(crate) tiled_drag_origin: Option<crate::tiling::ExtractedTiledLeaf>,
     client_serials: BTreeMap<ClientId, VecDeque<SerialRange>>,
     data_device_resources: BTreeMap<ClientId, Vec<Resolved<WlDataDeviceId>>>,
+    data_control_devices: BTreeMap<ClientId, Vec<Resolved<ZwlrDataControlDeviceV1Id>>>,
     selection_source: Option<SelectionSourceState>,
     selection_serial: u32,
     active_drag: Option<DragState>,
@@ -353,6 +354,7 @@ impl Default for SeatState {
             tiled_drag_origin: None,
             client_serials: BTreeMap::default(),
             data_device_resources: BTreeMap::default(),
+            data_control_devices: BTreeMap::default(),
             selection_source: None,
             selection_serial: 0,
             active_drag: None,
@@ -491,6 +493,54 @@ impl SeatState {
 
     pub fn unregister_data_device(&mut self, data_device: Resolved<WlDataDeviceId>) {
         remove_resource(&mut self.data_device_resources, data_device.client_id(), data_device);
+    }
+
+    pub fn register_data_control_device(&mut self, device: Resolved<ZwlrDataControlDeviceV1Id>) {
+        let devices = self
+            .data_control_devices
+            .entry(device.client_id())
+            .or_default();
+        if !devices.contains(&device) {
+            devices.push(device);
+        }
+    }
+
+    pub fn unregister_data_control_device(&mut self, device: Resolved<ZwlrDataControlDeviceV1Id>) {
+        remove_resource(&mut self.data_control_devices, device.client_id(), device);
+    }
+
+    pub fn data_control_devices(
+        &self,
+        client_id: ClientId,
+    ) -> Vec<Resolved<ZwlrDataControlDeviceV1Id>> {
+        self.data_control_devices
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn data_control_client_ids(&self) -> Vec<ClientId> {
+        self.data_control_devices.keys().copied().collect()
+    }
+
+    /// Tell the focused `wl_data_device` and every data-control device that the clipboard changed.
+    /// `skip` is a client whose socket is already going away.
+    pub fn publish_clipboard_selection(
+        &self,
+        dispatcher: &mut ClientDispatcher,
+        skip: Option<ClientId>,
+    ) {
+        if let Some(focus) = self.keyboard_focus() {
+            if skip != Some(focus.client_id()) {
+                dispatcher.dispatch_to(focus.client_id(), ClientAction::RefreshDataDeviceSelection);
+            }
+        }
+        for client_id in self.data_control_client_ids() {
+            if skip == Some(client_id) {
+                continue;
+            }
+            dispatcher.dispatch_to(client_id, ClientAction::RefreshDataControlSelection);
+        }
     }
 
     pub fn pointer_resources(&self, client_id: ClientId) -> Vec<Resolved<WlPointerId>> {
@@ -789,6 +839,7 @@ impl SeatState {
         let mut result = SeatClientRemovalResult::default();
         self.client_serials.remove(&client_id);
         self.data_device_resources.remove(&client_id);
+        self.data_control_devices.remove(&client_id);
         self.pointer_resources.remove(&client_id);
         self.relative_pointers
             .retain(|pointer, _| pointer.client_id() != client_id);

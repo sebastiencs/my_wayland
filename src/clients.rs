@@ -24,8 +24,8 @@ use crate::{
         wl_data_device_manager::DndAction, wl_data_offer, wl_display, wl_pointer, Array, Constants,
         ExtWorkspaceManagerV1Id, HyprlandCtmControlManagerV1Id, WaylandId, WlCallbackId,
         WlDataOfferId, WlDataSourceId, WlOutputId, WlRegistryId, WlSurfaceId,
-        WpPresentationFeedbackId, XdgPopupId, XdgToplevelId, ZwlrGammaControlV1Id,
-        ZwlrLayerSurfaceV1Id, ZxdgOutputV1Id,
+        WpPresentationFeedbackId, XdgPopupId, XdgToplevelId, ZwlrDataControlSourceV1Id,
+        ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id, ZxdgOutputV1Id,
     },
     region::RectI,
     runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
@@ -36,11 +36,15 @@ use crate::{
     udev::Udev,
     wayland_objects::{
         ext_workspace_manager_v1::publish_workspace_state_changed,
-        hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1, wl_data_offer::WlDataOffer,
-        wl_display::WlDisplay, wl_output::WlOutput,
+        hyprland_ctm_control_manager_v1::HyprlandCtmControlManagerV1,
+        wl_data_offer::WlDataOffer,
+        wl_display::WlDisplay,
+        wl_output::WlOutput,
         wp_presentation_feedback::WpPresentationFeedback,
+        zwlr_data_control_offer_v1::{create_data_control_offer, destroy_data_control_offer},
         zwlr_gamma_control_v1::ZwlrGammaControlV1,
-        zwlr_layer_surface_v1::relayout_client_layer_surfaces, zxdg_output_v1::ZxdgOutputV1,
+        zwlr_layer_surface_v1::relayout_client_layer_surfaces,
+        zxdg_output_v1::ZxdgOutputV1,
     },
 };
 
@@ -451,6 +455,7 @@ pub enum ClientAction {
         toplevel: Resolved<crate::protocol_generated::XdgToplevelId>,
     },
     RefreshDataDeviceSelection,
+    RefreshDataControlSelection,
     DataDeviceDragEnter {
         serial: u32,
         surface: Resolved<WlSurfaceId>,
@@ -465,6 +470,10 @@ pub enum ClientAction {
         y: f32,
     },
     DataDeviceDragDrop,
+    DataControlSourceEvent {
+        source: Resolved<ZwlrDataControlSourceV1Id>,
+        event: DataControlSourceEvent,
+    },
     DataSourceEvent {
         source: Resolved<WlDataSourceId>,
         event: DataSourceClientEvent,
@@ -544,6 +553,11 @@ pub enum ClientAction {
 }
 
 #[derive(Debug)]
+pub enum DataControlSourceEvent {
+    Send { mime_type: String, fd: RawFd },
+    Cancelled,
+}
+
 pub enum DataSourceClientEvent {
     Target(Option<String>),
     Send { mime_type: String, fd: RawFd },
@@ -1119,8 +1133,8 @@ impl Client {
             return;
         }
         if let Some(mut offer_obj) = offer.try_grab(state) {
-            if let Some(src) = offer_obj.source() {
-                state.unregister_data_offer_for_source(src, offer);
+            if let Some(source) = offer_obj.source_object_id() {
+                state.unregister_data_offer_for_source(source, offer);
             }
             offer_obj.before_destroy(self.id, offer, state, dispatcher);
         }
@@ -1168,7 +1182,7 @@ impl Client {
         let offer_id = self.allocate_server_object_id::<WlDataOfferId>();
         let offer = WlDataOffer::new(offer_id, device_version, role, Some(source));
         let (resolved_offer, _) = self.insert_object(state, offer);
-        state.register_data_offer_for_source(source, resolved_offer);
+        state.register_data_offer_for_source(source.object_id(), resolved_offer);
         {
             let device = self.ref_object(device_id, state);
             device.send_data_offer(resolved_offer, dispatcher);
@@ -1214,18 +1228,67 @@ impl Client {
             }
 
             let next_offer = selection_source.and_then(|selection| {
-                self.create_data_offer_for_device(
+                self.create_selection_data_offer(
                     state,
                     dispatcher,
                     data_device.wayland_id(),
-                    selection.wl_data_source(),
-                    DataOfferRole::Selection,
+                    selection,
                 )
             });
 
             let data_device = data_device.ref_mut(state);
             data_device.set_selection_offer(next_offer);
             data_device.send_selection(next_offer, dispatcher);
+        }
+    }
+
+    fn create_selection_data_offer(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        device_id: crate::protocol_generated::WlDataDeviceId,
+        selection: SelectionSourceState,
+    ) -> Option<Resolved<WlDataOfferId>> {
+        if !self.contains_object(device_id, state) {
+            return None;
+        }
+        let device_version = self.ref_object(device_id, state).version();
+        let mime_types = selection.mime_types(state)?;
+        let offer_id = self.allocate_server_object_id::<WlDataOfferId>();
+        let offer = WlDataOffer::from_selection(offer_id, device_version, selection);
+        let (resolved_offer, _) = self.insert_object(state, offer);
+        state.register_data_offer_for_source(selection.object_id(), resolved_offer);
+        {
+            let device = self.ref_object(device_id, state);
+            device.send_data_offer(resolved_offer, dispatcher);
+        }
+        for mime_type in mime_types {
+            self.ref_object(offer_id, state)
+                .send_offer(mime_type, dispatcher);
+        }
+        Some(resolved_offer)
+    }
+
+    fn refresh_data_control_selection(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+    ) {
+        let selection = state.seat.selection_source();
+        for device in state.seat.data_control_devices(self.id) {
+            if !device.exists(state) || device.rref(state).is_inert() {
+                continue;
+            }
+            let previous_offer = device.ref_mut(state).take_selection_offer();
+            if let Some(previous_offer) = previous_offer {
+                destroy_data_control_offer(self, state, dispatcher, previous_offer);
+            }
+            let next_offer = selection.and_then(|selection| {
+                create_data_control_offer(self, state, dispatcher, device, selection)
+            });
+            let device = device.ref_mut(state);
+            device.set_selection_offer(next_offer);
+            device.send_selection(next_offer, dispatcher);
         }
     }
 
@@ -1371,6 +1434,28 @@ impl Client {
                     );
                 }
             }
+        }
+    }
+
+    fn handle_data_control_source_event(
+        &mut self,
+        state: &mut State,
+        dispatcher: &mut ClientDispatcher,
+        source: Resolved<ZwlrDataControlSourceV1Id>,
+        event: DataControlSourceEvent,
+    ) {
+        if !source.exists(state) {
+            if let DataControlSourceEvent::Send { fd, .. } = event {
+                let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+            }
+            return;
+        }
+        let source = source.ref_mut(state);
+        match event {
+            DataControlSourceEvent::Send { mime_type, fd } => {
+                source.send_send(mime_type, fd, dispatcher);
+            }
+            DataControlSourceEvent::Cancelled => source.send_cancelled(dispatcher),
         }
     }
 
@@ -2349,6 +2434,12 @@ impl Model for Client {
             }
             RefreshDataDeviceSelection => {
                 self.refresh_data_device_selection(state, &mut dispatcher);
+            }
+            RefreshDataControlSelection => {
+                self.refresh_data_control_selection(state, &mut dispatcher);
+            }
+            DataControlSourceEvent { source, event } => {
+                self.handle_data_control_source_event(state, &mut dispatcher, source, event);
             }
             DataDeviceDragEnter { serial, surface, x, y, source } => {
                 self.handle_data_device_drag_enter(

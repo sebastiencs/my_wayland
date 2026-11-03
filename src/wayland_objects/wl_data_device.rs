@@ -36,6 +36,10 @@ impl WlDataDevice {
         self.version
     }
 
+    pub fn selection_offer(&self) -> Option<Resolved<WlDataOfferId>> {
+        self.selection_offer
+    }
+
     pub fn take_selection_offer(&mut self) -> Option<Resolved<WlDataOfferId>> {
         self.selection_offer.take()
     }
@@ -205,9 +209,7 @@ fn set_selection(
         previous.cancelled(dispatcher);
     }
 
-    if let Some(focus) = state.seat.keyboard_focus() {
-        dispatcher.dispatch_to(focus.client_id(), ClientAction::RefreshDataDeviceSelection);
-    }
+    state.seat.publish_clipboard_selection(dispatcher, None);
 
     Ok(())
 }

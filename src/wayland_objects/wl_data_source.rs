@@ -170,7 +170,7 @@ impl Object for WlDataSource {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        destroy_source(client, state, dispatcher, self.id);
+        clear_selection_source(client, state, dispatcher, self.id, Some(client.client_id()));
     }
 }
 
@@ -180,9 +180,19 @@ fn destroy_source(
     dispatcher: &mut ClientDispatcher,
     source_id: WlDataSourceId,
 ) -> RequestResult {
+    clear_selection_source(client, state, dispatcher, source_id, None)
+}
+
+fn clear_selection_source(
+    client: &mut Client,
+    state: &mut State,
+    dispatcher: &mut ClientDispatcher,
+    source_id: WlDataSourceId,
+    skip_client: Option<crate::clients::ClientId>,
+) -> RequestResult {
     let source = client.resolve_or_disconnect(source_id, state, dispatcher)?;
 
-    let offer_ids = state.take_data_offers_for_source(source);
+    let offer_ids = state.take_data_offers_for_source(source.object_id());
     for offer in offer_ids {
         if let Some(offer_obj) = offer.try_ref_mut(state) {
             offer_obj.clear_source();
@@ -197,9 +207,9 @@ fn destroy_source(
         state
             .seat
             .replace_selection_source(None, state.seat.selection_serial());
-        if let Some(focus) = state.seat.keyboard_focus() {
-            dispatcher.dispatch_to(focus.client_id(), ClientAction::RefreshDataDeviceSelection);
-        }
+        state
+            .seat
+            .publish_clipboard_selection(dispatcher, skip_client);
     }
 
     if state
@@ -220,6 +230,9 @@ impl SelectionSourceState {
             Self::WlData(source) => source
                 .try_ref(state)
                 .map(|source| source.mime_types().to_vec()),
+            Self::DataControl(source) => source
+                .try_ref(state)
+                .map(|source| source.mime_types().to_vec()),
         }
     }
 
@@ -234,6 +247,15 @@ impl SelectionSourceState {
                     },
                 );
             }
+            Self::DataControl(source) => {
+                dispatcher.dispatch_to(
+                    source.client_id(),
+                    ClientAction::DataControlSourceEvent {
+                        source,
+                        event: crate::clients::DataControlSourceEvent::Send { mime_type, fd },
+                    },
+                );
+            }
         }
     }
 
@@ -245,6 +267,15 @@ impl SelectionSourceState {
                     ClientAction::DataSourceEvent {
                         source,
                         event: DataSourceClientEvent::Cancelled,
+                    },
+                );
+            }
+            Self::DataControl(source) => {
+                dispatcher.dispatch_to(
+                    source.client_id(),
+                    ClientAction::DataControlSourceEvent {
+                        source,
+                        event: crate::clients::DataControlSourceEvent::Cancelled,
                     },
                 );
             }

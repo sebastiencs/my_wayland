@@ -16,6 +16,7 @@ use crate::{
         wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1Global,
         wp_presentation::WpPresentationGlobal, wp_viewporter::WpViewporterGlobal,
         xdg_activation_v1::XdgActivationV1Global, xdg_wm_base::XdgWmBaseGlobal,
+        zwlr_data_control_manager_v1::ZwlrDataControlManagerV1Global,
         zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1Global,
         zwlr_layer_shell_v1::ZwlrLayerShellV1Global,
         zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1Global,
@@ -96,6 +97,7 @@ impl Globals {
         for fun in [
             WlCompositorGlobal::new,
             WlDataDeviceManagerGlobal::new,
+            ZwlrDataControlManagerV1Global::new,
             WlFixesGlobal::new,
             WlShmGlobal::new,
             WlSubcompositorGlobal::new,
