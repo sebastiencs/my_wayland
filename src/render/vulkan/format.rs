@@ -72,13 +72,14 @@ fn query_fourcc(
             vk::FormatFeatureFlags::SAMPLED_IMAGE,
             vk::ImageUsageFlags::SAMPLED,
         )?;
+        // Jay advertises a modifier as a framebuffer only when it can also be copied.
         let render_max = image_extent(
             instance,
             physical_device,
             vk_format,
             &modifier,
-            vk::FormatFeatureFlags::COLOR_ATTACHMENT,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            vk::FormatFeatureFlags::COLOR_ATTACHMENT | vk::FormatFeatureFlags::TRANSFER_SRC,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
         )?;
         if sample_max.is_none() && render_max.is_none() {
             continue;

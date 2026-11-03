@@ -416,6 +416,151 @@ fn upload_sampled(
     })
 }
 
+impl VulkanTexture {
+    pub(super) fn copy_from(
+        device: &Rc<VulkanDevice>,
+        source: &dyn resources::PaintedTarget,
+    ) -> Result<Self, RendererError> {
+        let width = source.width();
+        let height = source.height();
+        if width <= 0 || height <= 0 {
+            log::error!("vulkan capture copy has no positive size");
+            return Err(RendererError::RenderFailed);
+        }
+        let format = vk::Format::B8G8R8A8_UNORM;
+        let info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D { width: width as u32, height: height as u32, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = unsafe { device.device.create_image(&info, None) }.map_err(|error| {
+            log::error!("vulkan capture image creation failed: {error}");
+            RendererError::RenderFailed
+        })?;
+        let requirements = unsafe { device.device.get_image_memory_requirements(image) };
+        let allocation = match device.allocate(requirements, UsageFlags::FAST_DEVICE_ACCESS) {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                log::error!("{error}");
+                unsafe { device.device.destroy_image(image, None) };
+                return Err(RendererError::RenderFailed);
+            }
+        };
+        if let Err(error) = unsafe {
+            device
+                .device
+                .bind_image_memory(image, allocation.memory(), allocation.offset())
+        } {
+            log::error!("vulkan capture image bind failed: {error}");
+            unsafe { device.device.destroy_image(image, None) };
+            return Err(RendererError::RenderFailed);
+        }
+        let view = match create_view(&device.device, image, format) {
+            Ok(view) => view,
+            Err(error) => {
+                unsafe { device.device.destroy_image(image, None) };
+                return Err(error);
+            }
+        };
+        let old_layout = source.layout().get();
+        let copied = device.submit(RendererError::RenderFailed, |vulkan, command| {
+            let (src_stage, src_access) = if old_layout == vk::ImageLayout::UNDEFINED {
+                (vk::PipelineStageFlags::TOP_OF_PIPE, vk::AccessFlags::empty())
+            } else {
+                (
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                )
+            };
+            command::image_barrier(
+                vulkan,
+                command,
+                source.image(),
+                old_layout,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                src_stage,
+                vk::PipelineStageFlags::TRANSFER,
+                src_access,
+                vk::AccessFlags::TRANSFER_READ,
+            );
+            command::image_barrier(
+                vulkan,
+                command,
+                image,
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::AccessFlags::empty(),
+                vk::AccessFlags::TRANSFER_WRITE,
+            );
+            let region = vk::ImageCopy {
+                src_subresource: color_layers(),
+                src_offset: vk::Offset3D::default(),
+                dst_subresource: color_layers(),
+                dst_offset: vk::Offset3D::default(),
+                extent: vk::Extent3D { width: width as u32, height: height as u32, depth: 1 },
+            };
+            unsafe {
+                vulkan.cmd_copy_image(
+                    command,
+                    source.image(),
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    std::slice::from_ref(&region),
+                );
+            }
+            command::image_barrier(
+                vulkan,
+                command,
+                source.image(),
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags::TRANSFER_READ,
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            );
+            command::image_barrier(
+                vulkan,
+                command,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::SHADER_READ,
+            );
+            Ok(())
+        });
+        if let Err(error) = copied {
+            unsafe {
+                device.device.destroy_image_view(view, None);
+                device.device.destroy_image(image, None);
+            }
+            return Err(error);
+        }
+        source
+            .layout()
+            .set(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        Ok(Self {
+            device: device.clone(),
+            device_id: device.device_id(),
+            image,
+            view,
+            memory: TextureMemory::Gpu(allocation),
+        })
+    }
+}
+
 fn transition_sampled(device: &VulkanDevice, image: vk::Image) -> Result<(), RendererError> {
     device.submit(RendererError::ImportFailed, |device, command| {
         command::image_barrier(

@@ -3,6 +3,7 @@ mod command;
 mod descriptor;
 mod device;
 mod draw;
+mod effects;
 mod format;
 mod instance;
 mod memory;
@@ -21,10 +22,11 @@ use std::{
 
 use crate::{
     dmabuf::{DmaBuf, DmaBufId},
-    region::RectI,
+    region::{DamageRegion, RectI},
     render::{
-        FrameElement, GraphicsApi, OffscreenTarget, RenderCompletion, RenderFrame, RenderTarget,
-        Renderer, RendererCapabilities, RendererError, ShmImage, Texture,
+        FrameElement, GraphicsApi, OffscreenTarget, OutputFrameRecipe, RenderCompletion,
+        RenderFrame, RenderSyncMode, RenderTarget, Renderer, RendererCapabilities, RendererError,
+        ShmImage, Texture,
     },
     sync::AcquireSync,
     transform::OutputPresentationTransform,
@@ -157,13 +159,35 @@ impl Renderer for VulkanRenderer {
 
     fn capture_transparent(
         &mut self,
-        _elements: &[FrameElement],
-        _width: i32,
-        _height: i32,
-        _blur_reference: (i32, i32),
-        _presentation_transform: OutputPresentationTransform,
+        elements: &[FrameElement],
+        width: i32,
+        height: i32,
+        blur_reference: (i32, i32),
+        presentation_transform: OutputPresentationTransform,
     ) -> Result<Rc<dyn Texture>, RendererError> {
-        Err(RendererError::NotImplemented("vulkan transparent capture"))
+        if width <= 0 || height <= 0 {
+            log::error!("vulkan transparent capture has no positive size");
+            return Err(RendererError::RenderFailed);
+        }
+        let bounds = RectI::new(0, 0, width, height).ok_or(RendererError::RenderFailed)?;
+        let target = OffscreenImage::new(&self.device, width, height)?;
+        let recipe = OutputFrameRecipe { elements: elements.to_vec() };
+        let damage = DamageRegion::from_rect(bounds);
+        draw::paint(
+            &self.device,
+            &mut self.draw,
+            &target,
+            RenderFrame {
+                recipe: &recipe,
+                damage: &damage,
+                preserve_contents: false,
+                presentation_transform,
+                sync_mode: RenderSyncMode::BlockingFinishFallback,
+                blur_reference: Some(blur_reference),
+            },
+        )?;
+        VulkanTexture::copy_from(&self.device, &target)
+            .map(|texture| Rc::new(texture) as Rc<dyn Texture>)
     }
 
     fn wait_acquire(&mut self, _acquire: &AcquireSync) -> Result<(), RendererError> {
@@ -191,10 +215,7 @@ mod tests {
         drm::DrmFd,
         gbm::{GbmDevice, UseFlags},
         region::{DamageRegion, RectI},
-        render::{
-            create_renderer, OutputFrameRecipe, RenderFrame, RenderSyncMode, Renderer,
-            RendererError,
-        },
+        render::{create_renderer, OutputFrameRecipe, RenderFrame, RenderSyncMode, Renderer},
         transform::OutputPresentationTransform,
     };
 
@@ -334,13 +355,11 @@ mod tests {
         assert!(completion.used_blocking_fallback);
         assert!(completion.in_fence_fd.is_none());
         let mut pixels = [0_u8; 4];
-        let readback = setup.renderer.readback(
-            &*target,
-            RectI::new(0, 0, 1, 1).expect("rect"),
-            4,
-            &mut pixels,
-        );
-        assert!(matches!(readback, Err(RendererError::ReadbackFailed)));
+        setup
+            .renderer
+            .readback(&*target, RectI::new(0, 0, 1, 1).expect("rect"), 4, &mut pixels)
+            .expect("read the cleared scanout target");
+        assert_eq!(pixels, [0, 0, 255, 255]);
         drop(target);
     }
 }

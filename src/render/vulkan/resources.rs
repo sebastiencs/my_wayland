@@ -106,7 +106,7 @@ impl OutputTarget {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .flags(flags)
@@ -312,7 +312,7 @@ impl PaintedTarget for OutputTarget {
     }
 
     fn can_readback(&self) -> bool {
-        false
+        true
     }
 }
 
@@ -574,7 +574,7 @@ pub(super) fn color_render_pass(
         .map_err(|error| format!("vulkan color render pass failed: {error}"))
 }
 
-fn create_framebuffer(
+pub(super) fn create_framebuffer(
     device: &ash::Device,
     render_pass: vk::RenderPass,
     view: vk::ImageView,

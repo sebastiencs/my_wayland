@@ -1,10 +1,14 @@
-//! Textured-quad pipeline. One layout is reused for every draw in a frame.
+//! Textured-quad, border, shadow, and blur pipelines.
 
 use std::{ffi::CString, rc::Rc};
 
 use {ash::vk, gpu_alloc::UsageFlags};
 
-use super::{allocator::AllocatedBuffer, compiled_shaders, device::VulkanDevice, resources};
+use crate::render::Texture;
+
+use super::{
+    allocator::AllocatedBuffer, compiled_shaders, device::VulkanDevice, resources, texture,
+};
 
 pub(super) struct DrawState {
     device: Rc<VulkanDevice>,
@@ -15,6 +19,7 @@ pub(super) struct DrawState {
     pool: vk::DescriptorPool,
     sampler: vk::Sampler,
     vertices: AllocatedBuffer,
+    effects: EffectGpu,
 }
 
 impl DrawState {
@@ -79,7 +84,15 @@ impl DrawState {
                     return Err(error);
                 }
             };
-        let pipeline = match graphics_pipeline(&device.device, pipeline_layout, render_pass) {
+        let pipeline = match graphics_pipeline(
+            &device.device,
+            pipeline_layout,
+            render_pass,
+            compiled_shaders::TEXTURE_VERT,
+            compiled_shaders::TEXTURE_FRAG,
+            false,
+            true,
+        ) {
             Ok(pipeline) => pipeline,
             Err(error) => {
                 unsafe {
@@ -110,6 +123,22 @@ impl DrawState {
                 return Err(error);
             }
         };
+        let effects = match EffectGpu::new(device, render_pass, pipeline_layout) {
+            Ok(effects) => effects,
+            Err(error) => {
+                unsafe {
+                    device.device.destroy_pipeline(pipeline, None);
+                    device.device.destroy_render_pass(render_pass, None);
+                    device.device.destroy_pipeline_layout(pipeline_layout, None);
+                    device.device.destroy_descriptor_pool(pool, None);
+                    device
+                        .device
+                        .destroy_descriptor_set_layout(set_layout, None);
+                    device.device.destroy_sampler(sampler, None);
+                }
+                return Err(error);
+            }
+        };
         Ok(Self {
             device: device.clone(),
             pipeline,
@@ -119,6 +148,7 @@ impl DrawState {
             pool,
             sampler,
             vertices,
+            effects,
         })
     }
 
@@ -143,7 +173,14 @@ impl DrawState {
     }
 
     pub(super) fn allocate_set(&mut self) -> Result<vk::DescriptorSet, String> {
-        let layouts = [self.set_layout];
+        self.allocate_set_for(self.set_layout)
+    }
+
+    pub(super) fn allocate_set_for(
+        &mut self,
+        layout: vk::DescriptorSetLayout,
+    ) -> Result<vk::DescriptorSet, String> {
+        let layouts = [layout];
         let info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.pool)
             .set_layouts(&layouts);
@@ -152,6 +189,38 @@ impl DrawState {
             .into_iter()
             .next()
             .ok_or_else(|| "vulkan allocated no descriptor set".to_string())
+    }
+
+    pub(super) fn border_pipeline(&self) -> vk::Pipeline {
+        self.effects.border_pipeline
+    }
+
+    pub(super) fn border_layout(&self) -> vk::PipelineLayout {
+        self.effects.border_layout
+    }
+
+    pub(super) fn border_set_layout(&self) -> vk::DescriptorSetLayout {
+        self.effects.border_set_layout
+    }
+
+    pub(super) fn shadow_pipeline(&self) -> vk::Pipeline {
+        self.effects.shadow_pipeline
+    }
+
+    pub(super) fn shadow_layout(&self) -> vk::PipelineLayout {
+        self.effects.shadow_layout
+    }
+
+    pub(super) fn shadow_set_layout(&self) -> vk::DescriptorSetLayout {
+        self.effects.shadow_set_layout
+    }
+
+    pub(super) fn blur_pipeline(&self) -> vk::Pipeline {
+        self.effects.blur_pipeline
+    }
+
+    pub(super) fn dim_texture(&self) -> Rc<dyn Texture> {
+        self.effects.dim.clone()
     }
 
     pub(super) fn reset_descriptors(&mut self) -> Result<(), String> {
@@ -170,6 +239,7 @@ impl Drop for DrawState {
             if let Err(error) = self.device.device.device_wait_idle() {
                 log::error!("vulkan wait before destroying the pipeline failed: {error}");
             }
+            self.effects.destroy();
             self.device.device.destroy_pipeline(self.pipeline, None);
             self.device
                 .device
@@ -211,15 +281,15 @@ fn descriptor_pool(device: &ash::Device) -> Result<vk::DescriptorPool, String> {
     let sizes = [
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 256,
+            descriptor_count: 1024,
         },
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: 256,
+            descriptor_count: 1024,
         },
     ];
     let info = vk::DescriptorPoolCreateInfo::default()
-        .max_sets(256)
+        .max_sets(1024)
         .pool_sizes(&sizes);
     unsafe { device.create_descriptor_pool(&info, None) }
         .map_err(|error| format!("vulkan descriptor pool failed: {error}"))
@@ -239,9 +309,13 @@ fn graphics_pipeline(
     device: &ash::Device,
     layout: vk::PipelineLayout,
     render_pass: vk::RenderPass,
+    vertex_spirv: &[u8],
+    fragment_spirv: &[u8],
+    position_only: bool,
+    blend: bool,
 ) -> Result<vk::Pipeline, String> {
-    let vertex = shader_module(device, compiled_shaders::TEXTURE_VERT)?;
-    let fragment = match shader_module(device, compiled_shaders::TEXTURE_FRAG) {
+    let vertex = shader_module(device, vertex_spirv)?;
+    let fragment = match shader_module(device, fragment_spirv) {
         Ok(module) => module,
         Err(error) => {
             unsafe { device.destroy_shader_module(vertex, None) };
@@ -264,23 +338,27 @@ fn graphics_pipeline(
         stride: 16,
         input_rate: vk::VertexInputRate::VERTEX,
     };
-    let attributes = [
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
-            offset: 0,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
-            offset: 8,
-        },
-    ];
+    let position = vk::VertexInputAttributeDescription {
+        location: 0,
+        binding: 0,
+        format: vk::Format::R32G32_SFLOAT,
+        offset: 0,
+    };
+    let texcoord = vk::VertexInputAttributeDescription {
+        location: 1,
+        binding: 0,
+        format: vk::Format::R32G32_SFLOAT,
+        offset: 8,
+    };
+    let attributes = [position, texcoord];
+    let position_attributes = [position];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(std::slice::from_ref(&binding))
-        .vertex_attribute_descriptions(&attributes);
+        .vertex_attribute_descriptions(if position_only {
+            &position_attributes
+        } else {
+            &attributes
+        });
     let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(vk::PrimitiveTopology::TRIANGLE_STRIP);
     let viewport = vk::PipelineViewportStateCreateInfo::default()
@@ -294,7 +372,7 @@ fn graphics_pipeline(
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-        .blend_enable(true)
+        .blend_enable(blend)
         .src_color_blend_factor(vk::BlendFactor::ONE)
         .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
         .color_blend_op(vk::BlendOp::ADD)
@@ -367,4 +445,168 @@ fn quad_vertices(device: &Rc<VulkanDevice>) -> Result<AllocatedBuffer, String> {
     )?;
     buffer.write(bytes)?;
     Ok(buffer)
+}
+
+struct EffectGpu {
+    device: Rc<VulkanDevice>,
+    border_pipeline: vk::Pipeline,
+    border_layout: vk::PipelineLayout,
+    border_set_layout: vk::DescriptorSetLayout,
+    shadow_pipeline: vk::Pipeline,
+    shadow_layout: vk::PipelineLayout,
+    shadow_set_layout: vk::DescriptorSetLayout,
+    blur_pipeline: vk::Pipeline,
+    dim: Rc<dyn Texture>,
+}
+
+impl EffectGpu {
+    fn new(
+        device: &Rc<VulkanDevice>,
+        render_pass: vk::RenderPass,
+        texture_layout: vk::PipelineLayout,
+    ) -> Result<Self, String> {
+        let (border_pipeline, border_layout, border_set_layout) = uniform_pipeline(
+            &device.device,
+            render_pass,
+            compiled_shaders::BORDER_VERT,
+            compiled_shaders::BORDER_FRAG,
+        )?;
+        let (shadow_pipeline, shadow_layout, shadow_set_layout) = match uniform_pipeline(
+            &device.device,
+            render_pass,
+            compiled_shaders::SHADOW_VERT,
+            compiled_shaders::SHADOW_FRAG,
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                destroy_uniform(&device.device, border_pipeline, border_layout, border_set_layout);
+                return Err(error);
+            }
+        };
+        let blur_pipeline = match graphics_pipeline(
+            &device.device,
+            texture_layout,
+            render_pass,
+            compiled_shaders::BLUR_VERT,
+            compiled_shaders::BLUR_FRAG,
+            false,
+            false,
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                destroy_uniform(&device.device, shadow_pipeline, shadow_layout, shadow_set_layout);
+                destroy_uniform(&device.device, border_pipeline, border_layout, border_set_layout);
+                return Err(error);
+            }
+        };
+        let dim = match texture::VulkanTexture::upload_rgba(device, &[0, 0, 0, 255], 1, 1) {
+            Ok(texture) => Rc::new(texture) as Rc<dyn Texture>,
+            Err(_) => {
+                unsafe { device.device.destroy_pipeline(blur_pipeline, None) };
+                destroy_uniform(&device.device, shadow_pipeline, shadow_layout, shadow_set_layout);
+                destroy_uniform(&device.device, border_pipeline, border_layout, border_set_layout);
+                return Err("vulkan dim texture failed".to_string());
+            }
+        };
+        Ok(Self {
+            device: device.clone(),
+            border_pipeline,
+            border_layout,
+            border_set_layout,
+            shadow_pipeline,
+            shadow_layout,
+            shadow_set_layout,
+            blur_pipeline,
+            dim,
+        })
+    }
+
+    fn destroy(&mut self) {
+        unsafe {
+            let device = &self.device.device;
+            if self.blur_pipeline != vk::Pipeline::null() {
+                device.destroy_pipeline(self.blur_pipeline, None);
+                self.blur_pipeline = vk::Pipeline::null();
+            }
+            if self.shadow_pipeline != vk::Pipeline::null() {
+                destroy_uniform(
+                    device,
+                    self.shadow_pipeline,
+                    self.shadow_layout,
+                    self.shadow_set_layout,
+                );
+                self.shadow_pipeline = vk::Pipeline::null();
+                self.shadow_layout = vk::PipelineLayout::null();
+                self.shadow_set_layout = vk::DescriptorSetLayout::null();
+            }
+            if self.border_pipeline != vk::Pipeline::null() {
+                destroy_uniform(
+                    device,
+                    self.border_pipeline,
+                    self.border_layout,
+                    self.border_set_layout,
+                );
+                self.border_pipeline = vk::Pipeline::null();
+                self.border_layout = vk::PipelineLayout::null();
+                self.border_set_layout = vk::DescriptorSetLayout::null();
+            }
+        }
+    }
+}
+
+impl Drop for EffectGpu {
+    fn drop(&mut self) {
+        self.destroy();
+    }
+}
+
+fn uniform_pipeline(
+    device: &ash::Device,
+    render_pass: vk::RenderPass,
+    vertex_spirv: &[u8],
+    fragment_spirv: &[u8],
+) -> Result<(vk::Pipeline, vk::PipelineLayout, vk::DescriptorSetLayout), String> {
+    let set_layout = uniform_set_layout(device)?;
+    let layout = match pipeline_layout(device, set_layout) {
+        Ok(layout) => layout,
+        Err(error) => {
+            unsafe { device.destroy_descriptor_set_layout(set_layout, None) };
+            return Err(error);
+        }
+    };
+    match graphics_pipeline(device, layout, render_pass, vertex_spirv, fragment_spirv, true, true) {
+        Ok(pipeline) => Ok((pipeline, layout, set_layout)),
+        Err(error) => {
+            unsafe {
+                device.destroy_pipeline_layout(layout, None);
+                device.destroy_descriptor_set_layout(set_layout, None);
+            }
+            Err(error)
+        }
+    }
+}
+
+fn uniform_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout, String> {
+    let binding = vk::DescriptorSetLayoutBinding::default()
+        .binding(0)
+        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+        .descriptor_count(1)
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT);
+    let info =
+        vk::DescriptorSetLayoutCreateInfo::default().bindings(std::slice::from_ref(&binding));
+    unsafe { device.create_descriptor_set_layout(&info, None) }
+        .map_err(|error| format!("vulkan uniform layout failed: {error}"))
+}
+
+fn destroy_uniform(
+    device: &ash::Device,
+    pipeline: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    set_layout: vk::DescriptorSetLayout,
+) {
+    unsafe {
+        device.destroy_pipeline(pipeline, None);
+        device.destroy_pipeline_layout(layout, None);
+        device.destroy_descriptor_set_layout(set_layout, None);
+    }
 }
