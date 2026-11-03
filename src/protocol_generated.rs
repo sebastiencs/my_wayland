@@ -81,6 +81,10 @@ wayland_id! {
   WpDrmLeaseConnectorV1Id,
   WpDrmLeaseRequestV1Id,
   WpDrmLeaseV1Id,
+  ExtDataControlManagerV1Id,
+  ExtDataControlDeviceV1Id,
+  ExtDataControlSourceV1Id,
+  ExtDataControlOfferV1Id,
   ExtForeignToplevelListV1Id,
   ExtForeignToplevelHandleV1Id,
   ExtIdleNotifierV1Id,
@@ -117,6 +121,10 @@ wayland_id! {
   ZwpPointerConstraintsV1Id,
   ZwpLockedPointerV1Id,
   ZwpConfinedPointerV1Id,
+  ZwpPrimarySelectionDeviceManagerV1Id,
+  ZwpPrimarySelectionDeviceV1Id,
+  ZwpPrimarySelectionOfferV1Id,
+  ZwpPrimarySelectionSourceV1Id,
   ZwpRelativePointerManagerV1Id,
   ZwpRelativePointerV1Id,
   ZxdgDecorationManagerV1Id,
@@ -126,6 +134,10 @@ wayland_id! {
   ExtWorkspaceManagerV1Id,
   ExtWorkspaceGroupHandleV1Id,
   ExtWorkspaceHandleV1Id,
+  ZwlrDataControlManagerV1Id,
+  ZwlrDataControlDeviceV1Id,
+  ZwlrDataControlSourceV1Id,
+  ZwlrDataControlOfferV1Id,
   ZwlrForeignToplevelManagerV1Id,
   ZwlrForeignToplevelHandleV1Id,
   ZwlrScreencopyManagerV1Id,
@@ -10468,6 +10480,399 @@ pub mod wp_drm_lease_v1 {
     }
 }
 
+/// Manager to control data devices
+///
+/// This interface is a manager that allows creating per-seat data device
+/// controls.
+pub mod ext_data_control_manager_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::ext_data_control_manager_v1::ExtDataControlManagerV1 {
+        const INTERFACE_NAME: &'static str = "ext_data_control_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtDataControlManagerV1Id {
+        type Object = crate::wayland_objects::ext_data_control_manager_v1::ExtDataControlManagerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_data_control_manager_v1::ExtDataControlManagerV1
+    {
+        type Id = ExtDataControlManagerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Create a new data source
+        ///
+        /// Create a new data source.
+        CreateDataSource {
+            /// Data source to create,
+            id: ExtDataControlSourceV1Id,
+        },
+        /// Get a data device for a seat
+        ///
+        /// Create a data device that can be used to manage a seat's selection.
+        GetDataDevice { id: ExtDataControlDeviceV1Id, seat: WlSeatId },
+        /// Destroy the manager
+        ///
+        /// All objects created by the manager will still remain valid, until their
+        /// appropriate destroy request has been called.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::ext_data_control_manager_v1::ExtDataControlManagerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => CreateDataSource { id: req.id()? },
+                1 => GetDataDevice { id: req.id()?, seat: req.id()? },
+                2 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
+/// Manage a data device for a seat
+///
+/// This interface allows a client to manage a seat's selection.
+///
+/// When the seat is destroyed, this object becomes inert.
+pub mod ext_data_control_device_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::ext_data_control_device_v1::ExtDataControlDeviceV1 {
+        const INTERFACE_NAME: &'static str = "ext_data_control_device_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtDataControlDeviceV1Id {
+        type Object = crate::wayland_objects::ext_data_control_device_v1::ExtDataControlDeviceV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_data_control_device_v1::ExtDataControlDeviceV1
+    {
+        type Id = ExtDataControlDeviceV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Copy data to the selection
+        ///
+        /// This request asks the compositor to set the selection to the data from
+        /// the source on behalf of the client.
+        ///
+        /// The given source may not be used in any further set_selection or
+        /// set_primary_selection requests. Attempting to use a previously used
+        /// source triggers the used_source protocol error.
+        ///
+        /// To unset the selection, set the source to NULL.
+        SetSelection { source: ExtDataControlSourceV1Id },
+        /// Destroy this data device
+        ///
+        /// Destroys the data device object.
+        Destroy,
+        /// Copy data to the primary selection
+        ///
+        /// This request asks the compositor to set the primary selection to the
+        /// data from the source on behalf of the client.
+        ///
+        /// The given source may not be used in any further set_selection or
+        /// set_primary_selection requests. Attempting to use a previously used
+        /// source triggers the used_source protocol error.
+        ///
+        /// To unset the primary selection, set the source to NULL.
+        ///
+        /// The compositor will ignore this request if it does not support primary
+        /// selection.
+        SetPrimarySelection { source: ExtDataControlSourceV1Id },
+    }
+    impl Parser for crate::wayland_objects::ext_data_control_device_v1::ExtDataControlDeviceV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetSelection { source: req.id()? },
+                1 => Destroy,
+                2 => SetPrimarySelection { source: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Introduce a new ext_data_control_offer
+        ///
+        /// The data_offer event introduces a new ext_data_control_offer object,
+        /// which will subsequently be used in either the
+        /// ext_data_control_device.selection event (for the regular clipboard
+        /// selections) or the ext_data_control_device.primary_selection event (for
+        /// the primary clipboard selections). Immediately following the
+        /// ext_data_control_device.data_offer event, the new data_offer object
+        /// will send out ext_data_control_offer.offer events to describe the MIME
+        /// types it offers.
+        DataOffer { id: ExtDataControlOfferV1Id },
+        /// Advertise new selection
+        ///
+        /// The selection event is sent out to notify the client of a new
+        /// ext_data_control_offer for the selection for this device. The
+        /// ext_data_control_device.data_offer and the ext_data_control_offer.offer
+        /// events are sent out immediately before this event to introduce the data
+        /// offer object. The selection event is sent to a client when a new
+        /// selection is set. The ext_data_control_offer is valid until a new
+        /// ext_data_control_offer or NULL is received. The client must destroy the
+        /// previous selection ext_data_control_offer, if any, upon receiving this
+        /// event. Regardless, the previous selection will be ignored once a new
+        /// selection ext_data_control_offer is received.
+        ///
+        /// The first selection event is sent upon binding the
+        /// ext_data_control_device object.
+        Selection { id: ExtDataControlOfferV1Id },
+        /// This data control is no longer valid
+        ///
+        /// This data control object is no longer valid and should be destroyed by
+        /// the client.
+        Finished,
+        /// Advertise new primary selection
+        ///
+        /// The primary_selection event is sent out to notify the client of a new
+        /// ext_data_control_offer for the primary selection for this device. The
+        /// ext_data_control_device.data_offer and the ext_data_control_offer.offer
+        /// events are sent out immediately before this event to introduce the data
+        /// offer object. The primary_selection event is sent to a client when a
+        /// new primary selection is set. The ext_data_control_offer is valid until
+        /// a new ext_data_control_offer or NULL is received. The client must
+        /// destroy the previous primary selection ext_data_control_offer, if any,
+        /// upon receiving this event. Regardless, the previous primary selection
+        /// will be ignored once a new primary selection ext_data_control_offer is
+        /// received.
+        ///
+        /// If the compositor supports primary selection, the first
+        /// primary_selection event is sent upon binding the
+        /// ext_data_control_device object.
+        PrimarySelection { id: ExtDataControlOfferV1Id },
+    }
+    impl EventWriter for crate::wayland_objects::ext_data_control_device_v1::ExtDataControlDeviceV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                DataOffer { id } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(id);
+                    raw
+                }
+                Selection { id } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.id(id);
+                    raw
+                }
+                Finished {} => {
+                    let mut raw = RawEvent::new(self.id(), 2, 0);
+                    raw
+                }
+                PrimarySelection { id } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.id(id);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Source given to set_selection or set_primary_selection was already used before,
+        UsedSource = 1,
+    }
+}
+
+/// Offer to transfer data
+///
+/// The ext_data_control_source object is the source side of a
+/// ext_data_control_offer. It is created by the source client in a data
+/// transfer and provides a way to describe the offered data and a way to
+/// respond to requests to transfer the data.
+pub mod ext_data_control_source_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::ext_data_control_source_v1::ExtDataControlSourceV1 {
+        const INTERFACE_NAME: &'static str = "ext_data_control_source_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtDataControlSourceV1Id {
+        type Object = crate::wayland_objects::ext_data_control_source_v1::ExtDataControlSourceV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_data_control_source_v1::ExtDataControlSourceV1
+    {
+        type Id = ExtDataControlSourceV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Add an offered MIME type
+        ///
+        /// This request adds a MIME type to the set of MIME types advertised to
+        /// targets. Can be called several times to offer multiple types.
+        ///
+        /// Calling this after ext_data_control_device.set_selection is a protocol
+        /// error.
+        Offer {
+            /// MIME type offered by the data source,
+            mime_type: String,
+        },
+        /// Destroy this source
+        ///
+        /// Destroys the data source object.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::ext_data_control_source_v1::ExtDataControlSourceV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Offer { mime_type: req.string()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Send the data
+        ///
+        /// Request for data from the client. Send the data as the specified MIME
+        /// type over the passed file descriptor, then close it.
+        Send {
+            /// MIME type for the data,
+            mime_type: String,
+            /// File descriptor for the data,
+            fd: RawFd,
+        },
+        /// Selection was cancelled
+        ///
+        /// This data source is no longer valid. The data source has been replaced
+        /// by another data source.
+        ///
+        /// The client should clean up and destroy this data source.
+        Cancelled,
+    }
+    impl EventWriter for crate::wayland_objects::ext_data_control_source_v1::ExtDataControlSourceV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Send { mime_type, fd } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 2);
+                    raw.string(mime_type);
+                    raw.fd(fd);
+                    raw
+                }
+                Cancelled {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Offer sent after ext_data_control_device.set_selection,
+        InvalidOffer = 1,
+    }
+}
+
+/// Offer to transfer data
+///
+/// A ext_data_control_offer represents a piece of data offered for transfer
+/// by another client (the source client). The offer describes the different
+/// MIME types that the data can be converted to and provides the mechanism
+/// for transferring the data directly from the source client.
+pub mod ext_data_control_offer_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::ext_data_control_offer_v1::ExtDataControlOfferV1 {
+        const INTERFACE_NAME: &'static str = "ext_data_control_offer_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ExtDataControlOfferV1Id {
+        type Object = crate::wayland_objects::ext_data_control_offer_v1::ExtDataControlOfferV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::ext_data_control_offer_v1::ExtDataControlOfferV1
+    {
+        type Id = ExtDataControlOfferV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Request that the data is transferred
+        ///
+        /// To transfer the offered data, the client issues this request and
+        /// indicates the MIME type it wants to receive. The transfer happens
+        /// through the passed file descriptor (typically created with the pipe
+        /// system call). The source client writes the data in the MIME type
+        /// representation requested and then closes the file descriptor.
+        ///
+        /// The receiving client reads from the read end of the pipe until EOF and
+        /// then closes its end, at which point the transfer is complete.
+        ///
+        /// This request may happen multiple times for different MIME types.
+        Receive {
+            /// MIME type desired by receiver,
+            mime_type: String,
+            /// File descriptor for data transfer,
+            fd: RawFd,
+        },
+        /// Destroy this offer
+        ///
+        /// Destroys the data offer object.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::ext_data_control_offer_v1::ExtDataControlOfferV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Receive { mime_type: req.string()?, fd: req.fd()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Advertise offered MIME type
+        ///
+        /// Sent immediately after creating the ext_data_control_offer object.
+        /// One event per offered MIME type.
+        Offer {
+            /// Offered MIME type,
+            mime_type: String,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::ext_data_control_offer_v1::ExtDataControlOfferV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Offer { mime_type } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.string(mime_type);
+                    raw
+                }
+            }
+        }
+    }
+}
+
 /// List toplevels
 ///
 /// A toplevel is defined as a surface with a role similar to xdg_toplevel.
@@ -14168,6 +14573,331 @@ pub mod zwp_confined_pointer_v1 {
     }
 }
 
+/// X primary selection emulation
+///
+/// The primary selection device manager is a singleton global object that
+/// provides access to the primary selection. It allows to create
+/// wp_primary_selection_source objects, as well as retrieving the per-seat
+/// wp_primary_selection_device objects.
+pub mod zwp_primary_selection_device_manager_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1 {
+    const INTERFACE_NAME: &'static str = "zwp_primary_selection_device_manager_v1";
+    const INTERFACE_VERSION: u32 = 1;
+  }
+    impl crate::object::IdToObject for ZwpPrimarySelectionDeviceManagerV1Id {
+        type Object = crate::wayland_objects::zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1 {
+    type Id = ZwpPrimarySelectionDeviceManagerV1Id;
+  }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Create a new primary selection source
+        ///
+        /// Create a new primary selection source.
+        CreateSource { id: ZwpPrimarySelectionSourceV1Id },
+        /// Create a new primary selection device
+        ///
+        /// Create a new data device for a given seat.
+        GetDevice { id: ZwpPrimarySelectionDeviceV1Id, seat: WlSeatId },
+        /// Destroy the primary selection device manager
+        ///
+        /// Destroy the primary selection device manager.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1 {
+    type Request = Request;
+    fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+      use Request::*;
+      let request = match req.request_id {
+        0 => CreateSource {
+          id: req.id()?,
+        },
+        1 => GetDevice {
+          id: req.id()?,
+          seat: req.id()?,
+        },
+        2 => Destroy,
+        _ => return Err(ParserError::InvalidRequest),
+      };
+      Ok(request)
+    }
+  }
+}
+
+pub mod zwp_primary_selection_device_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1
+    {
+        const INTERFACE_NAME: &'static str = "zwp_primary_selection_device_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpPrimarySelectionDeviceV1Id {
+        type Object =
+            crate::wayland_objects::zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1
+    {
+        type Id = ZwpPrimarySelectionDeviceV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Set the primary selection
+        ///
+        /// Replaces the current selection. The previous owner of the primary
+        /// selection will receive a wp_primary_selection_source.cancelled event.
+        ///
+        /// To unset the selection, set the source to NULL.
+        SetSelection {
+            source: ZwpPrimarySelectionSourceV1Id,
+            /// Serial of the event that triggered this request,
+            serial: u32,
+        },
+        /// Destroy the primary selection device
+        ///
+        /// Destroy the primary selection device.
+        Destroy,
+    }
+    impl Parser
+        for crate::wayland_objects::zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetSelection { source: req.id()?, serial: req.uint()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Introduce a new wp_primary_selection_offer
+        ///
+        /// Introduces a new wp_primary_selection_offer object that may be used
+        /// to receive the current primary selection. Immediately following this
+        /// event, the new wp_primary_selection_offer object will send
+        /// wp_primary_selection_offer.offer events to describe the offered mime
+        /// types.
+        DataOffer { offer: ZwpPrimarySelectionOfferV1Id },
+        /// Advertise a new primary selection
+        ///
+        /// The wp_primary_selection_device.selection event is sent to notify the
+        /// client of a new primary selection. This event is sent after the
+        /// wp_primary_selection.data_offer event introducing this object, and after
+        /// the offer has announced its mimetypes through
+        /// wp_primary_selection_offer.offer.
+        ///
+        /// The data_offer is valid until a new offer or NULL is received
+        /// or until the client loses keyboard focus. The client must destroy the
+        /// previous selection data_offer, if any, upon receiving this event.
+        Selection { id: ZwpPrimarySelectionOfferV1Id },
+    }
+    impl EventWriter
+        for crate::wayland_objects::zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                DataOffer { offer } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(offer);
+                    raw
+                }
+                Selection { id } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.id(id);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// Offer to transfer primary selection contents
+///
+/// A wp_primary_selection_offer represents an offer to transfer the contents
+/// of the primary selection clipboard to the client. Similar to
+/// wl_data_offer, the offer also describes the mime types that the data can
+/// be converted to and provides the mechanisms for transferring the data
+/// directly to the client.
+pub mod zwp_primary_selection_offer_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1
+    {
+        const INTERFACE_NAME: &'static str = "zwp_primary_selection_offer_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpPrimarySelectionOfferV1Id {
+        type Object =
+            crate::wayland_objects::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1
+    {
+        type Id = ZwpPrimarySelectionOfferV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Request that the data is transferred
+        ///
+        /// To transfer the contents of the primary selection clipboard, the client
+        /// issues this request and indicates the mime type that it wants to
+        /// receive. The transfer happens through the passed file descriptor
+        /// (typically created with the pipe system call). The source client writes
+        /// the data in the mime type representation requested and then closes the
+        /// file descriptor.
+        ///
+        /// The receiving client reads from the read end of the pipe until EOF and
+        /// closes its end, at which point the transfer is complete.
+        Receive { mime_type: String, fd: RawFd },
+        /// Destroy the primary selection offer
+        ///
+        /// Destroy the primary selection offer.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Receive { mime_type: req.string()?, fd: req.fd()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Advertise offered mime type
+        ///
+        /// Sent immediately after creating announcing the
+        /// wp_primary_selection_offer through
+        /// wp_primary_selection_device.data_offer. One event is sent per offered
+        /// mime type.
+        Offer { mime_type: String },
+    }
+    impl EventWriter
+        for crate::wayland_objects::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Offer { mime_type } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.string(mime_type);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// Offer to replace the contents of the primary selection
+///
+/// The source side of a wp_primary_selection_offer, it provides a way to
+/// describe the offered data and respond to requests to transfer the
+/// requested contents of the primary selection clipboard.
+pub mod zwp_primary_selection_source_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1
+    {
+        const INTERFACE_NAME: &'static str = "zwp_primary_selection_source_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpPrimarySelectionSourceV1Id {
+        type Object =
+            crate::wayland_objects::zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1
+    {
+        type Id = ZwpPrimarySelectionSourceV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Add an offered mime type
+        ///
+        /// This request adds a mime type to the set of mime types advertised to
+        /// targets. Can be called several times to offer multiple types.
+        Offer { mime_type: String },
+        /// Destroy the primary selection source
+        ///
+        /// Destroy the primary selection source.
+        Destroy,
+    }
+    impl Parser
+        for crate::wayland_objects::zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Offer { mime_type: req.string()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Send the primary selection contents
+        ///
+        /// Request for the current primary selection contents from the client.
+        /// Send the specified mime type over the passed file descriptor, then
+        /// close it.
+        Send { mime_type: String, fd: RawFd },
+        /// Request for primary selection contents was canceled
+        ///
+        /// This primary selection source is no longer valid. The client should
+        /// clean up and destroy this primary selection source.
+        Cancelled,
+    }
+    impl EventWriter
+        for crate::wayland_objects::zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Send { mime_type, fd } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 2);
+                    raw.string(mime_type);
+                    raw.fd(fd);
+                    raw
+                }
+                Cancelled {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+}
+
 /// Get relative pointer objects
 ///
 /// A global interface used for getting the relative pointer object for a
@@ -15346,6 +16076,401 @@ pub mod ext_workspace_handle_v1 {
         Remove = 4,
         /// Assign request is available,
         Assign = 8,
+    }
+}
+
+/// Manager to control data devices
+///
+/// This interface is a manager that allows creating per-seat data device
+/// controls.
+pub mod zwlr_data_control_manager_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwlr_data_control_manager_v1::ZwlrDataControlManagerV1 {
+        const INTERFACE_NAME: &'static str = "zwlr_data_control_manager_v1";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwlrDataControlManagerV1Id {
+        type Object =
+            crate::wayland_objects::zwlr_data_control_manager_v1::ZwlrDataControlManagerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwlr_data_control_manager_v1::ZwlrDataControlManagerV1
+    {
+        type Id = ZwlrDataControlManagerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Create a new data source
+        ///
+        /// Create a new data source.
+        CreateDataSource {
+            /// Data source to create,
+            id: ZwlrDataControlSourceV1Id,
+        },
+        /// Get a data device for a seat
+        ///
+        /// Create a data device that can be used to manage a seat's selection.
+        GetDataDevice { id: ZwlrDataControlDeviceV1Id, seat: WlSeatId },
+        /// Destroy the manager
+        ///
+        /// All objects created by the manager will still remain valid, until their
+        /// appropriate destroy request has been called.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwlr_data_control_manager_v1::ZwlrDataControlManagerV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => CreateDataSource { id: req.id()? },
+                1 => GetDataDevice { id: req.id()?, seat: req.id()? },
+                2 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
+/// Manage a data device for a seat
+///
+/// This interface allows a client to manage a seat's selection.
+///
+/// When the seat is destroyed, this object becomes inert.
+pub mod zwlr_data_control_device_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwlr_data_control_device_v1::ZwlrDataControlDeviceV1 {
+        const INTERFACE_NAME: &'static str = "zwlr_data_control_device_v1";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwlrDataControlDeviceV1Id {
+        type Object = crate::wayland_objects::zwlr_data_control_device_v1::ZwlrDataControlDeviceV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwlr_data_control_device_v1::ZwlrDataControlDeviceV1
+    {
+        type Id = ZwlrDataControlDeviceV1Id;
+    }
+    /// Minimum interface version for the `set_primary_selection` message (XML `since` / `version`).
+    pub const SET_PRIMARY_SELECTION_SINCE: u32 = 2;
+    #[derive(Debug)]
+    pub enum Request {
+        /// Copy data to the selection
+        ///
+        /// This request asks the compositor to set the selection to the data from
+        /// the source on behalf of the client.
+        ///
+        /// The given source may not be used in any further set_selection or
+        /// set_primary_selection requests. Attempting to use a previously used
+        /// source is a protocol error.
+        ///
+        /// To unset the selection, set the source to NULL.
+        SetSelection { source: ZwlrDataControlSourceV1Id },
+        /// Destroy this data device
+        ///
+        /// Destroys the data device object.
+        Destroy,
+        /// Copy data to the primary selection
+        ///
+        /// This request asks the compositor to set the primary selection to the
+        /// data from the source on behalf of the client.
+        ///
+        /// The given source may not be used in any further set_selection or
+        /// set_primary_selection requests. Attempting to use a previously used
+        /// source is a protocol error.
+        ///
+        /// To unset the primary selection, set the source to NULL.
+        ///
+        /// The compositor will ignore this request if it does not support primary
+        /// selection.
+        SetPrimarySelection { source: ZwlrDataControlSourceV1Id },
+    }
+    impl Parser for crate::wayland_objects::zwlr_data_control_device_v1::ZwlrDataControlDeviceV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => SetSelection { source: req.id()? },
+                1 => Destroy,
+                2 => SetPrimarySelection { source: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    /// Minimum interface version for the `primary_selection` message (XML `since` / `version`).
+    pub const PRIMARY_SELECTION_SINCE: u32 = 2;
+    #[derive(Debug)]
+    pub enum Event {
+        /// Introduce a new wlr_data_control_offer
+        ///
+        /// The data_offer event introduces a new wlr_data_control_offer object,
+        /// which will subsequently be used in either the
+        /// wlr_data_control_device.selection event (for the regular clipboard
+        /// selections) or the wlr_data_control_device.primary_selection event (for
+        /// the primary clipboard selections). Immediately following the
+        /// wlr_data_control_device.data_offer event, the new data_offer object
+        /// will send out wlr_data_control_offer.offer events to describe the MIME
+        /// types it offers.
+        DataOffer { id: ZwlrDataControlOfferV1Id },
+        /// Advertise new selection
+        ///
+        /// The selection event is sent out to notify the client of a new
+        /// wlr_data_control_offer for the selection for this device. The
+        /// wlr_data_control_device.data_offer and the wlr_data_control_offer.offer
+        /// events are sent out immediately before this event to introduce the data
+        /// offer object. The selection event is sent to a client when a new
+        /// selection is set. The wlr_data_control_offer is valid until a new
+        /// wlr_data_control_offer or NULL is received. The client must destroy the
+        /// previous selection wlr_data_control_offer, if any, upon receiving this
+        /// event.
+        ///
+        /// The first selection event is sent upon binding the
+        /// wlr_data_control_device object.
+        Selection { id: ZwlrDataControlOfferV1Id },
+        /// This data control is no longer valid
+        ///
+        /// This data control object is no longer valid and should be destroyed by
+        /// the client.
+        Finished,
+        /// Advertise new primary selection
+        ///
+        /// The primary_selection event is sent out to notify the client of a new
+        /// wlr_data_control_offer for the primary selection for this device. The
+        /// wlr_data_control_device.data_offer and the wlr_data_control_offer.offer
+        /// events are sent out immediately before this event to introduce the data
+        /// offer object. The primary_selection event is sent to a client when a
+        /// new primary selection is set. The wlr_data_control_offer is valid until
+        /// a new wlr_data_control_offer or NULL is received. The client must
+        /// destroy the previous primary selection wlr_data_control_offer, if any,
+        /// upon receiving this event.
+        ///
+        /// If the compositor supports primary selection, the first
+        /// primary_selection event is sent upon binding the
+        /// wlr_data_control_device object.
+        PrimarySelection { id: ZwlrDataControlOfferV1Id },
+    }
+    impl EventWriter for crate::wayland_objects::zwlr_data_control_device_v1::ZwlrDataControlDeviceV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                DataOffer { id } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(id);
+                    raw
+                }
+                Selection { id } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.id(id);
+                    raw
+                }
+                Finished {} => {
+                    let mut raw = RawEvent::new(self.id(), 2, 0);
+                    raw
+                }
+                PrimarySelection { id } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.id(id);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Source given to set_selection or set_primary_selection was already used before,
+        UsedSource = 1,
+    }
+}
+
+/// Offer to transfer data
+///
+/// The wlr_data_control_source object is the source side of a
+/// wlr_data_control_offer. It is created by the source client in a data
+/// transfer and provides a way to describe the offered data and a way to
+/// respond to requests to transfer the data.
+pub mod zwlr_data_control_source_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwlr_data_control_source_v1::ZwlrDataControlSourceV1 {
+        const INTERFACE_NAME: &'static str = "zwlr_data_control_source_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwlrDataControlSourceV1Id {
+        type Object = crate::wayland_objects::zwlr_data_control_source_v1::ZwlrDataControlSourceV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwlr_data_control_source_v1::ZwlrDataControlSourceV1
+    {
+        type Id = ZwlrDataControlSourceV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Add an offered MIME type
+        ///
+        /// This request adds a MIME type to the set of MIME types advertised to
+        /// targets. Can be called several times to offer multiple types.
+        ///
+        /// Calling this after wlr_data_control_device.set_selection is a protocol
+        /// error.
+        Offer {
+            /// MIME type offered by the data source,
+            mime_type: String,
+        },
+        /// Destroy this source
+        ///
+        /// Destroys the data source object.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwlr_data_control_source_v1::ZwlrDataControlSourceV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Offer { mime_type: req.string()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Send the data
+        ///
+        /// Request for data from the client. Send the data as the specified MIME
+        /// type over the passed file descriptor, then close it.
+        Send {
+            /// MIME type for the data,
+            mime_type: String,
+            /// File descriptor for the data,
+            fd: RawFd,
+        },
+        /// Selection was cancelled
+        ///
+        /// This data source is no longer valid. The data source has been replaced
+        /// by another data source.
+        ///
+        /// The client should clean up and destroy this data source.
+        Cancelled,
+    }
+    impl EventWriter for crate::wayland_objects::zwlr_data_control_source_v1::ZwlrDataControlSourceV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Send { mime_type, fd } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 2);
+                    raw.string(mime_type);
+                    raw.fd(fd);
+                    raw
+                }
+                Cancelled {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Offer sent after wlr_data_control_device.set_selection,
+        InvalidOffer = 1,
+    }
+}
+
+/// Offer to transfer data
+///
+/// A wlr_data_control_offer represents a piece of data offered for transfer
+/// by another client (the source client). The offer describes the different
+/// MIME types that the data can be converted to and provides the mechanism
+/// for transferring the data directly from the source client.
+pub mod zwlr_data_control_offer_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwlr_data_control_offer_v1::ZwlrDataControlOfferV1 {
+        const INTERFACE_NAME: &'static str = "zwlr_data_control_offer_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwlrDataControlOfferV1Id {
+        type Object = crate::wayland_objects::zwlr_data_control_offer_v1::ZwlrDataControlOfferV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwlr_data_control_offer_v1::ZwlrDataControlOfferV1
+    {
+        type Id = ZwlrDataControlOfferV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Request that the data is transferred
+        ///
+        /// To transfer the offered data, the client issues this request and
+        /// indicates the MIME type it wants to receive. The transfer happens
+        /// through the passed file descriptor (typically created with the pipe
+        /// system call). The source client writes the data in the MIME type
+        /// representation requested and then closes the file descriptor.
+        ///
+        /// The receiving client reads from the read end of the pipe until EOF and
+        /// then closes its end, at which point the transfer is complete.
+        ///
+        /// This request may happen multiple times for different MIME types.
+        Receive {
+            /// MIME type desired by receiver,
+            mime_type: String,
+            /// File descriptor for data transfer,
+            fd: RawFd,
+        },
+        /// Destroy this offer
+        ///
+        /// Destroys the data offer object.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwlr_data_control_offer_v1::ZwlrDataControlOfferV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Receive { mime_type: req.string()?, fd: req.fd()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Advertise offered MIME type
+        ///
+        /// Sent immediately after creating the wlr_data_control_offer object.
+        /// One event per offered MIME type.
+        Offer {
+            /// Offered MIME type,
+            mime_type: String,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zwlr_data_control_offer_v1::ZwlrDataControlOfferV1 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Offer { mime_type } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.string(mime_type);
+                    raw
+                }
+            }
+        }
     }
 }
 
