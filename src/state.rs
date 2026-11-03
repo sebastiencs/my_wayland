@@ -445,6 +445,11 @@ pub struct ManagedRootSurfaceState {
     pub awaiting_initial_layout: bool,
     pub remembered_floating_state: Option<RememberedFloatingState>,
     pub restore_floating_state_on_next_configure: bool,
+    /// Keep the saved floating frame until the client commits that size.
+    ///
+    /// Layout passes also run for the active workspace, and the fullscreen buffer is still
+    /// attached then. Sampling it would park the fullscreen size on the floating origin.
+    pub hold_floating_layout: bool,
     pub focus_animation: FocusVisualAnimation,
     pub lifecycle_animation: WindowLifecycleAnimation,
     pub geometry_animation: WindowGeometryAnimation,
@@ -454,6 +459,9 @@ pub struct ManagedRootSurfaceState {
 pub struct RememberedFloatingState {
     pub root_pos: (i32, i32),
     pub configure_size: (i32, i32),
+    /// Frame saved before fullscreen or tiling. The committed buffer is still the
+    /// fullscreen size when floating is restored, so the animation must aim here.
+    pub layout_rect: RectI,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1483,6 +1491,7 @@ impl State {
                 awaiting_initial_layout: true,
                 remembered_floating_state: None,
                 restore_floating_state_on_next_configure: false,
+                hold_floating_layout: false,
                 focus_animation: initial_animation,
                 lifecycle_animation: WindowLifecycleAnimation::idle(),
                 geometry_animation: WindowGeometryAnimation::unarmed(),
@@ -1738,6 +1747,19 @@ impl State {
         if !self.managed_root_surfaces.contains_key(&surface) {
             return;
         }
+        if motion == WindowGeometryMotion::Warp {
+            if let Some(managed) = self.managed_root_surfaces.get_mut(&surface) {
+                managed.hold_floating_layout = false;
+            }
+        } else if let Some(held) = self.held_floating_layout(surface) {
+            let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
+                return;
+            };
+            managed
+                .geometry_animation
+                .set_goal(held, WindowGeometryMotion::Layout);
+            return;
+        }
         let Some(geometry) = self.ensure_root_geometry_fresh(surface) else {
             return;
         };
@@ -1747,6 +1769,28 @@ impl State {
         managed
             .geometry_animation
             .set_goal(geometry.layout_rect_global, motion);
+    }
+
+    /// Saved floating frame while the attached buffer is still a different size.
+    fn held_floating_layout(&mut self, surface: Resolved<WlSurfaceId>) -> Option<RectI> {
+        let managed = self.managed_root_surfaces.get(&surface)?;
+        if !managed.hold_floating_layout
+            || managed.fullscreen
+            || managed.mode != ManagedWindowMode::Floating
+        {
+            return None;
+        }
+        let remembered = managed.remembered_floating_state?;
+        let geometry = self.committed_root_geometry(surface)?;
+        let caught_up = geometry.layout_rect_global.width == remembered.layout_rect.width
+            && geometry.layout_rect_global.height == remembered.layout_rect.height;
+        if caught_up {
+            if let Some(managed) = self.managed_root_surfaces.get_mut(&surface) {
+                managed.hold_floating_layout = false;
+            }
+            return None;
+        }
+        Some(remembered.layout_rect)
     }
 
     pub fn mark_root_geometry_dirty(&mut self, surface: Resolved<WlSurfaceId>) {
@@ -2654,6 +2698,7 @@ impl State {
                 self.configured_decoration_insets(),
             )
             .size,
+            layout_rect: geometry.layout_rect_global,
         })
     }
 
@@ -2688,7 +2733,9 @@ impl State {
         let restore_state = floating
             .then_some(managed.remembered_floating_state)
             .flatten();
-        managed.restore_floating_state_on_next_configure = floating && restore_state.is_some();
+        let restore_floating = floating && restore_state.is_some();
+        managed.restore_floating_state_on_next_configure = restore_floating;
+        managed.hold_floating_layout = restore_floating;
         if floating {
             managed.fullscreen = false;
             if let Some(workspace) = self.workspaces.try_get_mut(workspace_id) {
@@ -2735,6 +2782,7 @@ impl State {
         managed.mode = ManagedWindowMode::Floating;
         managed.fullscreen = false;
         managed.restore_floating_state_on_next_configure = false;
+        managed.hold_floating_layout = false;
         if let Some(workspace) = self.workspaces.try_get_mut(workspace_id) {
             if workspace
                 .layout
@@ -2758,6 +2806,7 @@ impl State {
         let workspace_id = managed.workspace_id;
         managed.mode = ManagedWindowMode::Tiled;
         managed.restore_floating_state_on_next_configure = false;
+        managed.hold_floating_layout = false;
         tiling::mark_workspace_dirty(self, workspace_id);
         self.relayout_dirty_workspaces();
         true
@@ -2812,6 +2861,7 @@ impl State {
                         }
                     }
                     managed.restore_floating_state_on_next_configure = false;
+                    managed.hold_floating_layout = false;
                     managed.fullscreen = true;
                 })
                 .or_insert(ManagedRootSurfaceState {
@@ -2822,6 +2872,7 @@ impl State {
                     awaiting_initial_layout: true,
                     remembered_floating_state: None,
                     restore_floating_state_on_next_configure: false,
+                    hold_floating_layout: false,
                     focus_animation: initial_animation,
                     lifecycle_animation: WindowLifecycleAnimation::idle(),
                     geometry_animation: WindowGeometryAnimation::unarmed(),
@@ -2837,9 +2888,12 @@ impl State {
                 managed.fullscreen = false;
                 if managed.mode == ManagedWindowMode::Floating {
                     restore_state = managed.remembered_floating_state;
-                    managed.restore_floating_state_on_next_configure = restore_state.is_some();
+                    let restore = restore_state.is_some();
+                    managed.restore_floating_state_on_next_configure = restore;
+                    managed.hold_floating_layout = restore;
                 } else {
                     managed.restore_floating_state_on_next_configure = false;
+                    managed.hold_floating_layout = false;
                 }
             }
             self.sync_root_surface_requested_fullscreen(surface, false);
@@ -2941,6 +2995,11 @@ impl State {
                             remembered_state.root_pos.0 + dx,
                             remembered_state.root_pos.1 + dy,
                         ),
+                        layout_rect: RectI {
+                            x: remembered_state.layout_rect.x + dx,
+                            y: remembered_state.layout_rect.y + dy,
+                            ..remembered_state.layout_rect
+                        },
                         ..remembered_state
                     });
         }
@@ -2988,7 +3047,14 @@ impl State {
         wl_surface.set_root_position(remembered_state.root_pos.0, remembered_state.root_pos.1);
         drop(wl_surface);
         self.mark_root_geometry_dirty(surface);
-        self.sync_window_geometry_goal(surface, WindowGeometryMotion::Layout);
+        // The attached buffer is still the fullscreen frame. Sampling it would aim the
+        // animation at that size, parked on the restored floating origin.
+        let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
+            return false;
+        };
+        managed
+            .geometry_animation
+            .set_goal(remembered_state.layout_rect, WindowGeometryMotion::Layout);
         true
     }
 
@@ -4648,7 +4714,11 @@ mod tests {
                 .managed_root_surface_state(root(&state, object_id))
                 .unwrap()
                 .remembered_floating_state,
-            Some(RememberedFloatingState { root_pos: (250, 180), configure_size: (120, 90) })
+            Some(RememberedFloatingState {
+                root_pos: (250, 180),
+                configure_size: (120, 90),
+                layout_rect: RectI { x: 250, y: 180, width: 120, height: 90 },
+            })
         );
 
         assert!(state.set_root_surface_floating(root(&state, object_id), true));
@@ -4738,7 +4808,16 @@ mod tests {
         state.mark_root_geometry_dirty(root(&state, object_id));
         let _ = state.committed_root_geometry(root(&state, object_id));
 
+        let floating_rect = state
+            .committed_root_geometry(root(&state, object_id))
+            .unwrap()
+            .layout_rect_global;
         assert!(state.set_root_surface_fullscreen(root(&state, object_id), true));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(0usize), 0, 0, 1280, 720);
+        }
+        state.mark_root_geometry_dirty(root(&state, object_id));
         assert!(state.set_root_surface_fullscreen(root(&state, object_id), false));
 
         let surface = state
@@ -4750,8 +4829,25 @@ mod tests {
             state
                 .managed_root_surface_state(root(&state, object_id))
                 .unwrap()
-                .restore_floating_state_on_next_configure,
-            true
+                .geometry_animation
+                .goal_rect(),
+            Some(floating_rect)
+        );
+        assert!(
+            state
+                .managed_root_surface_state(root(&state, object_id))
+                .unwrap()
+                .restore_floating_state_on_next_configure
+        );
+        state.take_scheduled_floating_restore_state(root(&state, object_id));
+        state.relayout_dirty_workspaces();
+        assert_eq!(
+            state
+                .managed_root_surface_state(root(&state, object_id))
+                .unwrap()
+                .geometry_animation
+                .goal_rect(),
+            Some(floating_rect)
         );
     }
 
@@ -4804,7 +4900,11 @@ mod tests {
                 .managed_root_surface_state(root_surface)
                 .unwrap()
                 .remembered_floating_state,
-            Some(RememberedFloatingState { root_pos: (40, 50), configure_size: (120, 90) })
+            Some(RememberedFloatingState {
+                root_pos: (40, 50),
+                configure_size: (120, 90),
+                layout_rect: RectI { x: 40, y: 50, width: 120, height: 90 },
+            })
         );
     }
 
@@ -4858,8 +4958,11 @@ mod tests {
             .managed_root_surfaces
             .get_mut(&surface)
             .unwrap()
-            .remembered_floating_state =
-            Some(RememberedFloatingState { root_pos: (10, 20), configure_size: (50, 50) });
+            .remembered_floating_state = Some(RememberedFloatingState {
+            root_pos: (10, 20),
+            configure_size: (50, 50),
+            layout_rect: RectI { x: 10, y: 20, width: 50, height: 50 },
+        });
 
         state.move_workspace_to_group_output(left_workspace, right_group);
 
@@ -4868,7 +4971,11 @@ mod tests {
                 .managed_root_surface_state(root(&state, object_id))
                 .unwrap()
                 .remembered_floating_state,
-            Some(RememberedFloatingState { root_pos: (210, 20), configure_size: (50, 50) })
+            Some(RememberedFloatingState {
+                root_pos: (210, 20),
+                configure_size: (50, 50),
+                layout_rect: RectI { x: 210, y: 20, width: 50, height: 50 },
+            })
         );
     }
 
@@ -4892,8 +4999,11 @@ mod tests {
             .managed_root_surfaces
             .get_mut(&surface)
             .unwrap()
-            .remembered_floating_state =
-            Some(RememberedFloatingState { root_pos: (10, 20), configure_size: (50, 50) });
+            .remembered_floating_state = Some(RememberedFloatingState {
+            root_pos: (10, 20),
+            configure_size: (50, 50),
+            layout_rect: RectI { x: 10, y: 20, width: 50, height: 50 },
+        });
         state
             .managed_root_surfaces
             .get_mut(&surface)
@@ -4907,7 +5017,11 @@ mod tests {
                 .managed_root_surface_state(root(&state, object_id))
                 .unwrap()
                 .remembered_floating_state,
-            Some(RememberedFloatingState { root_pos: (210, 20), configure_size: (50, 50) })
+            Some(RememberedFloatingState {
+                root_pos: (210, 20),
+                configure_size: (50, 50),
+                layout_rect: RectI { x: 210, y: 20, width: 50, height: 50 },
+            })
         );
         assert!(
             state
