@@ -38,9 +38,15 @@ impl Global for WlOutputGlobal {
         let Some(wl_output) = client.resolve(id, state) else {
             return;
         };
-        let wl_output = wl_output.rref(state);
-        wl_output.send_state(state, dispatcher);
+        wl_output.rref(state).send_state(state, dispatcher);
         client.replay_surface_output_for_output(state, dispatcher, self.output_id);
+        crate::capture::replay_wlr_toplevel_output(
+            client,
+            state,
+            dispatcher,
+            self.output_id,
+            wl_output,
+        );
         client.refresh_workspace_protocols(state, dispatcher);
     }
 }

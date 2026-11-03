@@ -57,6 +57,8 @@ pub mod xdg_popup;
 pub mod xdg_positioner;
 pub mod xdg_surface;
 pub mod xdg_wm_base;
+pub mod zwlr_foreign_toplevel_handle_v1;
+pub mod zwlr_foreign_toplevel_manager_v1;
 pub mod zwlr_gamma_control_manager_v1;
 pub mod zwlr_gamma_control_v1;
 pub mod zwlr_layer_shell_v1;
@@ -150,6 +152,4 @@ fake_obj! {
     { zwp_tablet_v2, ZwpTabletV2 },
     { zwp_tablet_tool_v2, ZwpTabletToolV2 },
     { zwp_tablet_seat_v2, ZwpTabletSeatV2 },
-    { zwlr_foreign_toplevel_manager_v1, ZwlrForeignToplevelManagerV1 },
-    { zwlr_foreign_toplevel_handle_v1, ZwlrForeignToplevelHandleV1 },
 }

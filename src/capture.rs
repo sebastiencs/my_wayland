@@ -12,13 +12,17 @@ use crate::{
     clients::{Client, ClientAction, ClientDispatcher, ClientId, Resolved},
     protocol_generated::{
         ExtForeignToplevelHandleV1Id, ExtForeignToplevelListV1Id, ExtImageCopyCaptureFrameV1Id,
-        ExtImageCopyCaptureSessionV1Id, WlBufferId, WlPointerId, WlSurfaceId, XdgToplevelId,
+        ExtImageCopyCaptureSessionV1Id, WlBufferId, WlOutputId, WlPointerId, WlSurfaceId,
+        XdgToplevelId, ZwlrForeignToplevelHandleV1Id, ZwlrForeignToplevelManagerV1Id,
         ZwlrScreencopyFrameV1Id,
     },
     region::RectI,
     runner::Dispatcher,
     state::{OutputId, State},
-    wayland_objects::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+    wayland_objects::{
+        ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+        zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+    },
 };
 
 /// Stable mapped-toplevel identity. Values are never reused after [`close_toplevel`].
@@ -124,30 +128,53 @@ struct ToplevelRecord {
 }
 
 /// A client watching mapped toplevels. Ext lists ignore shell, output, and parent updates.
-/// wlr managers join this list when that protocol is implemented.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToplevelSubscriber {
     ExtList(Resolved<ExtForeignToplevelListV1Id>),
+    WlrManager(Resolved<ZwlrForeignToplevelManagerV1Id>),
 }
 
 impl ToplevelSubscriber {
     fn client_id(self) -> ClientId {
         match self {
             Self::ExtList(list) => list.client_id(),
+            Self::WlrManager(manager) => manager.client_id(),
         }
     }
 
     fn ext_list(self) -> Option<Resolved<ExtForeignToplevelListV1Id>> {
         match self {
             Self::ExtList(list) => Some(list),
+            Self::WlrManager(_) => None,
+        }
+    }
+
+    fn wlr_manager(self) -> Option<Resolved<ZwlrForeignToplevelManagerV1Id>> {
+        match self {
+            Self::WlrManager(manager) => Some(manager),
+            Self::ExtList(_) => None,
         }
     }
 
     fn is_finished(self, state: &State) -> bool {
         match self {
             Self::ExtList(list) => list.try_ref(state).is_none_or(|list| list.is_finished()),
+            Self::WlrManager(manager) => manager
+                .try_ref(state)
+                .is_none_or(|manager| manager.is_finished()),
         }
     }
+}
+
+/// One `zwlr_foreign_toplevel_handle_v1` created for a manager. `closed` is set when the
+/// compositor sends `closed`. Destroying the object removes the slot and keeps the manager's
+/// announced entry, so the same toplevel is not announced again.
+#[derive(Clone, Copy, Debug)]
+struct WlrHandleSlot {
+    handle: Resolved<ZwlrForeignToplevelHandleV1Id>,
+    manager: Resolved<ZwlrForeignToplevelManagerV1Id>,
+    key: ToplevelKey,
+    closed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -189,6 +216,7 @@ enum Pending {
         job: CaptureJobId,
     },
     CloseHandle(Resolved<ExtForeignToplevelHandleV1Id>),
+    CloseWlrHandle(Resolved<ZwlrForeignToplevelHandleV1Id>),
     Announce {
         key: ToplevelKey,
         title: String,
@@ -232,6 +260,10 @@ pub struct CaptureRegistry {
     /// Lists that already received a handle for a key. Destroying that handle does not create
     /// another one until the toplevel is unmapped and mapped again.
     announced: BTreeSet<(Resolved<ExtForeignToplevelListV1Id>, ToplevelKey)>,
+    /// wlr managers that already received a handle for a key. Client `destroy` does not
+    /// create another handle. A new map after unmap does, because it has a new key.
+    wlr_announced: BTreeSet<(Resolved<ZwlrForeignToplevelManagerV1Id>, ToplevelKey)>,
+    wlr_handles: Vec<WlrHandleSlot>,
     sessions: Vec<SessionSlot>,
     ext_frames: Vec<ExtFrameSlot>,
     screencopy: Vec<ScreencopySlot>,
@@ -314,6 +346,21 @@ impl CaptureRegistry {
         self.subscribers.push(ToplevelSubscriber::ExtList(list));
     }
 
+    pub(crate) fn track_wlr_manager(&mut self, manager: Resolved<ZwlrForeignToplevelManagerV1Id>) {
+        self.subscribers
+            .push(ToplevelSubscriber::WlrManager(manager));
+    }
+
+    pub(crate) fn track_wlr_handle(
+        &mut self,
+        handle: Resolved<ZwlrForeignToplevelHandleV1Id>,
+        manager: Resolved<ZwlrForeignToplevelManagerV1Id>,
+        key: ToplevelKey,
+    ) {
+        self.wlr_handles
+            .push(WlrHandleSlot { handle, manager, key, closed: false });
+    }
+
     pub(crate) fn track_handle(
         &mut self,
         handle: Resolved<ExtForeignToplevelHandleV1Id>,
@@ -348,6 +395,17 @@ impl CaptureRegistry {
         self.retain_pending(|item| !matches!(item, Pending::CloseHandle(id) if *id == handle));
     }
 
+    pub(crate) fn forget_wlr_manager(&mut self, manager: Resolved<ZwlrForeignToplevelManagerV1Id>) {
+        self.subscribers
+            .retain(|subscriber| subscriber.wlr_manager() != Some(manager));
+    }
+
+    /// Drop the handle object. The announced entry stays, so this toplevel is not sent again.
+    pub(crate) fn forget_wlr_handle(&mut self, handle: Resolved<ZwlrForeignToplevelHandleV1Id>) {
+        self.wlr_handles.retain(|slot| slot.handle != handle);
+        self.retain_pending(|item| !matches!(item, Pending::CloseWlrHandle(id) if *id == handle));
+    }
+
     /// Drop every capture object and queued event owned by a disconnected client.
     pub fn drop_client(&mut self, client_id: ClientId) {
         self.sessions
@@ -362,6 +420,10 @@ impl CaptureRegistry {
             .retain(|(handle, _)| handle.client_id() != client_id);
         self.announced
             .retain(|(list, _)| list.client_id() != client_id);
+        self.wlr_handles
+            .retain(|slot| slot.handle.client_id() != client_id);
+        self.wlr_announced
+            .retain(|(manager, _)| manager.client_id() != client_id);
         self.jobs
             .retain(|_, job| job.buffer.client_id() != client_id);
         self.samples.retain(|id, _| self.jobs.contains_key(id));
@@ -385,6 +447,14 @@ impl CaptureRegistry {
             .iter()
             .filter(|(_, candidate)| *candidate == key)
             .map(|(handle, _)| *handle)
+            .collect()
+    }
+
+    fn wlr_handles_for(&self, key: ToplevelKey) -> Vec<WlrHandleSlot> {
+        self.wlr_handles
+            .iter()
+            .copied()
+            .filter(|slot| slot.key == key && !slot.closed)
             .collect()
     }
 
@@ -1982,6 +2052,13 @@ pub(crate) fn close_toplevel(state: &mut State, dispatcher: &mut Dispatcher, key
             .enqueue(handle.client_id(), Pending::CloseHandle(handle));
         clients.insert(handle.client_id());
     }
+    let wlr_handles = state.capture.wlr_handles_for(key);
+    for slot in wlr_handles {
+        state
+            .capture
+            .enqueue(slot.handle.client_id(), Pending::CloseWlrHandle(slot.handle));
+        clients.insert(slot.handle.client_id());
+    }
     let target = CaptureTarget::Toplevel(key);
     let sessions: Vec<_> = state
         .capture
@@ -2029,6 +2106,30 @@ fn is_announced(state: &State, key: ToplevelKey) -> bool {
         .announced
         .iter()
         .any(|(_, announced)| *announced == key)
+        || state
+            .capture
+            .wlr_handles
+            .iter()
+            .any(|slot| slot.key == key && !slot.closed)
+}
+
+fn watcher_clients(state: &State, key: ToplevelKey) -> BTreeSet<ClientId> {
+    let mut clients: BTreeSet<_> = state
+        .capture
+        .announced
+        .iter()
+        .filter(|(_, announced)| *announced == key)
+        .map(|(list, _)| list.client_id())
+        .collect();
+    clients.extend(
+        state
+            .capture
+            .wlr_handles
+            .iter()
+            .filter(|slot| slot.key == key && !slot.closed)
+            .map(|slot| slot.handle.client_id()),
+    );
+    clients
 }
 
 fn enqueue_if_announced(
@@ -2040,13 +2141,7 @@ fn enqueue_if_announced(
     if !is_announced(state, key) {
         return;
     }
-    let clients: BTreeSet<_> = state
-        .capture
-        .announced
-        .iter()
-        .filter(|(_, announced)| *announced == key)
-        .map(|(list, _)| list.client_id())
-        .collect();
+    let clients = watcher_clients(state, key);
     for client_id in clients.iter().copied() {
         state.capture.enqueue(client_id, item.clone());
     }
@@ -2281,7 +2376,25 @@ pub fn deliver(client: &mut Client, state: &mut State, dispatcher: &mut ClientDi
     let Some(pending) = state.capture.pending.remove(&client.client_id()) else {
         return;
     };
+    // Create every wlr handle before sending details. A child's parent event can then point
+    // at a handle created for the same manager in this delivery, matching wlroots' bind.
+    let mut created = Vec::new();
+    let mut rest = Vec::new();
     for item in pending {
+        match item {
+            Pending::Announce { key, title, app_id } => {
+                if state.capture.toplevel_is_open(key) {
+                    announce_to_client(client, state, dispatcher, key, &title, &app_id);
+                    created.extend(create_wlr_handles(client, state, dispatcher, key));
+                }
+            }
+            other => rest.push(other),
+        }
+    }
+    for handle in created {
+        send_wlr_initial(client, state, dispatcher, handle);
+    }
+    for item in rest {
         match item {
             Pending::StopSession(session) => {
                 if let Some(session) = session.try_ref_mut(state) {
@@ -2331,9 +2444,17 @@ pub fn deliver(client: &mut Client, state: &mut State, dispatcher: &mut ClientDi
                     handle.send_closed(dispatcher);
                 }
             }
-            Pending::Announce { key, title, app_id } => {
-                if state.capture.toplevel_is_open(key) {
-                    announce_to_client(client, state, dispatcher, key, &title, &app_id);
+            Pending::CloseWlrHandle(handle) => {
+                if let Some(slot) = state
+                    .capture
+                    .wlr_handles
+                    .iter_mut()
+                    .find(|slot| slot.handle == handle)
+                {
+                    slot.closed = true;
+                }
+                if let Some(handle) = handle.try_ref_mut(state) {
+                    handle.send_closed(dispatcher);
                 }
             }
             Pending::Retitle { key, title } => {
@@ -2342,6 +2463,7 @@ pub fn deliver(client: &mut Client, state: &mut State, dispatcher: &mut ClientDi
                         handle.send_title(&title, dispatcher);
                     }
                 }
+                send_wlr_title(client, state, dispatcher, key, &title);
             }
             Pending::Reapp { key, app_id } => {
                 for handle in state.capture.handles_for(key) {
@@ -2349,12 +2471,22 @@ pub fn deliver(client: &mut Client, state: &mut State, dispatcher: &mut ClientDi
                         handle.send_app_id(&app_id, dispatcher);
                     }
                 }
+                send_wlr_app_id(client, state, dispatcher, key, &app_id);
             }
-            // Ext lists have no state, output, or parent events. wlr handles consume these later.
-            Pending::ShellState { .. }
-            | Pending::OutputEntered { .. }
-            | Pending::OutputLeft { .. }
-            | Pending::ParentChanged { .. } => {}
+            Pending::ShellState { key, activated, maximized, fullscreen } => {
+                send_wlr_state(client, state, dispatcher, key, activated, maximized, fullscreen);
+            }
+            Pending::OutputEntered { key, output } => {
+                send_wlr_output(client, state, dispatcher, key, output, true);
+            }
+            Pending::OutputLeft { key, output } => {
+                send_wlr_output(client, state, dispatcher, key, output, false);
+            }
+            Pending::ParentChanged { key, parent } => {
+                send_wlr_parent(client, state, dispatcher, key, parent);
+            }
+            // Taken out of `rest` before this loop. Kept so the match stays exhaustive.
+            Pending::Announce { .. } => unreachable!("announce is sent in the first pass"),
         }
     }
 }
@@ -2390,6 +2522,248 @@ fn announce_to_client(
         state.capture.announced.insert((list, key));
         list.rref(state).send_toplevel(handle_id, dispatcher);
         handle.rref(state).send_initial(dispatcher);
+    }
+}
+
+fn create_wlr_handles(
+    client: &mut Client,
+    state: &mut State,
+    dispatcher: &mut ClientDispatcher,
+    key: ToplevelKey,
+) -> Vec<Resolved<ZwlrForeignToplevelHandleV1Id>> {
+    let managers: Vec<_> = state
+        .capture
+        .subscribers
+        .iter()
+        .copied()
+        .filter_map(ToplevelSubscriber::wlr_manager)
+        .filter(|manager| manager.client_id() == client.client_id())
+        .filter(|manager| {
+            !manager
+                .try_ref(state)
+                .is_none_or(|manager| manager.is_finished())
+        })
+        .filter(|manager| !state.capture.wlr_announced.contains(&(*manager, key)))
+        .collect();
+    let mut created = Vec::new();
+    for manager in managers {
+        let version = manager
+            .try_ref(state)
+            .map(|manager| manager.version())
+            .unwrap_or(1);
+        let handle_id = client.allocate_server_object_id::<ZwlrForeignToplevelHandleV1Id>();
+        let (handle, _) = client.insert_object(
+            state,
+            ZwlrForeignToplevelHandleV1::new(handle_id, key, version, manager),
+        );
+        state.capture.track_wlr_handle(handle, manager, key);
+        state.capture.wlr_announced.insert((manager, key));
+        manager.rref(state).send_toplevel(handle_id, dispatcher);
+        created.push(handle);
+    }
+    created
+}
+
+fn live_wlr_handles(
+    client: &Client,
+    state: &State,
+    key: ToplevelKey,
+) -> Vec<Resolved<ZwlrForeignToplevelHandleV1Id>> {
+    state
+        .capture
+        .wlr_handles
+        .iter()
+        .filter(|slot| {
+            slot.key == key && !slot.closed && slot.handle.client_id() == client.client_id()
+        })
+        .map(|slot| slot.handle)
+        .collect()
+}
+
+/// Title, app id, entered outputs, state, and parent, then one `done`.
+/// Strings are sent even when empty. A missing parent handle is omitted: the client destroyed it.
+fn send_wlr_initial(
+    client: &Client,
+    state: &State,
+    dispatcher: &mut ClientDispatcher,
+    handle: Resolved<ZwlrForeignToplevelHandleV1Id>,
+) {
+    let Some(object) = handle.try_ref(state) else {
+        return;
+    };
+    if object.is_closed() {
+        return;
+    }
+    let version = object.version();
+    let manager = object.manager();
+    let key = object.key();
+    let Some(record) = state.capture.toplevels.get(&key) else {
+        return;
+    };
+    let title = record.title.clone();
+    let app_id = record.app_id.clone();
+    let outputs: Vec<OutputId> = record.outputs.iter().copied().collect();
+    let parent = record.parent;
+    let activated = record.activated;
+    let maximized = record.maximized;
+    let fullscreen = record.fullscreen;
+    let object = handle.rref(state);
+    object.send_title(&title, dispatcher);
+    object.send_app_id(&app_id, dispatcher);
+    for output in outputs {
+        for wl_output in client.output_object_ids_for_output(state, output) {
+            handle
+                .rref(state)
+                .send_output_enter(wl_output.wayland_id(), dispatcher);
+        }
+    }
+    handle.rref(state).send_state(
+        ZwlrForeignToplevelHandleV1::state_values(version, activated, maximized, fullscreen),
+        dispatcher,
+    );
+    if version >= crate::protocol_generated::zwlr_foreign_toplevel_handle_v1::PARENT_SINCE {
+        if let Some(parent) = wlr_parent_id(state, manager, parent) {
+            handle.rref(state).send_parent(parent, dispatcher);
+        }
+    }
+    handle.rref(state).send_done(dispatcher);
+}
+
+/// `None` means the client has no live handle for a parent that exists, so no event is sent.
+/// A toplevel with no parent produces the null parent id.
+fn wlr_parent_id(
+    state: &State,
+    manager: Resolved<ZwlrForeignToplevelManagerV1Id>,
+    parent: Option<ToplevelKey>,
+) -> Option<ZwlrForeignToplevelHandleV1Id> {
+    match parent {
+        None => Some(ZwlrForeignToplevelHandleV1Id::from(0)),
+        Some(parent) => state.capture.wlr_handles.iter().find_map(|slot| {
+            (slot.manager == manager && slot.key == parent && !slot.closed)
+                .then_some(slot.handle.wayland_id())
+        }),
+    }
+}
+
+fn send_wlr_title(
+    client: &Client,
+    state: &State,
+    dispatcher: &mut ClientDispatcher,
+    key: ToplevelKey,
+    title: &str,
+) {
+    for handle in live_wlr_handles(client, state, key) {
+        let Some(object) = handle.try_ref(state) else {
+            continue;
+        };
+        if object.is_closed() {
+            continue;
+        }
+        object.send_title(title, dispatcher);
+        object.send_done(dispatcher);
+    }
+}
+
+fn send_wlr_app_id(
+    client: &Client,
+    state: &State,
+    dispatcher: &mut ClientDispatcher,
+    key: ToplevelKey,
+    app_id: &str,
+) {
+    for handle in live_wlr_handles(client, state, key) {
+        let Some(object) = handle.try_ref(state) else {
+            continue;
+        };
+        if object.is_closed() {
+            continue;
+        }
+        object.send_app_id(app_id, dispatcher);
+        object.send_done(dispatcher);
+    }
+}
+
+fn send_wlr_state(
+    client: &Client,
+    state: &State,
+    dispatcher: &mut ClientDispatcher,
+    key: ToplevelKey,
+    activated: bool,
+    maximized: bool,
+    fullscreen: bool,
+) {
+    for handle in live_wlr_handles(client, state, key) {
+        let Some(object) = handle.try_ref(state) else {
+            continue;
+        };
+        if object.is_closed() {
+            continue;
+        }
+        let version = object.version();
+        object.send_state(
+            ZwlrForeignToplevelHandleV1::state_values(version, activated, maximized, fullscreen),
+            dispatcher,
+        );
+        object.send_done(dispatcher);
+    }
+}
+
+fn send_wlr_output(
+    client: &Client,
+    state: &State,
+    dispatcher: &mut ClientDispatcher,
+    key: ToplevelKey,
+    output: OutputId,
+    entered: bool,
+) {
+    for handle in live_wlr_handles(client, state, key) {
+        let Some(object) = handle.try_ref(state) else {
+            continue;
+        };
+        if object.is_closed() {
+            continue;
+        }
+        let wl_outputs = client.output_object_ids_for_output(state, output);
+        if wl_outputs.is_empty() {
+            continue;
+        }
+        for wl_output in wl_outputs {
+            if entered {
+                handle
+                    .rref(state)
+                    .send_output_enter(wl_output.wayland_id(), dispatcher);
+            } else {
+                handle
+                    .rref(state)
+                    .send_output_leave(wl_output.wayland_id(), dispatcher);
+            }
+        }
+        handle.rref(state).send_done(dispatcher);
+    }
+}
+
+fn send_wlr_parent(
+    client: &Client,
+    state: &State,
+    dispatcher: &mut ClientDispatcher,
+    key: ToplevelKey,
+    parent: Option<ToplevelKey>,
+) {
+    for handle in live_wlr_handles(client, state, key) {
+        let Some(object) = handle.try_ref(state) else {
+            continue;
+        };
+        if object.is_closed()
+            || object.version()
+                < crate::protocol_generated::zwlr_foreign_toplevel_handle_v1::PARENT_SINCE
+        {
+            continue;
+        }
+        let Some(parent) = wlr_parent_id(state, object.manager(), parent) else {
+            continue;
+        };
+        object.send_parent(parent, dispatcher);
+        object.send_done(dispatcher);
     }
 }
 
@@ -2474,12 +2848,20 @@ fn update_xdg_detail(
         }
         record.app_id = value.clone();
     }
-    let clients: BTreeSet<_> = state
+    let mut clients: BTreeSet<_> = state
         .capture
         .handles_for(key)
         .into_iter()
         .map(|handle| handle.client_id())
         .collect();
+    clients.extend(
+        state
+            .capture
+            .wlr_handles
+            .iter()
+            .filter(|slot| slot.key == key && !slot.closed)
+            .map(|slot| slot.handle.client_id()),
+    );
     for client_id in clients.iter().copied() {
         let item = if title {
             Pending::Retitle { key, title: value.clone() }
@@ -2517,6 +2899,74 @@ pub(crate) fn sync_mapped_toplevels(
             .enqueue(client_id, Pending::Announce { key, title, app_id });
     }
     dispatch_deliver(dispatcher, BTreeSet::from([client_id]));
+}
+
+/// Send every currently mapped toplevel to a wlr manager that just bound.
+pub(crate) fn sync_wlr_manager(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    manager: Resolved<ZwlrForeignToplevelManagerV1Id>,
+) {
+    if manager
+        .try_ref(state)
+        .is_none_or(|manager| manager.is_finished())
+    {
+        return;
+    }
+    let open: Vec<_> = state
+        .capture
+        .toplevels
+        .iter()
+        .filter(|(_, record)| !record.closed)
+        .map(|(key, record)| (*key, record.title.clone(), record.app_id.clone()))
+        .collect();
+    if open.is_empty() {
+        return;
+    }
+    let client_id = manager.client_id();
+    for (key, title, app_id) in open {
+        state
+            .capture
+            .enqueue(client_id, Pending::Announce { key, title, app_id });
+    }
+    dispatch_deliver(dispatcher, BTreeSet::from([client_id]));
+}
+
+/// A client bound `wl_output` after the handle already existed. Send `output_enter` for that
+/// object only, then one `done`, for each toplevel currently on this output.
+pub(crate) fn replay_wlr_toplevel_output(
+    client: &Client,
+    state: &State,
+    dispatcher: &mut ClientDispatcher,
+    output_id: OutputId,
+    wl_output: Resolved<WlOutputId>,
+) {
+    let handles: Vec<_> = state
+        .capture
+        .wlr_handles
+        .iter()
+        .filter(|slot| {
+            slot.handle.client_id() == client.client_id()
+                && !slot.closed
+                && state
+                    .capture
+                    .toplevels
+                    .get(&slot.key)
+                    .is_some_and(|record| record.outputs.contains(&output_id))
+        })
+        .map(|slot| slot.handle)
+        .collect();
+    let wl_output = wl_output.wayland_id();
+    for handle in handles {
+        let Some(object) = handle.try_ref(state) else {
+            continue;
+        };
+        if object.is_closed() {
+            continue;
+        }
+        object.send_output_enter(wl_output, dispatcher);
+        object.send_done(dispatcher);
+    }
 }
 
 fn dispatch_deliver(dispatcher: &mut Dispatcher, clients: BTreeSet<ClientId>) {
@@ -4815,5 +5265,203 @@ mod tests {
         sync_toplevel_outputs(&mut state, &mut dispatcher, surface);
         assert!(state.capture.toplevels[&key].outputs.is_empty());
         assert!(!state.capture.handles_for(key).is_empty());
+    }
+
+    #[test]
+    fn wlr_manager_sends_the_initial_burst_from_the_current_record() {
+        use crate::{
+            protocol_generated::ZwlrForeignToplevelManagerV1Id,
+            wayland_objects::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+        };
+
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let (surface, key) = mapped_window(&mut client, &mut state, &mut dispatcher);
+        let toplevel = state
+            .capture
+            .by_xdg
+            .iter()
+            .find(|(_, mapped)| **mapped == key)
+            .map(|(toplevel, _)| *toplevel)
+            .expect("mapped toplevel");
+        note_xdg_shell_state(&mut state, &mut dispatcher, toplevel, true, false);
+        let parent = announce_toplevel(&mut state, &mut dispatcher, "Parent", "parent");
+        note_parent(&mut state, &mut dispatcher, key, Some(parent));
+        let output = insert_output(&mut client, &mut state);
+        let xdg_surface = surface
+            .ref_mut(&mut state)
+            .xdg_surface()
+            .expect("toplevel surface");
+        state.register_xdg_toplevel_role(xdg_surface, toplevel);
+        surface
+            .ref_mut(&mut state)
+            .update_output_membership(vec![output]);
+        sync_toplevel_outputs(&mut state, &mut dispatcher, surface);
+        ZwlrForeignToplevelManagerV1::attach(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ZwlrForeignToplevelManagerV1Id::from(90),
+            3,
+        );
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+
+        assert!(test_sent(&dispatcher, 90, 0));
+        let handle = state
+            .capture
+            .wlr_handles
+            .iter()
+            .find(|slot| slot.key == key)
+            .expect("wlr handle")
+            .handle;
+        let handle_id: u32 = handle.wayland_id().into();
+        let parent_id: u32 = state
+            .capture
+            .wlr_handles
+            .iter()
+            .find(|slot| slot.key == parent)
+            .expect("parent handle")
+            .handle
+            .wayland_id()
+            .into();
+        assert!(test_sent(&dispatcher, handle_id, 0));
+        assert!(test_sent(&dispatcher, handle_id, 1));
+        assert!(test_sent_arg(&dispatcher, handle_id, 2, OUTPUT_OBJECT));
+        assert!(test_sent(&dispatcher, handle_id, 4));
+        assert!(test_sent_arg(&dispatcher, handle_id, 7, parent_id));
+        assert!(test_sent(&dispatcher, handle_id, 5));
+        assert_eq!(ZwlrForeignToplevelHandleV1::state_values(3, false, true, false), vec![0]);
+        assert_eq!(ZwlrForeignToplevelHandleV1::state_values(1, true, true, true), vec![0, 2]);
+        assert_eq!(ZwlrForeignToplevelHandleV1::state_values(3, true, true, true), vec![0, 2, 3]);
+        let ext_id: u32 = state.capture.handles_for(key)[0].wayland_id().into();
+        assert_ne!(ext_id, handle_id);
+
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            handle.wayland_id(),
+            test_request(handle_id, 0, 0),
+        );
+        assert!(!test_closed(&dispatcher, &client));
+
+        close_toplevel(&mut state, &mut dispatcher, key);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        assert!(test_sent(&dispatcher, handle_id, 6));
+        assert!(state
+            .capture
+            .wlr_handles
+            .iter()
+            .any(|slot| slot.key == key && slot.closed));
+    }
+
+    #[test]
+    fn wlr_version_one_omits_parent_and_stop_destroys_the_manager() {
+        use crate::{
+            protocol_generated::ZwlrForeignToplevelManagerV1Id,
+            wayland_objects::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+        };
+
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let (_surface, key) = mapped_window(&mut client, &mut state, &mut dispatcher);
+        ZwlrForeignToplevelManagerV1::attach(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ZwlrForeignToplevelManagerV1Id::from(90),
+            1,
+        );
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        let handle = state
+            .capture
+            .wlr_handles
+            .iter()
+            .find(|slot| slot.key == key)
+            .expect("wlr handle")
+            .handle;
+        let handle_id: u32 = handle.wayland_id().into();
+        assert!(!test_sent(&dispatcher, handle_id, 7));
+
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            handle.wayland_id(),
+            test_request(handle_id, 7, 0),
+        );
+        assert!(state.capture.wlr_handles.iter().all(|slot| slot.key != key));
+        let manager = client
+            .resolve(ZwlrForeignToplevelManagerV1Id::from(90), &state)
+            .expect("manager");
+        sync_wlr_manager(&mut state, &mut dispatcher, manager);
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        assert!(state.capture.wlr_handles.iter().all(|slot| slot.key != key));
+
+        test_dispatch(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ZwlrForeignToplevelManagerV1Id::from(90),
+            test_request(90, 0, 0),
+        );
+        assert!(test_sent(&dispatcher, 90, 1));
+        assert!(client
+            .resolve(ZwlrForeignToplevelManagerV1Id::from(90), &state)
+            .is_none());
+    }
+
+    #[test]
+    fn wlr_output_enter_is_replayed_when_the_client_binds_wl_output() {
+        use crate::{
+            protocol_generated::ZwlrForeignToplevelManagerV1Id,
+            wayland_objects::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+        };
+
+        let (mut client, mut dispatcher, mut state) = client_state();
+        let (surface, key) = mapped_window(&mut client, &mut state, &mut dispatcher);
+        let toplevel = state
+            .capture
+            .by_xdg
+            .iter()
+            .find(|(_, mapped)| **mapped == key)
+            .map(|(toplevel, _)| *toplevel)
+            .expect("mapped toplevel");
+        let output = state.insert_output(test_output_drm1(0, 0, 640, 480));
+        let xdg_surface = surface
+            .ref_mut(&mut state)
+            .xdg_surface()
+            .expect("toplevel surface");
+        state.register_xdg_toplevel_role(xdg_surface, toplevel);
+        surface
+            .ref_mut(&mut state)
+            .update_output_membership(vec![output]);
+        sync_toplevel_outputs(&mut state, &mut dispatcher, surface);
+        ZwlrForeignToplevelManagerV1::attach(
+            &mut client,
+            &mut state,
+            &mut dispatcher,
+            ZwlrForeignToplevelManagerV1Id::from(90),
+            3,
+        );
+        test_deliver(&mut client, &mut state, &mut dispatcher);
+        let handle = state
+            .capture
+            .wlr_handles
+            .iter()
+            .find(|slot| slot.key == key)
+            .expect("wlr handle")
+            .handle;
+        let handle_id: u32 = handle.wayland_id().into();
+        assert!(!test_sent(&dispatcher, handle_id, 2));
+
+        client.insert_object(&mut state, WlOutput::new(WlOutputId::from(OUTPUT_OBJECT), output, 4));
+        let wl_output = client
+            .resolve(WlOutputId::from(OUTPUT_OBJECT), &state)
+            .expect("wl_output");
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            replay_wlr_toplevel_output(&client, &state, &mut client_dispatcher, output, wl_output);
+        }
+        assert!(test_sent_arg(&dispatcher, handle_id, 2, OUTPUT_OBJECT));
+        assert!(test_sent(&dispatcher, handle_id, 5));
     }
 }
