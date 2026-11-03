@@ -31,7 +31,7 @@ use crate::{
     runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
     scene::visibility::root_has_protocol_visibility,
     seat::SeatClientEvent,
-    state::{DataOfferRole, DrmId, GrabbedObject, ObjectId, OutputId, State},
+    state::{DataOfferRole, DrmId, GrabbedObject, ObjectId, OutputId, SelectionSourceState, State},
     sync::AcquireReadyWaiterId,
     udev::Udev,
     wayland_objects::{
@@ -1149,10 +1149,8 @@ impl Client {
                     .unwrap_or(0),
             )
         };
-        let (mime_types, source_actions) = {
-            let source = source.try_ref(state)?;
-            (source.mime_types().to_vec(), source.effective_dnd_actions())
-        };
+        let mime_types = SelectionSourceState::WlData(source).mime_types(state)?;
+        let source_actions = source.try_ref(state)?.effective_dnd_actions();
         let chosen_action = if role == DataOfferRole::Drag
             && device_version < wl_data_offer::SOURCE_ACTIONS_SINCE
         {
@@ -1220,7 +1218,7 @@ impl Client {
                     state,
                     dispatcher,
                     data_device.wayland_id(),
-                    selection.source,
+                    selection.wl_data_source(),
                     DataOfferRole::Selection,
                 )
             });

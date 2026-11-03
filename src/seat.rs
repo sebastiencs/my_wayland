@@ -807,7 +807,7 @@ impl SeatState {
         self.keyboard_resources.remove(&client_id);
         if self
             .selection_source
-            .is_some_and(|selection| selection.source.client_id() == client_id)
+            .is_some_and(|selection| selection.owner_client_id() == client_id)
         {
             self.selection_source = None;
         }

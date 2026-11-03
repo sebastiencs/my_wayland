@@ -765,9 +765,33 @@ pub enum DataOfferRole {
     Drag,
 }
 
+/// Clipboard selection owner. Drag-and-drop stays on [`DragSource`].
+///
+/// Data-control and primary selection join this later as their own variants.
+/// wlroots keeps primary selection on a separate source type as well.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SelectionSourceState {
-    pub source: Resolved<WlDataSourceId>,
+pub enum SelectionSourceState {
+    WlData(Resolved<WlDataSourceId>),
+}
+
+impl SelectionSourceState {
+    pub fn owner_client_id(self) -> ClientId {
+        match self {
+            Self::WlData(source) => source.client_id(),
+        }
+    }
+
+    pub fn object_id(self) -> ObjectId {
+        match self {
+            Self::WlData(source) => source.object_id(),
+        }
+    }
+
+    pub fn wl_data_source(self) -> Resolved<WlDataSourceId> {
+        match self {
+            Self::WlData(source) => source,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

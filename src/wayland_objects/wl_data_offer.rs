@@ -10,7 +10,7 @@ use crate::{
         wl_data_device_manager, wl_data_offer, WaylandId, WlDataOfferId, WlDataSourceId,
     },
     seat,
-    state::{DataOfferRole, DragPhase, GrabbedObject, ObjectId, State},
+    state::{DataOfferRole, DragPhase, GrabbedObject, ObjectId, SelectionSourceState, State},
     wayland_objects::wl_data_source::WlDataSource,
 };
 
@@ -224,13 +224,7 @@ impl Object for WlDataOffer {
                     // Be intentionally permissive for compatibility: even if the MIME type
                     // was not previously advertised, forward the request to the source
                     // instead of rejecting it in the compositor.
-                    dispatcher.dispatch_to(
-                        source.client_id(),
-                        ClientAction::DataSourceEvent {
-                            source,
-                            event: DataSourceClientEvent::Send { mime_type, fd },
-                        },
-                    );
+                    SelectionSourceState::WlData(source).send(mime_type, fd, dispatcher);
                 } else {
                     let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
                 }

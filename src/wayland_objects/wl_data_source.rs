@@ -1,9 +1,12 @@
 use crate::{
-    clients::{Client, ClientAction, ClientDispatcher, EventWriter, RawRequest, Resolved},
+    clients::{
+        Client, ClientAction, ClientDispatcher, DataSourceClientEvent, EventWriter, RawRequest,
+        Resolved,
+    },
     object::{Object, Parser, RequestResult},
     protocol_generated::{wl_data_device_manager, wl_data_source, WaylandId, WlDataSourceId},
     seat,
-    state::{GrabbedObject, State},
+    state::{GrabbedObject, SelectionSourceState, State},
     wayland_objects::wl_display::WlDisplay,
 };
 
@@ -189,7 +192,7 @@ fn destroy_source(
     if state
         .seat
         .selection_source()
-        .is_some_and(|selection| selection.source.object_id() == source.object_id())
+        .is_some_and(|selection| selection.object_id() == source.object_id())
     {
         state
             .seat
@@ -208,6 +211,45 @@ fn destroy_source(
     }
 
     Ok(())
+}
+
+impl SelectionSourceState {
+    /// `None` when the backing object is already gone, so offer creation can skip it.
+    pub fn mime_types(self, state: &State) -> Option<Vec<String>> {
+        match self {
+            Self::WlData(source) => source
+                .try_ref(state)
+                .map(|source| source.mime_types().to_vec()),
+        }
+    }
+
+    pub fn send(self, mime_type: String, fd: i32, dispatcher: &mut ClientDispatcher) {
+        match self {
+            Self::WlData(source) => {
+                dispatcher.dispatch_to(
+                    source.client_id(),
+                    ClientAction::DataSourceEvent {
+                        source,
+                        event: DataSourceClientEvent::Send { mime_type, fd },
+                    },
+                );
+            }
+        }
+    }
+
+    pub fn cancelled(self, dispatcher: &mut ClientDispatcher) {
+        match self {
+            Self::WlData(source) => {
+                dispatcher.dispatch_to(
+                    source.client_id(),
+                    ClientAction::DataSourceEvent {
+                        source,
+                        event: DataSourceClientEvent::Cancelled,
+                    },
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -261,9 +303,11 @@ mod tests {
             );
         }
         state.seat.replace_selection_source(
-            Some(SelectionSourceState {
-                source: Resolved::new(owner_client_id, source_id, source_object_id),
-            }),
+            Some(SelectionSourceState::WlData(Resolved::new(
+                owner_client_id,
+                source_id,
+                source_object_id,
+            ))),
             1,
         );
 

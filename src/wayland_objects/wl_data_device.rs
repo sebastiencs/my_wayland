@@ -196,19 +196,13 @@ fn set_selection(
             // selection operations. wlroots and Smithay are intentionally permissive
             // here, so we keep the source usable instead of disconnecting.
             source_object.set_used(SourceUse::Selection);
-            Some(SelectionSourceState { source })
+            Some(SelectionSourceState::WlData(source))
         }
     };
 
     let previous = state.seat.replace_selection_source(next_selection, serial);
     if let Some(previous) = previous {
-        dispatcher.dispatch_to(
-            previous.source.client_id(),
-            ClientAction::DataSourceEvent {
-                source: previous.source,
-                event: DataSourceClientEvent::Cancelled,
-            },
-        );
+        previous.cancelled(dispatcher);
     }
 
     if let Some(focus) = state.seat.keyboard_focus() {
