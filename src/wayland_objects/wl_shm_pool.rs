@@ -19,7 +19,7 @@ use crate::{
 #[derive(Debug)]
 pub struct WlShmPool {
     id: WlShmPoolId,
-    fd: OwnedFd,
+    fd: Rc<OwnedFd>,
     size: usize,
     mem: Rc<SharedMemory>,
     /// `wl_shm` version that created this pool. Pool error codes exist from version 3.
@@ -27,8 +27,7 @@ pub struct WlShmPool {
 }
 
 impl WlShmPool {
-    pub fn new(id: WlShmPoolId, fd: RawFd, size: usize, shm_version: u32) -> Self {
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    pub fn new(id: WlShmPoolId, fd: Rc<OwnedFd>, size: usize, shm_version: u32) -> Self {
         let mem = SharedMemory::mmap(fd.as_raw_fd(), size);
         Self { id, fd, size, mem, shm_version }
     }

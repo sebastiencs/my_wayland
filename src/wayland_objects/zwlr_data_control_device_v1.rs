@@ -1035,7 +1035,9 @@ mod tests {
                 .unwrap();
         }
         assert!(!capture::test_closed(&dispatcher, &client));
-        assert!(capture::test_sent_arg(&dispatcher, 1, 1, u32::from(previous_offer.wayland_id())));
+        // The offer object is gone, and server-created ids never get a delete_id.
+        assert!(!client.contains_object(previous_offer.wayland_id(), &state));
+        assert!(!capture::test_sent_arg(&dispatcher, 1, 1, u32::from(previous_offer.wayland_id())));
     }
 
     fn register_data_control(client: &mut Client, state: &mut crate::state::State, version: u32) {

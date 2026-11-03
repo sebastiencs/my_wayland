@@ -104,6 +104,11 @@ pub struct SendmsgData {
     pub buffer_aux: Box<[u8]>,
     pub buffer: Box<[u8]>,
     pub msghdr: msghdr,
+    /// The fds transferred with the message, held while the message is in
+    /// flight. Dropping them once it is out releases the last reference for a
+    /// sole-owner fd (a clipboard pipe end, closing it) or just one reference
+    /// of a shared one (the keymap).
+    pub fds: Vec<std::rc::Rc<std::os::fd::OwnedFd>>,
 }
 
 impl Debug for RecvmsgData {

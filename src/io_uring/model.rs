@@ -2,7 +2,8 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io::ErrorKind::UnexpectedEof,
     ops::Range,
-    os::fd::{FromRawFd, OwnedFd, RawFd},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    rc::Rc,
 };
 
 use {libc::cmsghdr, log::error};
@@ -63,7 +64,7 @@ pub enum IoUringAction {
     Sendmsg {
         fd: RawFd,
         buffer: Box<[u8]>,
-        fds: Box<[RawFd]>,
+        fds: Vec<Rc<OwnedFd>>,
         dispatch_to: Redispatcher<std::io::Result<SendmsgCompleted>>,
     },
     Accept {
@@ -267,7 +268,13 @@ impl Model for IoUringState {
             }
             IoUringAction::Sendmsg { fd, buffer, fds, dispatch_to } => {
                 let id = self.next_id();
-                let buffer_aux = write_fds(&*fds);
+                // The kernel transfers a reference and leaves the sender's copy
+                // open, so the references travel with the message: dropping them
+                // once it is out closes a sole-owner fd — a clipboard pipe end
+                // received with a `receive` request must not stay open or the
+                // pasting client never sees EOF — and keeps a shared fd open,
+                // like the keymap, whose owner holds another reference.
+                let buffer_aux = write_fds(&fds);
                 let mut data = Box::new(SendmsgData {
                     iovec: libc::iovec {
                         iov_base: buffer.as_ptr() as *mut _,
@@ -276,6 +283,7 @@ impl Model for IoUringState {
                     msghdr: empty_msghdr(),
                     buffer_aux,
                     buffer,
+                    fds,
                 });
                 data.msghdr.msg_iov = &data.iovec as *const _ as *mut _;
                 data.msghdr.msg_iovlen = 1;
@@ -462,7 +470,11 @@ impl IoUringState {
                     dispatcher.redispatch_to(dispatch_to, Err(io_err()));
                     return;
                 }
-                Operation::Sendmsg { dispatch_to, .. } => {
+                Operation::Sendmsg { fd, dispatch_to, .. } => {
+                    // Client event sends use `Redispatcher::None`, so the error
+                    // would otherwise vanish silently and the client would just
+                    // never see the message (a clipboard transfer would hang).
+                    error!("io_uring sendmsg failed fd={fd} error_code={result:?}");
                     dispatcher.redispatch_to(dispatch_to, Err(io_err()));
                     return;
                 }
@@ -515,7 +527,16 @@ impl IoUringState {
                 let buffer = Box::from(&buffer[..nbytes]);
                 dispatcher.redispatch_to(to, Ok(ReadWriteCompleted { fd, offset, buffer }));
             }
-            Operation::Sendmsg { id: _, fd, data: _, dispatch_to: to } => {
+            Operation::Sendmsg { id: _, fd, data, dispatch_to: to } => {
+                let expected = data.iovec.iov_len;
+                if (result as usize) != expected {
+                    // A partial send drops the tail of the message. Client
+                    // sockets drain fast so this should never fire; if it does,
+                    // the receiver lost events.
+                    error!(
+                        "io_uring sendmsg partial write fd={fd} sent={result} expected={expected}"
+                    );
+                }
                 dispatcher.redispatch_to(to, Ok(SendmsgCompleted { fd }));
             }
             Operation::Accept { id: _, fd, dispatch_to: to } => {
@@ -575,26 +596,37 @@ fn align(size: usize) -> usize {
     size.next_multiple_of(std::mem::size_of::<usize>())
 }
 
-fn write_fds(fds: &[RawFd]) -> Box<[u8]> {
+fn write_fds(fds: &[impl AsRawFd]) -> Box<[u8]> {
     if fds.is_empty() {
         return Box::new([]);
     }
 
+    // `cmsg_len` counts the header plus the fd array exactly, because the kernel
+    // derives the number of file descriptors from it: one 4-byte int per fd.
+    // Padding it up to the alignment would transfer the padding as a bogus fd 0,
+    // shifting every later fd argument on the client: the keymap would take the
+    // right fd, and the next fd event (a clipboard send) would take the stale
+    // leftover.
+    let data_len = fds.len() * std::mem::size_of::<RawFd>();
     let header = cmsghdr {
-        cmsg_len: CMSG_HEADER_LENGTH + align(std::mem::size_of_val(fds)),
+        cmsg_len: CMSG_HEADER_LENGTH + data_len,
         cmsg_level: libc::SOL_SOCKET,
         cmsg_type: libc::SCM_RIGHTS,
     };
-    let mut bytes = Vec::with_capacity(header.cmsg_len);
+    let mut bytes = Vec::with_capacity(align(header.cmsg_len));
 
     // Write header
     bytes.extend(header.cmsg_len.to_ne_bytes());
     bytes.extend(header.cmsg_level.to_ne_bytes());
     bytes.extend(header.cmsg_type.to_ne_bytes());
     // write fds
-    bytes.extend(fds.iter().copied().flat_map(i32::to_ne_bytes));
-    // paddding to alignment
-    bytes.extend(std::iter::repeat(0).take(header.cmsg_len - bytes.len()));
+    bytes.extend(
+        fds.iter()
+            .map(|fd| fd.as_raw_fd())
+            .flat_map(i32::to_ne_bytes),
+    );
+    // Pad the control buffer to the alignment. The kernel stops at cmsg_len.
+    bytes.extend(std::iter::repeat(0).take(align(header.cmsg_len) - bytes.len()));
 
     bytes.into_boxed_slice()
 }
@@ -764,5 +796,218 @@ mod drain_tests {
             .unwrap();
         assert!(ring.drained);
         assert!(!hit.get());
+    }
+}
+
+#[cfg(test)]
+mod write_fds_tests {
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+
+    use super::*;
+
+    fn pipe() -> (OwnedFd, OwnedFd) {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        (read, write)
+    }
+
+    /// Parse the control buffer back without taking ownership of the fds:
+    /// the real owners stay alive with the caller.
+    fn parse_raw(control: &[u8]) -> Vec<i32> {
+        read_fds(control)
+            .unwrap()
+            .into_iter()
+            .map(|fd| fd.into_raw_fd())
+            .collect()
+    }
+
+    #[test]
+    fn the_kernel_fd_count_round_trips_exactly() {
+        // The kernel derives the number of fds from cmsg_len, so the control
+        // data must parse back to exactly the fds we wrote. A padded cmsg_len
+        // transfers the padding as a bogus extra fd and shifts every later fd
+        // argument on the client: the keymap gets the right fd, and the next fd
+        // event (a clipboard send) gets a stale leftover instead.
+        let (a, b) = pipe();
+        let control = write_fds(&[a.as_raw_fd(), b.as_raw_fd()]);
+        let mut fds = parse_raw(&control);
+        let mut expected = vec![a.as_raw_fd(), b.as_raw_fd()];
+        fds.sort();
+        expected.sort();
+        assert_eq!(fds, expected);
+
+        let control = write_fds(&[a.as_raw_fd()]);
+        assert_eq!(parse_raw(&control), vec![a.as_raw_fd()]);
+
+        // One fd: the length field is the exact header plus the array, with no
+        // alignment padding inside it.
+        let control = write_fds(&[a.as_raw_fd()]);
+        let len = usize::from_ne_bytes(control[0..8].try_into().unwrap());
+        assert_eq!(len, CMSG_HEADER_LENGTH + 4);
+    }
+
+    #[test]
+    fn a_sendmsg_delivers_exactly_one_ancillary_fd() {
+        // Cross-client clipboard transfers pass a pipe end from one client to
+        // another through this exact path: Sendmsg on the owner's socket with
+        // the fd in the ancillary data. Verify the kernel really attaches it,
+        // and only it.
+        let Ok(mut ring) = IoUringState::try_new() else {
+            return;
+        };
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+
+        let mut sockets = [0; 2];
+        assert_eq!(
+            unsafe {
+                libc::socketpair(
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                    0,
+                    sockets.as_mut_ptr(),
+                )
+            },
+            0
+        );
+        let receiver = unsafe { OwnedFd::from_raw_fd(sockets[0]) };
+        let sender = unsafe { OwnedFd::from_raw_fd(sockets[1]) };
+
+        let (pipe_read, pipe_write) = pipe();
+        // The clipboard path hands over the sole reference: once the message is
+        // out, dropping that reference closes the fd, so the pasting client's
+        // read end reaches EOF.
+        ring.process(
+            &mut state,
+            IoUringAction::Sendmsg {
+                fd: sender.as_raw_fd(),
+                buffer: Box::from(&b"hello"[..]),
+                fds: vec![Rc::new(pipe_write)],
+                dispatch_to: Redispatcher::None,
+            },
+            &mut dispatcher,
+        )
+        .unwrap();
+        ring.process(&mut state, IoUringAction::Drain, &mut dispatcher)
+            .unwrap();
+
+        let mut data = [0u8; 64];
+        let mut control = [0u8; 256];
+        let mut iovec = libc::iovec { iov_base: data.as_mut_ptr() as *mut _, iov_len: data.len() };
+        let mut msghdr: libc::msghdr = unsafe { std::mem::zeroed() };
+        msghdr.msg_iov = &mut iovec;
+        msghdr.msg_iovlen = 1;
+        msghdr.msg_control = control.as_mut_ptr() as *mut _;
+        msghdr.msg_controllen = control.len();
+        let size = unsafe { libc::recvmsg(receiver.as_raw_fd(), &mut msghdr, 0) };
+        assert_eq!(size, 5, "the sent message did not arrive");
+        assert_eq!(&data[..size as usize], b"hello");
+
+        let fds = read_fds(&control[..msghdr.msg_controllen as usize]).unwrap();
+        assert_eq!(fds.len(), 1, "exactly one ancillary fd must arrive");
+
+        // The received fd must be the other end of the pipe: write to it and
+        // read the bytes back through the pipe's read end.
+        let received = fds.into_iter().next().unwrap();
+        let probe = b"clipboard";
+        assert_eq!(
+            unsafe { libc::write(received.as_raw_fd(), probe.as_ptr() as *const _, probe.len()) },
+            probe.len() as isize
+        );
+        let mut buffer = [0u8; 16];
+        assert_eq!(
+            unsafe {
+                libc::read(pipe_read.as_raw_fd(), buffer.as_mut_ptr() as *mut _, buffer.len())
+            },
+            probe.len() as isize
+        );
+        assert_eq!(&buffer[..probe.len()], probe);
+
+        // The sender must not hold the pipe open: with the client copy closed
+        // and the message's sole reference gone, the read end reaches EOF. A
+        // retained reference would keep a clipboard transfer waiting forever.
+        let flags = unsafe { libc::fcntl(pipe_read.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        unsafe { libc::fcntl(pipe_read.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        drop(received);
+        let size = unsafe {
+            libc::read(pipe_read.as_raw_fd(), buffer.as_mut_ptr() as *mut _, buffer.len())
+        };
+        assert_eq!(size, 0, "the compositor must close its fd copy after the send");
+    }
+
+    #[test]
+    fn a_sendmsg_keeps_shared_fds_open() {
+        // The keymap is one fd shared with every client and owned by the
+        // compositor state: the send must leave it open and usable.
+        let Ok(mut ring) = IoUringState::try_new() else {
+            return;
+        };
+        let mut state = crate::test_support::state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+
+        let mut sockets = [0; 2];
+        assert_eq!(
+            unsafe {
+                libc::socketpair(
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                    0,
+                    sockets.as_mut_ptr(),
+                )
+            },
+            0
+        );
+        let receiver = unsafe { OwnedFd::from_raw_fd(sockets[0]) };
+        let sender = unsafe { OwnedFd::from_raw_fd(sockets[1]) };
+
+        let (pipe_read, pipe_write) = pipe();
+        // The keymap path sends one of several references: the owner keeps the
+        // fd open after the message is out.
+        let owner = Rc::new(pipe_write);
+        ring.process(
+            &mut state,
+            IoUringAction::Sendmsg {
+                fd: sender.as_raw_fd(),
+                buffer: Box::from(&b"keymap"[..]),
+                fds: vec![Rc::clone(&owner)],
+                dispatch_to: Redispatcher::None,
+            },
+            &mut dispatcher,
+        )
+        .unwrap();
+        ring.process(&mut state, IoUringAction::Drain, &mut dispatcher)
+            .unwrap();
+
+        // The message and the ancillary fd arrived.
+        let mut data = [0u8; 64];
+        let mut control = [0u8; 256];
+        let mut iovec = libc::iovec { iov_base: data.as_mut_ptr() as *mut _, iov_len: data.len() };
+        let mut msghdr: libc::msghdr = unsafe { std::mem::zeroed() };
+        msghdr.msg_iov = &mut iovec;
+        msghdr.msg_iovlen = 1;
+        msghdr.msg_control = control.as_mut_ptr() as *mut _;
+        msghdr.msg_controllen = control.len();
+        let size = unsafe { libc::recvmsg(receiver.as_raw_fd(), &mut msghdr, 0) };
+        assert_eq!(size, 6);
+        let fds = read_fds(&control[..msghdr.msg_controllen as usize]).unwrap();
+        assert_eq!(fds.len(), 1);
+        std::mem::forget(fds);
+
+        // The original survived the send and stays usable for the next client.
+        let probe = b"next";
+        assert_eq!(
+            unsafe { libc::write(owner.as_raw_fd(), probe.as_ptr() as *const _, probe.len()) },
+            probe.len() as isize
+        );
+        let mut buffer = [0u8; 16];
+        assert_eq!(
+            unsafe {
+                libc::read(pipe_read.as_raw_fd(), buffer.as_mut_ptr() as *mut _, buffer.len())
+            },
+            probe.len() as isize
+        );
     }
 }

@@ -2,6 +2,7 @@ use std::{
     ffi::CStr,
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     ptr::NonNull,
+    rc::Rc,
 };
 
 use xkbcommon::xkb;
@@ -136,13 +137,19 @@ fn keymap_as_cstr<'a>(keymap: &xkb::Keymap) -> ForeignStr<'a> {
 }
 
 pub struct MemFd {
-    fd: OwnedFd,
+    fd: Rc<OwnedFd>,
     size: usize,
 }
 
 impl MemFd {
     pub fn raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+    /// A shared reference to the fd. The keymap is sent to every client: the
+    /// sendmsg holds such a reference while the message is in flight, and the
+    /// original stays open with the owner.
+    pub fn rc(&self) -> Rc<OwnedFd> {
+        Rc::clone(&self.fd)
     }
     pub fn len(&self) -> usize {
         self.size
@@ -180,5 +187,5 @@ fn new_memfd(data: *const u8, size: usize) -> std::io::Result<MemFd> {
         OwnedFd::from_raw_fd(fd)
     };
 
-    Ok(MemFd { fd, size })
+    Ok(MemFd { fd: Rc::new(fd), size })
 }

@@ -48,11 +48,10 @@ impl Object for WlKeyboard {
 impl WlKeyboard {
     pub fn send_keymap(&self, xkb: &Xkb, dispatcher: &mut ClientDispatcher) {
         let keymap = xkb.keymap_fd();
-
         self.send_event(
             wl_keyboard::Event::Keymap {
                 format: wl_keyboard::KeymapFormat::XkbV1 as u32,
-                fd: keymap.raw_fd(),
+                fd: keymap.rc(),
                 size: keymap.len() as u32,
             },
             dispatcher,

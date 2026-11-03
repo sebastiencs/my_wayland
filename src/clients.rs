@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io,
     os::{
-        fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::net::UnixListener,
     },
     path::PathBuf,
@@ -576,25 +576,25 @@ pub enum ClientAction {
 
 #[derive(Debug)]
 pub enum DataControlSourceEvent {
-    Send { mime_type: String, fd: RawFd },
+    Send { mime_type: String, fd: Rc<OwnedFd> },
     Cancelled,
 }
 
 #[derive(Debug)]
 pub enum ExtDataControlSourceEvent {
-    Send { mime_type: String, fd: RawFd },
+    Send { mime_type: String, fd: Rc<OwnedFd> },
     Cancelled,
 }
 
 #[derive(Debug)]
 pub enum PrimarySelectionSourceEvent {
-    Send { mime_type: String, fd: RawFd },
+    Send { mime_type: String, fd: Rc<OwnedFd> },
     Cancelled,
 }
 
 pub enum DataSourceClientEvent {
     Target(Option<String>),
-    Send { mime_type: String, fd: RawFd },
+    Send { mime_type: String, fd: Rc<OwnedFd> },
     Cancelled,
     DndDropPerformed,
     DndFinished,
@@ -616,7 +616,8 @@ impl Client {
 
     #[cfg(test)]
     pub(crate) fn new_for_tests(client_id: ClientId) -> Self {
-        let fd = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+        use std::os::fd::IntoRawFd as _;
+        let fd: RawFd = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
         Self::new(client_id, fd)
     }
 
@@ -1586,7 +1587,7 @@ impl Client {
     ) {
         if !source.exists(state) {
             if let DataControlSourceEvent::Send { fd, .. } = event {
-                let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+                drop(fd);
             }
             return;
         }
@@ -1608,7 +1609,7 @@ impl Client {
     ) {
         if !source.exists(state) {
             if let ExtDataControlSourceEvent::Send { fd, .. } = event {
-                let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+                drop(fd);
             }
             return;
         }
@@ -1630,7 +1631,7 @@ impl Client {
     ) {
         if !source.exists(state) {
             if let PrimarySelectionSourceEvent::Send { fd, .. } = event {
-                let _ = unsafe { OwnedFd::from_raw_fd(fd) };
+                drop(fd);
             }
             return;
         }
@@ -1652,7 +1653,7 @@ impl Client {
     ) {
         if !source.exists(state) {
             if let DataSourceClientEvent::Send { fd, .. } = event {
-                let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+                drop(fd);
             }
             return;
         };
@@ -3163,7 +3164,7 @@ pub struct RawEvent {
     pub object_id: u32,
     pub request_id: u16,
     pub arguments: Arguments,
-    fds: Vec<RawFd>,
+    fds: Vec<Rc<OwnedFd>>,
 }
 
 pub trait EventWriter: Constants + Sized {
@@ -3260,8 +3261,12 @@ impl RawEvent {
         }
     }
 
-    pub fn fd(&mut self, fd: RawFd) {
+    pub fn fd(&mut self, fd: Rc<OwnedFd>) {
         self.fds.push(fd)
+    }
+
+    fn take_fds(&mut self) -> Vec<Rc<OwnedFd>> {
+        std::mem::take(&mut self.fds)
     }
 
     pub fn into_bytes(self) -> Box<[u8]> {
@@ -3286,10 +3291,6 @@ impl RawEvent {
 
         bytes
     }
-
-    fn take_fds(&mut self) -> Box<[RawFd]> {
-        std::mem::take(&mut self.fds).into_boxed_slice()
-    }
 }
 
 #[derive(Debug, derive_more::Deref, derive_more::DerefMut)]
@@ -3307,12 +3308,12 @@ impl RawRequest<'_> {
         WaylandId::from(self.object_id)
     }
 
-    pub fn fd(&mut self) -> Result<RawFd, ParserError> {
+    pub fn fd(&mut self) -> Result<Rc<OwnedFd>, ParserError> {
         self.fds
             .as_mut()
             .unwrap()
             .pop_front()
-            .map(IntoRawFd::into_raw_fd)
+            .map(Rc::new)
             .ok_or(ParserError::MissingFileDescriptor)
     }
 }
@@ -3438,6 +3439,7 @@ mod clients_wire_tests {
     use std::{
         collections::VecDeque,
         os::fd::{FromRawFd, IntoRawFd, OwnedFd},
+        rc::Rc,
     };
 
     use super::{Arguments, ParserError, RawRequest};
@@ -3537,7 +3539,8 @@ mod clients_wire_tests {
         };
 
         let returned = request.fd().unwrap();
-        let _returned = unsafe { OwnedFd::from_raw_fd(returned) };
+        assert_eq!(Rc::strong_count(&returned), 1);
+        drop(returned);
 
         assert!(fds.is_empty());
     }
@@ -3663,8 +3666,10 @@ mod socket_shutdown_tests {
     }
 
     fn socket_pair() -> (RawFd, UnixStream) {
+        use std::os::fd::IntoRawFd as _;
         let (server, client) = UnixStream::pair().unwrap();
-        (server.into_raw_fd(), client)
+        let server: RawFd = server.into_raw_fd();
+        (server, client)
     }
 
     #[test]

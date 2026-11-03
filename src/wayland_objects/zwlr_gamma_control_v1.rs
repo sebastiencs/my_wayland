@@ -1,4 +1,7 @@
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::{
+    os::fd::{AsRawFd, OwnedFd},
+    rc::Rc,
+};
 
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
@@ -83,10 +86,14 @@ impl ZwlrGammaControlV1 {
         &mut self,
         client: &mut Client,
         state: &mut State,
-        fd: i32,
+        fd: Rc<OwnedFd>,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let Ok(fd) = Rc::try_unwrap(fd) else {
+            self.invalidate(state, dispatcher);
+            return;
+        };
+        let mut file = std::fs::File::from(fd);
         if set_nonblocking(file.as_raw_fd()).is_err() {
             self.invalidate(state, dispatcher);
             return;

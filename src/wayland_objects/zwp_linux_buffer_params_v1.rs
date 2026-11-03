@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    rc::Rc,
 };
 
 use crate::{
@@ -17,7 +18,7 @@ use crate::{
 
 #[derive(Debug)]
 struct PendingPlane {
-    fd: OwnedFd,
+    fd: Rc<OwnedFd>,
     offset: u32,
     stride: u32,
     modifier: Modifier,
@@ -145,15 +146,8 @@ impl Object for ZwpLinuxBufferParamsV1 {
                     return Ok(());
                 }
                 let modifier = Modifier(((modifier_hi as u64) << 32) | modifier_lo as u64);
-                self.planes.insert(
-                    plane_idx,
-                    PendingPlane {
-                        fd: unsafe { OwnedFd::from_raw_fd(fd) },
-                        offset,
-                        stride,
-                        modifier,
-                    },
-                );
+                self.planes
+                    .insert(plane_idx, PendingPlane { fd, offset, stride, modifier });
             }
             Create { width, height, format, flags } => {
                 if self.already_used(dispatcher).is_err() {

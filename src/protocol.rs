@@ -50,7 +50,11 @@ fn type_to_name(arg: &protocol::Arg) -> Cow<'static, str> {
         // protocol::Type::NewId => Cow::Owned(arg.interface.as_ref().unwrap().to_upper_camel_case()),
         protocol::Type::Array => Cow::Borrowed("Array"),
         // protocol::Type::Array => Cow::Borrowed(todo!()),
-        protocol::Type::Fd => Cow::Borrowed("RawFd"),
+        // Fd args carry an owned reference: inbound fds are freshly received from
+        // the socket's ancillary data, outbound fds are released when the message
+        // is out, so the last reference closes the fd (a clipboard pipe reaches
+        // EOF) or the original owner keeps it open (the shared keymap).
+        protocol::Type::Fd => Cow::Borrowed("Rc<OwnedFd>"),
         protocol::Type::Destructor => todo!(),
     }
 }
@@ -448,6 +452,8 @@ pub fn gen() -> std::io::Result<()> {
     writeln!(f, "#![allow(dead_code, unused_imports, unused_mut, clippy::let_and_return)]")?;
     writeln!(f, "#![allow(clippy::enum_variant_names)]\n")?;
     writeln!(f, "use std::os::unix::io::RawFd;")?;
+    writeln!(f, "use std::os::fd::OwnedFd;")?;
+    writeln!(f, "use std::rc::Rc;")?;
     writeln!(
         f,
         "use crate::{{clients::{{RawRequest, RawEvent, EventWriter}}, object::{{Parser, ParserError}}}};\n"

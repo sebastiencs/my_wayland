@@ -6,7 +6,10 @@ use {
         clients::{EventWriter, RawEvent, RawRequest},
         object::{Parser, ParserError},
     },
-    std::os::unix::io::RawFd,
+    std::{
+        os::{fd::OwnedFd, unix::io::RawFd},
+        rc::Rc,
+    },
 };
 
 #[derive(
@@ -665,7 +668,7 @@ pub mod wl_shm {
             /// Pool to create,
             id: WlShmPoolId,
             /// File descriptor for the pool,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
             /// Pool size, in bytes,
             size: i32,
         },
@@ -1194,7 +1197,7 @@ pub mod wl_data_offer {
             /// Mime type desired by receiver,
             mime_type: String,
             /// File descriptor for data transfer,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
         },
         /// Destroy data offer
         ///
@@ -1473,7 +1476,7 @@ pub mod wl_data_source {
             /// Mime type for the data,
             mime_type: String,
             /// File descriptor for the data,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
         },
         /// Selection was cancelled
         ///
@@ -3854,7 +3857,7 @@ pub mod wl_keyboard {
             /// Keymap format,
             format: u32,
             /// Keymap file descriptor,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
             /// Keymap size, in bytes,
             size: u32,
         },
@@ -5349,7 +5352,7 @@ pub mod zwp_linux_buffer_params_v1 {
         /// was already set.
         Add {
             /// Dmabuf fd,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
             /// Plane index,
             plane_idx: u32,
             /// Offset in bytes,
@@ -5690,7 +5693,7 @@ pub mod zwp_linux_dmabuf_feedback_v1 {
         /// store duplicate format + modifier pairs in the table.
         FormatTable {
             /// Table file descriptor,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
             /// Table size, in bytes,
             size: u32,
         },
@@ -10106,7 +10109,7 @@ pub mod wp_drm_lease_device_v1 {
         /// appropriate DRM device or select the appropriate connectors therein.
         DrmFd {
             /// DRM file descriptor,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
         },
         /// Advertise connectors available for leases
         ///
@@ -10441,7 +10444,7 @@ pub mod wp_drm_lease_v1 {
         /// lifetime.
         LeaseFd {
             /// Leased DRM file descriptor,
-            leased_fd: RawFd,
+            leased_fd: Rc<OwnedFd>,
         },
         /// Sent when the lease has been revoked
         ///
@@ -10747,7 +10750,7 @@ pub mod ext_data_control_source_v1 {
             /// MIME type for the data,
             mime_type: String,
             /// File descriptor for the data,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
         },
         /// Selection was cancelled
         ///
@@ -10824,7 +10827,7 @@ pub mod ext_data_control_offer_v1 {
             /// MIME type desired by receiver,
             mime_type: String,
             /// File descriptor for data transfer,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
         },
         /// Destroy this offer
         ///
@@ -13491,7 +13494,7 @@ pub mod wp_linux_drm_syncobj_manager_v1 {
         ImportTimeline {
             id: WpLinuxDrmSyncobjTimelineV1Id,
             /// Drm_syncobj file descriptor,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
         },
     }
     impl Parser
@@ -14013,7 +14016,7 @@ pub mod zwp_linux_surface_synchronization_v1 {
         /// error is raised.
         SetAcquireFence {
             /// Acquire fence fd,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
         },
         /// Release fence for last-attached buffer
         ///
@@ -14123,7 +14126,7 @@ pub mod zwp_linux_buffer_release_v1 {
         /// This event destroys the zwp_linux_buffer_release_v1 object.
         FencedRelease {
             /// Fence for last operation on buffer,
-            fence: RawFd,
+            fence: Rc<OwnedFd>,
         },
         /// Release buffer immediately
         ///
@@ -14761,7 +14764,7 @@ pub mod zwp_primary_selection_offer_v1 {
         ///
         /// The receiving client reads from the read end of the pipe until EOF and
         /// closes its end, at which point the transfer is complete.
-        Receive { mime_type: String, fd: RawFd },
+        Receive { mime_type: String, fd: Rc<OwnedFd> },
         /// Destroy the primary selection offer
         ///
         /// Destroy the primary selection offer.
@@ -14865,7 +14868,7 @@ pub mod zwp_primary_selection_source_v1 {
         /// Request for the current primary selection contents from the client.
         /// Send the specified mime type over the passed file descriptor, then
         /// close it.
-        Send { mime_type: String, fd: RawFd },
+        Send { mime_type: String, fd: Rc<OwnedFd> },
         /// Request for primary selection contents was canceled
         ///
         /// This primary selection source is no longer valid. The client should
@@ -16348,7 +16351,7 @@ pub mod zwlr_data_control_source_v1 {
             /// MIME type for the data,
             mime_type: String,
             /// File descriptor for the data,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
         },
         /// Selection was cancelled
         ///
@@ -16425,7 +16428,7 @@ pub mod zwlr_data_control_offer_v1 {
             /// MIME type desired by receiver,
             mime_type: String,
             /// File descriptor for data transfer,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
         },
         /// Destroy this offer
         ///
@@ -17228,7 +17231,7 @@ pub mod zwlr_gamma_control_v1 {
         /// gamma size.
         SetGamma {
             /// Gamma table file descriptor,
-            fd: RawFd,
+            fd: Rc<OwnedFd>,
         },
         /// Destroy this control
         ///

@@ -1,4 +1,4 @@
-use std::os::fd::{BorrowedFd, FromRawFd};
+use std::os::fd::{AsRawFd, BorrowedFd};
 
 use drm::control::Device;
 
@@ -102,7 +102,7 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                         wp_linux_drm_syncobj_manager_v1::Error::InvalidTimeline as u32,
                         "cannot import syncobj timeline without an active DRM backend",
                     );
-                    unsafe { libc::close(fd) };
+                    drop(fd);
                     return Ok(());
                 };
                 if !drm.supports_linux_drm_syncobj() {
@@ -112,11 +112,11 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                         wp_linux_drm_syncobj_manager_v1::Error::InvalidTimeline as u32,
                         "DRM backend does not support syncobj timelines",
                     );
-                    unsafe { libc::close(fd) };
+                    drop(fd);
                     return Ok(());
                 }
                 let drm_fd = drm.fd();
-                let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+                let borrowed = unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) };
                 let handle = match drm_fd.fd_to_syncobj(borrowed, false) {
                     Ok(handle) => handle,
                     Err(error) => {
@@ -126,11 +126,11 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                             wp_linux_drm_syncobj_manager_v1::Error::InvalidTimeline as u32,
                             format!("failed to import DRM syncobj timeline: {error}"),
                         );
-                        unsafe { libc::close(fd) };
+                        drop(fd);
                         return Ok(());
                     }
                 };
-                unsafe { libc::close(fd) };
+                drop(fd);
                 client.insert_object(
                     state,
                     WpLinuxDrmSyncobjTimelineV1::new(id, SyncTimeline::new(drm_fd, handle)),

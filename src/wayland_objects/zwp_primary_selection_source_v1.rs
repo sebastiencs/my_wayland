@@ -3,6 +3,8 @@
 //! The protocol defines no error for using a source twice. Clients such as Firefox
 //! set the same source again, so a later `offer` still adds the MIME type.
 
+use std::{os::fd::OwnedFd, rc::Rc};
+
 use crate::{
     clients::{Client, ClientAction, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
@@ -33,7 +35,7 @@ impl ZwpPrimarySelectionSourceV1 {
         &self.mime_types
     }
 
-    pub fn send_send(&self, mime_type: String, fd: i32, dispatcher: &mut ClientDispatcher) {
+    pub fn send_send(&self, mime_type: String, fd: Rc<OwnedFd>, dispatcher: &mut ClientDispatcher) {
         self.send_event(zwp_primary_selection_source_v1::Event::Send { mime_type, fd }, dispatcher);
     }
 
@@ -126,7 +128,7 @@ impl PrimarySelectionSourceState {
         }
     }
 
-    pub fn send(self, mime_type: String, fd: i32, dispatcher: &mut ClientDispatcher) {
+    pub fn send(self, mime_type: String, fd: Rc<OwnedFd>, dispatcher: &mut ClientDispatcher) {
         match self {
             Self::Zwp(source) => {
                 dispatcher.dispatch_to(

@@ -86,7 +86,7 @@ impl Object for ExtDataControlOfferV1 {
                 Some(OfferSource::Clipboard(source)) => source.send(mime_type, fd, dispatcher),
                 Some(OfferSource::Primary(source)) => source.send(mime_type, fd, dispatcher),
                 None => {
-                    let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+                    drop(fd);
                 }
             },
             Destroy => {

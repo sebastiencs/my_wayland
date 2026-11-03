@@ -254,7 +254,7 @@ impl Object for WlDataOffer {
                         wl_data_offer::Error::InvalidFinish as u32,
                         "wl_data_offer.receive is invalid after finish",
                     );
-                    let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+                    drop(fd);
                     return Ok(());
                 }
                 if self.role == DataOfferRole::Drag
@@ -262,7 +262,7 @@ impl Object for WlDataOffer {
                         !self.is_active_drag_offer(state, client.client_id(), offer)
                     })
                 {
-                    let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+                    drop(fd);
                     return Ok(());
                 }
                 if let Some(source) = self.selection_source() {
@@ -271,7 +271,7 @@ impl Object for WlDataOffer {
                     // instead of rejecting it in the compositor.
                     source.send(mime_type, fd, dispatcher);
                 } else {
-                    let _ = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+                    drop(fd);
                 }
             }
             Destroy => {

@@ -75,7 +75,7 @@ impl Object for ZwpPrimarySelectionOfferV1 {
                 if let Some(source) = self.source {
                     source.send(mime_type, fd, dispatcher);
                 } else {
-                    let _ = unsafe { OwnedFd::from_raw_fd(fd) };
+                    drop(fd);
                 }
             }
             Destroy => {

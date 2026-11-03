@@ -4,6 +4,8 @@
 //! the source for either selection, or offering another type afterwards, disconnects
 //! the client. That matches wlroots and jay.
 
+use std::{os::fd::OwnedFd, rc::Rc};
+
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
@@ -47,7 +49,7 @@ impl ExtDataControlSourceV1 {
         true
     }
 
-    pub fn send_send(&self, mime_type: String, fd: i32, dispatcher: &mut ClientDispatcher) {
+    pub fn send_send(&self, mime_type: String, fd: Rc<OwnedFd>, dispatcher: &mut ClientDispatcher) {
         self.send_event(ext_data_control_source_v1::Event::Send { mime_type, fd }, dispatcher);
     }
 

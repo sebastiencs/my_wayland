@@ -1,3 +1,5 @@
+use std::{os::fd::OwnedFd, rc::Rc};
+
 use crate::{
     clients::{
         Client, ClientAction, ClientDispatcher, DataSourceClientEvent, EventWriter, RawRequest,
@@ -82,7 +84,7 @@ impl WlDataSource {
         );
     }
 
-    pub fn send_send(&self, mime_type: String, fd: i32, dispatcher: &mut ClientDispatcher) {
+    pub fn send_send(&self, mime_type: String, fd: Rc<OwnedFd>, dispatcher: &mut ClientDispatcher) {
         self.send_event(wl_data_source::Event::Send { mime_type, fd }, dispatcher);
     }
 
@@ -239,7 +241,7 @@ impl SelectionSourceState {
         }
     }
 
-    pub fn send(self, mime_type: String, fd: i32, dispatcher: &mut ClientDispatcher) {
+    pub fn send(self, mime_type: String, fd: Rc<OwnedFd>, dispatcher: &mut ClientDispatcher) {
         match self {
             Self::WlData(source) => {
                 dispatcher.dispatch_to(
