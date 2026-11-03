@@ -1,7 +1,12 @@
+pub mod backend;
 pub mod recipe;
 pub mod visual;
 
 pub use {
+    backend::{
+        FormatSupport, GraphicsApi, OffscreenTarget, RenderCompletion, RenderFrame, RenderSyncMode,
+        RenderTarget, Renderer, RendererCapabilities, RendererError, ShmImage, Texture,
+    },
     recipe::{
         EffectElement, FrameElement, FramePhase, OutputFrameRecipe, TextureElement, TextureMask,
         TextureSource,

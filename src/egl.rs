@@ -553,24 +553,7 @@ impl Drop for GlTexture {
 pub type RenderItemMask = TextureMask;
 pub type RenderItem = crate::render::TextureElement;
 
-#[derive(Debug)]
-pub struct RenderCompletion {
-    pub in_fence_fd: Option<OwnedFd>,
-    pub used_blocking_fallback: bool,
-}
-
-impl RenderCompletion {
-    fn explicit(in_fence_fd: OwnedFd) -> Self {
-        Self {
-            in_fence_fd: Some(in_fence_fd),
-            used_blocking_fallback: false,
-        }
-    }
-
-    fn blocking_fallback() -> Self {
-        Self { in_fence_fd: None, used_blocking_fallback: true }
-    }
-}
+pub use crate::render::RenderCompletion;
 
 pub fn image_target(external_only: bool) -> gl::Enum {
     match external_only {

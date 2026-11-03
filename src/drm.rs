@@ -812,11 +812,7 @@ impl Plane {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RenderSyncMode {
-    ExplicitInFence,
-    BlockingFinishFallback,
-}
+pub use crate::render::RenderSyncMode;
 
 #[derive(Clone, Debug)]
 struct Crtc {
