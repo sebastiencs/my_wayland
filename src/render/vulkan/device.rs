@@ -1,4 +1,5 @@
 use std::{
+    cell::UnsafeCell,
     ffi::{c_char, CStr, CString},
     os::fd::{AsFd, AsRawFd},
     rc::Rc,
@@ -7,13 +8,18 @@ use std::{
 use {
     ash::{vk, Device},
     drm::buffer::DrmFourcc,
+    gpu_alloc::{Config, GpuAllocator},
+    gpu_alloc_ash::AshMemoryDevice,
 };
 
-use super::{
-    command,
-    format::{self, FormatSet},
-    instance::VulkanInstance,
-    sync,
+use {
+    super::{
+        command,
+        format::{self, FormatSet},
+        instance::VulkanInstance,
+        sync,
+    },
+    crate::render::{RenderDeviceId, RendererError},
 };
 
 pub(super) struct VulkanDevice {
@@ -21,9 +27,12 @@ pub(super) struct VulkanDevice {
     pub(super) graphics_queue: vk::Queue,
     pub(super) graphics_queue_family: u32,
     command_pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+    allocator: UnsafeCell<GpuAllocator<vk::DeviceMemory>>,
     pub(super) external_memory: ash::khr::external_memory_fd::Device,
     pub(super) memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub(super) formats: FormatSet,
+    device_id: RenderDeviceId,
 }
 
 impl Drop for VulkanDevice {
@@ -32,6 +41,9 @@ impl Drop for VulkanDevice {
             if let Err(error) = self.device.device_wait_idle() {
                 log::error!("vulkan device wait before destruction failed: {error}");
             }
+            self.allocator
+                .get_mut()
+                .cleanup(AshMemoryDevice::wrap(&self.device));
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
         }
@@ -57,6 +69,25 @@ impl VulkanDevice {
                 return Err(error);
             }
         };
+        let command_buffer = match command::allocate_command(&device, command_pool) {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                abandon(device, Some(command_pool));
+                return Err(error);
+            }
+        };
+        let mut memory_info = match unsafe {
+            gpu_alloc_ash::device_properties(&instance.instance, vk::API_VERSION_1_2, physical)
+        } {
+            Ok(properties) => properties,
+            Err(error) => {
+                abandon(device, Some(command_pool));
+                return Err(format!("failed to query vulkan memory properties: {error}"));
+            }
+        };
+        // Buffer device addresses are not enabled on this device.
+        memory_info.buffer_device_address = false;
+        let allocator = GpuAllocator::new(Config::i_am_prototyping(), memory_info);
         let external_memory =
             ash::khr::external_memory_fd::Device::new(&instance.instance, &device);
         let memory_properties = unsafe {
@@ -70,10 +101,91 @@ impl VulkanDevice {
             graphics_queue,
             graphics_queue_family: queue_family,
             command_pool,
+            command_buffer,
+            allocator: UnsafeCell::new(allocator),
             external_memory,
             memory_properties,
             formats,
+            device_id: RenderDeviceId::next(),
         }))
+    }
+
+    pub(super) fn device_id(&self) -> RenderDeviceId {
+        self.device_id
+    }
+
+    pub(super) fn allocator(&self) -> &mut GpuAllocator<vk::DeviceMemory> {
+        // The compositor records on one thread. Allocations are not shared.
+        unsafe { &mut *self.allocator.get() }
+    }
+
+    /// Record, submit, and wait for one command buffer.
+    ///
+    /// The wait is this frame's fence. The next submission resets that buffer.
+    /// Teardown is the only path that waits for the whole device.
+    pub(super) fn submit(
+        &self,
+        failed: RendererError,
+        record: impl FnOnce(&Device, vk::CommandBuffer) -> Result<(), String>,
+    ) -> Result<(), RendererError> {
+        let recorded = self.record_and_wait(record);
+        recorded.map_err(|error| {
+            log::error!("{error}");
+            failed
+        })
+    }
+
+    fn record_and_wait(
+        &self,
+        record: impl FnOnce(&Device, vk::CommandBuffer) -> Result<(), String>,
+    ) -> Result<(), String> {
+        unsafe {
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(|error| format!("failed to reset a vulkan command buffer: {error}"))?;
+            self.device
+                .begin_command_buffer(
+                    self.command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(|error| format!("failed to begin a vulkan command buffer: {error}"))?;
+            if let Err(error) = record(&self.device, self.command_buffer) {
+                let _ = self.device.end_command_buffer(self.command_buffer);
+                return Err(error);
+            }
+            self.device
+                .end_command_buffer(self.command_buffer)
+                .map_err(|error| format!("failed to end a vulkan command buffer: {error}"))?;
+            let fence = self
+                .device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+                .map_err(|error| format!("failed to create a vulkan fence: {error}"))?;
+            let submit = vk::SubmitInfo::default()
+                .command_buffers(std::slice::from_ref(&self.command_buffer));
+            if let Err(error) =
+                self.device
+                    .queue_submit(self.graphics_queue, std::slice::from_ref(&submit), fence)
+            {
+                self.device.destroy_fence(fence, None);
+                return Err(format!("vulkan queue submit failed: {error}"));
+            }
+            let waited = self
+                .device
+                .wait_for_fences(std::slice::from_ref(&fence), true, u64::MAX);
+            self.device.destroy_fence(fence, None);
+            waited.map_err(|error| format!("vulkan fence wait failed: {error}"))?;
+        }
+        Ok(())
+    }
+}
+
+fn abandon(device: Device, pool: Option<vk::CommandPool>) {
+    unsafe {
+        if let Some(pool) = pool {
+            device.destroy_command_pool(pool, None);
+        }
+        device.destroy_device(None);
     }
 }
 

@@ -36,6 +36,8 @@ drm-fourcc = { version = "2.2.0", features = ["build_bindings"] }
 xcursor = "0.3.10"
 inotify = { version = "0.11.1", default-features = false }
 ash = "0.38"
+gpu-alloc = "0.6"
+gpu-alloc-ash = "0.7"
 
 [build-dependencies]
 # Loads the installed libshaderc_shared. The shaderc crate needs development

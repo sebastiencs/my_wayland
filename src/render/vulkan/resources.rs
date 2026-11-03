@@ -1,18 +1,19 @@
 use std::{
     any::Any,
+    cell::Cell,
     fmt::{self, Debug},
     os::fd::AsRawFd,
     rc::Rc,
 };
 
-use ash::vk;
+use {ash::vk, gpu_alloc::UsageFlags};
 
 use crate::{
     dmabuf::{DmaBuf, DmaBufPlane},
-    render::{RenderTarget, RendererError},
+    render::{OffscreenTarget, RenderTarget, RendererError},
 };
 
-use super::{device::VulkanDevice, format::vk_format, memory};
+use super::{allocator::GpuAllocation, device::VulkanDevice, format::vk_format, memory};
 
 pub(super) struct OutputTarget {
     device: Rc<VulkanDevice>,
@@ -23,6 +24,7 @@ pub(super) struct OutputTarget {
     framebuffer: vk::Framebuffer,
     width: i32,
     height: i32,
+    layout: Cell<vk::ImageLayout>,
 }
 
 impl OutputTarget {
@@ -134,7 +136,10 @@ impl OutputTarget {
         bind_memory(device, image, &imported.memories, disjoint)?;
         let view = create_view(&device.device, image, vk_format)?;
         let view_guard = DestroyView { device: &device.device, view, disarm: false };
-        let render_pass = create_render_pass(&device.device, vk_format)?;
+        let render_pass = color_render_pass(&device.device, vk_format).map_err(|error| {
+            log::error!("{error}");
+            RendererError::ImportFailed
+        })?;
         let pass_guard = DestroyPass { device: &device.device, render_pass, disarm: false };
         let framebuffer = create_framebuffer(
             &device.device,
@@ -156,7 +161,192 @@ impl OutputTarget {
             framebuffer,
             width: source.width,
             height: source.height,
+            layout: Cell::new(vk::ImageLayout::UNDEFINED),
         })
+    }
+}
+
+pub(super) struct OffscreenImage {
+    device: Rc<VulkanDevice>,
+    image: vk::Image,
+    allocation: GpuAllocation,
+    view: vk::ImageView,
+    render_pass: vk::RenderPass,
+    framebuffer: vk::Framebuffer,
+    width: i32,
+    height: i32,
+    layout: Cell<vk::ImageLayout>,
+}
+
+impl OffscreenImage {
+    pub(super) fn new(
+        device: &Rc<VulkanDevice>,
+        width: i32,
+        height: i32,
+    ) -> Result<Self, RendererError> {
+        if width <= 0 || height <= 0 {
+            log::warn!("vulkan offscreen target has no positive size");
+            return Err(RendererError::TargetFailed);
+        }
+        let format = vk::Format::B8G8R8A8_UNORM;
+        let info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D { width: width as u32, height: height as u32, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = unsafe { device.device.create_image(&info, None) }.map_err(|error| {
+            log::error!("vulkan offscreen image creation failed: {error}");
+            RendererError::TargetFailed
+        })?;
+        let requirements = unsafe { device.device.get_image_memory_requirements(image) };
+        let allocation = match device.allocate(requirements, UsageFlags::FAST_DEVICE_ACCESS) {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                log::error!("{error}");
+                unsafe { device.device.destroy_image(image, None) };
+                return Err(RendererError::TargetFailed);
+            }
+        };
+        if let Err(error) = unsafe {
+            device
+                .device
+                .bind_image_memory(image, allocation.memory(), allocation.offset())
+        } {
+            log::error!("vulkan offscreen image bind failed: {error}");
+            unsafe { device.device.destroy_image(image, None) };
+            return Err(RendererError::TargetFailed);
+        }
+        let view = match create_view(&device.device, image, format) {
+            Ok(view) => view,
+            Err(error) => {
+                unsafe { device.device.destroy_image(image, None) };
+                return Err(error);
+            }
+        };
+        let render_pass = match color_render_pass(&device.device, format) {
+            Ok(pass) => pass,
+            Err(error) => {
+                log::error!("{error}");
+                unsafe {
+                    device.device.destroy_image_view(view, None);
+                    device.device.destroy_image(image, None);
+                }
+                return Err(RendererError::TargetFailed);
+            }
+        };
+        let framebuffer = match create_framebuffer(
+            &device.device,
+            render_pass,
+            view,
+            width as u32,
+            height as u32,
+        ) {
+            Ok(framebuffer) => framebuffer,
+            Err(error) => {
+                unsafe {
+                    device.device.destroy_render_pass(render_pass, None);
+                    device.device.destroy_image_view(view, None);
+                    device.device.destroy_image(image, None);
+                }
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            device: device.clone(),
+            image,
+            allocation,
+            view,
+            render_pass,
+            framebuffer,
+            width,
+            height,
+            layout: Cell::new(vk::ImageLayout::UNDEFINED),
+        })
+    }
+}
+
+pub(super) trait PaintedTarget {
+    fn image(&self) -> vk::Image;
+    fn framebuffer(&self) -> vk::Framebuffer;
+    fn render_pass(&self) -> vk::RenderPass;
+    fn width(&self) -> i32;
+    fn height(&self) -> i32;
+    fn layout(&self) -> &Cell<vk::ImageLayout>;
+    fn clear_color(&self) -> [f32; 4];
+    fn can_readback(&self) -> bool;
+}
+
+impl PaintedTarget for OutputTarget {
+    fn image(&self) -> vk::Image {
+        self.image
+    }
+
+    fn framebuffer(&self) -> vk::Framebuffer {
+        self.framebuffer
+    }
+
+    fn render_pass(&self) -> vk::RenderPass {
+        self.render_pass
+    }
+
+    fn width(&self) -> i32 {
+        self.width
+    }
+
+    fn height(&self) -> i32 {
+        self.height
+    }
+
+    fn layout(&self) -> &Cell<vk::ImageLayout> {
+        &self.layout
+    }
+
+    fn clear_color(&self) -> [f32; 4] {
+        [1.0, 0.0, 0.0, 1.0]
+    }
+
+    fn can_readback(&self) -> bool {
+        false
+    }
+}
+
+impl PaintedTarget for OffscreenImage {
+    fn image(&self) -> vk::Image {
+        self.image
+    }
+
+    fn framebuffer(&self) -> vk::Framebuffer {
+        self.framebuffer
+    }
+
+    fn render_pass(&self) -> vk::RenderPass {
+        self.render_pass
+    }
+
+    fn width(&self) -> i32 {
+        self.width
+    }
+
+    fn height(&self) -> i32 {
+        self.height
+    }
+
+    fn layout(&self) -> &Cell<vk::ImageLayout> {
+        &self.layout
+    }
+
+    fn clear_color(&self) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
+    fn can_readback(&self) -> bool {
+        true
     }
 }
 
@@ -188,6 +378,54 @@ impl RenderTarget for OutputTarget {
     }
 }
 
+impl Debug for OffscreenImage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VulkanOffscreenImage")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish()
+    }
+}
+
+impl RenderTarget for OffscreenImage {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn width(&self) -> i32 {
+        self.width
+    }
+
+    fn height(&self) -> i32 {
+        self.height
+    }
+}
+
+impl OffscreenTarget for OffscreenImage {}
+
+impl Drop for OffscreenImage {
+    fn drop(&mut self) {
+        unsafe {
+            if let Err(error) = self.device.device.device_wait_idle() {
+                log::error!("vulkan wait before destroying an offscreen image failed: {error}");
+            }
+            self.device
+                .device
+                .destroy_framebuffer(self.framebuffer, None);
+            self.device
+                .device
+                .destroy_render_pass(self.render_pass, None);
+            self.device.device.destroy_image_view(self.view, None);
+            self.device.device.destroy_image(self.image, None);
+        }
+    }
+}
+
 impl Drop for OutputTarget {
     fn drop(&mut self) {
         // Finish command use of this image before freeing it. Frame submission
@@ -211,7 +449,7 @@ impl Drop for OutputTarget {
     }
 }
 
-fn planes_are_disjoint(planes: &[DmaBufPlane]) -> Result<bool, RendererError> {
+pub(super) fn planes_are_disjoint(planes: &[DmaBufPlane]) -> Result<bool, RendererError> {
     if planes.len() <= 1 {
         return Ok(false);
     }
@@ -231,7 +469,7 @@ fn planes_are_disjoint(planes: &[DmaBufPlane]) -> Result<bool, RendererError> {
     Ok(false)
 }
 
-fn memory_plane(index: usize) -> Result<vk::ImageAspectFlags, RendererError> {
+pub(super) fn memory_plane(index: usize) -> Result<vk::ImageAspectFlags, RendererError> {
     match index {
         0 => Ok(vk::ImageAspectFlags::MEMORY_PLANE_0_EXT),
         1 => Ok(vk::ImageAspectFlags::MEMORY_PLANE_1_EXT),
@@ -244,7 +482,7 @@ fn memory_plane(index: usize) -> Result<vk::ImageAspectFlags, RendererError> {
     }
 }
 
-fn bind_memory(
+pub(super) fn bind_memory(
     device: &VulkanDevice,
     image: vk::Image,
     memories: &[vk::DeviceMemory],
@@ -277,7 +515,7 @@ fn bind_memory(
     Ok(())
 }
 
-fn create_view(
+pub(super) fn create_view(
     device: &ash::Device,
     image: vk::Image,
     format: vk::Format,
@@ -299,18 +537,18 @@ fn create_view(
     })
 }
 
-fn create_render_pass(
+pub(super) fn color_render_pass(
     device: &ash::Device,
     format: vk::Format,
-) -> Result<vk::RenderPass, RendererError> {
+) -> Result<vk::RenderPass, String> {
     let attachment = vk::AttachmentDescription::default()
         .format(format)
         .samples(vk::SampleCountFlags::TYPE_1)
-        .load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .load_op(vk::AttachmentLoadOp::LOAD)
         .store_op(vk::AttachmentStoreOp::STORE)
         .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
         .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
         .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
     let reference = vk::AttachmentReference {
         attachment: 0,
@@ -319,13 +557,21 @@ fn create_render_pass(
     let subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(std::slice::from_ref(&reference));
+    let dependency = vk::SubpassDependency::default()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .dst_subpass(0)
+        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+        .dst_access_mask(
+            vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        );
     let info = vk::RenderPassCreateInfo::default()
         .attachments(std::slice::from_ref(&attachment))
-        .subpasses(std::slice::from_ref(&subpass));
-    unsafe { device.create_render_pass(&info, None) }.map_err(|error| {
-        log::error!("vulkan output render pass failed: {error}");
-        RendererError::ImportFailed
-    })
+        .subpasses(std::slice::from_ref(&subpass))
+        .dependencies(std::slice::from_ref(&dependency));
+    unsafe { device.create_render_pass(&info, None) }
+        .map_err(|error| format!("vulkan color render pass failed: {error}"))
 }
 
 fn create_framebuffer(
