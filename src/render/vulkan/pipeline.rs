@@ -224,12 +224,23 @@ impl DrawState {
     }
 
     pub(super) fn reset_descriptors(&mut self) -> Result<(), String> {
+        if self.pool == vk::DescriptorPool::null() {
+            self.pool = descriptor_pool(&self.device.device)?;
+        }
         unsafe {
             self.device
                 .device
                 .reset_descriptor_pool(self.pool, vk::DescriptorPoolResetFlags::empty())
         }
         .map_err(|error| format!("vulkan descriptor reset failed: {error}"))
+    }
+
+    /// Hand the pool an in-flight frame still references to that frame.
+    ///
+    /// The next frame allocates another pool. Resetting this one would free
+    /// descriptor sets the GPU is still reading.
+    pub(super) fn park_pool(&mut self) -> vk::DescriptorPool {
+        std::mem::replace(&mut self.pool, vk::DescriptorPool::null())
     }
 }
 
@@ -247,7 +258,9 @@ impl Drop for DrawState {
             self.device
                 .device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.device.destroy_descriptor_pool(self.pool, None);
+            if self.pool != vk::DescriptorPool::null() {
+                self.device.device.destroy_descriptor_pool(self.pool, None);
+            }
             self.device
                 .device
                 .destroy_descriptor_set_layout(self.set_layout, None);

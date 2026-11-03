@@ -1,24 +1,34 @@
-//! One textured frame. The command buffer is waited on before `render` returns.
+//! One textured frame.
+//!
+//! `BlockingFinishFallback` waits before it returns. `ExplicitInFence` exports a
+//! sync file and leaves the command buffer, descriptors, and blur images alive
+//! until that fence signals.
 
 use {ash::vk, gpu_alloc::UsageFlags};
 
-use std::rc::Rc;
+use std::{os::fd::AsRawFd, rc::Rc};
 
 use crate::{
     config::RgbaColor,
     region::{DamageRegion, RectI},
     render::{
         shadow_geometry, BlurVisualStyle, BorderGradient, EffectElement, FrameElement,
-        RenderCompletion, RenderFrame, RendererError, RoundedRing, ShadowVisualStyle,
-        TextureElement, TextureMask, TextureSource,
+        RenderCompletion, RenderFrame, RenderSyncMode, RendererError, RoundedRing,
+        ShadowVisualStyle, TextureElement, TextureMask, TextureSource,
     },
     state::RootSurfaceClip,
     transform::{self, Mat3, OutputPresentationTransform},
 };
 
 use super::{
-    allocator::AllocatedBuffer, command, device::VulkanDevice, effects::BlurJob,
-    pipeline::DrawState, resources::PaintedTarget, texture,
+    allocator::AllocatedBuffer,
+    command,
+    device::{PendingFrame, RenderedSubmit, VulkanDevice},
+    effects::BlurJob,
+    pipeline::DrawState,
+    resources::PaintedTarget,
+    sync::OwnedSemaphores,
+    texture,
 };
 
 #[repr(C)]
@@ -103,6 +113,8 @@ pub(super) fn paint(
     draw: &mut DrawState,
     target: &dyn PaintedTarget,
     frame: RenderFrame<'_>,
+    pending: &mut Vec<PendingFrame>,
+    acquires: Vec<super::sync::StashedSemaphore>,
 ) -> Result<RenderCompletion, RendererError> {
     if target.width() <= 0 || target.height() <= 0 {
         log::error!("vulkan render target has no positive size");
@@ -129,7 +141,9 @@ pub(super) fn paint(
     }
     let clear_rects =
         clear_rects(target, frame.damage, frame.preserve_contents, frame.presentation_transform);
-    device.submit(RendererError::RenderFailed, |vulkan, command| {
+    let explicit = frame.sync_mode == RenderSyncMode::ExplicitInFence;
+    let waits = OwnedSemaphores::from_stashed(device, acquires);
+    let submitted = device.submit_rendered(explicit, waits.as_slice(), |vulkan, command| {
         let old_layout = target.layout().get();
         let (src_stage, src_access) = if old_layout == vk::ImageLayout::UNDEFINED {
             (vk::PipelineStageFlags::TOP_OF_PIPE, vk::AccessFlags::empty())
@@ -197,7 +211,19 @@ pub(super) fn paint(
     target
         .layout()
         .set(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-    Ok(RenderCompletion::blocking_fallback())
+    match submitted {
+        RenderedSubmit::Blocked => Ok(RenderCompletion::blocking_fallback()),
+        RenderedSubmit::Explicit(detached) => {
+            let pool = draw.park_pool();
+            let (sync_fd, parked) =
+                detached.into_frame(device, waits.into_handles(), pool, Box::new(ops));
+            if crate::logger::ENABLE_NOISY_LOG {
+                log::debug!("vulkan exported explicit render fence fd={}", sync_fd.as_raw_fd());
+            }
+            pending.push(parked);
+            Ok(RenderCompletion::explicit(sync_fd))
+        }
+    }
 }
 
 fn prepare_texture(

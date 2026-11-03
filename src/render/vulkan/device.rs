@@ -1,7 +1,8 @@
 use std::{
-    cell::UnsafeCell,
+    any::Any,
+    cell::{Cell, RefCell, UnsafeCell},
     ffi::{c_char, CStr, CString},
-    os::fd::{AsFd, AsRawFd},
+    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
     rc::Rc,
 };
 
@@ -27,12 +28,87 @@ pub(super) struct VulkanDevice {
     pub(super) graphics_queue: vk::Queue,
     pub(super) graphics_queue_family: u32,
     command_pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
+    /// Command buffers whose GPU work has finished. Jay keeps the same free list.
+    free_commands: RefCell<Vec<vk::CommandBuffer>>,
     allocator: UnsafeCell<GpuAllocator<vk::DeviceMemory>>,
     pub(super) external_memory: ash::khr::external_memory_fd::Device,
+    pub(super) external_semaphore: ash::khr::external_semaphore_fd::Device,
     pub(super) memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub(super) formats: FormatSet,
     device_id: RenderDeviceId,
+}
+
+/// One explicit submission. The renderer keeps it until the fence signals.
+pub(super) struct PendingFrame {
+    device: Rc<VulkanDevice>,
+    resources: Option<Box<dyn Any>>,
+    fence: vk::Fence,
+    semaphores: Vec<vk::Semaphore>,
+    descriptor_pool: vk::DescriptorPool,
+    command: vk::CommandBuffer,
+}
+
+impl PendingFrame {
+    pub(super) fn signaled(&self) -> bool {
+        match unsafe { self.device.device.get_fence_status(self.fence) } {
+            Ok(signaled) => signaled,
+            Err(error) => {
+                log::warn!("vulkan fence status failed: {error}");
+                false
+            }
+        }
+    }
+}
+
+impl Drop for PendingFrame {
+    fn drop(&mut self) {
+        self.resources.take();
+        unsafe {
+            self.device.device.destroy_fence(self.fence, None);
+            for semaphore in self.semaphores.drain(..) {
+                self.device.device.destroy_semaphore(semaphore, None);
+            }
+            if self.descriptor_pool != vk::DescriptorPool::null() {
+                self.device
+                    .device
+                    .destroy_descriptor_pool(self.descriptor_pool, None);
+            }
+        }
+        self.device.recycle_command(self.command);
+    }
+}
+
+pub(super) struct DetachedSubmit {
+    command: vk::CommandBuffer,
+    fence: vk::Fence,
+    signal: vk::Semaphore,
+    sync_fd: OwnedFd,
+}
+
+impl DetachedSubmit {
+    pub(super) fn into_frame(
+        self,
+        device: &Rc<VulkanDevice>,
+        mut waits: Vec<vk::Semaphore>,
+        descriptor_pool: vk::DescriptorPool,
+        resources: Box<dyn Any>,
+    ) -> (OwnedFd, PendingFrame) {
+        waits.push(self.signal);
+        let frame = PendingFrame {
+            device: device.clone(),
+            resources: Some(resources),
+            fence: self.fence,
+            semaphores: waits,
+            descriptor_pool,
+            command: self.command,
+        };
+        (self.sync_fd, frame)
+    }
+}
+
+pub(super) enum RenderedSubmit {
+    Blocked,
+    Explicit(DetachedSubmit),
 }
 
 impl Drop for VulkanDevice {
@@ -76,6 +152,8 @@ impl VulkanDevice {
                 return Err(error);
             }
         };
+        let external_semaphore =
+            ash::khr::external_semaphore_fd::Device::new(&instance.instance, &device);
         let mut memory_info = match unsafe {
             gpu_alloc_ash::device_properties(&instance.instance, vk::API_VERSION_1_2, physical)
         } {
@@ -101,9 +179,10 @@ impl VulkanDevice {
             graphics_queue,
             graphics_queue_family: queue_family,
             command_pool,
-            command_buffer,
+            free_commands: RefCell::new(vec![command_buffer]),
             allocator: UnsafeCell::new(allocator),
             external_memory,
+            external_semaphore,
             memory_properties,
             formats,
             device_id: RenderDeviceId::next(),
@@ -119,64 +198,378 @@ impl VulkanDevice {
         unsafe { &mut *self.allocator.get() }
     }
 
-    /// Record, submit, and wait for one command buffer.
-    ///
-    /// The wait is this frame's fence. The next submission resets that buffer.
-    /// Teardown is the only path that waits for the whole device.
+    /// Record, submit, and wait. Uploads and readback use this while a frame is in flight.
     pub(super) fn submit(
         &self,
         failed: RendererError,
         record: impl FnOnce(&Device, vk::CommandBuffer) -> Result<(), String>,
     ) -> Result<(), RendererError> {
-        let recorded = self.record_and_wait(record);
-        recorded.map_err(|error| {
-            log::error!("{error}");
-            failed
+        match self.record_submit(&[], false, record) {
+            Ok(RenderedSubmit::Blocked) => Ok(()),
+            Ok(RenderedSubmit::Explicit(_)) => {
+                log::error!("vulkan blocking submit returned an explicit fence");
+                Err(failed)
+            }
+            Err(error) => {
+                log::error!("{error}");
+                Err(failed)
+            }
+        }
+    }
+
+    /// Record a frame. Explicit mode returns a sync file without waiting.
+    pub(super) fn submit_rendered(
+        &self,
+        explicit: bool,
+        waits: &[vk::Semaphore],
+        record: impl FnOnce(&Device, vk::CommandBuffer) -> Result<(), String>,
+    ) -> Result<RenderedSubmit, RendererError> {
+        self.record_submit(waits, explicit, record)
+            .map_err(|error| {
+                log::error!("{error}");
+                RendererError::RenderFailed
+            })
+    }
+
+    fn record_submit(
+        &self,
+        waits: &[vk::Semaphore],
+        explicit: bool,
+        record: impl FnOnce(&Device, vk::CommandBuffer) -> Result<(), String>,
+    ) -> Result<RenderedSubmit, String> {
+        let command = self.checkout()?;
+        unsafe {
+            if let Err(error) = self.device.begin_command_buffer(
+                command,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            ) {
+                self.recycle_command(command);
+                return Err(format!("failed to begin a vulkan command buffer: {error}"));
+            }
+            if let Err(error) = record(&self.device, command) {
+                let _ = self.device.end_command_buffer(command);
+                self.recycle_command(command);
+                return Err(error);
+            }
+            if let Err(error) = self.device.end_command_buffer(command) {
+                self.recycle_command(command);
+                return Err(format!("failed to end a vulkan command buffer: {error}"));
+            }
+        }
+        let fence = match unsafe {
+            self.device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+        } {
+            Ok(fence) => fence,
+            Err(error) => {
+                self.recycle_command(command);
+                return Err(format!("failed to create a vulkan fence: {error}"));
+            }
+        };
+        let signal = if explicit {
+            match self.create_export_semaphore() {
+                Ok(semaphore) => Some(semaphore),
+                Err(error) => {
+                    log::warn!(
+                        "vulkan explicit fence export failed, falling back to a blocking finish: {error}"
+                    );
+                    if let Err(error) = self.queue_submit(command, waits, None, fence) {
+                        unsafe { self.device.destroy_fence(fence, None) };
+                        self.recycle_command(command);
+                        return Err(error);
+                    }
+                    return self.finish_blocked(fence, command, None);
+                }
+            }
+        } else {
+            None
+        };
+        // Creating the export semaphore can fail before anything is queued. A
+        // later export failure waits for the submission that already ran.
+        if let Err(error) = self.queue_submit(command, waits, signal, fence) {
+            unsafe {
+                self.device.destroy_fence(fence, None);
+                if let Some(semaphore) = signal {
+                    self.device.destroy_semaphore(semaphore, None);
+                }
+            }
+            self.recycle_command(command);
+            return Err(error);
+        }
+        let Some(signal) = signal else {
+            self.wait_fence_and_recycle(fence, command)?;
+            return Ok(RenderedSubmit::Blocked);
+        };
+        match self.export_sync_fd(signal) {
+            Ok(Some(sync_fd)) => {
+                Ok(RenderedSubmit::Explicit(DetachedSubmit { command, fence, signal, sync_fd }))
+            }
+            Ok(None) => {
+                log::warn!(
+                    "vulkan explicit fence was already signaled, falling back to a blocking finish"
+                );
+                self.finish_blocked(fence, command, Some(signal))
+            }
+            Err(error) => {
+                log::warn!(
+                    "vulkan explicit fence export failed, falling back to a blocking finish: {error}"
+                );
+                self.finish_blocked(fence, command, Some(signal))
+            }
+        }
+    }
+
+    fn finish_blocked(
+        &self,
+        fence: vk::Fence,
+        command: vk::CommandBuffer,
+        signal: Option<vk::Semaphore>,
+    ) -> Result<RenderedSubmit, String> {
+        let waited = self.wait_fence_and_recycle(fence, command);
+        if let Some(semaphore) = signal {
+            unsafe { self.device.destroy_semaphore(semaphore, None) };
+        }
+        waited?;
+        Ok(RenderedSubmit::Blocked)
+    }
+
+    fn wait_fence_and_recycle(
+        &self,
+        fence: vk::Fence,
+        command: vk::CommandBuffer,
+    ) -> Result<(), String> {
+        let waited = unsafe {
+            self.device
+                .wait_for_fences(std::slice::from_ref(&fence), true, u64::MAX)
+        };
+        if let Err(error) = waited {
+            log::error!("vulkan fence wait failed: {error}");
+            unsafe {
+                let _ = self.device.device_wait_idle();
+            }
+        }
+        unsafe { self.device.destroy_fence(fence, None) };
+        self.recycle_command(command);
+        waited.map_err(|error| format!("vulkan fence wait failed: {error}"))
+    }
+
+    fn queue_submit(
+        &self,
+        command: vk::CommandBuffer,
+        waits: &[vk::Semaphore],
+        signal: Option<vk::Semaphore>,
+        fence: vk::Fence,
+    ) -> Result<(), String> {
+        let stages = vec![vk::PipelineStageFlags::TOP_OF_PIPE; waits.len()];
+        let signals: Vec<vk::Semaphore> = signal.into_iter().collect();
+        let mut info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command));
+        if !waits.is_empty() {
+            info = info.wait_semaphores(waits).wait_dst_stage_mask(&stages);
+        }
+        if !signals.is_empty() {
+            info = info.signal_semaphores(&signals);
+        }
+        unsafe {
+            self.device
+                .queue_submit(self.graphics_queue, std::slice::from_ref(&info), fence)
+        }
+        .map_err(|error| format!("vulkan queue submit failed: {error}"))
+    }
+
+    fn create_export_semaphore(&self) -> Result<vk::Semaphore, String> {
+        let mut export = vk::ExportSemaphoreCreateInfo::default()
+            .handle_types(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
+        let info = vk::SemaphoreCreateInfo::default().push_next(&mut export);
+        unsafe { self.device.create_semaphore(&info, None) }
+            .map_err(|error| format!("vulkan export semaphore creation failed: {error}"))
+    }
+
+    fn export_sync_fd(&self, semaphore: vk::Semaphore) -> Result<Option<OwnedFd>, String> {
+        let info = vk::SemaphoreGetFdInfoKHR::default()
+            .semaphore(semaphore)
+            .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
+        let fd = unsafe { self.external_semaphore.get_semaphore_fd(&info) }
+            .map_err(|error| format!("vulkan sync-file export failed: {error}"))?;
+        if fd < 0 {
+            Ok(None)
+        } else {
+            Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }))
+        }
+    }
+
+    fn checkout(&self) -> Result<vk::CommandBuffer, String> {
+        let command = match self.free_commands.borrow_mut().pop() {
+            Some(command) => command,
+            None => command::allocate_command(&self.device, self.command_pool)?,
+        };
+        if let Err(error) = unsafe {
+            self.device
+                .reset_command_buffer(command, vk::CommandBufferResetFlags::empty())
+        } {
+            log::error!("vulkan command buffer reset failed: {error}");
+            return Err(format!("failed to reset a vulkan command buffer: {error}"));
+        }
+        Ok(command)
+    }
+
+    pub(super) fn recycle_command(&self, command: vk::CommandBuffer) {
+        self.free_commands.borrow_mut().push(command);
+    }
+}
+
+/// Sync file that stays unsignaled until [`BlockedSyncFile::release`].
+///
+/// An empty DRM syncobj has no dma-fence, so the kernel rejects exporting it.
+/// The file is the pending signal of a command buffer that waits on a host
+/// event. Tests use it as a client acquire without a kernel sw_sync device.
+#[cfg(test)]
+pub(super) struct BlockedSyncFile {
+    device: Rc<VulkanDevice>,
+    event: vk::Event,
+    signal: vk::Semaphore,
+    fence: vk::Fence,
+    command: vk::CommandBuffer,
+    fd: OwnedFd,
+    released: Cell<bool>,
+}
+
+#[cfg(test)]
+impl BlockedSyncFile {
+    pub(super) fn open(device: &Rc<VulkanDevice>) -> Result<Self, String> {
+        let event = unsafe {
+            device
+                .device
+                .create_event(&vk::EventCreateInfo::default(), None)
+        }
+        .map_err(|error| format!("vulkan event creation failed: {error}"))?;
+        let signal = match device.create_export_semaphore() {
+            Ok(semaphore) => semaphore,
+            Err(error) => {
+                unsafe { device.device.destroy_event(event, None) };
+                return Err(error);
+            }
+        };
+        let command = match device.checkout() {
+            Ok(command) => command,
+            Err(error) => {
+                unsafe {
+                    device.device.destroy_event(event, None);
+                    device.device.destroy_semaphore(signal, None);
+                }
+                return Err(error);
+            }
+        };
+        let fail_recording = |error: String| -> Result<Self, String> {
+            device.recycle_command(command);
+            unsafe {
+                device.device.destroy_event(event, None);
+                device.device.destroy_semaphore(signal, None);
+            }
+            Err(error)
+        };
+        unsafe {
+            if let Err(error) = device.device.begin_command_buffer(
+                command,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            ) {
+                return fail_recording(format!("failed to begin a vulkan command buffer: {error}"));
+            }
+            device.device.cmd_wait_events(
+                command,
+                std::slice::from_ref(&event),
+                vk::PipelineStageFlags::HOST,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                &[],
+                &[],
+                &[],
+            );
+            if let Err(error) = device.device.end_command_buffer(command) {
+                return fail_recording(format!("failed to end a vulkan command buffer: {error}"));
+            }
+        }
+        let fence = match unsafe {
+            device
+                .device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+        } {
+            Ok(fence) => fence,
+            Err(error) => {
+                let _ = fail_recording(String::new());
+                return Err(format!("failed to create a vulkan fence: {error}"));
+            }
+        };
+        if let Err(error) = device.queue_submit(command, &[], Some(signal), fence) {
+            unsafe {
+                device.device.destroy_fence(fence, None);
+                device.device.destroy_event(event, None);
+                device.device.destroy_semaphore(signal, None);
+            }
+            device.recycle_command(command);
+            return Err(error);
+        }
+        let fd = match device.export_sync_fd(signal)? {
+            Some(fd) => fd,
+            None => {
+                unsafe {
+                    let _ = device.device.set_event(event);
+                    let _ = device.device.wait_for_fences(
+                        std::slice::from_ref(&fence),
+                        true,
+                        2_000_000_000,
+                    );
+                    device.device.destroy_fence(fence, None);
+                    device.device.destroy_event(event, None);
+                    device.device.destroy_semaphore(signal, None);
+                }
+                device.recycle_command(command);
+                return Err("vulkan sync file was already signaled".to_string());
+            }
+        };
+        Ok(Self {
+            device: device.clone(),
+            event,
+            signal,
+            fence,
+            command,
+            fd,
+            released: Cell::new(false),
         })
     }
 
-    fn record_and_wait(
-        &self,
-        record: impl FnOnce(&Device, vk::CommandBuffer) -> Result<(), String>,
-    ) -> Result<(), String> {
-        unsafe {
-            self.device
-                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
-                .map_err(|error| format!("failed to reset a vulkan command buffer: {error}"))?;
-            self.device
-                .begin_command_buffer(
-                    self.command_buffer,
-                    &vk::CommandBufferBeginInfo::default()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                )
-                .map_err(|error| format!("failed to begin a vulkan command buffer: {error}"))?;
-            if let Err(error) = record(&self.device, self.command_buffer) {
-                let _ = self.device.end_command_buffer(self.command_buffer);
-                return Err(error);
-            }
-            self.device
-                .end_command_buffer(self.command_buffer)
-                .map_err(|error| format!("failed to end a vulkan command buffer: {error}"))?;
-            let fence = self
-                .device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-                .map_err(|error| format!("failed to create a vulkan fence: {error}"))?;
-            let submit = vk::SubmitInfo::default()
-                .command_buffers(std::slice::from_ref(&self.command_buffer));
-            if let Err(error) =
-                self.device
-                    .queue_submit(self.graphics_queue, std::slice::from_ref(&submit), fence)
-            {
-                self.device.destroy_fence(fence, None);
-                return Err(format!("vulkan queue submit failed: {error}"));
-            }
-            let waited = self
-                .device
-                .wait_for_fences(std::slice::from_ref(&fence), true, u64::MAX);
-            self.device.destroy_fence(fence, None);
-            waited.map_err(|error| format!("vulkan fence wait failed: {error}"))?;
+    pub(super) fn fd(&self) -> &OwnedFd {
+        &self.fd
+    }
+
+    pub(super) fn release(&self) -> Result<(), String> {
+        if self.released.replace(true) {
+            return Ok(());
         }
-        Ok(())
+        unsafe { self.device.device.set_event(self.event) }
+            .map_err(|error| format!("vulkan event signal failed: {error}"))
+    }
+}
+
+#[cfg(test)]
+impl Drop for BlockedSyncFile {
+    fn drop(&mut self) {
+        let _ = self.release();
+        unsafe {
+            let waited = self.device.device.wait_for_fences(
+                std::slice::from_ref(&self.fence),
+                true,
+                2_000_000_000,
+            );
+            if waited.is_err() {
+                log::error!("vulkan blocked sync file was still pending at drop");
+                return;
+            }
+            self.device.device.destroy_fence(self.fence, None);
+            self.device.device.destroy_event(self.event, None);
+            self.device.device.destroy_semaphore(self.signal, None);
+        }
+        self.device.recycle_command(self.command);
     }
 }
 
