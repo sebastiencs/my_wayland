@@ -97,7 +97,17 @@ fn element(
 }
 
 fn paint(renderer: &mut dyn Renderer, element: FrameElement, width: i32, height: i32) -> Vec<u8> {
-    let recipe = OutputFrameRecipe { elements: vec![element] };
+    paint_scene(renderer, vec![element], width, height, OutputPresentationTransform::FlipY)
+}
+
+fn paint_scene(
+    renderer: &mut dyn Renderer,
+    elements: Vec<FrameElement>,
+    width: i32,
+    height: i32,
+    presentation: OutputPresentationTransform,
+) -> Vec<u8> {
+    let recipe = OutputFrameRecipe { elements };
     let damage = DamageRegion::from_rect(RectI::new(0, 0, width, height).expect("damage"));
     let mut target = renderer
         .create_offscreen_target(width, height)
@@ -109,7 +119,7 @@ fn paint(renderer: &mut dyn Renderer, element: FrameElement, width: i32, height:
                 recipe: &recipe,
                 damage: &damage,
                 preserve_contents: false,
-                presentation_transform: OutputPresentationTransform::FlipY,
+                presentation_transform: presentation,
                 sync_mode: RenderSyncMode::BlockingFinishFallback,
                 blur_reference: None,
             },
@@ -121,6 +131,11 @@ fn paint(renderer: &mut dyn Renderer, element: FrameElement, width: i32, height:
         .readback(&*target, RectI::new(0, 0, width, height).expect("read"), stride, &mut bytes)
         .expect("readback");
     bytes
+}
+
+fn pixel<'a>(bytes: &'a [u8], width: i32, x: i32, y: i32) -> &'a [u8] {
+    let start = ((y * width + x) * 4) as usize;
+    &bytes[start..start + 4]
 }
 
 fn assert_close(left: &[u8], right: &[u8], tolerance: u8) {
@@ -300,6 +315,127 @@ fn vulkan_matches_gles_textured_quads() {
     assert_eq!(&gles_round[..4], &[0, 0, 0, 0]);
     assert_eq!(&gles_round[8 * 4 + 8..8 * 4 + 12], &green);
     assert_close(&gles_round, &vulkan_round, 1);
+}
+
+#[test]
+fn vulkan_matches_gles_frame_ring_opacity_and_upright_output() {
+    let Some(mut pair) = pair() else {
+        eprintln!("skipping vulkan mask comparison: no matching DRM node");
+        return;
+    };
+    let _ = pair.gbm;
+
+    let green = [0, 255, 0, 255];
+    let red = [0, 0, 255, 255];
+    let ring_bytes = solid(green, 8, 8);
+    let import = |renderer: &mut dyn Renderer| {
+        renderer
+            .import_shm(ShmImage {
+                bytes: &ring_bytes,
+                width: 8,
+                height: 8,
+                stride: 32,
+                fourcc: DrmFourcc::Argb8888,
+            })
+            .expect("ring texture")
+    };
+    let gl_ring = import(&mut *pair.gl);
+    let vk_ring = import(&mut *pair.vulkan);
+    let outer =
+        RootSurfaceClip::new(RectI::new(0, 0, 8, 8).expect("outer"), 2, RoundingPower::default());
+    let inner =
+        RootSurfaceClip::new(RectI::new(2, 2, 4, 4).expect("inner"), 0, RoundingPower::default());
+    let mask = TextureMask::FrameRing { ring: RoundedRing { outer, inner } };
+    let gles_ring = paint(&mut *pair.gl, element(gl_ring, 0, 0, 8, 8, u8::MAX, mask.clone()), 8, 8);
+    let vulkan_ring = paint(&mut *pair.vulkan, element(vk_ring, 0, 0, 8, 8, u8::MAX, mask), 8, 8);
+    assert_eq!(pixel(&gles_ring, 8, 1, 4), &green, "the ring band must keep the texture");
+    assert_eq!(pixel(&gles_ring, 8, 4, 4), &[0, 0, 0, 0], "the inner rect must be punched out");
+    assert_close(&gles_ring, &vulkan_ring, 1);
+
+    let background = solid(red, 2, 2);
+    let foreground = solid(green, 2, 2);
+    let import_pair = |renderer: &mut dyn Renderer, bytes: &[u8]| {
+        renderer
+            .import_shm(ShmImage {
+                bytes,
+                width: 2,
+                height: 2,
+                stride: 8,
+                fourcc: DrmFourcc::Argb8888,
+            })
+            .expect("layered texture")
+    };
+    let gl_back = import_pair(&mut *pair.gl, &background);
+    let gl_front = import_pair(&mut *pair.gl, &foreground);
+    let vk_back = import_pair(&mut *pair.vulkan, &background);
+    let vk_front = import_pair(&mut *pair.vulkan, &foreground);
+    let layered = |back, front| {
+        vec![
+            element(back, 0, 0, 2, 2, u8::MAX, TextureMask::None),
+            element(front, 0, 0, 2, 2, 128, TextureMask::None),
+        ]
+    };
+    let gles_layers = paint_scene(
+        &mut *pair.gl,
+        layered(gl_back, gl_front),
+        2,
+        2,
+        OutputPresentationTransform::FlipY,
+    );
+    let vulkan_layers = paint_scene(
+        &mut *pair.vulkan,
+        layered(vk_back, vk_front),
+        2,
+        2,
+        OutputPresentationTransform::FlipY,
+    );
+    let blended = pixel(&gles_layers, 2, 0, 0);
+    assert_ne!(blended, &red, "the translucent quad must change the background");
+    assert_ne!(blended, &green, "the background must remain visible through the quad");
+    assert_close(&gles_layers, &vulkan_layers, 1);
+
+    let mut rows = solid(green, 2, 1);
+    rows.extend(solid(red, 2, 1));
+    let import_rows = |renderer: &mut dyn Renderer| {
+        renderer
+            .import_shm(ShmImage {
+                bytes: &rows,
+                width: 2,
+                height: 2,
+                stride: 8,
+                fourcc: DrmFourcc::Argb8888,
+            })
+            .expect("row texture")
+    };
+    let gl_rows = import_rows(&mut *pair.gl);
+    let vk_rows = import_rows(&mut *pair.vulkan);
+    let gles_flipped = paint(
+        &mut *pair.gl,
+        element(gl_rows.clone(), 0, 0, 2, 2, u8::MAX, TextureMask::None),
+        2,
+        2,
+    );
+    let gl_upright = import_rows(&mut *pair.gl);
+    let gles_upright = paint_scene(
+        &mut *pair.gl,
+        vec![element(gl_upright, 0, 0, 2, 2, u8::MAX, TextureMask::None)],
+        2,
+        2,
+        OutputPresentationTransform::Normal,
+    );
+    let vk_upright = paint_scene(
+        &mut *pair.vulkan,
+        vec![element(vk_rows, 0, 0, 2, 2, u8::MAX, TextureMask::None)],
+        2,
+        2,
+        OutputPresentationTransform::Normal,
+    );
+    assert_ne!(
+        pixel(&gles_flipped, 2, 0, 0),
+        pixel(&gles_upright, 2, 0, 0),
+        "an upright output must not match the flipped row order"
+    );
+    assert_close(&gles_upright, &vk_upright, 0);
 }
 
 #[test]
