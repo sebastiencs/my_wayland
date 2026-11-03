@@ -188,8 +188,24 @@ impl AnimationsConfig {
         self.node(AnimationNode::WindowsMove)
     }
 
+    pub fn fade_in(&self) -> ResolvedAnimation {
+        self.node(AnimationNode::FadeIn)
+    }
+
+    pub fn fade_out(&self) -> ResolvedAnimation {
+        self.node(AnimationNode::FadeOut)
+    }
+
     pub fn workspace(&self) -> ResolvedAnimation {
         self.node(AnimationNode::Workspaces)
+    }
+
+    pub fn workspace_in(&self) -> ResolvedAnimation {
+        self.node(AnimationNode::WorkspacesIn)
+    }
+
+    pub fn workspace_out(&self) -> ResolvedAnimation {
+        self.node(AnimationNode::WorkspacesOut)
     }
 
     pub fn set_duration_msec(&mut self, node: AnimationNode, msec: u32) {
@@ -208,14 +224,18 @@ impl AnimationsConfig {
 
     pub fn set_open_duration_msec(&mut self, msec: u32) {
         self.set_duration_msec(AnimationNode::WindowsIn, msec);
+        self.set_duration_msec(AnimationNode::FadeIn, msec);
     }
 
     pub fn set_close_duration_msec(&mut self, msec: u32) {
         self.set_duration_msec(AnimationNode::WindowsOut, msec);
+        self.set_duration_msec(AnimationNode::FadeOut, msec);
     }
 
     pub fn set_workspace_duration_msec(&mut self, msec: u32) {
         self.set_duration_msec(AnimationNode::Workspaces, msec);
+        self.set_duration_msec(AnimationNode::WorkspacesIn, msec);
+        self.set_duration_msec(AnimationNode::WorkspacesOut, msec);
     }
 
     pub fn set_linear(&mut self, node: AnimationNode) {
@@ -228,12 +248,15 @@ impl AnimationsConfig {
     }
 
     pub fn set_workspace_fade(&mut self, fade: bool) {
-        let resolved = self
-            .nodes
-            .get_mut(&AnimationNode::Workspaces)
-            .expect("workspaces");
-        resolved.style =
-            if fade { AnimationStyle::Fade } else { AnimationStyle::Slide { edge: None } };
+        let style = if fade { AnimationStyle::Fade } else { AnimationStyle::Slide { edge: None } };
+        for node in
+            [AnimationNode::Workspaces, AnimationNode::WorkspacesIn, AnimationNode::WorkspacesOut]
+        {
+            self.nodes
+                .get_mut(&node)
+                .expect("workspace animation")
+                .style = style;
+        }
     }
 }
 

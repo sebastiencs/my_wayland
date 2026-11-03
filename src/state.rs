@@ -28,7 +28,7 @@ use crate::{
     tiling::{self, TiledResizeState, WorkspaceLayout},
     visual_animation::{
         lifecycle_pose, resolve_window_visual, FocusVisualAnimation, GeometryTiming,
-        OpeningIntroduction, RetainedClosingSnapshot, UnitValue, WindowGeometryAnimation,
+        OpeningIntroduction, RetainedClosingSnapshot, WindowGeometryAnimation,
         WindowGeometryMotion, WindowLifecycleAnim, WindowLifecycleAnimation, WindowVisualBase,
         WorkspaceGroupTransition, WorkspaceMotion, WorkspaceTransitionAdvance,
         WorkspaceTransitionDirection,
@@ -50,7 +50,7 @@ use {
         cell::Cell,
         collections::{BTreeMap, BTreeSet},
         rc::Rc,
-        time::{Duration, Instant},
+        time::Instant,
     },
 };
 
@@ -1358,7 +1358,19 @@ impl State {
             .map(|bounds| bounds.width)
             .unwrap_or(0);
         let mut motion = transition.motion_for(workspace_id, width);
-        if !self.config.animations.workspace().fades() {
+        let showing_incoming = transition.goal() == crate::visual_animation::UnitValue::ONE;
+        let fades = if workspace_id == transition.from_workspace() {
+            if showing_incoming {
+                self.config.animations.workspace_out().fades()
+            } else {
+                self.config.animations.workspace_in().fades()
+            }
+        } else if showing_incoming {
+            self.config.animations.workspace_in().fades()
+        } else {
+            self.config.animations.workspace_out().fades()
+        };
+        if !fades {
             motion.alpha = u8::MAX;
         }
         motion
@@ -1379,11 +1391,12 @@ impl State {
         let Some(previous) = previous.filter(|previous| *previous != next) else {
             return;
         };
-        let duration = self.config.animations.workspace().duration();
+        let incoming = self.config.animations.workspace_in().duration();
+        let outgoing = self.config.animations.workspace_out().duration();
         let Some(group) = self.workspace_groups.try_get_mut(group_id) else {
             return;
         };
-        if duration.is_zero() {
+        if incoming.is_zero() && outgoing.is_zero() {
             group.transition = None;
             return;
         }
@@ -1394,15 +1407,14 @@ impl State {
                 } else {
                     crate::visual_animation::UnitValue::ZERO
                 };
-                if transition.request_goal(goal, duration) {
+                if transition.request_goal(goal) {
                     group.transition = None;
                 }
                 return;
             }
         }
         let direction = workspace_transition_direction(group, previous, next);
-        group.transition =
-            Some(WorkspaceGroupTransition::pending(previous, next, direction, duration));
+        group.transition = Some(WorkspaceGroupTransition::pending(previous, next, direction));
     }
 
     fn clear_invalid_workspace_transition(&mut self, group_id: WorkspaceGroupId) {
@@ -2115,8 +2127,10 @@ impl State {
     {
         let focus = self.config.animations.focus();
         let opening = self.config.animations.opening();
+        let fade_in = self.config.animations.fade_in();
         let focus_duration = focus.duration();
         let open_duration = opening.duration();
+        let fade_in_duration = fade_in.duration();
         let windows = self
             .config
             .animations
@@ -2156,21 +2170,21 @@ impl State {
             managed
                 .focus_animation
                 .advance_with_easing(goal, focus_duration, focus.easing(), now);
-            managed
-                .lifecycle_animation
-                .advance_with_easing(open_duration, opening.easing(), now);
-            let opening_pose = match managed.lifecycle_animation.sample() {
-                WindowLifecycleAnim::Opening { progress } if progress == UnitValue::ZERO => {
-                    Some(OpeningIntroduction {
-                        style: opening.style(),
-                        output,
-                        timing: GeometryTiming {
-                            duration: open_duration,
-                            easing: opening.easing(),
-                        },
-                    })
-                }
-                _ => None,
+            managed.lifecycle_animation.advance_with_easing(
+                fade_in_duration,
+                fade_in.easing(),
+                now,
+            );
+            let opening_pose = if managed.geometry_animation.wants_opening_pose()
+                && !open_duration.is_zero()
+            {
+                Some(OpeningIntroduction {
+                    style: opening.style(),
+                    output,
+                    timing: GeometryTiming { duration: open_duration, easing: opening.easing() },
+                })
+            } else {
+                None
             };
             managed.geometry_animation.advance_with_introduction(
                 now,
@@ -2202,20 +2216,19 @@ impl State {
             }
         }
         let closing = self.config.animations.closing();
+        let fade_out = self.config.animations.fade_out();
         let close_duration = closing.duration();
         let close_style = closing.style();
         let close_poses = self
             .closing_snapshots
             .iter()
             .map(|snapshot| {
-                if close_duration.is_zero() {
-                    return None;
-                }
                 let output = snapshot
                     .workspace_id()
                     .and_then(|workspace_id| self.workspace_output_id(workspace_id))
                     .and_then(|output_id| self.output_bounds(output_id));
-                Some(lifecycle_pose(close_style, snapshot.bounds(), output))
+                let pose = lifecycle_pose(close_style, snapshot.bounds(), output);
+                (pose != snapshot.bounds()).then_some(pose)
             })
             .collect::<Vec<_>>();
         let mut finished_ids = Vec::new();
@@ -2228,7 +2241,13 @@ impl State {
             }
             let before_alpha = snapshot.alpha();
             let before_visual = snapshot.visual_bounds();
-            let finished = snapshot.advance_with_easing(now, close_duration, closing.easing());
+            let finished = snapshot.advance_split(
+                now,
+                fade_out.duration(),
+                fade_out.easing(),
+                close_duration,
+                closing.easing(),
+            );
             let after_visual = snapshot.visual_bounds();
             if finished || snapshot.alpha() != before_alpha || before_visual != after_visual {
                 damaged_rects.push(before_visual);
@@ -2254,8 +2273,8 @@ impl State {
             }
             self.closing_snapshots = kept;
         }
-        let workspace = self.config.animations.workspace();
-        let workspace_duration = workspace.duration();
+        let workspace_in = self.config.animations.workspace_in();
+        let workspace_out = self.config.animations.workspace_out();
         let mut completed_transition_outputs = Vec::new();
         let group_ids = self.workspace_group_ids();
         for group_id in group_ids {
@@ -2275,8 +2294,19 @@ impl State {
                 continue;
             }
             transition.resume();
-            let outcome =
-                transition.advance_with_easing(now, workspace_duration, workspace.easing());
+            let showing_incoming = transition.goal() == crate::visual_animation::UnitValue::ONE;
+            let (from_timing, to_timing) = if showing_incoming {
+                (workspace_out, workspace_in)
+            } else {
+                (workspace_in, workspace_out)
+            };
+            let outcome = transition.advance_sides(
+                now,
+                from_timing.duration(),
+                from_timing.easing(),
+                to_timing.duration(),
+                to_timing.easing(),
+            );
             let active = self
                 .workspace_groups
                 .try_get(group_id)
@@ -3620,6 +3650,7 @@ mod tests {
                 resolved_wl_surface as root, state_for_tests, test_output_with_crtc_name,
             },
         },
+        std::time::Duration,
     };
 
     #[test]
@@ -3838,7 +3869,7 @@ mod tests {
         state
             .config
             .animations
-            .set_linear(crate::animation_config::AnimationNode::WindowsIn);
+            .set_linear(crate::animation_config::AnimationNode::FadeIn);
         let surface = root(&state, object_id);
         state.register_root_surface(surface);
         state.assign_root_surface_to_workspace(surface, workspace_id);

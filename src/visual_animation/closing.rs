@@ -32,7 +32,10 @@ struct ClosingSnapshotAnimation {
     workspace_id: Option<WorkspaceId>,
     bounds: RectI,
     pose: Option<RectI>,
-    factor: UnitValue,
+    pose_progress: UnitValue,
+    pose_track: RetargetableTrack,
+    alpha_settled: bool,
+    pose_settled: bool,
     blur: Option<FrozenClosingBlur>,
     track: RetargetableTrack,
     cached_alpha: u8,
@@ -54,7 +57,10 @@ impl ClosingSnapshotAnimation {
             workspace_id,
             bounds,
             pose: None,
-            factor: UnitValue::ONE,
+            pose_progress: UnitValue::ZERO,
+            pose_track: RetargetableTrack::settled(UnitValue::ZERO),
+            alpha_settled: false,
+            pose_settled: true,
             blur,
             track: RetargetableTrack::settled(UnitValue::ONE),
             cached_alpha: u8::MAX,
@@ -63,31 +69,87 @@ impl ClosingSnapshotAnimation {
         }
     }
 
-    fn advance(&mut self, now: Instant, duration: Duration, easing: Easing) -> bool {
+    fn advance(
+        &mut self,
+        now: Instant,
+        alpha_duration: Duration,
+        alpha_easing: Easing,
+        pose_duration: Duration,
+        pose_easing: Easing,
+    ) -> bool {
         if !self.active {
             return false;
         }
-        if duration.is_zero() {
+        let pose_duration = if self.pose.is_some() { pose_duration } else { Duration::ZERO };
+        if self.pending && alpha_duration.is_zero() && pose_duration.is_zero() {
+            self.pose_progress = UnitValue::ONE;
             self.finish();
             return true;
         }
         if self.pending {
-            self.track = RetargetableTrack::start_timed(
-                UnitValue::ONE,
-                UnitValue::ZERO,
-                now,
-                duration,
-                easing,
-            );
             self.pending = false;
-        } else if self.track.duration() != duration || self.track.easing() != easing {
-            self.track
-                .retarget_timed(UnitValue::ZERO, now, duration, easing);
+            if alpha_duration.is_zero() {
+                self.cached_alpha = 0;
+                self.alpha_settled = true;
+            } else {
+                self.track = RetargetableTrack::start_timed(
+                    UnitValue::ONE,
+                    UnitValue::ZERO,
+                    now,
+                    alpha_duration,
+                    alpha_easing,
+                );
+                self.alpha_settled = false;
+            }
+            if pose_duration.is_zero() {
+                self.pose_progress = UnitValue::ONE;
+                self.pose_settled = true;
+            } else {
+                self.pose_track = RetargetableTrack::start_timed(
+                    UnitValue::ZERO,
+                    UnitValue::ONE,
+                    now,
+                    pose_duration,
+                    pose_easing,
+                );
+                self.pose_settled = false;
+            }
+        } else {
+            if !self.alpha_settled
+                && (self.track.duration() != alpha_duration || self.track.easing() != alpha_easing)
+            {
+                self.track
+                    .retarget_timed(UnitValue::ZERO, now, alpha_duration, alpha_easing);
+            }
+            if !self.pose_settled
+                && (self.pose_track.duration() != pose_duration
+                    || self.pose_track.easing() != pose_easing)
+            {
+                self.pose_track
+                    .retarget_timed(UnitValue::ONE, now, pose_duration, pose_easing);
+            }
         }
-        let sample = self.track.sample_mut(now);
-        self.factor = sample.value;
-        self.cached_alpha = sample.value.lerp_u8(0, u8::MAX);
-        if sample.status == TrackStatus::Settled {
+        if !self.alpha_settled {
+            if alpha_duration.is_zero() {
+                self.cached_alpha = 0;
+                self.alpha_settled = true;
+            } else {
+                let sample = self.track.sample_mut(now);
+                self.cached_alpha = sample.value.lerp_u8(0, u8::MAX);
+                self.alpha_settled = sample.status == TrackStatus::Settled;
+            }
+        }
+        if !self.pose_settled {
+            if pose_duration.is_zero() {
+                self.pose_progress = UnitValue::ONE;
+                self.pose_settled = true;
+            } else {
+                let sample = self.pose_track.sample_mut(now);
+                self.pose_progress = sample.value;
+                self.pose_settled = sample.status == TrackStatus::Settled;
+            }
+        }
+        if self.alpha_settled && self.pose_settled {
             self.finish();
             return true;
         }
@@ -105,9 +167,9 @@ impl ClosingSnapshotAnimation {
 /// before teardown. The visual-animation pump fades that texture, then dropping this value
 /// releases it. There is no detached live-surface close path.
 ///
-/// Capture is skipped when the toplevel is already snapshotted, the session is inactive, the close
-/// duration is zero, the root is unmapped or has no buffer, the role is not an xdg toplevel, the
-/// render plan is empty, or the window spans more than one DRM device.
+/// Capture is skipped when the toplevel is already snapshotted, the session is inactive, both
+/// `fadeOut` and `windowsOut` are disabled, the root is unmapped or has no buffer, the role is not
+/// an xdg toplevel, the render plan is empty, or the window spans more than one DRM device.
 ///
 /// Immutable window image retained after the real toplevel has left layout, input, and protocol state.
 pub struct RetainedClosingSnapshot {
@@ -167,7 +229,7 @@ impl RetainedClosingSnapshot {
         let Some(pose) = self.animation.pose else {
             return self.animation.bounds;
         };
-        lerp_rect(self.animation.bounds, pose, self.animation.factor)
+        lerp_rect(self.animation.bounds, pose, self.animation.pose_progress)
     }
 
     /// Union of the captured rectangle, the current sample, and the close pose.
@@ -218,14 +280,30 @@ impl RetainedClosingSnapshot {
         duration: Duration,
         easing: Easing,
     ) -> bool {
-        self.animation.advance(now, duration, easing)
+        self.advance_split(now, duration, easing, duration, easing)
+    }
+
+    /// `fadeOut` fades the image. `windowsOut` moves it toward the close pose.
+    ///
+    /// The snapshot is released only after both tracks have settled. A zero duration snaps that
+    /// track and leaves the other one running.
+    pub(crate) fn advance_split(
+        &mut self,
+        now: Instant,
+        alpha_duration: Duration,
+        alpha_easing: Easing,
+        pose_duration: Duration,
+        pose_easing: Easing,
+    ) -> bool {
+        self.animation
+            .advance(now, alpha_duration, alpha_easing, pose_duration, pose_easing)
     }
 }
 
-fn lerp_rect(from: RectI, to: RectI, remain: UnitValue) -> RectI {
-    let remain = remain.as_f64();
+fn lerp_rect(from: RectI, to: RectI, progress: UnitValue) -> RectI {
+    let progress = progress.as_f64();
     let mix = |start: i32, end: i32| -> i32 {
-        round_i32(f64::from(start) * remain + f64::from(end) * (1.0 - remain))
+        round_i32(f64::from(start) * (1.0 - progress) + f64::from(end) * progress)
     };
     RectI::new(
         mix(from.x, to.x),
@@ -397,5 +475,80 @@ mod tests {
         assert!(!snapshot.advance(now + Duration::from_millis(50), Duration::from_millis(100)));
         assert_eq!(snapshot.visual_bounds(), bounds());
         assert_eq!(snapshot.motion_bounds(), bounds());
+    }
+
+    #[test]
+    fn fade_can_finish_while_the_close_pose_is_still_moving() {
+        let (mut snapshot, probe) =
+            RetainedClosingSnapshot::test_pending(8, source(), bounds(), DrmId::from(0usize));
+        let pose = crate::visual_animation::lifecycle_pose(
+            crate::animation_config::AnimationStyle::Popin { percent: 50 },
+            bounds(),
+            None,
+        );
+        snapshot.arm_close_pose(pose);
+        let now = Instant::now();
+        let linear = crate::visual_animation::Easing::Linear;
+        assert!(!snapshot.advance_split(
+            now,
+            Duration::from_millis(40),
+            linear,
+            Duration::from_millis(200),
+            linear,
+        ));
+        assert!(!snapshot.advance_split(
+            now + Duration::from_millis(40),
+            Duration::from_millis(40),
+            linear,
+            Duration::from_millis(200),
+            linear,
+        ));
+        assert_eq!(snapshot.alpha(), 0);
+        assert!(snapshot.is_active());
+        let mid = snapshot.visual_bounds();
+        assert_ne!(mid, bounds());
+        assert_ne!(mid, pose);
+        assert!(snapshot.advance_split(
+            now + Duration::from_millis(200),
+            Duration::from_millis(40),
+            linear,
+            Duration::from_millis(200),
+            linear,
+        ));
+        drop(snapshot);
+        assert_eq!(probe.get(), 1);
+    }
+
+    #[test]
+    fn zero_fade_snaps_alpha_and_leaves_the_pose_running() {
+        let (mut snapshot, probe) =
+            RetainedClosingSnapshot::test_pending(9, source(), bounds(), DrmId::from(0usize));
+        let pose = crate::visual_animation::lifecycle_pose(
+            crate::animation_config::AnimationStyle::Popin { percent: 50 },
+            bounds(),
+            None,
+        );
+        snapshot.arm_close_pose(pose);
+        let now = Instant::now();
+        let linear = crate::visual_animation::Easing::Linear;
+        assert!(!snapshot.advance_split(
+            now,
+            Duration::ZERO,
+            linear,
+            Duration::from_millis(100),
+            linear,
+        ));
+        assert_eq!(snapshot.alpha(), 0);
+        assert!(snapshot.is_active());
+        assert_eq!(snapshot.visual_bounds(), bounds());
+        assert!(snapshot.advance_split(
+            now + Duration::from_millis(100),
+            Duration::ZERO,
+            linear,
+            Duration::from_millis(100),
+            linear,
+        ));
+        drop(snapshot);
+        assert_eq!(probe.get(), 1);
     }
 }

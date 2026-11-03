@@ -100,8 +100,9 @@ impl FocusVisualAnimation {
 /// Opening lifecycle owned separately from the focus style.
 ///
 /// `start_opening` exposes progress zero immediately. The first animation-pump tick starts the
-/// absolute-time track, and completion returns to [`WindowLifecycleAnim::Idle`]. Closing is not a
-/// lifecycle state: [`crate::visual_animation::RetainedClosingSnapshot`] owns the fade.
+/// `fadeIn` track, and completion returns to [`WindowLifecycleAnim::Idle`]. The geometry pose uses
+/// `windowsIn` and does not follow this clock. Closing is not a lifecycle state:
+/// [`crate::visual_animation::RetainedClosingSnapshot`] owns that fade.
 #[derive(Clone, Copy, Debug)]
 pub struct WindowLifecycleAnimation {
     track: RetargetableTrack,
@@ -477,6 +478,7 @@ pub struct WindowGeometryAnimation {
     relocation_pending: bool,
     pending: Option<PendingGeometry>,
     introduced: Option<GeometryTiming>,
+    opening_pose: bool,
 }
 
 impl WindowGeometryAnimation {
@@ -489,7 +491,17 @@ impl WindowGeometryAnimation {
             relocation_pending: false,
             pending: None,
             introduced: None,
+            opening_pose: false,
         }
+    }
+
+    /// The next applied goal starts at the `windowsIn` pose.
+    pub fn arm_opening_pose(&mut self) {
+        self.opening_pose = true;
+    }
+
+    pub fn wants_opening_pose(self) -> bool {
+        self.opening_pose
     }
 
     pub fn is_armed(self) -> bool {
@@ -596,6 +608,8 @@ impl WindowGeometryAnimation {
         opening: Option<OpeningIntroduction>,
     ) {
         let goal = WindowBox::from_rect(pending.rect);
+        let opening = if self.opening_pose { opening } else { None };
+        self.opening_pose = false;
         if pending.motion != WindowGeometryMotion::Warp {
             if let Some(opening) = opening.filter(|opening| style_has_pose(opening.style)) {
                 let pose = WindowBox::from_rect(lifecycle_pose(
@@ -1082,6 +1096,7 @@ mod tests {
         let mut geometry = WindowGeometryAnimation::unarmed();
         geometry.prefer_relocation();
         geometry.set_goal(goal(), WindowGeometryMotion::Layout);
+        geometry.arm_opening_pose();
         geometry.advance_with_introduction(
             now,
             linear(0),
@@ -1117,6 +1132,7 @@ mod tests {
         let now = Instant::now();
         let mut geometry = WindowGeometryAnimation::unarmed();
         geometry.set_goal(goal(), WindowGeometryMotion::Layout);
+        geometry.arm_opening_pose();
         geometry.advance_with_introduction(
             now,
             linear(0),
@@ -1141,6 +1157,7 @@ mod tests {
         let now = Instant::now();
         let mut geometry = WindowGeometryAnimation::unarmed();
         geometry.set_goal(goal(), WindowGeometryMotion::Layout);
+        geometry.arm_opening_pose();
         geometry.advance_with_introduction(
             now,
             linear(200),

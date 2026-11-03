@@ -36,19 +36,24 @@ enum TransitionPhase {
     Paused { goal: UnitValue },
 }
 
-/// One live slide-and-fade shared by every output in a workspace group.
+/// One live slide shared by every output in a workspace group.
 ///
-/// Progress `0` shows `from` in place. Progress `1` shows `to` in place. The animation pump is
-/// the only caller that starts or samples the clock. Hyprland owns the same live offset and alpha
-/// on the workspace; this compositor keeps one group clock instead of a per-monitor timeline.
+/// The outgoing workspace and the incoming workspace each keep a progress value. Progress `0`
+/// leaves `from` in place and `to` offscreen. Progress `1` leaves `to` in place and `from`
+/// offscreen. The two values share a direction, and each one is sampled on its own clock. The
+/// animation pump is the only caller that starts or samples those clocks.
 #[derive(Clone, Copy, Debug)]
 pub struct WorkspaceGroupTransition {
     from: WorkspaceId,
     to: WorkspaceId,
     direction: WorkspaceTransitionDirection,
-    full_duration: Duration,
-    track: RetargetableTrack,
-    cached_progress: UnitValue,
+    outgoing: UnitValue,
+    incoming: UnitValue,
+    outgoing_track: RetargetableTrack,
+    incoming_track: RetargetableTrack,
+    outgoing_duration: Duration,
+    incoming_duration: Duration,
+    goal: UnitValue,
     phase: TransitionPhase,
 }
 
@@ -65,15 +70,18 @@ impl WorkspaceGroupTransition {
         from: WorkspaceId,
         to: WorkspaceId,
         direction: WorkspaceTransitionDirection,
-        duration: Duration,
     ) -> Self {
         Self {
             from,
             to,
             direction,
-            full_duration: duration,
-            track: RetargetableTrack::settled(UnitValue::ZERO),
-            cached_progress: UnitValue::ZERO,
+            outgoing: UnitValue::ZERO,
+            incoming: UnitValue::ZERO,
+            outgoing_track: RetargetableTrack::settled(UnitValue::ZERO),
+            incoming_track: RetargetableTrack::settled(UnitValue::ZERO),
+            outgoing_duration: Duration::ZERO,
+            incoming_duration: Duration::ZERO,
+            goal: UnitValue::ONE,
             phase: TransitionPhase::Pending { goal: UnitValue::ONE },
         }
     }
@@ -90,8 +98,17 @@ impl WorkspaceGroupTransition {
         self.direction
     }
 
+    /// Outgoing progress. It matches the incoming progress while both clocks use the same timing.
     pub fn progress(self) -> UnitValue {
-        self.cached_progress
+        self.outgoing
+    }
+
+    pub fn incoming_progress(self) -> UnitValue {
+        self.incoming
+    }
+
+    pub fn goal(self) -> UnitValue {
+        self.goal
     }
 
     pub fn involves(self, workspace_id: WorkspaceId) -> bool {
@@ -102,29 +119,20 @@ impl WorkspaceGroupTransition {
         !matches!(self.phase, TransitionPhase::Paused { .. })
     }
 
-    /// Aim the existing pair at `goal` without moving the cached progress.
+    /// Aim both workspaces at `goal` without moving the sampled progress.
     ///
-    /// `true` means the transition has already reached that goal and can be dropped.
-    pub fn request_goal(&mut self, goal: UnitValue, full_duration: Duration) -> bool {
-        self.full_duration = full_duration;
-        if self.cached_progress == goal || full_duration.is_zero() {
-            self.cached_progress = goal;
-            self.phase = TransitionPhase::Pending { goal };
-            return true;
-        }
+    /// `true` means both workspaces already show that goal and the caller can drop the transition.
+    pub fn request_goal(&mut self, goal: UnitValue) -> bool {
+        self.goal = goal;
         self.phase = TransitionPhase::Pending { goal };
-        false
+        self.outgoing == goal && self.incoming == goal
     }
 
     pub fn pause(&mut self) {
         if matches!(self.phase, TransitionPhase::Paused { .. }) {
             return;
         }
-        let goal = match self.phase {
-            TransitionPhase::Pending { goal } | TransitionPhase::Paused { goal } => goal,
-            TransitionPhase::Running => self.track.goal(),
-        };
-        self.phase = TransitionPhase::Paused { goal };
+        self.phase = TransitionPhase::Paused { goal: self.goal };
     }
 
     pub fn resume(&mut self) {
@@ -141,9 +149,9 @@ impl WorkspaceGroupTransition {
         };
         if workspace_id == self.from {
             return WorkspaceMotion {
-                translation_x: -sign * self.cached_progress.scale_i32(width),
+                translation_x: -sign * self.outgoing.scale_i32(width),
                 alpha: UnitValue::ONE
-                    .saturating_sub(self.cached_progress)
+                    .saturating_sub(self.outgoing)
                     .lerp_u8(0, u8::MAX),
             };
         }
@@ -151,9 +159,9 @@ impl WorkspaceGroupTransition {
             return WorkspaceMotion {
                 translation_x: sign
                     * UnitValue::ONE
-                        .saturating_sub(self.cached_progress)
+                        .saturating_sub(self.incoming)
                         .scale_i32(width),
-                alpha: self.cached_progress.lerp_u8(0, u8::MAX),
+                alpha: self.incoming.lerp_u8(0, u8::MAX),
             };
         }
         WorkspaceMotion::IDENTITY
@@ -169,51 +177,130 @@ impl WorkspaceGroupTransition {
         full_duration: Duration,
         easing: Easing,
     ) -> WorkspaceTransitionAdvance {
+        self.advance_sides(now, full_duration, easing, full_duration, easing)
+    }
+
+    /// Sample the outgoing workspace on `(from_duration, from_easing)` and the incoming workspace
+    /// on `(to_duration, to_easing)`.
+    pub fn advance_sides(
+        &mut self,
+        now: Instant,
+        from_duration: Duration,
+        from_easing: Easing,
+        to_duration: Duration,
+        to_easing: Easing,
+    ) -> WorkspaceTransitionAdvance {
         if matches!(self.phase, TransitionPhase::Paused { .. }) {
             return WorkspaceTransitionAdvance::Unchanged;
         }
-        let duration_changed = self.full_duration != full_duration;
-        self.full_duration = full_duration;
         let goal = match self.phase {
             TransitionPhase::Pending { goal } | TransitionPhase::Paused { goal } => goal,
-            TransitionPhase::Running => self.track.goal(),
+            TransitionPhase::Running => self.goal,
         };
-        if full_duration.is_zero() {
-            self.cached_progress = goal;
-            return WorkspaceTransitionAdvance::Finished;
-        }
+        self.goal = goal;
         if matches!(self.phase, TransitionPhase::Pending { .. }) {
-            let distance = if goal >= self.cached_progress {
-                goal.saturating_sub(self.cached_progress)
-            } else {
-                self.cached_progress.saturating_sub(goal)
-            };
-            let duration = distance.scale_duration(full_duration);
-            if duration.is_zero() {
-                self.cached_progress = goal;
+            let outgoing_done = start_side(
+                &mut self.outgoing,
+                &mut self.outgoing_track,
+                &mut self.outgoing_duration,
+                goal,
+                now,
+                from_duration,
+                from_easing,
+            );
+            let incoming_done = start_side(
+                &mut self.incoming,
+                &mut self.incoming_track,
+                &mut self.incoming_duration,
+                goal,
+                now,
+                to_duration,
+                to_easing,
+            );
+            if outgoing_done && incoming_done {
                 return WorkspaceTransitionAdvance::Finished;
             }
-            self.track =
-                RetargetableTrack::start_timed(self.cached_progress, goal, now, duration, easing);
             self.phase = TransitionPhase::Running;
             return WorkspaceTransitionAdvance::Started;
         }
-        if duration_changed || self.track.easing() != easing {
-            let duration = remaining_duration(self.cached_progress, goal, full_duration);
-            self.track.retarget_timed(goal, now, duration, easing);
-        }
-        let sample = self.track.sample_mut(now);
-        let changed = sample.value != self.cached_progress;
-        self.cached_progress = sample.value;
-        if sample.status == TrackStatus::Settled {
+        let outgoing = sample_side(
+            &mut self.outgoing,
+            &mut self.outgoing_track,
+            &mut self.outgoing_duration,
+            goal,
+            now,
+            from_duration,
+            from_easing,
+        );
+        let incoming = sample_side(
+            &mut self.incoming,
+            &mut self.incoming_track,
+            &mut self.incoming_duration,
+            goal,
+            now,
+            to_duration,
+            to_easing,
+        );
+        if self.outgoing == goal && self.incoming == goal {
             return WorkspaceTransitionAdvance::Finished;
         }
-        if changed {
+        if outgoing || incoming {
             WorkspaceTransitionAdvance::Progressed
         } else {
             WorkspaceTransitionAdvance::Unchanged
         }
     }
+}
+
+fn start_side(
+    progress: &mut UnitValue,
+    track: &mut RetargetableTrack,
+    applied_duration: &mut Duration,
+    goal: UnitValue,
+    now: Instant,
+    full_duration: Duration,
+    easing: Easing,
+) -> bool {
+    *applied_duration = full_duration;
+    if *progress == goal || full_duration.is_zero() {
+        *progress = goal;
+        return true;
+    }
+    let duration = remaining_duration(*progress, goal, full_duration);
+    if duration.is_zero() {
+        *progress = goal;
+        return true;
+    }
+    *track = RetargetableTrack::start_timed(*progress, goal, now, duration, easing);
+    false
+}
+
+fn sample_side(
+    progress: &mut UnitValue,
+    track: &mut RetargetableTrack,
+    applied_duration: &mut Duration,
+    goal: UnitValue,
+    now: Instant,
+    full_duration: Duration,
+    easing: Easing,
+) -> bool {
+    if *progress == goal {
+        return false;
+    }
+    if full_duration.is_zero() {
+        *progress = goal;
+        *applied_duration = full_duration;
+        return true;
+    }
+    if *applied_duration != full_duration || track.goal() != goal || track.easing() != easing {
+        *applied_duration = full_duration;
+        let duration = remaining_duration(*progress, goal, full_duration);
+        track.retarget_timed(goal, now, duration, easing);
+    }
+    let sample = track.sample_mut(now);
+    let changed = sample.value != *progress;
+    *progress = if sample.status == TrackStatus::Settled { goal } else { sample.value };
+    changed || *progress == goal
 }
 
 fn remaining_duration(progress: UnitValue, goal: UnitValue, full_duration: Duration) -> Duration {
@@ -243,7 +330,7 @@ mod tests {
 
     fn pending(direction: WorkspaceTransitionDirection) -> WorkspaceGroupTransition {
         let (from, to) = pair();
-        WorkspaceGroupTransition::pending(from, to, direction, Duration::from_millis(200))
+        WorkspaceGroupTransition::pending(from, to, direction)
     }
 
     #[test]
@@ -323,7 +410,7 @@ mod tests {
         transition.advance(now, duration);
         transition.advance(now + Duration::from_millis(100), duration);
         let mid = transition.progress();
-        assert!(!transition.request_goal(UnitValue::ZERO, duration));
+        assert!(!transition.request_goal(UnitValue::ZERO));
         assert_eq!(transition.progress(), mid);
         assert_eq!(
             transition.advance(now + Duration::from_millis(100), duration),
@@ -346,12 +433,12 @@ mod tests {
         let duration = Duration::from_millis(100);
         transition.advance(now, duration);
         transition.advance(now + Duration::from_millis(40), duration);
-        transition.request_goal(UnitValue::ZERO, duration);
+        transition.request_goal(UnitValue::ZERO);
         transition.advance(now + Duration::from_millis(40), duration);
         transition.advance(now + Duration::from_millis(60), duration);
         let reversed = transition.progress();
         assert!(reversed < UnitValue::ONE);
-        assert!(!transition.request_goal(UnitValue::ONE, duration));
+        assert!(!transition.request_goal(UnitValue::ONE));
         assert_eq!(transition.progress(), reversed);
         transition.advance(now + Duration::from_millis(60), duration);
         assert_eq!(
@@ -398,5 +485,48 @@ mod tests {
         );
         assert!(transition.progress() > paused);
         assert!(transition.progress() < UnitValue::ONE);
+    }
+
+    #[test]
+    fn incoming_clock_finishes_before_the_outgoing_clock() {
+        let (from, to) = pair();
+        let mut transition = pending(WorkspaceTransitionDirection::Next);
+        let now = Instant::now();
+        let linear = crate::visual_animation::Easing::Linear;
+        assert_eq!(
+            transition.advance_sides(
+                now,
+                Duration::from_millis(200),
+                linear,
+                Duration::from_millis(100),
+                linear,
+            ),
+            WorkspaceTransitionAdvance::Started
+        );
+        assert_eq!(
+            transition.advance_sides(
+                now + Duration::from_millis(100),
+                Duration::from_millis(200),
+                linear,
+                Duration::from_millis(100),
+                linear,
+            ),
+            WorkspaceTransitionAdvance::Progressed
+        );
+        assert_eq!(transition.incoming_progress(), UnitValue::ONE);
+        assert!(transition.progress() > UnitValue::ZERO && transition.progress() < UnitValue::ONE);
+        assert_eq!(transition.motion_for(to, 200).translation_x, 0);
+        assert_eq!(transition.motion_for(to, 200).alpha, 255);
+        assert!(transition.motion_for(from, 200).translation_x < 0);
+        assert_eq!(
+            transition.advance_sides(
+                now + Duration::from_millis(200),
+                Duration::from_millis(200),
+                linear,
+                Duration::from_millis(100),
+                linear,
+            ),
+            WorkspaceTransitionAdvance::Finished
+        );
     }
 }

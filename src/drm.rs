@@ -5834,7 +5834,10 @@ fn closing_snapshot_eligible(
     {
         return false;
     }
-    if !state.session_active || state.config.animations.closing().duration().is_zero() {
+    if !state.session_active
+        || (state.config.animations.closing().duration().is_zero()
+            && state.config.animations.fade_out().duration().is_zero())
+    {
         return false;
     }
     let Some(managed) = state.managed_root_surface_state(surface_id) else {
@@ -7615,6 +7618,56 @@ mod window_animation_tests {
         assert_eq!(incoming.alpha, 255);
         assert!(outgoing.translation_x < 0);
         assert!(incoming.translation_x > 0);
+    }
+
+    #[test]
+    fn workspace_sides_follow_their_own_clocks_and_styles() {
+        let mut state = state_for_tests();
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::WorkspacesIn, 100);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::WorkspacesIn);
+        state.config.animations.set_style(
+            crate::animation_config::AnimationNode::WorkspacesIn,
+            crate::animation_config::AnimationStyle::Slide { edge: None },
+        );
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::WorkspacesOut, 200);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::WorkspacesOut);
+        let (output_id, group_id, from, to) = live_group(&mut state, 800, 600, 1);
+        assert!(state.activate_workspace(to));
+        let now = Instant::now();
+        state.advance_visual_animations(now);
+        state.advance_visual_animations(now + Duration::from_millis(100));
+        let outgoing = state.workspace_motion_for_output(output_id, Some(from));
+        let incoming = state.workspace_motion_for_output(output_id, Some(to));
+        assert_eq!(incoming.translation_x, 0);
+        assert_eq!(incoming.alpha, 255);
+        assert!(outgoing.translation_x < 0);
+        assert!(outgoing.alpha > 0 && outgoing.alpha < 255);
+        assert!(state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .transition
+            .is_some());
+
+        state.advance_visual_animations(now + Duration::from_millis(200));
+        assert!(state
+            .workspace_groups
+            .try_get(group_id)
+            .unwrap()
+            .transition
+            .is_none());
     }
 
     #[test]

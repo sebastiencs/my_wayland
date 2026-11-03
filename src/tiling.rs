@@ -1532,6 +1532,7 @@ fn sync_workspace_layout(
         })
         .collect::<BTreeMap<_, _>>();
     let open_duration = state.config.animations.opening().duration();
+    let fade_in_duration = state.config.animations.fade_in().duration();
     let workspace_active = state.workspace_is_active(workspace_id);
     let mut opened = Vec::new();
     for surface in &workspace_surface_ids {
@@ -1542,11 +1543,19 @@ fn sync_workspace_layout(
         let now_mapped = candidate_set.contains(surface);
         managed.mapped = now_mapped;
         if !was_mapped && now_mapped {
-            if workspace_active && !open_duration.is_zero() {
+            let mut started = false;
+            if workspace_active && !fade_in_duration.is_zero() {
                 managed.lifecycle_animation.start_opening();
-                opened.push(*surface);
+                started = true;
             } else {
                 managed.lifecycle_animation.settle_idle();
+            }
+            if workspace_active && !open_duration.is_zero() {
+                managed.geometry_animation.arm_opening_pose();
+                started = true;
+            }
+            if started {
+                opened.push(*surface);
             }
         } else if was_mapped && !now_mapped {
             managed.lifecycle_animation.settle_idle();
@@ -3087,6 +3096,44 @@ mod tests {
                 .sample(),
             crate::visual_animation::WindowLifecycleAnim::Idle
         );
+    }
+
+    #[test]
+    fn opening_alpha_fades_on_fade_in_while_the_pose_uses_windows_in() {
+        use std::time::{Duration, Instant};
+
+        let mut state = state_for_tests();
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::WindowsIn, 200);
+        state
+            .config
+            .animations
+            .set_linear(crate::animation_config::AnimationNode::WindowsIn);
+        state
+            .config
+            .animations
+            .set_duration_msec(crate::animation_config::AnimationNode::FadeIn, 0);
+        let surface = live_toplevel(&mut state);
+        assert_eq!(state.relayout_dirty_workspaces(), vec![surface]);
+        let goal = state
+            .committed_root_geometry(surface)
+            .unwrap()
+            .layout_rect_global;
+        let now = Instant::now();
+        state.advance_visual_animations(now);
+        assert_eq!(
+            state
+                .managed_root_surface_state(surface)
+                .unwrap()
+                .lifecycle_animation
+                .sample(),
+            crate::visual_animation::WindowLifecycleAnim::Idle
+        );
+        assert_ne!(window_visual(&state, surface), goal);
+        state.advance_visual_animations(now + Duration::from_millis(200));
+        assert_eq!(window_visual(&state, surface), goal);
     }
 
     fn test_committed_geometry(

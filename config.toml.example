@@ -108,11 +108,33 @@ enabled = true
 speed = 3.03
 bezier = "quick"
 
+[animations.fadeIn]
+enabled = true
+speed = 1.73
+bezier = "almostLinear"
+
+[animations.fadeOut]
+enabled = true
+speed = 1.46
+bezier = "almostLinear"
+
 [animations.workspaces]
 enabled = true
 speed = 1.94
 bezier = "almostLinear"
-# fade keeps the horizontal slide and also fades workspace opacity. slide leaves both opaque.
+# fade keeps the horizontal slide and also fades workspace opacity. slide leaves that side opaque.
+style = "fade"
+
+[animations.workspacesIn]
+enabled = true
+speed = 1.21
+bezier = "almostLinear"
+style = "fade"
+
+[animations.workspacesOut]
+enabled = true
+speed = 1.94
+bezier = "almostLinear"
 style = "fade"
 
 [bindings]
