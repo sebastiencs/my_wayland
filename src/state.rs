@@ -4,7 +4,6 @@ use crate::{
         DecorationInsets, OutputScaleSetting, RoundingPower, RuntimeConfig, XdgDecorationModePolicy,
     },
     drm::Drm,
-    egl::EGL,
     globals::{Global, GlobalName, Globals},
     libinput::Input,
     object::Object,
@@ -938,7 +937,6 @@ pub struct State {
     pub presentation: PresentationSubsystem,
     pub globals: Globals,
     pub activation_tokens: ActivationTokenStore,
-    pub egl: EGL,
     pub config: RuntimeConfig,
     pub seat: SeatState,
     pub keyboard: KeyboardState,
@@ -2461,8 +2459,23 @@ impl State {
     }
 }
 
+impl Drop for State {
+    fn drop(&mut self) {
+        // Closing snapshots hold renderer textures. Delete them while the DRM
+        // context is current, before the `drm` field destroys that context.
+        for snapshot in std::mem::take(&mut self.closing_snapshots) {
+            if snapshot.requires_device_context_on_drop() {
+                if let Some(drm) = self.drm.try_get(snapshot.drm_id()) {
+                    drm.bind_context();
+                }
+            }
+            drop(snapshot);
+        }
+    }
+}
+
 fn release_closing_snapshot(state: &mut State, snapshot: RetainedClosingSnapshot) {
-    if snapshot.texture_id() != 0 {
+    if snapshot.requires_device_context_on_drop() {
         if let Some(drm) = state.drm.try_get(snapshot.drm_id()) {
             drm.bind_context();
         }

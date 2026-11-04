@@ -13,7 +13,6 @@ use {
 use crate::{
     clients::{ClientDispatcher, Resolved},
     drm::{request_active_output, request_outputs_for_rect, DrmFd},
-    egl::EglContext,
     io_uring::{model::IoUringAction, ring::RingId},
     protocol_generated::{WlBufferId, WlSurfaceId},
     runner::{Dispatcher, Model, Redispatcher},
@@ -174,24 +173,6 @@ impl AcquireSync {
         }
     }
 
-    pub fn wait_for_renderer(&self, egl: &EglContext) {
-        let Ok(Some(sync_file)) = self.prepare_wait_fd() else {
-            return;
-        };
-
-        if let Err(error) = egl.wait_on_native_fence(sync_file) {
-            log::warn!(
-                "renderer explicit acquire wait failed, falling back to CPU wait: {:?}",
-                error
-            );
-            if let Ok(Some(sync_file)) = self.prepare_wait_fd() {
-                if let Err(wait_error) = wait_sync_file_cpu(sync_file.as_fd()) {
-                    log::warn!("renderer explicit acquire CPU wait also failed: {:?}", wait_error);
-                }
-            }
-        }
-    }
-
     fn export_sync_file(&self) -> io::Result<OwnedFd> {
         match self {
             Self::None => Err(io::Error::new(io::ErrorKind::InvalidInput, "no acquire sync")),
@@ -297,9 +278,8 @@ fn poll_fd_ready(fd: std::os::fd::BorrowedFd<'_>, timeout_ms: i32) -> bool {
     ready > 0 && (pfd.revents & libc::POLLIN) != 0
 }
 
-// Last-resort correctness fallback for sync_file acquires when the renderer
-// cannot import/wait on the native fence through EGL.
-fn wait_sync_file_cpu(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
+/// Last-resort correctness fallback when the renderer cannot wait on the native fence.
+pub(crate) fn wait_sync_file_cpu(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<()> {
     loop {
         let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
         let ready = unsafe { libc::poll(&mut pfd, 1, -1) };

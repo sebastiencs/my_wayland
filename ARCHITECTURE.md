@@ -20,7 +20,7 @@ At a high level, it does four things:
 1. Accepts Wayland clients and speaks the Wayland protocol.
 2. Tracks compositor state such as objects, globals, devices, and buffers.
 3. Talks to Linux graphics and input subsystems.
-4. Sets up display output through DRM/KMS, GBM, EGL, and OpenGL ES.
+4. Sets up display output through DRM/KMS and GBM, then draws with OpenGL ES or Vulkan.
 
 Another useful way to say it:
 
@@ -42,7 +42,7 @@ This compositor
   Clients, Wayland objects, surface state, roles, buffer handling
 
 Rendering layer
-  EGL + OpenGL ES
+  OpenGL ES or Vulkan
 
 Buffer allocation / sharing layer
   GBM + dma-buf
@@ -77,7 +77,9 @@ These files are the most important anchors:
 - `src/dbus.rs`: session and device access through logind.
 - `src/drm.rs`: display resources, modesetting, planes, framebuffers.
 - `src/gbm/*`: GBM buffer allocation.
-- `src/egl.rs`: EGL setup, dma-buf import, GL image/framebuffer helpers.
+- `src/render/`: renderer selection and the shared frame recipe.
+- `src/render/gles/`: OpenGL ES backend, including its EGL display.
+- `src/render/vulkan/`: Vulkan backend.
 - `src/dmabuf.rs`: shared dma-buf description.
 
 ### Repository mental model
@@ -230,16 +232,18 @@ EGL is not the display engine and not the renderer itself.
 
 It is the integration layer that makes "GL on Linux native buffers" work.
 
-In this repository, `src/egl.rs` is where:
+In this repository, `src/render/gles/` is where:
 
 - the EGL display is created from GBM
 - supported dma-buf formats/modifiers are queried
 - dma-bufs are imported into EGL images
 - those images are turned into renderbuffers, framebuffers, or textures
 
+Vulkan does not use EGL. Its device, images, and sync files live in `src/render/vulkan/`.
+
 ### 6.4 Rendering API: OpenGL ES / GL
 
-`OpenGL ES` is the API used to render images.
+`OpenGL ES` is one of the two rendering APIs. Vulkan is the other, and section 6.5 is how a device chooses.
 
 For this repository, GL is mostly about:
 
@@ -257,7 +261,19 @@ Useful terms here:
 
 OpenGL ES operates above buffer allocation and below compositor scene logic.
 
-### 6.5 Kernel display control: DRM/KMS
+### 6.5 Choosing the renderer
+
+Each DRM device builds one renderer at startup from `general.renderer`.
+
+- An omitted key, or `opengl`, uses OpenGL ES.
+- `auto` tries OpenGL ES on that device, then Vulkan.
+- `vulkan` uses Vulkan. If that device cannot match the DRM node or lacks a required extension, startup fails for that device. The compositor does not switch it to OpenGL.
+
+A running compositor keeps its renderer. Changing the setting needs a restart.
+
+When the renderer can export a sync file and the primary plane has `IN_FENCE_FD`, KMS waits on that fence. Otherwise the renderer waits for the GPU to finish before `render` returns. The DRM log for that second path is `Falling back to blocking GL sync`.
+
+### 6.6 Kernel display control: DRM/KMS
 
 `DRM` is the Linux kernel graphics subsystem.
 
@@ -280,7 +296,7 @@ In this repository, `src/drm.rs`:
 
 This is the layer closest to "actually putting pixels on screen".
 
-### 6.6 Kernel graphics memory objects: GEM
+### 6.7 Kernel graphics memory objects: GEM
 
 `GEM` stands for Graphics Execution Manager.
 
@@ -524,8 +540,8 @@ If coming back after a long time, this order should restore the mental model qui
    Rebuild the attach/commit model.
 8. `src/wayland_objects/wl_buffer.rs` and `src/wayland_objects/wl_shm*.rs`
    See where client image data enters the compositor.
-9. `src/egl.rs`
-   Rebuild the EGL/GL/dma-buf import model.
+9. `src/render/`
+   See how a DRM device chooses OpenGL ES or Vulkan, then how that backend imports a buffer.
 10. `src/drm.rs`
    Rebuild KMS resources, framebuffers, and display output.
 11. `src/gbm/gbm.rs`
@@ -548,10 +564,10 @@ If coming back after a long time, this order should restore the mental model qui
 ### Rendering
 
 - render: generate pixels into a destination
-- texture: GL image resource sampled during rendering
+- texture: image resource sampled during rendering
 - shader: program run on the GPU during drawing
 - blend: combine source pixels with destination pixels
-- blend state: the GL rules controlling how that combination happens
+- blend state: the rules controlling how that combination happens
 - viewport: map normalized output coordinates into a target rectangle
 - scissor: rectangular clip on writes
 - GL context: the current OpenGL ES stateful execution environment
@@ -559,7 +575,8 @@ If coming back after a long time, this order should restore the mental model qui
 
 ### EGL / GL
 
-- OpenGL ES: the rendering API used to draw images
+- OpenGL ES: one rendering API used to draw images
+- Vulkan: the other rendering API. It imports the same dma-bufs and does not use EGL
 - GL: shorthand for the OpenGL API family or its function set
 - EGL: bridge between native graphics resources and GL
 - EGLImage: EGL-side interoperable image object, often imported from dma-buf
@@ -592,7 +609,7 @@ If coming back after a long time, this order should restore the mental model qui
 When this repository feels too abstract, reduce it to this:
 
 - Wayland decides which client buffer should be visible.
-- EGL and OpenGL ES make those buffers usable for rendering.
+- The renderer, OpenGL ES or Vulkan, draws those buffers into an output image.
 - GBM allocates the buffers the GPU and display hardware want.
 - dma-buf lets those buffers be shared without copying.
 - DRM/KMS tells the display hardware what to show.

@@ -8,7 +8,7 @@ use super::{
 pub(super) fn submit_render_buffer(
     drm: &mut Drm,
     drm_crtc_id: u32,
-    render_completion: &crate::egl::RenderCompletion,
+    render_completion: &crate::render::RenderCompletion,
     damage: &DamageRegion,
     output_id: Option<OutputId>,
     scene: Vec<SceneItemState>,
