@@ -939,6 +939,11 @@ pub struct State {
     pub seat: SeatState,
     pub keyboard: KeyboardState,
     pub xkb: Xkb,
+    /// The client representing the compositor-spawned Xwayland process, when
+    /// it is running. Inserted from the socketpair handed to Xwayland and
+    /// cleared when that client disconnects. Xwayland-only globals (the
+    /// `xwayland_shell_v1` family) identify their client with this tag.
+    pub xwayland_client_id: Option<crate::clients::ClientId>,
 }
 
 const INITIAL_WORKSPACES_PER_OUTPUT: usize = 4;

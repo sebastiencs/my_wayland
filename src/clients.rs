@@ -173,19 +173,48 @@ impl std::error::Error for SocketBindError {
 pub enum ClientManagerAction {
     Start,
     RearmAccept,
-    NewClient { new_client: RawFd },
+    NewClient {
+        new_client: RawFd,
+    },
+    /// Insert an already-connected socket as a client, bypassing the accept
+    /// path. The compositor-spawned Xwayland connects this way: its Wayland
+    /// end of a socketpair becomes a client before the process even execs.
+    /// The fd is owned by the new client. `xwayland` tags the client so
+    /// Xwayland-only globals can identify it.
+    NewClientFromFd {
+        fd: RawFd,
+        xwayland: bool,
+    },
     LibinputEvent,
     UdevEvent,
-    RegistryGlobalAdded { name: u32, interface: String, version: u32 },
-    RegistryGlobalRemoved { name: u32 },
-    OutputStateChanged { output_id: OutputId },
-    OutputRemoved { output_id: OutputId },
-    GammaControlFailed { output_id: OutputId },
-    DiscardSurfacePresentationFeedbacksForBackend { drm_id: DrmId },
-    PublishWorkspaceStateChanged { affected_outputs: Vec<OutputId> },
+    RegistryGlobalAdded {
+        name: u32,
+        interface: String,
+        version: u32,
+    },
+    RegistryGlobalRemoved {
+        name: u32,
+    },
+    OutputStateChanged {
+        output_id: OutputId,
+    },
+    OutputRemoved {
+        output_id: OutputId,
+    },
+    GammaControlFailed {
+        output_id: OutputId,
+    },
+    DiscardSurfacePresentationFeedbacksForBackend {
+        drm_id: DrmId,
+    },
+    PublishWorkspaceStateChanged {
+        affected_outputs: Vec<OutputId>,
+    },
     WorkspaceStateChanged,
     LayerShellLayoutChanged,
-    Close { id: ClientId },
+    Close {
+        id: ClientId,
+    },
     Stop,
 }
 
@@ -244,8 +273,11 @@ impl ClientManager {
         });
     }
 
-    fn close_client(&mut self, dispatcher: &mut Dispatcher, id: ClientId) {
+    fn close_client(&mut self, state: &mut State, dispatcher: &mut Dispatcher, id: ClientId) {
         log::trace!("client {:?} closed", id);
+        if state.xwayland_client_id == Some(id) {
+            state.xwayland_client_id = None;
+        }
         if self.set.remove(&id) {
             dispatcher.stop_model(id);
         }
@@ -263,13 +295,13 @@ impl ClientManager {
         }
     }
 
-    fn stop(&mut self, dispatcher: &mut Dispatcher) {
+    fn stop(&mut self, state: &mut State, dispatcher: &mut Dispatcher) {
         self.accepting = false;
         if let Some(accept_op_id) = self.accept_op_id.take() {
             dispatcher.dispatch(IoUringAction::Cancel { target: accept_op_id });
         }
         for id in self.set.iter().copied().collect::<Vec<_>>() {
-            self.close_client(dispatcher, id);
+            self.close_client(state, dispatcher, id);
         }
         self.unlink_socket();
     }
@@ -318,6 +350,20 @@ impl Model for ClientManager {
                 dispatcher.start_model(client_id, Client::new(client_id, new_client));
 
                 log::trace!("new_client id={:?} fd={:?}", client_id, new_client);
+            }
+            NewClientFromFd { fd, xwayland } => {
+                let client_id = self.next_id();
+                self.set.insert(client_id);
+                if xwayland {
+                    state.xwayland_client_id = Some(client_id);
+                }
+                dispatcher.start_model(client_id, Client::new(client_id, fd));
+                log::trace!(
+                    "new_client_from_fd id={:?} fd={:?} xwayland={}",
+                    client_id,
+                    fd,
+                    xwayland
+                );
             }
             LibinputEvent => {
                 // self.libinput.dispatch();
@@ -401,8 +447,8 @@ impl Model for ClientManager {
                     dispatcher.dispatch_to(client_id, ClientAction::RefreshLayerSurfaces);
                 }
             }
-            Close { id } => self.close_client(dispatcher, id),
-            Stop => self.stop(dispatcher),
+            Close { id } => self.close_client(state, dispatcher, id),
+            Stop => self.stop(state, dispatcher),
         }
         Ok(())
     }
@@ -3910,5 +3956,170 @@ impl Model for Boom {
             }
             BoomAction::Stop => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod client_from_fd_tests {
+    use std::{
+        io::{Read, Write},
+        os::{fd::AsFd, unix::net::UnixStream},
+        time::Duration,
+    };
+
+    use nix::sys::timerfd::{self, TimerFlags, TimerSetTimeFlags};
+
+    use {
+        super::*,
+        crate::{
+            runner::{Runner, ShutdownReason},
+            test_support::state_for_tests,
+        },
+    };
+
+    fn temp_socket() -> (mktemp::Temp, PathBuf) {
+        let dir = mktemp::Temp::new_dir().unwrap();
+        let path = dir.to_path_buf().join("wayland-test");
+        (dir, path)
+    }
+
+    fn socket_pair() -> (RawFd, UnixStream) {
+        let (server, client) = UnixStream::pair().unwrap();
+        (server.into_raw_fd(), client)
+    }
+
+    #[test]
+    fn a_client_from_a_socketpair_is_tagged_as_the_xwayland_client() {
+        let (_dir, path) = temp_socket();
+        let mut manager = ClientManager::bind(&path).unwrap();
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        let (fd, _peer) = socket_pair();
+        manager
+            .process(
+                &mut state,
+                ClientManagerAction::NewClientFromFd { fd, xwayland: true },
+                &mut dispatcher,
+            )
+            .unwrap();
+        let client_id = state.xwayland_client_id.expect("the client is tagged");
+        assert!(manager.set.contains(&client_id));
+    }
+
+    #[test]
+    fn closing_the_xwayland_client_clears_the_tag() {
+        let (_dir, path) = temp_socket();
+        let mut manager = ClientManager::bind(&path).unwrap();
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        let (fd, _peer) = socket_pair();
+        manager
+            .process(
+                &mut state,
+                ClientManagerAction::NewClientFromFd { fd, xwayland: true },
+                &mut dispatcher,
+            )
+            .unwrap();
+        let client_id = state.xwayland_client_id.expect("the client is tagged");
+        manager
+            .process(&mut state, ClientManagerAction::Close { id: client_id }, &mut dispatcher)
+            .unwrap();
+        assert_eq!(state.xwayland_client_id, None);
+        assert!(!manager.set.contains(&client_id));
+    }
+
+    #[test]
+    fn an_untagged_client_from_fd_leaves_the_tag_unset() {
+        let (_dir, path) = temp_socket();
+        let mut manager = ClientManager::bind(&path).unwrap();
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        let (fd, _peer) = socket_pair();
+        manager
+            .process(
+                &mut state,
+                ClientManagerAction::NewClientFromFd { fd, xwayland: false },
+                &mut dispatcher,
+            )
+            .unwrap();
+        assert_eq!(state.xwayland_client_id, None);
+        assert_eq!(manager.set.len(), 1);
+    }
+
+    #[test]
+    fn a_client_from_a_socketpair_serves_registry_globals() {
+        let (_dir, path) = temp_socket();
+        let manager = ClientManager::bind(&path).unwrap();
+        let (fd, mut peer) = socket_pair();
+
+        // End the test shortly after the globals were served.
+        let timer = timerfd::TimerFd::new(
+            timerfd::ClockId::CLOCK_MONOTONIC,
+            TimerFlags::TFD_CLOEXEC | TimerFlags::TFD_NONBLOCK,
+        )
+        .unwrap();
+        timer
+            .set(
+                timerfd::Expiration::OneShot(Duration::from_millis(200).into()),
+                TimerSetTimeFlags::empty(),
+            )
+            .unwrap();
+
+        struct QuitProbe;
+        enum QuitProbeAction {
+            Quit,
+        }
+        impl crate::runner::Model for QuitProbe {
+            type Action = QuitProbeAction;
+
+            fn process(
+                &mut self,
+                _state: &mut State,
+                _action: QuitProbeAction,
+                dispatcher: &mut Dispatcher,
+            ) -> std::result::Result<(), crate::runner::ModelFailure> {
+                dispatcher.request_shutdown(ShutdownReason::Quit);
+                Ok(())
+            }
+        }
+
+        let mut runner = Runner::with_state(state_for_tests());
+        let Ok(ring) = crate::io_uring::model::IoUringState::try_new() else {
+            panic!("io_uring is available in tests");
+        };
+        runner.add_model(Box::new(ring));
+        runner.add_model(Box::new(manager));
+        runner.add_model(Box::new(QuitProbe));
+        let mut dispatcher = Dispatcher::default();
+        dispatcher.start::<ClientManager>();
+        dispatcher.dispatch(ClientManagerAction::NewClientFromFd { fd, xwayland: true });
+
+        // `wl_display.get_registry`: object 1, opcode 1, the registry id.
+        let mut event = RawEvent::new(WaylandId::from(1u32), 1, 1);
+        event.id(2u32);
+        peer.write_all(&event.into_bytes()).unwrap();
+
+        dispatcher.dispatch(IoUringAction::Poll {
+            id: None,
+            fd: timer.as_fd().as_raw_fd(),
+            dispatch_to: Redispatcher::to::<QuitProbe>(|_| QuitProbeAction::Quit),
+        });
+        let outcome = runner.run(dispatcher);
+        assert_eq!(outcome.code, 0);
+
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received).unwrap();
+        assert!(
+            received
+                .windows(b"wl_compositor".len())
+                .any(|window| window == b"wl_compositor"),
+            "registry globals did not reach the socketpair peer"
+        );
+        assert!(
+            received
+                .windows(b"wl_seat".len())
+                .any(|window| window == b"wl_seat"),
+            "registry globals did not reach the socketpair peer"
+        );
     }
 }

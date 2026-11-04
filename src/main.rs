@@ -345,6 +345,7 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
         seat: Default::default(),
         keyboard,
         xkb,
+        xwayland_client_id: None,
     };
     let mut startup_dispatcher = Dispatcher::default();
     config::apply_general_settings(&mut state, &mut startup_dispatcher);
