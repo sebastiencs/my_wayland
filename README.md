@@ -7,6 +7,8 @@ through DRM/KMS + GBM, renders with **OpenGL ES** or **Vulkan**, and runs its
 entire event loop (clients, input, udev, D-Bus, DRM) on a single
 io_uring-driven action dispatcher.
 
+![my-wayland running btop, fastfetch, and Alacritty](./static/screenshot.png)
+
 ## Status
 
 **Work in progress.** The core is implemented and the compositor runs real
