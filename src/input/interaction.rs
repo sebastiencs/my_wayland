@@ -195,6 +195,7 @@ fn classify_window_semantics(
         return HitSemantics::SurfaceContent;
     }
     if root_clip.is_some_and(|clip| !clip.contains_point(pointer_pos.0, pointer_pos.1)) {
+        // `root_surface_clip` is the outer frame at `rounding + border.size - correction`.
         return HitSemantics::SurfaceContent;
     }
 

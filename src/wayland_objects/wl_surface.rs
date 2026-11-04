@@ -2172,6 +2172,16 @@ impl WlSurface {
                     .is_some_and(XdgSurface::is_toplevel_parent)
                 {
                     if is_mapped {
+                        let toplevel = xdg_surface_id
+                            .try_ref(state)
+                            .and_then(XdgSurface::toplevel_role);
+                        if let Some(toplevel) = toplevel {
+                            (this, _) = client.with_ungrabbed(this, state, |state| {
+                                if let Some(mut toplevel) = toplevel.try_ref_mut(state) {
+                                    toplevel.note_mapped();
+                                }
+                            });
+                        }
                         let relayout_first_map = state
                             .managed_root_surface_state(resolved_surface)
                             .is_some_and(|managed| {
@@ -3646,7 +3656,7 @@ mod tests {
         assert_eq!(toplevel.test_current_size(), (1280, 720));
         let states = toplevel.test_current_states();
         assert!(
-            states.contains(&(crate::protocol_generated::xdg_toplevel::State::Maximized as u32))
+            !states.contains(&(crate::protocol_generated::xdg_toplevel::State::Maximized as u32))
         );
         assert!(
             states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledLeft as u32))
@@ -3666,8 +3676,7 @@ mod tests {
     #[test]
     fn tiled_root_initial_configure_uses_frame_size_with_decoration_insets() {
         let mut state = state_for_tests();
-        state.config.general.decoration_insets =
-            crate::config::DecorationInsets { top: 11, right: 7, bottom: 5, left: 3 };
+        state.config.decorations.border.size = 3;
         let backend = BackendOutputRef::new(DrmId::from(22usize));
         let _output_id =
             state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
@@ -3690,15 +3699,56 @@ mod tests {
             XdgSurfaceId::from(181),
         );
 
-        let toplevel = state
-            .objects
-            .try_ref_object::<XdgToplevel>(client.object_id(XdgToplevelId::from(182)))
-            .unwrap();
-        assert_eq!(toplevel.test_current_size(), (1280, 720));
+        {
+            let toplevel = state
+                .objects
+                .try_ref_object::<XdgToplevel>(client.object_id(XdgToplevelId::from(182)))
+                .unwrap();
+            assert_eq!(toplevel.test_current_size(), (1274, 714));
+        }
+        let buffer_object_id =
+            insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(183), 2, 2);
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.pending.buffer = Some(Some(resolved_buffer(buffer_object_id)));
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
+        }
+        state.config.decorations.rounding = 8;
+        let surface = root(&state, surface_object_id);
+        let geometry = state
+            .committed_root_geometry(surface)
+            .expect("client-side frame");
+        let frame = geometry.frame_rect_global();
+        let content = geometry.content_rect_global();
+        assert_eq!(geometry.decoration_mode, Some(ToplevelDecorationMode::ClientSide));
+        assert_eq!(frame.width, content.width + 6);
+        assert_eq!(frame.height, content.height + 6);
+        assert!(state.root_surface_decoration_layout(surface).is_some());
+        assert!(state
+            .root_surface_visual_state(surface)
+            .unwrap()
+            .border
+            .is_some());
+        assert_eq!(
+            state.root_surface_window_clip(surface),
+            Some(crate::render::WindowClip::Corners(crate::state::RootSurfaceClip::new(
+                content,
+                8,
+                crate::config::RoundingPower::DEFAULT,
+            )))
+        );
     }
 
     #[test]
-    fn floating_root_initial_configure_stays_generic() {
+    fn floating_root_initial_configure_sends_tiled_states_at_zero_size() {
         let mut state = state_for_tests();
         let backend = BackendOutputRef::new(DrmId::from(3usize));
         let _output_id =
@@ -3730,7 +3780,17 @@ mod tests {
         assert_eq!(toplevel.test_current_size(), (0, 0));
         let states = toplevel.test_current_states();
         assert!(
-            !states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledLeft as u32))
+            !states.contains(&(crate::protocol_generated::xdg_toplevel::State::Maximized as u32))
+        );
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledLeft as u32))
+        );
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledRight as u32))
+        );
+        assert!(states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledTop as u32)));
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledBottom as u32))
         );
         assert!(!state
             .managed_root_surface_state(root(&state, surface_object_id))
@@ -3738,8 +3798,82 @@ mod tests {
     }
 
     #[test]
+    fn floating_root_first_map_adds_maximized_without_a_maximize_request() {
+        let mut state = state_for_tests();
+        let backend = BackendOutputRef::new(DrmId::from(31usize));
+        let _output_id =
+            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(9);
+
+        let surface_object_id = create_root_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            WlSurfaceId::from(290),
+            XdgSurfaceId::from(291),
+            XdgToplevelId::from(292),
+        );
+        assert!(state.set_root_surface_floating(root(&state, surface_object_id), true));
+        commit_initial_xdg_toplevel(
+            &mut state,
+            &mut client,
+            &mut dispatcher,
+            surface_object_id,
+            XdgSurfaceId::from(291),
+        );
+
+        let buffer_object_id =
+            insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(293), 80, 60);
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.pending.buffer = Some(Some(resolved_buffer(buffer_object_id)));
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            client.test_reconfigure_mapped_toplevels(&mut state, &mut client_dispatcher);
+        }
+
+        let toplevel = state
+            .objects
+            .try_ref_object::<XdgToplevel>(client.object_id(XdgToplevelId::from(292)))
+            .unwrap();
+        assert!(!toplevel.is_maximized());
+        assert_eq!(toplevel.published_shell_state(), (false, false));
+        let states = state
+            .objects
+            .try_ref_object::<XdgSurface>(client.object_id(XdgSurfaceId::from(291)))
+            .unwrap()
+            .test_latest_pending_toplevel_states()
+            .expect("map configure");
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::Maximized as u32))
+        );
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledLeft as u32))
+        );
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledRight as u32))
+        );
+        assert!(states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledTop as u32)));
+        assert!(
+            states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledBottom as u32))
+        );
+    }
+
+    #[test]
     fn fullscreen_root_initial_configure_uses_fullscreen_layout() {
         let mut state = state_for_tests();
+        state.config.decorations.border.size = 3;
+        state.config.decorations.rounding = 10;
         let backend = BackendOutputRef::new(DrmId::from(4usize));
         let _output_id =
             state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
@@ -3763,15 +3897,47 @@ mod tests {
             XdgSurfaceId::from(101),
         );
 
-        let toplevel = state
-            .objects
-            .try_ref_object::<XdgToplevel>(client.object_id(XdgToplevelId::from(102)))
-            .unwrap();
-        assert_eq!(toplevel.test_current_size(), (1280, 720));
-        let states = toplevel.test_current_states();
-        assert!(
-            states.contains(&(crate::protocol_generated::xdg_toplevel::State::Fullscreen as u32))
-        );
+        {
+            let toplevel = state
+                .objects
+                .try_ref_object::<XdgToplevel>(client.object_id(XdgToplevelId::from(102)))
+                .unwrap();
+            assert_eq!(toplevel.test_current_size(), (1280, 720));
+            let states = toplevel.test_current_states();
+            assert!(states
+                .contains(&(crate::protocol_generated::xdg_toplevel::State::Fullscreen as u32)));
+            assert!(!states
+                .contains(&(crate::protocol_generated::xdg_toplevel::State::Maximized as u32)));
+            assert!(states
+                .contains(&(crate::protocol_generated::xdg_toplevel::State::TiledLeft as u32)));
+        }
+        let buffer_object_id =
+            insert_test_shm_buffer(&mut state, client.client_id(), WlBufferId::from(103), 2, 2);
+        {
+            let surface = state
+                .objects
+                .get_mut(surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.pending.buffer = Some(Some(resolved_buffer(buffer_object_id)));
+        }
+        {
+            let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+            let mut surface = state.objects.grab_object::<WlSurface>(surface_object_id);
+            surface.on_commit(&mut client, &mut state, &mut client_dispatcher);
+        }
+        let surface = root(&state, surface_object_id);
+        let geometry = state
+            .committed_root_geometry(surface)
+            .expect("fullscreen geometry");
+        assert_eq!(geometry.frame_rect_global(), geometry.content_rect_global());
+        assert!(state.root_surface_decoration_layout(surface).is_none());
+        assert_eq!(state.root_surface_window_clip(surface), None);
+        assert!(state
+            .root_surface_visual_state(surface)
+            .unwrap()
+            .border
+            .is_none());
     }
 
     #[test]
@@ -4255,7 +4421,7 @@ mod tests {
     #[test]
     fn first_map_tiled_server_side_updates_root_position_before_returning() {
         let mut state = state_for_tests();
-        state.config.decorations.border.thickness = 5;
+        state.config.decorations.border.size = 5;
         let backend = BackendOutputRef::new(DrmId::from(24usize));
         let _output_id =
             state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
@@ -4325,8 +4491,9 @@ mod tests {
     }
 
     #[test]
-    fn buffer_resize_without_new_window_geometry_relayouts_tiled_insets() {
+    fn buffer_resize_without_new_window_geometry_keeps_the_frame_insets() {
         let mut state = state_for_tests();
+        state.config.decorations.border.size = 3;
         let backend = BackendOutputRef::new(DrmId::from(7usize));
         let _output_id =
             state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
@@ -4432,7 +4599,7 @@ mod tests {
                 .unwrap()
                 .content_rect_global()
                 .width,
-            1280
+            1274
         );
         assert_eq!(
             state
@@ -4448,7 +4615,7 @@ mod tests {
                 .unwrap()
                 .decoration_insets
                 .right,
-            2
+            3
         );
 
         let resized_buffer_object_id =
@@ -4477,7 +4644,7 @@ mod tests {
                 .unwrap()
                 .content_rect_global()
                 .width,
-            1280
+            1274
         );
         assert_eq!(
             state
@@ -4493,7 +4660,7 @@ mod tests {
                 .unwrap()
                 .decoration_insets
                 .right,
-            0
+            3
         );
     }
 
@@ -4546,6 +4713,9 @@ mod tests {
             .unwrap();
         assert_eq!(second_toplevel.test_current_size(), (1280, 720));
         let states = second_toplevel.test_current_states();
+        assert!(
+            !states.contains(&(crate::protocol_generated::xdg_toplevel::State::Maximized as u32))
+        );
         assert!(
             states.contains(&(crate::protocol_generated::xdg_toplevel::State::TiledLeft as u32))
         );

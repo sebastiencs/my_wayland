@@ -59,7 +59,20 @@ void discardOutsideRoundedRect(vec2 point, vec4 rect, float radius, float roundi
 }
 void main() {
     vec2 point = v_local_position;
-    if (u_clip_mode != 0) {
+    if (u_clip_mode == 3) {
+        // Corner-only rounding: keep pixels outside the window box so that
+        // client-drawn CSD shadows survive; discard only pixels inside the
+        // box that fall outside a rounded corner.
+        float outerRadius = min(
+            u_clip_outer_corner_radius,
+            min(u_clip_outer_rect.z, u_clip_outer_rect.w) * 0.5
+        );
+        float outerRoundingPower = max(u_clip_outer_rounding_power, 0.0001);
+        if (pointInRect(point, u_clip_outer_rect)
+            && !pointInRoundedRect(point, u_clip_outer_rect, outerRadius, outerRoundingPower)) {
+            discard;
+        }
+    } else if (u_clip_mode != 0) {
         float outerRadius = min(
             u_clip_outer_corner_radius,
             min(u_clip_outer_rect.z, u_clip_outer_rect.w) * 0.5

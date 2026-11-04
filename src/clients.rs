@@ -2118,7 +2118,6 @@ impl Client {
             let toplevel_ref = toplevel.rref(state);
             let xdg_surface = toplevel_ref.xdg_surface();
             let has_decoration_object = toplevel_ref.has_decoration_object();
-            let requested_decoration_mode = toplevel_ref.requested_decoration_mode(state);
             let xdg_surface_ref = xdg_surface.rref(state);
             let wl_surface = xdg_surface_ref.wl_surface();
             let Some(root_surface) = state.root_surface_for_surface(wl_surface) else {
@@ -2136,11 +2135,8 @@ impl Client {
                 } else {
                     None
                 };
-            let desired_decoration_mode = Some(state.xdg_decoration_mode_for_surface(
-                Some(root_surface),
-                has_decoration_object,
-                requested_decoration_mode,
-            ));
+            let desired_decoration_mode =
+                Some(state.xdg_decoration_mode_for_surface(has_decoration_object));
 
             {
                 let mut xdg_surface = xdg_surface.grab(state);
@@ -2148,15 +2144,8 @@ impl Client {
                 if let Some(mode) = desired_decoration_mode {
                     toplevel.schedule_decoration_mode(mode);
                 }
-                let tiled_configure_geometry = tiled_geometry.zip(desired_decoration_mode).map(
-                    |(geometry, decoration_mode)| {
-                        crate::root_geometry::project_configure_geometry(
-                            geometry,
-                            decoration_mode,
-                            state.configured_decoration_insets(),
-                        )
-                    },
-                );
+                let tiled_configure_geometry = tiled_geometry
+                    .map(|geometry| crate::root_geometry::project_configure_geometry(geometry));
                 let configure_bounds = tiled_configure_geometry
                     .map(|geometry| geometry.size)
                     .or(surface_configure_bounds);

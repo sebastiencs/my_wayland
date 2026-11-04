@@ -86,7 +86,6 @@ pub struct GeneralConfig {
     pub cursor_size: u32,
     pub outer_gap: i32,
     pub inner_gap: i32,
-    pub decoration_insets: DecorationInsets,
     pub renderer: RendererSelection,
 }
 
@@ -142,40 +141,24 @@ impl PartialEq for SplitRatio {
 
 impl Eq for SplitRatio {}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum XdgDecorationModePolicy {
-    Server,
-    Client,
-    HonorClient,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecorationsConfig {
-    pub xdg: XdgDecorationConfig,
+    pub rounding: i32,
+    pub rounding_power: RoundingPower,
     pub border: BorderDecorationConfig,
     pub shadow: ShadowDecorationConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct XdgDecorationConfig {
-    pub no_protocol: XdgDecorationModePolicy,
-    pub tiled: XdgDecorationModePolicy,
-    pub floating: XdgDecorationModePolicy,
-    pub fullscreen: XdgDecorationModePolicy,
-    pub unset_mode: XdgDecorationModePolicy,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BorderDecorationConfig {
-    pub thickness: i32,
+    /// Logical pixels reserved on every edge, and the width of the drawn border.
+    /// Zero reserves nothing and draws no border.
+    pub size: i32,
     pub active_start_color: RgbaColor,
     pub active_end_color: RgbaColor,
     pub inactive_start_color: RgbaColor,
     pub inactive_end_color: RgbaColor,
     pub gradient_angle_degrees: i32,
-    pub rounding: i32,
-    pub rounding_power: RoundingPower,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -430,35 +413,24 @@ struct TilingDragConfigFile {
     split_ratio: f32,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct DecorationsConfigFile {
-    xdg: XdgDecorationConfigFile,
+    rounding: i32,
+    rounding_power: f32,
     border: BorderDecorationConfigFile,
     shadow: ShadowDecorationConfigFile,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct XdgDecorationConfigFile {
-    no_protocol: XdgDecorationModePolicy,
-    tiled: XdgDecorationModePolicy,
-    floating: XdgDecorationModePolicy,
-    fullscreen: XdgDecorationModePolicy,
-    unset_mode: XdgDecorationModePolicy,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
 struct BorderDecorationConfigFile {
-    thickness: i32,
+    size: i32,
     active_start_color: String,
     active_end_color: String,
     inactive_start_color: String,
     inactive_end_color: String,
     gradient_angle_degrees: i32,
-    rounding: i32,
-    rounding_power: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -540,7 +512,6 @@ struct GeneralConfigFile {
     cursor_size: u32,
     outer_gap: i32,
     inner_gap: i32,
-    decoration_insets: DecorationInsets,
     renderer: String,
 }
 
@@ -610,7 +581,7 @@ impl RuntimeConfig {
         }
 
         let border = BorderDecorationConfig {
-            thickness: sanitize_non_negative_i32(parsed.decorations.border.thickness),
+            size: sanitize_non_negative_i32(parsed.decorations.border.size),
             active_start_color: parse_rgba_color(&parsed.decorations.border.active_start_color)
                 .with_context(|| "invalid decorations.border.active_start_color")?,
             active_end_color: parse_rgba_color(&parsed.decorations.border.active_end_color)
@@ -620,8 +591,6 @@ impl RuntimeConfig {
             inactive_end_color: parse_rgba_color(&parsed.decorations.border.inactive_end_color)
                 .with_context(|| "invalid decorations.border.inactive_end_color")?,
             gradient_angle_degrees: parsed.decorations.border.gradient_angle_degrees,
-            rounding: sanitize_non_negative_i32(parsed.decorations.border.rounding),
-            rounding_power: RoundingPower::sanitize(parsed.decorations.border.rounding_power),
         };
         let shadow = ShadowDecorationConfig {
             radius: sanitize_non_negative_i32(parsed.decorations.shadow.radius),
@@ -652,7 +621,6 @@ impl RuntimeConfig {
                 cursor_size: sanitize_cursor_size(parsed.general.cursor_size),
                 outer_gap: sanitize_non_negative_i32(parsed.general.outer_gap),
                 inner_gap: sanitize_non_negative_i32(parsed.general.inner_gap),
-                decoration_insets: sanitize_decoration_insets(parsed.general.decoration_insets),
                 renderer: parse_renderer(&parsed.general.renderer)?,
             },
             tiling: TilingConfig {
@@ -663,13 +631,8 @@ impl RuntimeConfig {
                 },
             },
             decorations: DecorationsConfig {
-                xdg: XdgDecorationConfig {
-                    no_protocol: parsed.decorations.xdg.no_protocol,
-                    tiled: parsed.decorations.xdg.tiled,
-                    floating: parsed.decorations.xdg.floating,
-                    fullscreen: parsed.decorations.xdg.fullscreen,
-                    unset_mode: parsed.decorations.xdg.unset_mode,
-                },
+                rounding: sanitize_non_negative_i32(parsed.decorations.rounding),
+                rounding_power: RoundingPower::sanitize(parsed.decorations.rounding_power),
                 border,
                 shadow,
             },
@@ -689,7 +652,6 @@ impl RuntimeConfig {
                 cursor_size: DEFAULT_CURSOR_SIZE,
                 outer_gap: 0,
                 inner_gap: 0,
-                decoration_insets: DecorationInsets::default(),
                 renderer: RendererSelection::OpenGl,
             },
             tiling: TilingConfig::default(),
@@ -795,21 +757,10 @@ impl GeneralConfig {
 impl Default for DecorationsConfig {
     fn default() -> Self {
         Self {
-            xdg: XdgDecorationConfig::default(),
+            rounding: 0,
+            rounding_power: RoundingPower::DEFAULT,
             border: BorderDecorationConfig::default(),
             shadow: ShadowDecorationConfig::default(),
-        }
-    }
-}
-
-impl Default for XdgDecorationConfig {
-    fn default() -> Self {
-        Self {
-            no_protocol: XdgDecorationModePolicy::Client,
-            tiled: XdgDecorationModePolicy::Server,
-            floating: XdgDecorationModePolicy::HonorClient,
-            fullscreen: XdgDecorationModePolicy::Server,
-            unset_mode: XdgDecorationModePolicy::Server,
         }
     }
 }
@@ -817,14 +768,12 @@ impl Default for XdgDecorationConfig {
 impl Default for BorderDecorationConfig {
     fn default() -> Self {
         Self {
-            thickness: 0,
+            size: 1,
             active_start_color: RgbaColor::new(0x50, 0x78, 0xc8, 0xff),
             active_end_color: RgbaColor::new(0x6b, 0x9d, 0xf6, 0xff),
             inactive_start_color: RgbaColor::new(0x33, 0x38, 0x44, 0xff),
             inactive_end_color: RgbaColor::new(0x43, 0x48, 0x54, 0xff),
             gradient_angle_degrees: 0,
-            rounding: 0,
-            rounding_power: RoundingPower::DEFAULT,
         }
     }
 }
@@ -862,12 +811,6 @@ impl Default for OpacityConfig {
     }
 }
 
-impl Default for XdgDecorationModePolicy {
-    fn default() -> Self {
-        Self::HonorClient
-    }
-}
-
 impl KeyBinding {
     fn matches(&self, keysym: xkb::Keysym, modifiers: u32) -> bool {
         self.keysym == keysym && self.modifiers == modifiers
@@ -887,7 +830,6 @@ impl Default for GeneralConfigFile {
             cursor_size: GeneralConfig::default_cursor_size(),
             outer_gap: GeneralConfig::default_outer_gap(),
             inner_gap: GeneralConfig::default_inner_gap(),
-            decoration_insets: DecorationInsets::default(),
             renderer: RendererSelection::default().to_string(),
         }
     }
@@ -904,15 +846,14 @@ fn parse_renderer(raw: &str) -> anyhow::Result<RendererSelection> {
     }
 }
 
-impl Default for XdgDecorationConfigFile {
+impl Default for DecorationsConfigFile {
     fn default() -> Self {
-        let defaults = XdgDecorationConfig::default();
+        let defaults = DecorationsConfig::default();
         Self {
-            no_protocol: defaults.no_protocol,
-            tiled: defaults.tiled,
-            floating: defaults.floating,
-            fullscreen: defaults.fullscreen,
-            unset_mode: defaults.unset_mode,
+            rounding: defaults.rounding,
+            rounding_power: defaults.rounding_power.get(),
+            border: BorderDecorationConfigFile::default(),
+            shadow: ShadowDecorationConfigFile::default(),
         }
     }
 }
@@ -921,14 +862,12 @@ impl Default for BorderDecorationConfigFile {
     fn default() -> Self {
         let defaults = BorderDecorationConfig::default();
         Self {
-            thickness: defaults.thickness,
+            size: defaults.size,
             active_start_color: "#5078c8ff".to_string(),
             active_end_color: "#6b9df6ff".to_string(),
             inactive_start_color: "#333844ff".to_string(),
             inactive_end_color: "#434854ff".to_string(),
             gradient_angle_degrees: defaults.gradient_angle_degrees,
-            rounding: defaults.rounding,
-            rounding_power: defaults.rounding_power.get(),
         }
     }
 }
@@ -1828,15 +1767,6 @@ fn sanitize_non_negative_i32(value: i32) -> i32 {
     value.max(0)
 }
 
-fn sanitize_decoration_insets(insets: DecorationInsets) -> DecorationInsets {
-    DecorationInsets {
-        top: sanitize_non_negative_i32(insets.top),
-        right: sanitize_non_negative_i32(insets.right),
-        bottom: sanitize_non_negative_i32(insets.bottom),
-        left: sanitize_non_negative_i32(insets.left),
-    }
-}
-
 fn parse_rgba_color(raw: &str) -> anyhow::Result<RgbaColor> {
     fn parse_hex_byte(component: &str, raw: &str) -> anyhow::Result<u8> {
         u8::from_str_radix(component, 16)
@@ -1960,28 +1890,17 @@ mod tests {
             outer_gap = 12
             inner_gap = 6
 
-            [general.decoration_insets]
-            top = 3
-            right = 4
-            bottom = 5
-            left = 6
-
-            [decorations.xdg]
-            no_protocol = "server"
-            tiled = "server"
-            floating = "honor-client"
-            fullscreen = "client"
-            unset_mode = "client"
+            [decorations]
+            rounding = 7
+            rounding_power = 3.5
 
             [decorations.border]
-            thickness = 4
+            size = 4
             active_start_color = "#11223344"
             active_end_color = "#22334455"
             inactive_start_color = "rgba(55667788)"
             inactive_end_color = "#66778899"
             gradient_angle_degrees = 15
-            rounding = 7
-            rounding_power = 3.5
 
             [decorations.shadow]
             radius = 18
@@ -2002,26 +1921,17 @@ mod tests {
         assert_eq!(config.general.cursor_size, 32);
         assert_eq!(config.general.outer_gap, 12);
         assert_eq!(config.general.inner_gap, 6);
-        assert_eq!(
-            config.general.decoration_insets,
-            DecorationInsets { top: 3, right: 4, bottom: 5, left: 6 }
-        );
-        assert_eq!(config.decorations.xdg.no_protocol, XdgDecorationModePolicy::Server);
-        assert_eq!(config.decorations.xdg.tiled, XdgDecorationModePolicy::Server);
-        assert_eq!(config.decorations.xdg.floating, XdgDecorationModePolicy::HonorClient);
-        assert_eq!(config.decorations.xdg.fullscreen, XdgDecorationModePolicy::Client);
-        assert_eq!(config.decorations.xdg.unset_mode, XdgDecorationModePolicy::Client);
+        assert_eq!(config.decorations.rounding, 7);
+        assert_eq!(config.decorations.rounding_power, RoundingPower::sanitize(3.5));
         assert_eq!(
             config.decorations.border,
             BorderDecorationConfig {
-                thickness: 4,
+                size: 4,
                 active_start_color: RgbaColor::new(0x11, 0x22, 0x33, 0x44),
                 active_end_color: RgbaColor::new(0x22, 0x33, 0x44, 0x55),
                 inactive_start_color: RgbaColor::new(0x55, 0x66, 0x77, 0x88),
                 inactive_end_color: RgbaColor::new(0x66, 0x77, 0x88, 0x99),
                 gradient_angle_degrees: 15,
-                rounding: 7,
-                rounding_power: RoundingPower::sanitize(3.5),
             }
         );
         assert_eq!(
@@ -2050,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn negative_gap_and_inset_values_are_clamped_to_zero() {
+    fn negative_gap_border_and_rounding_values_are_clamped_to_zero() {
         let xkb = Xkb::new();
         let config = RuntimeConfig::parse_for_test(
             r#"
@@ -2058,16 +1968,12 @@ mod tests {
             outer_gap = -5
             inner_gap = -7
 
-            [general.decoration_insets]
-            top = -1
-            right = 2
-            bottom = -3
-            left = 4
-
-            [decorations.border]
-            thickness = -9
+            [decorations]
             rounding = -5
             rounding_power = 0.0
+
+            [decorations.border]
+            size = -9
             "#,
             &xkb,
         )
@@ -2075,26 +1981,19 @@ mod tests {
 
         assert_eq!(config.general.outer_gap, 0);
         assert_eq!(config.general.inner_gap, 0);
-        assert_eq!(
-            config.general.decoration_insets,
-            DecorationInsets { top: 0, right: 2, bottom: 0, left: 4 }
-        );
-        assert_eq!(config.decorations.border.thickness, 0);
-        assert_eq!(config.decorations.border.rounding, 0);
-        assert_eq!(config.decorations.border.rounding_power, RoundingPower::DEFAULT);
+        assert_eq!(config.decorations.border.size, 0);
+        assert_eq!(config.decorations.rounding, 0);
+        assert_eq!(config.decorations.rounding_power, RoundingPower::DEFAULT);
         assert_eq!(config.decorations.shadow.power, ShadowPower::DEFAULT);
     }
 
     #[test]
-    fn xdg_decoration_policy_defaults_match_tiling_first_behavior() {
+    fn decoration_defaults_reserve_a_one_pixel_border() {
         let config = RuntimeConfig::default();
+        let parsed = RuntimeConfig::parse_for_test("", &Xkb::new()).unwrap();
 
-        assert_eq!(config.decorations.xdg.no_protocol, XdgDecorationModePolicy::Client);
-        assert_eq!(config.decorations.xdg.tiled, XdgDecorationModePolicy::Server);
-        assert_eq!(config.decorations.xdg.floating, XdgDecorationModePolicy::HonorClient);
-        assert_eq!(config.decorations.xdg.fullscreen, XdgDecorationModePolicy::Server);
-        assert_eq!(config.decorations.xdg.unset_mode, XdgDecorationModePolicy::Server);
-        assert_eq!(config.decorations.border.thickness, 0);
+        assert_eq!(config.decorations.border.size, 1);
+        assert_eq!(parsed.decorations.border.size, 1);
         assert_eq!(
             config.decorations.border.active_start_color,
             RgbaColor::new(0x50, 0x78, 0xc8, 0xff)
@@ -2103,8 +2002,25 @@ mod tests {
             config.decorations.border.inactive_start_color,
             RgbaColor::new(0x33, 0x38, 0x44, 0xff)
         );
-        assert_eq!(config.decorations.border.rounding, 0);
-        assert_eq!(config.decorations.border.rounding_power, RoundingPower::DEFAULT);
+        assert_eq!(config.decorations.rounding, 0);
+        assert_eq!(config.decorations.rounding_power, RoundingPower::DEFAULT);
+    }
+
+    #[test]
+    fn rejects_removed_decoration_config_keys() {
+        let xkb = Xkb::new();
+        for source in [
+            "[decorations.xdg]\nno_protocol = \"client\"\n",
+            "[decorations.border]\nthickness = 2\n",
+            "[general.decoration_insets]\ntop = 5\n",
+            "[decorations.border]\nrounding = 8\n",
+        ] {
+            let error = RuntimeConfig::parse_for_test(source, &xkb).unwrap_err();
+            assert!(
+                error.to_string().contains("unknown field"),
+                "expected `{source}` to be rejected, got {error:#}"
+            );
+        }
     }
 
     #[test]
@@ -2122,7 +2038,7 @@ mod tests {
         let xkb = Xkb::new();
         let config = RuntimeConfig::parse_for_test(
             r#"
-            [decorations.border]
+            [decorations]
             rounding = 8
             rounding_power = -1.0
             "#,
@@ -2130,7 +2046,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.decorations.border.rounding_power, RoundingPower::DEFAULT);
+        assert_eq!(config.decorations.rounding, 8);
+        assert_eq!(config.decorations.rounding_power, RoundingPower::DEFAULT);
     }
 
     #[test]

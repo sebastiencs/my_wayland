@@ -21,6 +21,9 @@ use crate::{
 
 pub fn state_for_tests() -> State {
     let mut state = state_for_tests_with_config(RuntimeConfig::default());
+    // The runtime default reserves a 1px frame. Tests that are not about that
+    // frame start from a zero border and set `decorations.border.size` themselves.
+    state.config.decorations.border.size = 0;
     state.config.animations.set_workspace_duration_msec(0);
     state
         .config

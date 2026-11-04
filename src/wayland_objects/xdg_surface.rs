@@ -187,6 +187,30 @@ impl XdgSurface {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_latest_pending_decoration_mode(
+        &self,
+    ) -> Option<crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode> {
+        self.pending_configures
+            .iter()
+            .rev()
+            .find_map(|pending| match &pending.state {
+                ConfigureState::Toplevel(configure) => Some(configure.decoration_mode),
+                ConfigureState::Popup(_) => None,
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_latest_pending_toplevel_states(&self) -> Option<Vec<u32>> {
+        self.pending_configures
+            .iter()
+            .rev()
+            .find_map(|pending| match &pending.state {
+                ConfigureState::Toplevel(configure) => Some(configure.states.clone()),
+                ConfigureState::Popup(_) => None,
+            })
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_set_initial_commit_complete(&mut self, complete: bool) {
         self.initial_commit_complete = complete;
     }
@@ -397,7 +421,7 @@ impl XdgSurface {
         client: &mut Client,
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
-        current_logical_size: Option<SizeI>,
+        _current_logical_size: Option<SizeI>,
         has_pending_buffer_attach: bool,
         is_null_buffer_commit: bool,
         configure_bounds: Option<(i32, i32)>,
@@ -434,41 +458,19 @@ impl XdgSurface {
                         return None;
                     }
                     let desired_decoration_mode = id.try_ref(state).map(|toplevel| {
-                        state.xdg_decoration_mode_for_surface(
-                            Some(surface_id),
-                            toplevel.has_decoration_object(),
-                            toplevel.requested_decoration_mode(state),
-                        )
+                        state.xdg_decoration_mode_for_surface(toplevel.has_decoration_object())
                     });
                     if let Some(mode) = desired_decoration_mode {
                         if let Some(mut toplevel) = id.try_ref_mut(state) {
                             toplevel.schedule_decoration_mode(mode);
                         }
                     }
-                    let fallback_decoration_insets = state.configured_decoration_insets();
+                    let fallback_decoration_insets = state.frame_insets();
                     let committed_window_geometry = self.geometry_after_this_commit();
-                    let (target_min_size, surface_decoration_insets) = id
+                    let target_min_size = id
                         .try_ref(state)
-                        .map(|toplevel| {
-                            let insets = if toplevel.decoration_mode_for_configure()
-                                == xdg_toplevel::ToplevelDecorationMode::ServerSide
-                            {
-                                fallback_decoration_insets
-                            } else {
-                                committed_window_geometry
-                                    .and_then(|window_geometry| {
-                                        current_logical_size.and_then(|logical_size| {
-                                            crate::root_geometry::decoration_insets_from_window_geometry_and_logical_size(
-                                                logical_size,
-                                                window_geometry,
-                                            )
-                                        })
-                                    })
-                                    .unwrap_or(fallback_decoration_insets)
-                            };
-                            (toplevel.minimum_size(), insets)
-                        })
-                        .unwrap_or((None, fallback_decoration_insets));
+                        .and_then(|toplevel| toplevel.minimum_size());
+                    let surface_decoration_insets = fallback_decoration_insets;
                     let initial_tiled_geometry = crate::tiling::initial_root_geometry_for_surface(
                         state,
                         surface_id,
@@ -780,7 +782,10 @@ pub mod xdg_toplevel {
         max_size: Option<(i32, i32)>,
         requested_fullscreen: bool,
         requested_maximized: bool,
-        /// `Maximized` bit last sent in `xdg_toplevel.configure`, including the tiled hint.
+        /// First mapped buffer has been committed. Later configures keep `Maximized`.
+        mapped_once: bool,
+        /// Client maximize request last published to foreign-toplevel.
+        /// The protocol `Maximized` bit is forced after map and is not this flag.
         published_maximized: bool,
         /// `Fullscreen` bit last sent in `xdg_toplevel.configure`.
         published_fullscreen: bool,
@@ -876,6 +881,7 @@ pub mod xdg_toplevel {
                 max_size: None,
                 requested_fullscreen: false,
                 requested_maximized: false,
+                mapped_once: false,
                 published_maximized: false,
                 published_fullscreen: false,
                 current_width: 0,
@@ -908,13 +914,33 @@ pub mod xdg_toplevel {
             client.send_protocol_error(dispatcher, self.id.into(), code as u32, message);
         }
 
-        fn effective_states(&self) -> Vec<u32> {
+        /// `Tiled*` since xdg_toplevel state version 2. Hyprland pushes all four at creation.
+        const TILED_STATES_SINCE: u32 = 2;
+
+        /// Hyprland forces these so clients that skip xdg-decoration still drop CSD.
+        /// All four `Tiled*` states from the first configure. `Maximized` after the first
+        /// map, including fullscreen, and never removed. Real tiling stays in `tiled_edges`.
+        fn forced_shell_states(&self) -> BTreeSet<proto_xdg_toplevel::State> {
             let mut states = BTreeSet::default();
-            if self.requested_maximized {
+            if self.wm_base_version >= Self::TILED_STATES_SINCE {
+                states.insert(proto_xdg_toplevel::State::TiledLeft);
+                states.insert(proto_xdg_toplevel::State::TiledRight);
+                states.insert(proto_xdg_toplevel::State::TiledTop);
+                states.insert(proto_xdg_toplevel::State::TiledBottom);
+            }
+            if self.mapped_once {
                 states.insert(proto_xdg_toplevel::State::Maximized);
             }
-            if self.requested_fullscreen {
+            states
+        }
+
+        fn shell_states(&self, fullscreen: bool, resizing: bool) -> Vec<u32> {
+            let mut states = self.forced_shell_states();
+            if fullscreen {
                 states.insert(proto_xdg_toplevel::State::Fullscreen);
+            }
+            if resizing {
+                states.insert(proto_xdg_toplevel::State::Resizing);
             }
             for state in self.current_states.iter().cloned() {
                 if matches!(
@@ -927,39 +953,12 @@ pub mod xdg_toplevel {
             states.into_iter().map(|state| state as u32).collect()
         }
 
-        fn layout_states(&self, tiled_edges: u32, fullscreen: bool, resizing: bool) -> Vec<u32> {
-            let mut states = BTreeSet::default();
-            if fullscreen {
-                states.insert(proto_xdg_toplevel::State::Fullscreen);
-            } else if tiled_edges != 0 {
-                // Match Hyprland's tiled startup hint so GTK clients settle into the compositor's
-                // managed frame earlier instead of briefly presenting a smaller intermediate size.
-                states.insert(proto_xdg_toplevel::State::Maximized);
-            }
-            for state in self.current_states.iter().cloned() {
-                if matches!(
-                    state,
-                    proto_xdg_toplevel::State::Activated | proto_xdg_toplevel::State::Suspended
-                ) {
-                    states.insert(state);
-                }
-            }
-            if resizing {
-                states.insert(proto_xdg_toplevel::State::Resizing);
-            }
-            if tiled_edges & crate::tiling::EDGE_LEFT != 0 {
-                states.insert(proto_xdg_toplevel::State::TiledLeft);
-            }
-            if tiled_edges & crate::tiling::EDGE_RIGHT != 0 {
-                states.insert(proto_xdg_toplevel::State::TiledRight);
-            }
-            if tiled_edges & crate::tiling::EDGE_TOP != 0 {
-                states.insert(proto_xdg_toplevel::State::TiledTop);
-            }
-            if tiled_edges & crate::tiling::EDGE_BOTTOM != 0 {
-                states.insert(proto_xdg_toplevel::State::TiledBottom);
-            }
-            states.into_iter().map(|state| state as u32).collect()
+        fn effective_states(&self) -> Vec<u32> {
+            self.shell_states(self.requested_fullscreen, false)
+        }
+
+        fn layout_states(&self, fullscreen: bool, resizing: bool) -> Vec<u32> {
+            self.shell_states(fullscreen, resizing)
         }
 
         /// Ask the client to close. Sway's `kill` sends this request and leaves the client
@@ -1059,11 +1058,7 @@ pub mod xdg_toplevel {
             dispatcher: &mut ClientDispatcher,
         ) {
             if let Some(geometry) = initial_tiled_geometry {
-                let configure_geometry = crate::root_geometry::project_configure_geometry(
-                    geometry,
-                    self.decoration_mode_for_configure(),
-                    state.configured_decoration_insets(),
-                );
+                let configure_geometry = crate::root_geometry::project_configure_geometry(geometry);
                 self.send_tiled_layout_configure(
                     client,
                     state,
@@ -1096,7 +1091,6 @@ pub mod xdg_toplevel {
                 xdg_surface,
                 width,
                 height,
-                geometry.tiled_edges,
                 geometry.fullscreen,
                 resizing,
                 dispatcher,
@@ -1111,12 +1105,11 @@ pub mod xdg_toplevel {
             xdg_surface: &mut XdgSurface,
             width: i32,
             height: i32,
-            tiled_edges: u32,
             fullscreen: bool,
             resizing: bool,
             dispatcher: &mut ClientDispatcher,
         ) {
-            let states = self.layout_states(tiled_edges, fullscreen, resizing);
+            let states = self.layout_states(fullscreen, resizing);
             self.note_published_shell_state(client, state, dispatcher, &states);
             self.send_configure_bounds(configure_bounds, dispatcher);
             self.send_event(
@@ -1221,7 +1214,9 @@ pub mod xdg_toplevel {
             dispatcher: &mut ClientDispatcher,
             states: &[u32],
         ) {
-            let maximized = states.contains(&(proto_xdg_toplevel::State::Maximized as u32));
+            // The protocol `Maximized` bit is forced after map. Foreign toplevel and
+            // capture follow the client's request, as Hyprland's fullscreen controller does.
+            let maximized = self.requested_maximized;
             let fullscreen = states.contains(&(proto_xdg_toplevel::State::Fullscreen as u32));
             if self.published_maximized == maximized && self.published_fullscreen == fullscreen {
                 return;
@@ -1313,14 +1308,18 @@ pub mod xdg_toplevel {
             self.requested_fullscreen = fullscreen;
         }
 
-        /// True when the client or compositor requested maximize.
+        /// True when the client requested maximize.
         ///
-        /// Tiled configures also advertise `Maximized` so clients settle into the
-        /// managed frame. That hint lands in `current_states` after ack and is not
-        /// a maximize request. Hyprland keeps floating and tiled policy on its own
-        /// window flag, separate from the protocol bit it sends on map.
+        /// Configures advertise `Maximized` after the first map so clients drop
+        /// client-side decorations. That bit is not a maximize request.
+        /// `CWaylandBackend::setMaximized` in Hyprland is a no-op for the same reason.
         pub fn is_maximized(&self) -> bool {
             self.requested_maximized
+        }
+
+        /// Remember that this toplevel has mapped. The forced `Maximized` bit stays set.
+        pub(crate) fn note_mapped(&mut self) {
+            self.mapped_once = true;
         }
 
         pub fn is_fullscreen(&self) -> bool {
@@ -1440,6 +1439,7 @@ pub mod xdg_toplevel {
         }
 
         pub fn reset_on_unmap(&mut self) {
+            // `mapped_once` stays set. Hyprland never removes the forced maximized state.
             self.parent = None;
             self.requested_fullscreen = false;
             self.requested_maximized = false;
@@ -1904,6 +1904,25 @@ pub mod xdg_toplevel {
     mod tests {
         use super::*;
 
+        fn test_toplevel(wm_base_version: u32) -> XdgToplevel {
+            XdgToplevel::new(
+                XdgToplevelId::from(1),
+                Resolved::new(
+                    crate::clients::ClientId::from_raw(1),
+                    super::super::XdgSurfaceId::from(2),
+                    ObjectId::from(2usize),
+                ),
+                wm_base_version,
+            )
+        }
+
+        fn assert_tiled_states(states: &[u32]) {
+            assert!(states.contains(&(proto_xdg_toplevel::State::TiledLeft as u32)));
+            assert!(states.contains(&(proto_xdg_toplevel::State::TiledRight as u32)));
+            assert!(states.contains(&(proto_xdg_toplevel::State::TiledTop as u32)));
+            assert!(states.contains(&(proto_xdg_toplevel::State::TiledBottom as u32)));
+        }
+
         #[test]
         fn send_close_queues_the_toplevel_close_event() {
             let client =
@@ -1959,69 +1978,91 @@ pub mod xdg_toplevel {
             );
 
             assert!(!toplevel.is_maximized());
+            let states = toplevel.effective_states();
+            assert!(!states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
+            assert_tiled_states(&states);
             toplevel.test_set_maximized(true);
             assert!(toplevel.is_maximized());
         }
 
         #[test]
-        fn layout_states_strip_maximized_from_tiled_configures() {
-            let mut toplevel = XdgToplevel::new(
-                XdgToplevelId::from(1),
-                Resolved::new(
-                    crate::clients::ClientId::from_raw(1),
-                    super::super::XdgSurfaceId::from(2),
-                    ObjectId::from(2usize),
-                ),
-                7,
-            );
+        fn initial_configure_sends_tiled_states_without_maximized() {
+            let mut toplevel = test_toplevel(7);
             toplevel.test_set_maximized(true);
 
-            let states = toplevel.layout_states(
-                crate::tiling::EDGE_LEFT | crate::tiling::EDGE_RIGHT,
-                false,
-                false,
-            );
-
-            assert!(states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
-            assert!(states.contains(&(proto_xdg_toplevel::State::TiledLeft as u32)));
-            assert!(states.contains(&(proto_xdg_toplevel::State::TiledRight as u32)));
-        }
-
-        #[test]
-        fn layout_states_strip_maximized_from_fullscreen_layout_configures() {
-            let mut toplevel = XdgToplevel::new(
-                XdgToplevelId::from(3),
-                Resolved::new(
-                    crate::clients::ClientId::from_raw(1),
-                    super::super::XdgSurfaceId::from(4),
-                    ObjectId::from(4usize),
-                ),
-                7,
-            );
-            toplevel.test_set_maximized(true);
-
-            let states = toplevel.layout_states(0, true, false);
+            let states = toplevel.effective_states();
 
             assert!(!states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
-            assert!(states.contains(&(proto_xdg_toplevel::State::Fullscreen as u32)));
+            assert_tiled_states(&states);
+            assert!(toplevel.is_maximized());
         }
 
         #[test]
-        fn layout_states_include_resizing_for_interactive_tiled_resize() {
-            let toplevel = XdgToplevel::new(
-                XdgToplevelId::from(5),
-                Resolved::new(
-                    crate::clients::ClientId::from_raw(1),
-                    super::super::XdgSurfaceId::from(6),
-                    ObjectId::from(6usize),
-                ),
-                7,
-            );
+        fn mapped_floating_configure_keeps_maximized_after_unset() {
+            let mut toplevel = test_toplevel(7);
+            toplevel.note_mapped();
+            toplevel.test_set_maximized(true);
+            toplevel.test_set_maximized(false);
 
-            let states = toplevel.layout_states(crate::tiling::EDGE_RIGHT, false, true);
+            let states = toplevel.effective_states();
+
+            assert!(states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
+            assert_tiled_states(&states);
+            assert!(!toplevel.is_maximized());
+        }
+
+        #[test]
+        fn fullscreen_layout_keeps_forced_maximized_after_map() {
+            let mut toplevel = test_toplevel(7);
+            toplevel.note_mapped();
+
+            let states = toplevel.layout_states(true, false);
+
+            assert!(states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
+            assert!(states.contains(&(proto_xdg_toplevel::State::Fullscreen as u32)));
+            assert_tiled_states(&states);
+        }
+
+        #[test]
+        fn version_one_toplevels_get_maximized_without_tiled_states() {
+            let mut toplevel = test_toplevel(1);
+
+            let before_map = toplevel.effective_states();
+            assert!(!before_map.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
+            assert!(!before_map.contains(&(proto_xdg_toplevel::State::TiledLeft as u32)));
+
+            toplevel.note_mapped();
+            let states = toplevel.effective_states();
+            assert!(states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
+            assert!(!states.contains(&(proto_xdg_toplevel::State::TiledLeft as u32)));
+            assert!(!states.contains(&(proto_xdg_toplevel::State::TiledRight as u32)));
+            assert!(!states.contains(&(proto_xdg_toplevel::State::TiledTop as u32)));
+            assert!(!states.contains(&(proto_xdg_toplevel::State::TiledBottom as u32)));
+        }
+
+        #[test]
+        fn unmap_keeps_forced_maximized() {
+            let mut toplevel = test_toplevel(7);
+            toplevel.note_mapped();
+            toplevel.test_set_maximized(true);
+
+            toplevel.reset_on_unmap();
+
+            assert!(!toplevel.is_maximized());
+            let states = toplevel.effective_states();
+            assert!(states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
+            assert_tiled_states(&states);
+        }
+
+        #[test]
+        fn layout_states_include_resizing_and_every_tiled_edge() {
+            let toplevel = test_toplevel(7);
+
+            let states = toplevel.layout_states(false, true);
 
             assert!(states.contains(&(proto_xdg_toplevel::State::Resizing as u32)));
-            assert!(states.contains(&(proto_xdg_toplevel::State::TiledRight as u32)));
+            assert!(!states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
+            assert_tiled_states(&states);
         }
 
         #[test]
@@ -2049,6 +2090,8 @@ pub mod xdg_toplevel {
 
             assert!(states.contains(&(proto_xdg_toplevel::State::Activated as u32)));
             assert!(!states.contains(&(proto_xdg_toplevel::State::Fullscreen as u32)));
+            assert!(!states.contains(&(proto_xdg_toplevel::State::Maximized as u32)));
+            assert_tiled_states(&states);
         }
 
         #[test]
@@ -2103,11 +2146,7 @@ pub mod xdg_toplevel {
                 &state,
                 &mut xdg_surface,
                 geometry,
-                crate::root_geometry::project_configure_geometry(
-                    geometry,
-                    ToplevelDecorationMode::ServerSide,
-                    state.configured_decoration_insets(),
-                ),
+                crate::root_geometry::project_configure_geometry(geometry),
                 false,
                 &mut client_dispatcher,
             );
@@ -2175,11 +2214,7 @@ pub mod xdg_toplevel {
                 &state,
                 &mut xdg_surface,
                 geometry,
-                crate::root_geometry::project_configure_geometry(
-                    geometry,
-                    ToplevelDecorationMode::ClientSide,
-                    state.configured_decoration_insets(),
-                ),
+                crate::root_geometry::project_configure_geometry(geometry),
                 false,
                 &mut client_dispatcher,
             );
@@ -2191,7 +2226,7 @@ pub mod xdg_toplevel {
             let super::super::ConfigureState::Toplevel(configure) = &pending.state else {
                 panic!("expected toplevel configure");
             };
-            assert_eq!((configure.width, configure.height), (1240, 760));
+            assert_eq!((configure.width, configure.height), (1230, 750));
             assert_eq!(configure.decoration_mode, ToplevelDecorationMode::ClientSide);
         }
 

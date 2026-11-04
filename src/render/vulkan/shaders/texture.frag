@@ -61,7 +61,17 @@ bool pointInRoundedRect(vec2 point, vec4 rect, float radius, float roundingPower
 }
 void main() {
     vec2 point = v_local_position;
-    if (draw.clip_mode != 0) {
+    if (draw.clip_mode == 3) {
+        // Corner-only rounding: keep pixels outside the window box so that
+        // client-drawn CSD shadows survive; discard only pixels inside the
+        // box that fall outside a rounded corner.
+        float outerRadius = min(draw.outer_radius, min(draw.outer_rect.z, draw.outer_rect.w) * 0.5);
+        float outerRoundingPower = max(draw.outer_power, 0.0001);
+        if (pointInRect(point, draw.outer_rect)
+            && !pointInRoundedRect(point, draw.outer_rect, outerRadius, outerRoundingPower)) {
+            discard;
+        }
+    } else if (draw.clip_mode != 0) {
         float outerRadius = min(draw.outer_radius, min(draw.outer_rect.z, draw.outer_rect.w) * 0.5);
         float outerRoundingPower = max(draw.outer_power, 0.0001);
         if (!pointInRoundedRect(point, draw.outer_rect, outerRadius, outerRoundingPower)) {

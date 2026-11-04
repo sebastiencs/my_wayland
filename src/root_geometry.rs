@@ -41,9 +41,8 @@ pub struct DecorationFrameLayout {
 pub struct CommittedRootGeometry {
     /// Global compositor layout slot for the root surface.
     ///
-    /// Under server-side decorations this is the outer frame rect. Under
-    /// client-side or undecorated paths it matches the compositor-assigned
-    /// outer content slot.
+    /// This is the outer frame. The client content rect sits inside it by
+    /// `decoration_insets` on every edge, for both decoration modes.
     pub layout_rect_global: RectI,
     /// Current root `wl_surface` origin in global compositor coordinates.
     pub root_pos: (i32, i32),
@@ -75,7 +74,6 @@ impl CommittedRootGeometry {
     pub fn content_rect_global(self) -> RectI {
         project_content_rect_global(
             self.layout_rect_global,
-            self.decoration_mode,
             self.fullscreen,
             self.decoration_insets,
         )
@@ -94,7 +92,7 @@ impl CommittedRootGeometry {
 
     /// Derive the whole outer frame rect in global space.
     pub fn frame_rect_global(self) -> RectI {
-        if compositor_decorations_enabled(self.decoration_mode, self.fullscreen) {
+        if compositor_decorations_enabled(self.fullscreen) {
             self.layout_rect_global
         } else {
             self.content_rect_global()
@@ -107,7 +105,6 @@ impl CommittedRootGeometry {
             self.frame_rect_global(),
             self.content_rect_global(),
             self.decoration_insets,
-            self.decoration_mode,
             self.fullscreen,
         )
     }
@@ -154,25 +151,12 @@ pub struct WindowTargetGeometry {
     pub binding_rect: RectI,
 }
 
-/// Project configure geometry for a committed snapshot and pending decoration policy.
-pub fn project_configure_geometry(
-    geometry: CommittedRootGeometry,
-    pending_decoration_mode: ToplevelDecorationMode,
-    configured_decoration_insets: DecorationInsets,
-) -> ConfigureGeometry {
-    let window_rect =
-        if geometry.fullscreen || pending_decoration_mode == ToplevelDecorationMode::ClientSide {
-            geometry.layout_rect_global
-        } else if geometry.decoration_mode == Some(ToplevelDecorationMode::ServerSide) {
-            geometry.content_rect_global()
-        } else {
-            project_content_rect_global(
-                geometry.layout_rect_global,
-                Some(ToplevelDecorationMode::ServerSide),
-                geometry.fullscreen,
-                configured_decoration_insets,
-            )
-        };
+/// Project the content size sent in `xdg_toplevel.configure`.
+///
+/// The frame is outside that size for both decoration modes. Fullscreen sends
+/// the whole slot.
+pub fn project_configure_geometry(geometry: CommittedRootGeometry) -> ConfigureGeometry {
+    let window_rect = geometry.content_rect_global();
     ConfigureGeometry { window_rect, size: (window_rect.width, window_rect.height) }
 }
 
@@ -276,12 +260,7 @@ pub fn resolve_protocol_resize_target_geometry(
     )?;
     Some(WindowTargetGeometry {
         root_pos: geometry.root_pos,
-        resize_size: project_configure_geometry(
-            geometry,
-            configure_decoration_mode,
-            state.configured_decoration_insets(),
-        )
-        .size,
+        resize_size: project_configure_geometry(geometry).size,
         target_rect: geometry.window_target_rect(),
         binding_rect: geometry.binding_rect(surface.logical_size()),
     })
@@ -299,37 +278,6 @@ pub struct GeometryBuildOverrides {
     pub root_pos: Option<(i32, i32)>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GeometryOwnership {
-    Compositor,
-    Client,
-}
-
-impl GeometryOwnership {
-    fn for_decoration_mode(decoration_mode: ToplevelDecorationMode) -> Self {
-        match decoration_mode {
-            ToplevelDecorationMode::ServerSide => Self::Compositor,
-            ToplevelDecorationMode::ClientSide => Self::Client,
-        }
-    }
-
-    fn decoration_insets(
-        self,
-        fallback: DecorationInsets,
-        surface: &WlSurface,
-        effective_window_geometry: Option<RectI>,
-    ) -> DecorationInsets {
-        match self {
-            Self::Compositor => fallback,
-            Self::Client => effective_window_geometry
-                .and_then(|window_geometry| {
-                    decoration_insets_from_window_geometry(surface, window_geometry)
-                })
-                .unwrap_or(fallback),
-        }
-    }
-}
-
 pub fn effective_decoration_insets(
     state: &State,
     surface_object_id: Resolved<WlSurfaceId>,
@@ -338,7 +286,7 @@ pub fn effective_decoration_insets(
         .objects
         .try_ref_object::<WlSurface>(surface_object_id.object_id())
     else {
-        return state.configured_decoration_insets();
+        return state.frame_insets();
     };
     effective_decoration_insets_for_surface(state, surface)
 }
@@ -349,19 +297,15 @@ pub fn effective_decoration_insets_for_surface(
     state: &State,
     surface: &WlSurface,
 ) -> DecorationInsets {
-    let fallback = state.configured_decoration_insets();
-    let Some(toplevel) = surface
+    let has_toplevel = surface
         .xdg_surface()
         .and_then(|xdg_surface| state.xdg_toplevel(xdg_surface))
-        .and_then(|toplevel| toplevel.try_ref(state))
-    else {
-        return fallback;
-    };
-    let geometry_ownership = GeometryOwnership::for_decoration_mode(toplevel.decoration_mode());
-    let effective_window_geometry = toplevel.window_geometry().and_then(|window_geometry| {
-        effective_window_geometry_for_surface(state, surface, Some(window_geometry))
-    });
-    geometry_ownership.decoration_insets(fallback, surface, effective_window_geometry)
+        .is_some_and(|toplevel| toplevel.exists(state));
+    if has_toplevel {
+        state.frame_insets()
+    } else {
+        DecorationInsets::default()
+    }
 }
 
 /// Derive CSD-style decoration insets from a client-declared window geometry.
@@ -457,16 +401,9 @@ pub fn build_committed_root_geometry(
         .root_pos
         .unwrap_or_else(|| surface.root_position());
     let fullscreen = layout_allocation.is_some_and(|allocation| allocation.fullscreen);
-    let decoration_insets = overrides.decoration_insets.unwrap_or_else(|| {
-        decoration_insets_for_surface(
-            state,
-            surface_object_id,
-            surface,
-            decoration_mode,
-            effective_window_geometry,
-            fullscreen,
-        )
-    });
+    let decoration_insets = overrides
+        .decoration_insets
+        .unwrap_or_else(|| decoration_insets_for_surface(state, decoration_mode, fullscreen));
 
     let local_surface_bounds = WlSurface::local_surface_tree_bounds_from_ref(state, surface);
     let (layout_rect_global, logical_window_rect_global, computed_root_pos, tiled_edges) =
@@ -474,14 +411,12 @@ pub fn build_committed_root_geometry(
             let layout_rect_global = allocation.frame_rect;
             let content_rect_global = project_content_rect_global(
                 layout_rect_global,
-                decoration_mode,
                 allocation.fullscreen,
                 decoration_insets,
             );
-            // The compositor still owns SSD frame sizing, but the client's effective window-geometry
-            // origin tells us where its real content lives inside the root surface. Align the root
-            // so that content lands on the compositor content rect even when clients keep a positive
-            // origin under SSD (for example GTK calculators with their own internal padding).
+            // The client's window-geometry origin places its content inside the root surface.
+            // Align the root so that content lands on the compositor content rect. A client
+            // shadow then hangs outside that rect.
             let computed_root_pos = effective_window_geometry
                 .map(|window_geometry| {
                     (
@@ -504,8 +439,7 @@ pub fn build_committed_root_geometry(
                     )
                 })
                 .or(translated_surface_bounds)?;
-            let layout_rect_global = if compositor_decorations_enabled(decoration_mode, fullscreen)
-            {
+            let layout_rect_global = if compositor_decorations_enabled(fullscreen) {
                 inflate_rect_with_insets(logical_window_rect_global, decoration_insets)
             } else {
                 logical_window_rect_global
@@ -543,7 +477,6 @@ pub fn predictive_tiled_geometry(
         if layout_allocation.fullscreen { DecorationInsets::default() } else { decoration_insets };
     let content_rect_global = project_content_rect_global(
         layout_rect_global,
-        Some(decoration_mode),
         layout_allocation.fullscreen,
         decoration_insets,
     );
@@ -569,27 +502,16 @@ pub fn predictive_tiled_geometry(
     }
 }
 
-/// Resolve the effective insets used for the current decoration mode.
+/// Frame reserved around every non-fullscreen toplevel, from `decorations.border.size`.
 fn decoration_insets_for_surface(
     state: &State,
-    _surface_object_id: Resolved<WlSurfaceId>,
-    surface: &WlSurface,
     decoration_mode: Option<ToplevelDecorationMode>,
-    effective_window_geometry: Option<RectI>,
     fullscreen: bool,
 ) -> DecorationInsets {
-    if fullscreen {
-        return DecorationInsets::default();
-    }
-    let fallback = state.configured_decoration_insets();
-    match decoration_mode {
-        Some(ToplevelDecorationMode::ServerSide) => fallback,
-        Some(ToplevelDecorationMode::ClientSide) => effective_window_geometry
-            .and_then(|window_geometry| {
-                decoration_insets_from_window_geometry(surface, window_geometry)
-            })
-            .unwrap_or(fallback),
-        None => DecorationInsets::default(),
+    if fullscreen || decoration_mode.is_none() {
+        DecorationInsets::default()
+    } else {
+        state.frame_insets()
     }
 }
 
@@ -632,25 +554,19 @@ fn non_ssd_binding_rect(
     )
 }
 
-/// Whether compositor-owned decorations should be projected for this snapshot.
-fn compositor_decorations_enabled(
-    decoration_mode: Option<ToplevelDecorationMode>,
-    fullscreen: bool,
-) -> bool {
-    decoration_mode == Some(ToplevelDecorationMode::ServerSide) && !fullscreen
+/// Whether the compositor frame is reserved around this snapshot.
+fn compositor_decorations_enabled(fullscreen: bool) -> bool {
+    !fullscreen
 }
 
-/// Build compositor-owned SSD chrome layout from outer frame and content rects.
+/// Build the compositor frame when it is larger than the content rect.
 fn compositor_decoration_layout(
     frame_rect: RectI,
     client_window_rect: RectI,
     decoration_insets: DecorationInsets,
-    decoration_mode: Option<ToplevelDecorationMode>,
     fullscreen: bool,
 ) -> Option<DecorationFrameLayout> {
-    if !compositor_decorations_enabled(decoration_mode, fullscreen)
-        || frame_rect == client_window_rect
-    {
+    if !compositor_decorations_enabled(fullscreen) || frame_rect == client_window_rect {
         return None;
     }
     Some(DecorationFrameLayout {
@@ -741,11 +657,10 @@ fn inflate_rect_with_insets(rect: RectI, insets: DecorationInsets) -> RectI {
 /// effective decoration ownership for this snapshot.
 fn project_content_rect_global(
     layout_rect_global: RectI,
-    decoration_mode: Option<ToplevelDecorationMode>,
     fullscreen: bool,
     decoration_insets: DecorationInsets,
 ) -> RectI {
-    if fullscreen || decoration_mode == Some(ToplevelDecorationMode::ClientSide) {
+    if fullscreen {
         layout_rect_global
     } else {
         shrink_rect(layout_rect_global, decoration_insets)

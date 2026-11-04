@@ -583,12 +583,7 @@ fn pickup_tiled_drag(
         abort_pointer_interactive_grab(state, dispatcher, 0);
         return;
     };
-    let configure = crate::root_geometry::project_configure_geometry(
-        built,
-        decoration_mode,
-        state.configured_decoration_insets(),
-    )
-    .size;
+    let configure = crate::root_geometry::project_configure_geometry(built).size;
     let clamped = size_constraints.clamp(configure.0, configure.1);
     if clamped != configure {
         frame.width = frame.width.saturating_add(clamped.0 - configure.0).max(1);

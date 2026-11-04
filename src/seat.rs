@@ -3392,12 +3392,9 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn decoration_titlebar_press_starts_move_without_client_pointer_focus() {
+    fn decoration_top_border_press_starts_resize_without_client_pointer_focus() {
         let mut state = state_for_tests();
-        state.config.general.decoration_insets.top = 12;
-        state.config.general.decoration_insets.left = 4;
-        state.config.general.decoration_insets.right = 4;
-        state.config.general.decoration_insets.bottom = 4;
+        state.config.decorations.border.size = 12;
         let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
@@ -3447,7 +3444,8 @@ mod xdg_seat_tests {
 
         assert!(matches!(
             state.seat.pointer_interactive_grab,
-            Some(super::PointerInteractiveGrab::Move { .. })
+            Some(super::PointerInteractiveGrab::Resize { edges, .. })
+                if edges == xdg_toplevel::ResizeEdge::Top as u32
         ));
         assert_eq!(
             state.seat.keyboard_focus.map(|focus| focus.surface_id()),
@@ -3512,10 +3510,7 @@ mod xdg_seat_tests {
     #[test]
     fn decoration_left_border_press_starts_resize_with_left_edge() {
         let mut state = state_for_tests();
-        state.config.general.decoration_insets.top = 12;
-        state.config.general.decoration_insets.left = 6;
-        state.config.general.decoration_insets.right = 4;
-        state.config.general.decoration_insets.bottom = 4;
+        state.config.decorations.border.size = 12;
         let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
@@ -3717,10 +3712,7 @@ mod xdg_seat_tests {
     #[test]
     fn scene_pick_keeps_focus_and_window_target_on_the_same_topmost_root_surface() {
         let mut state = state_for_tests();
-        state.config.general.decoration_insets.top = 12;
-        state.config.general.decoration_insets.left = 6;
-        state.config.general.decoration_insets.right = 4;
-        state.config.general.decoration_insets.bottom = 4;
+        state.config.decorations.border.size = 12;
         let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
@@ -3911,12 +3903,9 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn window_pointer_hit_classifies_decoration_titlebar_and_resize_hits() {
+    fn window_pointer_hit_classifies_decoration_border_resize_hits() {
         let mut state = state_for_tests();
-        state.config.general.decoration_insets.top = 12;
-        state.config.general.decoration_insets.left = 6;
-        state.config.general.decoration_insets.right = 4;
-        state.config.general.decoration_insets.bottom = 4;
+        state.config.decorations.border.size = 12;
         let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
@@ -3961,8 +3950,11 @@ mod xdg_seat_tests {
         }
         ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
-        let titlebar_hit = window_hit_at(&state, (80.0, 44.0)).expect("titlebar hit");
-        assert_eq!(titlebar_hit.semantics, HitSemantics::CompositorMove);
+        let top_border_hit = window_hit_at(&state, (80.0, 44.0)).expect("top border hit");
+        assert_eq!(
+            top_border_hit.semantics,
+            HitSemantics::CompositorResize(xdg_toplevel::ResizeEdge::Top as u32)
+        );
 
         let resize_hit = window_hit_at(&state, (35.0, 90.0)).expect("resize hit");
         assert_eq!(
@@ -3972,13 +3964,62 @@ mod xdg_seat_tests {
     }
 
     #[test]
+    fn client_side_border_resizes_and_the_outer_radius_drops_the_corner() {
+        let mut state = state_for_tests();
+        state.config.decorations.border.size = 12;
+        state.config.decorations.rounding = 18;
+        let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
+        let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
+
+        let (wl_surface_object_id, xdg_surface_object_id) = insert_xdg_surface(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            WlSurfaceId::from(268),
+            XdgSurfaceId::from(278),
+        );
+        let _toplevel_object_id = assign_toplevel_role(
+            &mut state,
+            &mut client,
+            &mut client_dispatcher,
+            xdg_surface_object_id,
+            XdgSurfaceId::from(278),
+            XdgToplevelId::from(288),
+        );
+        {
+            let surface = state
+                .objects
+                .get_mut(wl_surface_object_id)
+                .downcast_mut::<WlSurface>()
+                .unwrap();
+            surface.test_map(ObjectId::from(959usize), 40, 50, 120, 80);
+        }
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
+
+        let border_hit = window_hit_at(&state, (34.0, 90.0)).expect("client-side border hit");
+        assert_eq!(
+            border_hit.semantics,
+            HitSemantics::CompositorResize(xdg_toplevel::ResizeEdge::Left as u32)
+        );
+
+        // Inside the old content radius, outside `rounding + border.size`.
+        let corner_hit = window_hit_at(&state, (34.0, 44.0)).expect("outer-corner hit");
+        assert_eq!(corner_hit.semantics, HitSemantics::SurfaceContent);
+
+        state.seat.pointer_pos = (34.0, 90.0);
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Resize { edges, .. })
+                if edges == xdg_toplevel::ResizeEdge::Left as u32
+        ));
+    }
+
+    #[test]
     fn window_pointer_hit_treats_rounded_decoration_corner_as_non_border() {
         let mut state = state_for_tests();
-        state.config.general.decoration_insets.top = 12;
-        state.config.general.decoration_insets.left = 6;
-        state.config.general.decoration_insets.right = 4;
-        state.config.general.decoration_insets.bottom = 4;
-        state.config.decorations.border.rounding = 18;
+        state.config.decorations.border.size = 12;
+        state.config.decorations.rounding = 18;
         let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
@@ -4028,12 +4069,9 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn decoration_hover_uses_resize_and_move_cursors_before_click() {
+    fn decoration_hover_uses_resize_cursors_before_click() {
         let mut state = state_for_tests();
-        state.config.general.decoration_insets.top = 12;
-        state.config.general.decoration_insets.left = 6;
-        state.config.general.decoration_insets.right = 4;
-        state.config.general.decoration_insets.bottom = 4;
+        state.config.decorations.border.size = 12;
         let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
 
@@ -4091,7 +4129,7 @@ mod xdg_seat_tests {
         assert_named_cursor_matches_any(&state.seat, super::POINTER_RESIZE_S_CURSOR_ICON_NAMES);
 
         handle_pointer_motion_absolute(&mut state, &mut dispatcher, 80.0, 44.0, 140);
-        assert_named_cursor_matches_any(&state.seat, super::POINTER_MOVE_CURSOR_ICON_NAMES);
+        assert_named_cursor_matches_any(&state.seat, super::POINTER_RESIZE_N_CURSOR_ICON_NAMES);
         assert!(state.seat.pointer_focus.is_none());
     }
 
@@ -4335,6 +4373,7 @@ mod xdg_seat_tests {
             &state.xkb,
         )
         .unwrap();
+        state.config.decorations.border.size = 0;
         state.keyboard.update_key(125, true);
         state.seat.pointer_pos = (70.0, 80.0);
 
@@ -4389,6 +4428,9 @@ mod xdg_seat_tests {
             &state.xkb,
         )
         .unwrap();
+        // Reloading the config restores the runtime 1px border. These drag tests
+        // are about the move binding, so keep the zero-frame baseline.
+        state.config.decorations.border.size = 0;
         state.keyboard.update_key(125, true);
     }
 
@@ -5152,16 +5194,13 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn tiled_drag_titlebar_press_drops_back_into_the_source_split() {
+    fn tiled_drag_press_drops_back_into_the_source_split() {
         let mut state = state_for_tests();
         let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
         let (stayed, dragged) = map_drag_pair(&mut state, &mut client, &mut client_dispatcher);
         enable_move_window_binding(&mut state);
-        state.config.general.decoration_insets.top = 12;
-        state.config.general.decoration_insets.left = 4;
-        state.config.general.decoration_insets.right = 4;
-        state.config.general.decoration_insets.bottom = 4;
+        state.config.decorations.border.size = 12;
         set_server_side_decoration(&mut state, dragged);
         let workspace_id = state.root_surface_workspace(root(&state, dragged)).unwrap();
         crate::tiling::mark_workspace_dirty(&mut state, workspace_id);
@@ -5169,7 +5208,8 @@ mod xdg_seat_tests {
         ensure_test_root_geometry(&mut state, stayed);
         ensure_test_root_geometry(&mut state, dragged);
         let frame = layout_rect(&state, dragged);
-        state.seat.pointer_pos = (frame.x as f64 + 10.0, frame.y as f64 + 4.0);
+        state.seat.pointer_pos =
+            (frame.x as f64 + frame.width as f64 / 2.0, frame.y as f64 + frame.height as f64 / 2.0);
         handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 210);
 
         assert!(matches!(

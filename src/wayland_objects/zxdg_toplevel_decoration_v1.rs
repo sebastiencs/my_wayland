@@ -2,8 +2,8 @@ use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, PostAction, RequestResult},
     protocol_generated::{
-        zxdg_toplevel_decoration_v1, Constants, WaylandId, WlSurfaceId, XdgSurfaceId,
-        XdgToplevelId, ZxdgToplevelDecorationV1Id,
+        zxdg_toplevel_decoration_v1, Constants, WaylandId, XdgSurfaceId, XdgToplevelId,
+        ZxdgToplevelDecorationV1Id,
     },
     state::{GrabbedObject, State},
     wayland_objects::{
@@ -47,12 +47,6 @@ impl ZxdgToplevelDecorationV1 {
         );
     }
 
-    fn root_surface(&self, _client: &Client, state: &State) -> Option<Resolved<WlSurfaceId>> {
-        let toplevel = self.toplevel.try_ref(state)?;
-        let xdg_surface = toplevel.xdg_surface().try_ref(state)?;
-        Some(xdg_surface.wl_surface())
-    }
-
     fn update_effective_mode(
         &mut self,
         client: &mut Client,
@@ -61,9 +55,7 @@ impl ZxdgToplevelDecorationV1 {
         force_xdg_configure: bool,
         send_xdg_configure: bool,
     ) {
-        let root_surface = self.root_surface(client, state);
-        let effective_mode =
-            state.xdg_decoration_mode_for_surface(root_surface, true, self.requested_mode);
+        let effective_mode = state.xdg_decoration_mode_for_surface(true);
         let Some(toplevel) = self.toplevel.try_ref_mut(state) else {
             return;
         };
@@ -111,8 +103,7 @@ impl ZxdgToplevelDecorationV1 {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let target_mode =
-            state.xdg_decoration_mode_for_surface(self.root_surface(client, state), false, None);
+        let target_mode = state.xdg_decoration_mode_for_surface(false);
         let Some(toplevel) = self.toplevel.try_ref_mut(state) else {
             return;
         };
@@ -171,19 +162,15 @@ impl PostAction for RevertUnnegotiatedDecoration {
         state: &mut State,
         dispatcher: &mut ClientDispatcher,
     ) {
-        let root = {
+        {
             let Some(toplevel) = self.toplevel.try_ref(state) else {
                 return;
             };
             if toplevel.has_decoration_object() {
                 return;
             }
-            toplevel
-                .xdg_surface()
-                .try_ref(state)
-                .map(|xdg| xdg.wl_surface())
-        };
-        let target_mode = state.xdg_decoration_mode_for_surface(root, false, None);
+        }
+        let target_mode = state.xdg_decoration_mode_for_surface(false);
         let Some(mut toplevel) = self.toplevel.try_ref_mut(state) else {
             return;
         };
@@ -406,11 +393,34 @@ mod tests {
             );
         }
 
-        let xdg_surface = state
-            .objects
-            .try_ref_object::<XdgSurface>(xdg_surface_object_id)
-            .unwrap();
-        assert_eq!(xdg_surface.test_pending_configure_count(), 1);
+        {
+            let xdg_surface = state
+                .objects
+                .try_ref_object::<XdgSurface>(xdg_surface_object_id)
+                .unwrap();
+            assert_eq!(xdg_surface.test_pending_configure_count(), 1);
+            assert_eq!(
+                xdg_surface.test_latest_pending_decoration_mode(),
+                Some(ToplevelDecorationMode::ServerSide)
+            );
+        }
+        {
+            let toplevel = state
+                .objects
+                .try_ref_object::<XdgToplevel>(toplevel_object_id)
+                .unwrap();
+            assert_eq!(
+                toplevel.decoration_mode_for_configure(),
+                ToplevelDecorationMode::ServerSide
+            );
+        }
+        {
+            let decoration = state
+                .objects
+                .try_ref_object::<ZxdgToplevelDecorationV1>(decoration_object_id)
+                .unwrap();
+            assert_eq!(decoration.requested_mode(), Some(ToplevelDecorationMode::ClientSide));
+        }
     }
 
     #[test]

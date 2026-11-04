@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     clients::Resolved,
     config::{DecorationInsets, SplitRatio},
-    protocol_generated::{xdg_toplevel, WlSurfaceId, XdgSurfaceId},
+    protocol_generated::{WlSurfaceId, XdgSurfaceId},
     region::RectI,
     root_geometry::{self, CommittedRootGeometry},
     state::{ManagedWindowMode, ObjectId, State, WorkspaceId},
@@ -2302,23 +2302,6 @@ fn is_managed_root_surface_candidate_common(
         .is_some()
 }
 
-pub fn xdg_toplevel_states_for_edges(edges: u32) -> Vec<u32> {
-    let mut states = Vec::new();
-    if edges & EDGE_LEFT != 0 {
-        states.push(xdg_toplevel::State::TiledLeft as u32);
-    }
-    if edges & EDGE_RIGHT != 0 {
-        states.push(xdg_toplevel::State::TiledRight as u32);
-    }
-    if edges & EDGE_TOP != 0 {
-        states.push(xdg_toplevel::State::TiledTop as u32);
-    }
-    if edges & EDGE_BOTTOM != 0 {
-        states.push(xdg_toplevel::State::TiledBottom as u32);
-    }
-    states
-}
-
 #[cfg(test)]
 pub(crate) fn test_tiled_resize_state() -> TiledResizeState {
     TiledResizeState {
@@ -2781,7 +2764,7 @@ mod tests {
             let mut toplevel = state.objects.grab_object::<XdgToplevel>(toplevel_id);
             toplevel.set_decoration_mode(ToplevelDecorationMode::ServerSide);
         }
-        state.config.decorations.border.thickness = 4;
+        state.config.decorations.border.size = 4;
         state.config.decorations.shadow.radius = 40;
         state.config.decorations.shadow.offset_x = 0;
         state.config.decorations.shadow.offset_y = 0;
@@ -3415,19 +3398,15 @@ mod tests {
 
     #[test]
     fn tiled_geometry_uses_content_size_for_server_side_configures() {
-        let geometry = test_committed_geometry(
+        let mut geometry = test_committed_geometry(
             RectI { x: 20, y: 20, width: 1240, height: 760 },
             RectI { x: 25, y: 25, width: 1230, height: 750 },
             EDGE_TOP | EDGE_BOTTOM | EDGE_LEFT | EDGE_RIGHT,
             false,
             (25, 25),
         );
-
-        let configure_geometry = crate::root_geometry::project_configure_geometry(
-            geometry,
-            ToplevelDecorationMode::ServerSide,
-            DecorationInsets { left: 5, top: 5, right: 5, bottom: 5 },
-        );
+        geometry.decoration_insets = DecorationInsets { left: 5, top: 5, right: 5, bottom: 5 };
+        let configure_geometry = crate::root_geometry::project_configure_geometry(geometry);
 
         assert_eq!(configure_geometry.size, (1230, 750));
     }
@@ -3668,8 +3647,7 @@ mod tests {
     #[test]
     fn effective_decoration_insets_fall_back_to_config_without_explicit_geometry() {
         let mut state = state_for_tests();
-        state.config.general.decoration_insets =
-            DecorationInsets { top: 7, right: 1, bottom: 2, left: 3 };
+        state.config.decorations.border.size = 7;
         let mut client = Client::new_for_tests(ClientId::from_raw(40));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -3686,15 +3664,14 @@ mod tests {
 
         assert_eq!(
             root_geometry::effective_decoration_insets(&state, root(&state, surface_object_id),),
-            DecorationInsets { top: 7, right: 1, bottom: 2, left: 3 }
+            DecorationInsets { top: 7, right: 7, bottom: 7, left: 7 }
         );
     }
 
     #[test]
-    fn effective_decoration_insets_use_explicit_window_geometry_for_csd() {
+    fn effective_decoration_insets_ignore_csd_window_geometry() {
         let mut state = state_for_tests();
-        state.config.general.decoration_insets =
-            DecorationInsets { top: 1, right: 1, bottom: 1, left: 1 };
+        state.config.decorations.border.size = 3;
         let mut client = Client::new_for_tests(ClientId::from_raw(50));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -3755,15 +3732,14 @@ mod tests {
 
         assert_eq!(
             root_geometry::effective_decoration_insets(&state, root(&state, surface_object_id),),
-            DecorationInsets { top: 12, right: 6, bottom: 8, left: 4 }
+            DecorationInsets { top: 3, right: 3, bottom: 3, left: 3 }
         );
     }
 
     #[test]
-    fn effective_decoration_insets_clamp_window_geometry_to_surface_tree_bounds() {
+    fn effective_decoration_insets_ignore_oversized_window_geometry() {
         let mut state = state_for_tests();
-        state.config.general.decoration_insets =
-            DecorationInsets { top: 1, right: 1, bottom: 1, left: 1 };
+        state.config.decorations.border.size = 3;
         let mut client = Client::new_for_tests(ClientId::from_raw(55));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -3824,15 +3800,14 @@ mod tests {
 
         assert_eq!(
             root_geometry::effective_decoration_insets(&state, root(&state, surface_object_id),),
-            DecorationInsets { top: 12, right: 6, bottom: 8, left: 4 }
+            DecorationInsets { top: 3, right: 3, bottom: 3, left: 3 }
         );
     }
 
     #[test]
     fn server_side_decoration_mode_uses_configured_fallback_insets() {
         let mut state = state_for_tests();
-        state.config.general.decoration_insets =
-            DecorationInsets { top: 2, right: 3, bottom: 4, left: 5 };
+        state.config.decorations.border.size = 5;
         let mut client = Client::new_for_tests(ClientId::from_raw(60));
         let mut dispatcher = Dispatcher::default();
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -3863,7 +3838,7 @@ mod tests {
 
         assert_eq!(
             root_geometry::effective_decoration_insets(&state, root(&state, surface_object_id),),
-            DecorationInsets { top: 2, right: 3, bottom: 4, left: 5 }
+            DecorationInsets { top: 5, right: 5, bottom: 5, left: 5 }
         );
     }
 

@@ -35,7 +35,7 @@ use crate::{
     render::{
         create_renderer, rounded_ring, EffectElement, FrameElement, FramePhase, OutputFrameRecipe,
         RenderFrame, RenderTarget, Renderer, RootSurfaceVisualState, RoundedRing, ShmImage,
-        Texture, TextureElement, TextureMask, TextureSource,
+        Texture, TextureElement, TextureMask, TextureSource, WindowClip,
     },
     runner::{isolate_session_fault, Dispatcher, Model, ModelInstanceId, SessionFault},
     scene::{ComposedEntry, CompositionTier, OutputCompositionView},
@@ -247,6 +247,7 @@ struct SceneItemState {
 enum SceneItemMask {
     None,
     RoundedClip { clip: RootSurfaceClip },
+    CornerRoundedClip { clip: RootSurfaceClip },
     FrameRing { ring: RoundedRing },
 }
 
@@ -5292,7 +5293,7 @@ fn scene_item_requires_compositor_compositing(item: &SceneItem) -> bool {
     item.alpha < u8::MAX || !matches!(item.mask, SceneItemMask::None)
 }
 
-fn surface_allows_direct_scanout(root_clip: Option<RootSurfaceClip>, alpha: u8) -> bool {
+fn surface_allows_direct_scanout(root_clip: Option<WindowClip>, alpha: u8) -> bool {
     root_clip.is_none() && alpha == u8::MAX
 }
 
@@ -5496,7 +5497,7 @@ fn push_scene_items_from_snapshots(
     output_bounds: RectI,
     snapshots: Vec<crate::wayland_objects::wl_surface::SurfaceRenderState>,
     allow_direct_scanout: bool,
-    root_clip: Option<RootSurfaceClip>,
+    root_clip: Option<WindowClip>,
     alpha: u8,
     geometry_scale: Option<(RectI, RectI)>,
 ) {
@@ -5587,8 +5588,12 @@ fn push_scene_items_from_snapshots(
             .expect("rendered surface snapshots carry their object id");
         let surface_key = surface;
         let (mask, opaque_region, opaque) = if surface_state.inherit_root_clip {
-            if let Some(clip) = root_clip {
-                (SceneItemMask::RoundedClip { clip }, DamageRegion::new(), false)
+            if let Some(window_clip) = root_clip {
+                let mask = match window_clip {
+                    WindowClip::Frame(clip) => SceneItemMask::RoundedClip { clip },
+                    WindowClip::Corners(clip) => SceneItemMask::CornerRoundedClip { clip },
+                };
+                (mask, DamageRegion::new(), false)
             } else {
                 let opaque = !opaque_region.is_empty();
                 (SceneItemMask::None, opaque_region, opaque)
@@ -5630,10 +5635,20 @@ fn push_root_surface_effect_elements(
     let Some(visual_state) = visual_state else {
         return;
     };
-    let clip = visual_state.clip.unwrap_or_else(|| {
-        RootSurfaceClip::new(visual_state.outer_rect, 0, crate::config::RoundingPower::DEFAULT)
-    });
-    let ring = rounded_ring(clip, visual_state.content_rect);
+    let inner_radius = visual_state
+        .clip
+        .map(|clip| clip.clip().corner_radius)
+        .unwrap_or(0);
+    let ring = crate::render::RoundedRing {
+        outer: visual_state.frame_clip,
+        inner: RootSurfaceClip::new(
+            visual_state.content_rect,
+            inner_radius,
+            visual_state.frame_clip.rounding_power,
+        ),
+    };
+    let shadow_clip = visual_state.shadow_clip();
+    let dim_clip = visual_state.frame_clip;
     if phase == FramePhase::UnderWindow {
         if let Some(blur) = visual_state.effects.blur {
             frame_elements.push(RecordedFrameElement::Effect {
@@ -5651,7 +5666,7 @@ fn push_root_surface_effect_elements(
             frame_elements.push(RecordedFrameElement::Effect {
                 phase: FramePhase::UnderWindow,
                 element: EffectElement::WindowShadow {
-                    clip,
+                    clip: shadow_clip,
                     style: shadow,
                     alpha: visual_state.shadow_alpha,
                 },
@@ -5673,7 +5688,10 @@ fn push_root_surface_effect_elements(
     if phase == FramePhase::Overlay && visual_state.effects.dim_alpha > 0 {
         frame_elements.push(RecordedFrameElement::Effect {
             phase: FramePhase::Overlay,
-            element: EffectElement::DimOverlay { clip, alpha: visual_state.effects.dim_alpha },
+            element: EffectElement::DimOverlay {
+                clip: dim_clip,
+                alpha: visual_state.effects.dim_alpha,
+            },
         });
     }
 }
@@ -5888,7 +5906,7 @@ pub(crate) struct ClosingCapturePlan {
     pub effects: Vec<PlannedClosingEffect>,
     pub blur: Option<FrozenClosingBlur>,
     pub content_alpha: u8,
-    pub root_clip: Option<RootSurfaceClip>,
+    pub root_clip: Option<WindowClip>,
 }
 
 pub(crate) fn begin_managed_toplevel_close_surface(
@@ -6333,18 +6351,23 @@ fn closing_capture_elements(
         };
         let mask = if surface.inherit_root_clip {
             plan.root_clip
-                .map(|clip| TextureMask::RoundedClip {
-                    clip: localize_clip(
-                        RootSurfaceClip::new(
-                            clip.outer_rect.translate(
-                                plan.bounds.x.saturating_neg(),
-                                plan.bounds.y.saturating_neg(),
-                            ),
-                            clip.corner_radius,
-                            clip.rounding_power,
+                .map(|window_clip| {
+                    let clip = RootSurfaceClip::new(
+                        window_clip.clip().outer_rect.translate(
+                            plan.bounds.x.saturating_neg(),
+                            plan.bounds.y.saturating_neg(),
                         ),
-                        bounds,
-                    ),
+                        window_clip.clip().corner_radius,
+                        window_clip.clip().rounding_power,
+                    );
+                    match window_clip {
+                        WindowClip::Frame(_) => {
+                            TextureMask::RoundedClip { clip: localize_clip(clip, bounds) }
+                        }
+                        WindowClip::Corners(_) => {
+                            TextureMask::CornerRoundedClip { clip: localize_clip(clip, bounds) }
+                        }
+                    }
                 })
                 .unwrap_or(TextureMask::None)
         } else {
@@ -6680,6 +6703,9 @@ fn scene_item_to_texture_element(item: &SceneItem) -> TextureElement {
             SceneItemMask::RoundedClip { clip } => {
                 TextureMask::RoundedClip { clip: localize_clip(clip, item.state.bounds) }
             }
+            SceneItemMask::CornerRoundedClip { clip } => {
+                TextureMask::CornerRoundedClip { clip: localize_clip(clip, item.state.bounds) }
+            }
             SceneItemMask::FrameRing { ring } => {
                 TextureMask::FrameRing { ring: localize_ring(ring, item.state.bounds) }
             }
@@ -6721,7 +6747,7 @@ fn translate_scene_items(items: &mut [SceneItem], dx: i32, dy: i32) {
 fn translate_scene_item_mask(mask: &mut SceneItemMask, dx: i32, dy: i32) {
     match mask {
         SceneItemMask::None => {}
-        SceneItemMask::RoundedClip { clip } => {
+        SceneItemMask::RoundedClip { clip } | SceneItemMask::CornerRoundedClip { clip } => {
             clip.outer_rect = clip.outer_rect.translate(dx, dy);
         }
         SceneItemMask::FrameRing { ring } => {
@@ -6925,14 +6951,7 @@ fn render_composed_entry(
     let mut visual_state = state.root_surface_visual_state(root_surface);
     if let Some((logical, visual)) = geometry_scale {
         if let Some(visual_state) = visual_state.as_mut() {
-            let border = state.config.decorations.border;
-            crate::render::place_visual_frame(
-                visual_state,
-                logical,
-                visual,
-                border.rounding.max(0),
-                border.rounding_power,
-            );
+            crate::render::place_visual_frame(visual_state, logical, visual);
         }
     }
     let allow_direct_scanout = entry.allow_direct_scanout
@@ -8063,8 +8082,7 @@ mod closing_capture_tests {
     fn flattened_plan_localizes_subsurfaces_and_popups_without_taking_live_state() {
         let mut state = state_for_tests();
         let output_id = state.insert_output(test_output_drm0_wh(800, 600));
-        state.config.general.decoration_insets.top = 12;
-        state.config.decorations.border.thickness = 4;
+        state.config.decorations.border.size = 4;
         state.config.decorations.shadow.radius = 16;
         state.config.effects.blur.enabled = true;
         let parent = mapped_root(&mut state, 100, 80);
@@ -8556,6 +8574,7 @@ mod render_recipe_tests {
             render::{
                 rounded_ring, BlurVisualStyle, BorderGradient, BorderVisualStyle, EffectElement,
                 FramePhase, RootSurfaceVisualState, ShadowVisualStyle, SurfaceEffectStyle,
+                WindowClip,
             },
             state::RootSurfaceClip,
             transform,
@@ -8609,6 +8628,52 @@ mod render_recipe_tests {
     }
 
     #[test]
+    fn scene_items_to_texture_elements_map_corner_clip_to_local_coordinates() {
+        let item_bounds = RectI::new(40, 50, 120, 80).unwrap();
+        let clip = RootSurfaceClip::new(
+            RectI::new(34, 38, 130, 96).unwrap(),
+            18,
+            crate::config::RoundingPower::DEFAULT,
+        );
+        let items = vec![SceneItem {
+            state: SceneItemState {
+                key: SceneItemKey::Cursor,
+                surface_key: None,
+                content_key: SceneItemContentKey::NamedCursor(
+                    crate::cursor::CursorImageContentKey { width: 1, height: 2, fingerprint: 3 },
+                ),
+                bounds: item_bounds,
+                tex_transform: transform::Mat3::identity(),
+                alpha: u8::MAX,
+                mask: SceneItemMask::CornerRoundedClip { clip },
+            },
+            mask: SceneItemMask::CornerRoundedClip { clip },
+            texture: crate::render::inert_texture(),
+            damage: DamageRegion::from_rect(item_bounds),
+            sample_damage_padding: 0,
+            state_has_alpha: false,
+            alpha: u8::MAX,
+            opaque_region: DamageRegion::new(),
+            opaque: false,
+            sync: crate::sync::SurfaceSyncState::default(),
+            direct_scanout: None,
+            presentation_feedbacks: Vec::new(),
+        }];
+
+        let render_item = scene_item_to_texture_element(&items[0]);
+        assert_eq!(
+            render_item.mask,
+            crate::render::gles::RenderItemMask::CornerRoundedClip {
+                clip: RootSurfaceClip::new(
+                    RectI::new(-6, -12, 130, 96).unwrap(),
+                    18,
+                    crate::config::RoundingPower::DEFAULT,
+                ),
+            }
+        );
+    }
+
+    #[test]
     fn root_surface_effect_elements_use_runtime_alpha_blur_and_clip() {
         let clip = RootSurfaceClip::new(
             RectI::new(20, 30, 100, 80).unwrap(),
@@ -8618,7 +8683,8 @@ mod render_recipe_tests {
         let visual_state = RootSurfaceVisualState {
             outer_rect: clip.outer_rect,
             content_rect: RectI::new(26, 36, 88, 68).unwrap(),
-            clip: Some(clip),
+            clip: Some(WindowClip::Frame(clip)),
+            frame_clip: clip,
             border: Some(BorderVisualStyle {
                 gradient: BorderGradient {
                     start_color: crate::config::RgbaColor::new(1, 2, 3, 4),
@@ -8775,7 +8841,13 @@ mod render_recipe_tests {
             RecordedFrameElement::Effect {
                 phase: FramePhase::OverWindow,
                 element: EffectElement::WindowBorder {
-                    ring: rounded_ring(clip, RectI::new(14, 22, 72, 54).unwrap()),
+                    ring: rounded_ring(
+                        clip.outer_rect,
+                        RectI::new(14, 22, 72, 54).unwrap(),
+                        10,
+                        0,
+                        clip.rounding_power,
+                    ),
                     gradient: BorderGradient {
                         start_color: crate::config::RgbaColor::new(1, 2, 3, 4),
                         end_color: crate::config::RgbaColor::new(5, 6, 7, 8),
@@ -8818,7 +8890,13 @@ mod render_recipe_tests {
             RecordedFrameElement::Effect {
                 phase: FramePhase::UnderWindow,
                 element: EffectElement::WindowBlurBackdrop {
-                    ring: rounded_ring(clip, RectI::new(314, 222, 84, 66).unwrap()),
+                    ring: rounded_ring(
+                        clip.outer_rect,
+                        RectI::new(314, 222, 84, 66).unwrap(),
+                        10,
+                        0,
+                        clip.rounding_power,
+                    ),
                     style: BlurVisualStyle { radius: 12, passes: 2 },
                     alpha: 180,
                 },
@@ -8826,7 +8904,13 @@ mod render_recipe_tests {
             RecordedFrameElement::Effect {
                 phase: FramePhase::OverWindow,
                 element: EffectElement::WindowBorder {
-                    ring: rounded_ring(clip, RectI::new(314, 222, 84, 66).unwrap()),
+                    ring: rounded_ring(
+                        clip.outer_rect,
+                        RectI::new(314, 222, 84, 66).unwrap(),
+                        10,
+                        0,
+                        clip.rounding_power,
+                    ),
                     gradient: BorderGradient {
                         start_color: crate::config::RgbaColor::new(1, 2, 3, 4),
                         end_color: crate::config::RgbaColor::new(5, 6, 7, 8),
@@ -8940,12 +9024,11 @@ mod render_recipe_tests {
                 phase: FramePhase::OverWindow,
                 element: EffectElement::WindowBorder {
                     ring: rounded_ring(
-                        RootSurfaceClip::new(
-                            RectI::new(308, 216, 96, 78).unwrap(),
-                            10,
-                            crate::config::RoundingPower::DEFAULT,
-                        ),
+                        RectI::new(308, 216, 96, 78).unwrap(),
                         RectI::new(314, 222, 84, 66).unwrap(),
+                        10,
+                        0,
+                        crate::config::RoundingPower::DEFAULT,
                     ),
                     gradient: BorderGradient {
                         start_color: crate::config::RgbaColor::new(1, 2, 3, 4),
@@ -9491,11 +9574,11 @@ mod presentation_timing_tests {
         assert!(surface_allows_direct_scanout(None, u8::MAX));
         assert!(!surface_allows_direct_scanout(None, 200));
         assert!(!surface_allows_direct_scanout(
-            Some(crate::state::RootSurfaceClip::new(
+            Some(crate::render::WindowClip::Frame(crate::state::RootSurfaceClip::new(
                 RectI::new(0, 0, 100, 100).unwrap(),
                 8,
                 crate::config::RoundingPower::DEFAULT,
-            )),
+            ))),
             u8::MAX,
         ));
     }

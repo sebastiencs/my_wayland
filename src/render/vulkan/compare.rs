@@ -310,11 +310,25 @@ fn vulkan_matches_gles_textured_quads() {
         })
         .expect("vulkan clip");
     let gles_round =
-        paint(&mut *pair.gl, element(gl_round, 0, 0, 4, 4, u8::MAX, mask.clone()), 4, 4);
-    let vulkan_round = paint(&mut *pair.vulkan, element(vk_round, 0, 0, 4, 4, u8::MAX, mask), 4, 4);
+        paint(&mut *pair.gl, element(gl_round.clone(), 0, 0, 4, 4, u8::MAX, mask.clone()), 4, 4);
+    let vulkan_round = paint(&mut *pair.vulkan, element(vk_round.clone(), 0, 0, 4, 4, u8::MAX, mask), 4, 4);
     assert_eq!(&gles_round[..4], &[0, 0, 0, 0]);
     assert_eq!(&gles_round[8 * 4 + 8..8 * 4 + 12], &green);
     assert_close(&gles_round, &vulkan_round, 1);
+
+    // Corner-only clip over (2, 2, 4, 4): pixels outside the window box are kept
+    // (unlike mode 1), while pixels inside the box that fall outside the rounded
+    // corner are discarded.
+    let corner_clip =
+        RootSurfaceClip::new(RectI::new(2, 2, 4, 4).expect("corner clip"), 8, RoundingPower::default());
+    let corner_mask = TextureMask::CornerRoundedClip { clip: corner_clip };
+    let gles_corner =
+        paint(&mut *pair.gl, element(gl_round.clone(), 0, 0, 4, 4, u8::MAX, corner_mask.clone()), 4, 4);
+    let vulkan_corner =
+        paint(&mut *pair.vulkan, element(vk_round.clone(), 0, 0, 4, 4, u8::MAX, corner_mask), 4, 4);
+    assert_eq!(&gles_corner[..4], &green);
+    assert_eq!(&gles_corner[(2 * 4 + 2) * 4..(2 * 4 + 2) * 4 + 4], &[0, 0, 0, 0]);
+    assert_close(&gles_corner, &vulkan_corner, 1);
 }
 
 #[test]

@@ -17,14 +17,6 @@ renderer = "opengl"
 outer_gap = 10
 inner_gap = 10
 
-# Decoration insets (logical pixels): frame rect minus these edges is the tiled client content
-# rect for configure and root position. Keep at zero until server-side decorations are drawn.
-[general.decoration_insets]
-top = 5
-right = 5
-bottom = 5
-left = 5
-
 # Mouse move of a tiled window.
 # threshold is logical pixels before the window is picked up; 0 picks it up immediately.
 # precise_mouse_move false splits a wide tile left/right and a tall tile top/bottom.
@@ -34,16 +26,23 @@ threshold = 0
 precise_mouse_move = false
 split_ratio = 1.0
 
-# Root-window border styling used by the pass-based effects pipeline.
+# Corner radius of the window content, in logical pixels. This is independent of
+# who draws the decorations. 0 disables rounding.
+[decorations]
+rounding = 20
+rounding_power = 2.0
+
+# Width of the compositor frame on every edge, in logical pixels. This is also
+# the drawn border width. Every non-fullscreen window gets this frame, including
+# clients that draw their own decorations. A client that asks for client-side
+# mode is still told to use server-side mode. 0 reserves no frame and draws no border.
 [decorations.border]
-thickness = 0
+size = 1
 active_start_color = "#5078c8ff"
 active_end_color = "#6b9df6ff"
 inactive_start_color = "#333844ff"
 inactive_end_color = "#434854ff"
 gradient_angle_degrees = 0
-rounding = 20
-rounding_power = 2.0
 
 # Simple compositor-owned shadow around the root window.
 [decorations.shadow]
@@ -52,18 +51,6 @@ offset_x = 0
 offset_y = 8
 color = "#00000090"
 power = 2.0
-
-# XDG decoration mode when the client uses zxdg_toplevel_decoration_v1 (or not).
-# Each key sets policy for: no CSD protocol, tiled, floating, fullscreen, or unset mode.
-# Values: "server" (SSD), "client" (CSD), "honor-client" (prefer client preference).
-# Defaults if this table is omitted: no_protocol=client, tiled=server, floating=honor-client,
-# fullscreen=server, unset_mode=server.
-[decorations.xdg]
-no_protocol = "client"
-tiled = "server"
-floating = "honor-client"
-fullscreen = "server"
-unset_mode = "server"
 
 [effects.blur]
 enabled = false

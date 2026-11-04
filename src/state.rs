@@ -1,8 +1,6 @@
 use crate::{
     clients::{ClientId, ProcessInfo, Resolved},
-    config::{
-        DecorationInsets, OutputScaleSetting, RoundingPower, RuntimeConfig, XdgDecorationModePolicy,
-    },
+    config::{DecorationInsets, OutputScaleSetting, RoundingPower, RuntimeConfig},
     drm::Drm,
     globals::{Global, GlobalName, Globals},
     libinput::Input,
@@ -15,7 +13,7 @@ use crate::{
     region::RectI,
     render::{
         BlurVisualStyle, BorderGradient, BorderVisualStyle, RootSurfaceVisualState,
-        ShadowVisualStyle, SurfaceEffectStyle,
+        ShadowVisualStyle, SurfaceEffectStyle, WindowClip,
     },
     root_geometry::{self, CommittedRootGeometry, DecorationFrameLayout},
     scene::{self, OutputCompositionView, SceneModel, WorkspaceFocusOrder},
@@ -1943,47 +1941,21 @@ impl State {
             .map(|toplevel| toplevel.rref(self))
     }
 
-    fn resolve_xdg_decoration_mode_policy(
-        policy: XdgDecorationModePolicy,
-        requested_mode: Option<ToplevelDecorationMode>,
-    ) -> ToplevelDecorationMode {
-        match policy {
-            XdgDecorationModePolicy::Server => ToplevelDecorationMode::ServerSide,
-            XdgDecorationModePolicy::Client => ToplevelDecorationMode::ClientSide,
-            XdgDecorationModePolicy::HonorClient => {
-                requested_mode.unwrap_or(ToplevelDecorationMode::ClientSide)
-            }
-        }
-    }
-
+    /// Decoration mode sent to a toplevel.
+    ///
+    /// A client that creates `zxdg_toplevel_decoration_v1` is always told to use
+    /// server-side decorations, whatever mode it requested and whatever layout
+    /// the window is in. A client that never creates that object stays
+    /// client-side, because the protocol gives us no way to say otherwise.
     pub fn xdg_decoration_mode_for_surface(
         &self,
-        root_surface: Option<Resolved<WlSurfaceId>>,
         has_decoration_object: bool,
-        requested_mode: Option<ToplevelDecorationMode>,
     ) -> ToplevelDecorationMode {
-        let policy = &self.config.decorations.xdg;
-        if !has_decoration_object {
-            return Self::resolve_xdg_decoration_mode_policy(policy.no_protocol, None);
-        }
-
-        let managed_state =
-            root_surface.and_then(|surface| self.managed_root_surfaces.get(&surface));
-        let selected_policy = if requested_mode.is_none() {
-            policy.unset_mode
-        } else if managed_state.is_some_and(|managed| managed.fullscreen)
-            || root_surface.is_some_and(|surface| self.root_surface_is_fullscreen(surface))
-        {
-            policy.fullscreen
-        } else if managed_state.is_some_and(|managed| managed.mode == ManagedWindowMode::Tiled) {
-            policy.tiled
-        } else if managed_state.is_some_and(|managed| managed.mode == ManagedWindowMode::Floating) {
-            policy.floating
+        if has_decoration_object {
+            ToplevelDecorationMode::ServerSide
         } else {
-            policy.floating
-        };
-
-        Self::resolve_xdg_decoration_mode_policy(selected_policy, requested_mode)
+            ToplevelDecorationMode::ClientSide
+        }
     }
 
     pub fn root_surface_content_rect_global(
@@ -2007,8 +1979,7 @@ impl State {
         surface: Resolved<WlSurfaceId>,
     ) -> Option<DecorationInsets> {
         let geometry = self.committed_root_geometry(surface)?;
-        (geometry.decoration_mode == Some(ToplevelDecorationMode::ServerSide)
-            && !geometry.fullscreen
+        (!geometry.fullscreen
             && (geometry.decoration_insets.top > 0
                 || geometry.decoration_insets.right > 0
                 || geometry.decoration_insets.bottom > 0
@@ -2017,22 +1988,13 @@ impl State {
     }
 
     pub fn compositor_decorations_enabled(&self, surface: Resolved<WlSurfaceId>) -> bool {
-        self.root_surface_xdg_toplevel(surface.object_id()).is_some_and(|toplevel| {
-            toplevel.decoration_mode()
-                == crate::wayland_objects::xdg_surface::xdg_toplevel::ToplevelDecorationMode::ServerSide
-                && !self.root_surface_is_fullscreen(surface)
-        })
+        !self.root_surface_is_fullscreen(surface)
     }
 
-    pub fn configured_decoration_insets(&self) -> DecorationInsets {
-        let explicit = self.config.general.decoration_insets;
-        let border_size = self.config.decorations.border.thickness.max(0);
-        DecorationInsets {
-            top: if explicit.top > 0 { explicit.top } else { border_size },
-            right: if explicit.right > 0 { explicit.right } else { border_size },
-            bottom: if explicit.bottom > 0 { explicit.bottom } else { border_size },
-            left: if explicit.left > 0 { explicit.left } else { border_size },
-        }
+    /// `decorations.border.size` on every edge. Fullscreen snapshots zero this themselves.
+    pub fn frame_insets(&self) -> DecorationInsets {
+        let size = self.config.decorations.border.size.max(0);
+        DecorationInsets { top: size, right: size, bottom: size, left: size }
     }
 
     pub fn root_surface_decoration_layout(
@@ -2046,14 +2008,40 @@ impl State {
         let outer_rect = self
             .root_surface_decoration_layout(surface)
             .map(|layout| layout.frame_rect)?;
-        let rounding = self.config.decorations.border.rounding.max(0);
-        (rounding > 0).then(|| {
-            RootSurfaceClip::new(
-                outer_rect,
-                rounding,
-                self.config.decorations.border.rounding_power,
-            )
+        let rounding = self.config.decorations.rounding.max(0);
+        let outer_radius = crate::render::visual::border_outer_radius(
+            rounding,
+            self.config.decorations.border.size,
+            self.config.decorations.rounding_power,
+        );
+        (rounding > 0 && outer_radius > 0).then(|| {
+            RootSurfaceClip::new(outer_rect, outer_radius, self.config.decorations.rounding_power)
         })
+    }
+
+    /// Rounded-rect clip applied to a window's client surfaces.
+    ///
+    /// The radius is `decorations.rounding` on the content rect. The kind still
+    /// follows the decoration mode:
+    /// - Server-side windows are hard-clipped, so nothing is drawn outside the box.
+    /// - Client-side windows only lose the square corner pixels, so a client shadow
+    ///   outside the box is kept.
+    pub fn root_surface_window_clip(&self, surface: Resolved<WlSurfaceId>) -> Option<WindowClip> {
+        let geometry = self.committed_root_geometry(surface)?;
+        if geometry.fullscreen {
+            return None;
+        }
+        let rounding = self.config.decorations.rounding.max(0);
+        if rounding == 0 {
+            return None;
+        }
+        let server_side = geometry.decoration_mode == Some(ToplevelDecorationMode::ServerSide);
+        let clip = RootSurfaceClip::new(
+            geometry.content_rect_global(),
+            rounding,
+            self.config.decorations.rounding_power,
+        );
+        Some(if server_side { WindowClip::Frame(clip) } else { WindowClip::Corners(clip) })
     }
 
     pub fn focus_visual_base(&self, surface: Resolved<WlSurfaceId>) -> WindowVisualBase {
@@ -2086,14 +2074,7 @@ impl State {
     ) -> Option<RectI> {
         let mut visual = self.root_surface_visual_state(surface)?;
         let logical = self.committed_root_geometry(surface)?.layout_rect_global;
-        let border = self.config.decorations.border;
-        crate::render::place_visual_frame(
-            &mut visual,
-            logical,
-            layout_rect,
-            border.rounding.max(0),
-            border.rounding_power,
-        );
+        crate::render::place_visual_frame(&mut visual, logical, layout_rect);
         Some(visual.influence_bounds())
     }
 
@@ -2483,6 +2464,14 @@ fn release_closing_snapshot(state: &mut State, snapshot: RetainedClosingSnapshot
     drop(snapshot);
 }
 
+fn uniform_frame_inset(frame: RectI, content: RectI) -> Option<i32> {
+    let left = content.x.checked_sub(frame.x)?;
+    let top = content.y.checked_sub(frame.y)?;
+    let right = frame.x2().checked_sub(content.x2())?;
+    let bottom = frame.y2().checked_sub(content.y2())?;
+    (left >= 0 && left == top && top == right && right == bottom).then_some(left)
+}
+
 fn composed_window_style(
     focus: WindowVisualBase,
     lifecycle: WindowLifecycleAnim,
@@ -2510,12 +2499,30 @@ impl State {
         let content_rect = compositor_layout
             .map(|layout| layout.client_window_rect)
             .unwrap_or_else(|| geometry.content_rect_global());
-        let compositor_decorations_enabled = compositor_layout.is_some();
-        let has_visible_decoration_ring =
-            compositor_decorations_enabled && outer_rect != content_rect;
-        let clip = compositor_decorations_enabled
-            .then(|| self.root_surface_clip(surface))
-            .flatten();
+        // Hyprland draws the border and the shadow on every non-fullscreen window,
+        // in either decoration mode. `decorate` is off for fullscreen. The shadow
+        // does not require a border (`CHyprDropShadowDecoration::canRender`).
+        let decorate_window = geometry.decoration_mode.is_some() && !geometry.fullscreen;
+        let has_visible_decoration_ring = compositor_layout.is_some() && outer_rect != content_rect;
+        let frame_rect = compositor_layout
+            .map(|layout| layout.frame_rect)
+            .unwrap_or(content_rect);
+        let rounding = self.config.decorations.rounding.max(0);
+        let border_size = uniform_frame_inset(frame_rect, content_rect).unwrap_or(0);
+        let frame_clip = RootSurfaceClip::new(
+            frame_rect,
+            if decorate_window {
+                crate::render::visual::border_outer_radius(
+                    rounding,
+                    border_size,
+                    self.config.decorations.rounding_power,
+                )
+            } else {
+                0
+            },
+            self.config.decorations.rounding_power,
+        );
+        let clip = self.root_surface_window_clip(surface);
         let focused = self.focused_root_surface() == Some(surface);
         let border_config = self.config.decorations.border;
         let shadow_config = self.config.decorations.shadow;
@@ -2551,23 +2558,20 @@ impl State {
                 angle_degrees: border_config.gradient_angle_degrees,
             }
         };
-        let border = (compositor_decorations_enabled
-            && border_config.thickness > 0
-            && has_visible_decoration_ring)
+        let border = (decorate_window && border_config.size > 0 && has_visible_decoration_ring)
             .then_some(BorderVisualStyle { gradient });
-        let shadow = (compositor_decorations_enabled && shadow_config.radius > 0).then_some(
-            ShadowVisualStyle {
-                radius: shadow_config.radius,
-                offset_x: shadow_config.offset_x,
-                offset_y: shadow_config.offset_y,
-                color: shadow_config.color,
-                power: shadow_config.power,
-            },
-        );
+        let shadow = (decorate_window && shadow_config.radius > 0).then_some(ShadowVisualStyle {
+            radius: shadow_config.radius,
+            offset_x: shadow_config.offset_x,
+            offset_y: shadow_config.offset_y,
+            color: shadow_config.color,
+            power: shadow_config.power,
+        });
         let visual_state = RootSurfaceVisualState {
             outer_rect,
             content_rect,
             clip,
+            frame_clip,
             border,
             border_alpha: resolved.border_alpha,
             shadow,
@@ -2754,14 +2758,7 @@ impl State {
         let geometry = self.committed_root_geometry(surface)?;
         Some(RememberedFloatingState {
             root_pos: geometry.root_pos,
-            configure_size: crate::root_geometry::project_configure_geometry(
-                geometry,
-                geometry
-                    .decoration_mode
-                    .unwrap_or(ToplevelDecorationMode::ClientSide),
-                self.configured_decoration_insets(),
-            )
-            .size,
+            configure_size: crate::root_geometry::project_configure_geometry(geometry).size,
             layout_rect: geometry.layout_rect_global,
         })
     }
@@ -3882,7 +3879,7 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(object_id);
             surface.test_map(ObjectId::from(0usize), 30, 40, 160, 120);
         }
-        state.config.decorations.border.thickness = 4;
+        state.config.decorations.border.size = 4;
         state.config.decorations.border.active_start_color = RgbaColor::new(1, 2, 3, 4);
         state.config.decorations.border.active_end_color = RgbaColor::new(5, 6, 7, 8);
         state.config.decorations.border.inactive_start_color = RgbaColor::new(9, 10, 11, 12);
@@ -4082,7 +4079,7 @@ mod tests {
             let mut surface = state.objects.grab_object::<WlSurface>(object_id);
             surface.test_map(ObjectId::from(0usize), 30, 40, 160, 120);
         }
-        state.config.decorations.border.thickness = 0;
+        state.config.decorations.border.size = 0;
         state.config.effects.blur.enabled = true;
         state.register_root_surface(root(&state, object_id));
         state.assign_root_surface_to_workspace(root(&state, object_id), workspace_id);
@@ -4093,6 +4090,183 @@ mod tests {
 
         assert_eq!(visual.outer_rect, visual.content_rect);
         assert!(visual.effects.blur.is_none());
+    }
+
+    #[test]
+    fn border_and_shadow_follow_hyprland_for_either_decoration_mode() {
+        let mut state = state_for_tests();
+        state.config.decorations.shadow.radius = 8;
+        state.config.effects.blur.enabled = true;
+        let (_, object_id) = state.insert_object(WlSurface::new(
+            WlSurfaceId::from(96u32),
+            ClientId::from_raw(11),
+            6,
+        ));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(0usize), 10, 20, 200, 140);
+        }
+        let surface = root(&state, object_id);
+        state.register_root_surface(surface);
+
+        state.config.decorations.border.size = 3;
+        cache_window_geometry(
+            &mut state,
+            surface,
+            Some(ToplevelDecorationMode::ClientSide),
+            DecorationInsets { top: 3, right: 3, bottom: 3, left: 3 },
+            false,
+        );
+        let client_side = state.root_surface_visual_state(surface).unwrap();
+        assert!(client_side.border.is_some());
+        assert!(client_side.shadow.is_some());
+        assert!(client_side.effects.blur.is_some());
+
+        state.config.decorations.border.size = 0;
+        cache_window_geometry(
+            &mut state,
+            surface,
+            Some(ToplevelDecorationMode::ClientSide),
+            DecorationInsets::default(),
+            false,
+        );
+        let zero_border = state.root_surface_visual_state(surface).unwrap();
+        assert!(zero_border.border.is_none());
+        assert!(zero_border.shadow.is_some());
+        assert!(zero_border.effects.blur.is_none());
+
+        state.config.decorations.border.size = 3;
+        cache_window_geometry(
+            &mut state,
+            surface,
+            Some(ToplevelDecorationMode::ServerSide),
+            DecorationInsets { top: 3, right: 3, bottom: 3, left: 3 },
+            true,
+        );
+        let fullscreen = state.root_surface_visual_state(surface).unwrap();
+        assert!(fullscreen.border.is_none());
+        assert!(fullscreen.shadow.is_none());
+        assert!(fullscreen.effects.blur.is_none());
+
+        cache_window_geometry(
+            &mut state,
+            surface,
+            None,
+            DecorationInsets { top: 3, right: 3, bottom: 3, left: 3 },
+            false,
+        );
+        let not_a_window = state.root_surface_visual_state(surface).unwrap();
+        assert!(not_a_window.border.is_none());
+        assert!(not_a_window.shadow.is_none());
+    }
+
+    fn cache_window_geometry(
+        state: &mut State,
+        surface: crate::clients::Resolved<WlSurfaceId>,
+        decoration_mode: Option<ToplevelDecorationMode>,
+        decoration_insets: DecorationInsets,
+        fullscreen: bool,
+    ) {
+        state.root_geometry_cache.insert(
+            surface,
+            std::cell::Cell::new(RootGeometryCacheEntry {
+                geometry: Some(crate::root_geometry::CommittedRootGeometry {
+                    layout_rect_global: RectI::new(10, 20, 200, 140).unwrap(),
+                    root_pos: (10, 20),
+                    surface_bounds_local: Some(RectI::new(0, 0, 200, 140).unwrap()),
+                    logical_window_local: Some(RectI::new(0, 0, 200, 140).unwrap()),
+                    decoration_mode,
+                    decoration_insets,
+                    tiled_edges: 0,
+                    fullscreen,
+                }),
+                dirty: false,
+                revision: 0,
+                built_from_revision: 0,
+            }),
+        );
+    }
+
+    #[test]
+    fn root_surface_window_clip_rounds_csd_windows_without_ssd_frame() {
+        let mut state = state_for_tests();
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(94u32), ClientId::from_raw(9), 6));
+        {
+            let mut surface = state.objects.grab_object::<WlSurface>(object_id);
+            surface.test_map(ObjectId::from(0usize), 30, 40, 160, 120);
+        }
+        state.config.decorations.rounding = 20;
+        state.config.decorations.border.size = 0;
+        state.register_root_surface(root(&state, object_id));
+        let surface = root(&state, object_id);
+
+        // No xdg decoration object: the client stays in charge of drawing its
+        // decorations, but the window box must still get corner-only rounding so
+        // client-drawn shadows outside the box survive.
+        let geometry = state.committed_root_geometry(surface).unwrap();
+        assert_eq!(geometry.decoration_mode, None);
+        assert_eq!(
+            state.root_surface_window_clip(surface),
+            Some(WindowClip::Corners(RootSurfaceClip::new(
+                geometry.frame_rect_global(),
+                20,
+                RoundingPower::DEFAULT,
+            )))
+        );
+        let visual = state.root_surface_visual_state(surface).unwrap();
+        assert!(matches!(visual.clip, Some(WindowClip::Corners(_))));
+
+        // A server-side window hard-clips the client to the rounded content box.
+        // The border is drawn around that box, on the outer frame.
+        state.root_geometry_cache.insert(
+            surface,
+            Cell::new(RootGeometryCacheEntry {
+                geometry: Some(crate::root_geometry::CommittedRootGeometry {
+                    layout_rect_global: geometry.layout_rect_global,
+                    root_pos: geometry.root_pos,
+                    surface_bounds_local: geometry.surface_bounds_local,
+                    logical_window_local: geometry.logical_window_local,
+                    decoration_mode: Some(ToplevelDecorationMode::ServerSide),
+                    decoration_insets: DecorationInsets { top: 5, right: 5, bottom: 5, left: 5 },
+                    tiled_edges: geometry.tiled_edges,
+                    fullscreen: false,
+                }),
+                dirty: false,
+                revision: 0,
+                built_from_revision: 0,
+            }),
+        );
+        let clip = state.root_surface_window_clip(surface).unwrap();
+        let geometry = state.committed_root_geometry(surface).unwrap();
+        assert_eq!(clip.clip().outer_rect, geometry.content_rect_global());
+        assert_eq!(clip.clip().corner_radius, 20);
+        assert!(matches!(clip, WindowClip::Frame(_)));
+        let visual = state.root_surface_visual_state(surface).unwrap();
+        assert_eq!(visual.frame_clip.outer_rect, geometry.frame_rect_global());
+        assert_eq!(visual.frame_clip.corner_radius, 25);
+        assert_eq!(visual.shadow_clip().corner_radius, 25);
+
+        // Fullscreen windows never round.
+        state.root_geometry_cache.insert(
+            surface,
+            Cell::new(RootGeometryCacheEntry {
+                geometry: Some(crate::root_geometry::CommittedRootGeometry {
+                    layout_rect_global: geometry.layout_rect_global,
+                    root_pos: geometry.root_pos,
+                    surface_bounds_local: geometry.surface_bounds_local,
+                    logical_window_local: geometry.logical_window_local,
+                    decoration_mode: Some(ToplevelDecorationMode::ServerSide),
+                    decoration_insets: DecorationInsets { top: 5, right: 5, bottom: 5, left: 5 },
+                    tiled_edges: geometry.tiled_edges,
+                    fullscreen: true,
+                }),
+                dirty: false,
+                revision: 0,
+                built_from_revision: 0,
+            }),
+        );
+        assert_eq!(state.root_surface_window_clip(surface), None);
     }
 
     #[test]
@@ -4646,106 +4820,14 @@ mod tests {
     }
 
     #[test]
-    fn xdg_decoration_policy_defaults_to_client_without_protocol() {
+    fn xdg_decoration_mode_follows_whether_the_client_negotiates() {
         let state = state_for_tests();
 
         assert_eq!(
-            state.xdg_decoration_mode_for_surface(None, false, None),
+            state.xdg_decoration_mode_for_surface(false),
             ToplevelDecorationMode::ClientSide
         );
-    }
-
-    #[test]
-    fn xdg_decoration_policy_forces_server_side_for_tiled_windows() {
-        let mut state = state_for_tests();
-        let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id =
-            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
-        let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
-        let (_, object_id) = state.insert_object(WlSurface::new(
-            WlSurfaceId::from(50u32),
-            ClientId::from_raw(50),
-            6,
-        ));
-        state.register_root_surface(root(&state, object_id));
-        let surface = state
-            .root_surfaces
-            .iter()
-            .copied()
-            .find(|surface| surface.object_id() == object_id);
-
-        assert_eq!(
-            state.xdg_decoration_mode_for_surface(
-                surface,
-                true,
-                Some(ToplevelDecorationMode::ClientSide)
-            ),
-            ToplevelDecorationMode::ServerSide
-        );
-    }
-
-    #[test]
-    fn xdg_decoration_policy_honors_client_for_floating_windows() {
-        let mut state = state_for_tests();
-        let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id =
-            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
-        let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
-        let (_, object_id) = state.insert_object(WlSurface::new(
-            WlSurfaceId::from(51u32),
-            ClientId::from_raw(51),
-            6,
-        ));
-        state.register_root_surface(root(&state, object_id));
-        assert!(state.set_root_surface_floating(root(&state, object_id), true));
-        let surface = state
-            .root_surfaces
-            .iter()
-            .copied()
-            .find(|surface| surface.object_id() == object_id);
-
-        assert_eq!(
-            state.xdg_decoration_mode_for_surface(
-                surface,
-                true,
-                Some(ToplevelDecorationMode::ClientSide)
-            ),
-            ToplevelDecorationMode::ClientSide
-        );
-        assert_eq!(
-            state.xdg_decoration_mode_for_surface(
-                surface,
-                true,
-                Some(ToplevelDecorationMode::ServerSide)
-            ),
-            ToplevelDecorationMode::ServerSide
-        );
-    }
-
-    #[test]
-    fn xdg_decoration_policy_uses_unset_mode_for_unset_requests() {
-        let mut state = state_for_tests();
-        let backend = BackendOutputRef::new(DrmId::from(0usize));
-        let output_id =
-            state.insert_output(test_output_with_crtc_name(backend, 1, 0, 0, 1280, 720));
-        let _workspace_id = state.active_workspace_for_output(output_id).unwrap();
-        let (_, object_id) = state.insert_object(WlSurface::new(
-            WlSurfaceId::from(52u32),
-            ClientId::from_raw(52),
-            6,
-        ));
-        state.register_root_surface(root(&state, object_id));
-        assert!(state.set_root_surface_floating(root(&state, object_id), true));
-        let surface = state
-            .root_surfaces
-            .iter()
-            .copied()
-            .find(|surface| surface.object_id() == object_id);
-
-        assert_eq!(
-            state.xdg_decoration_mode_for_surface(surface, true, None),
-            ToplevelDecorationMode::ServerSide
-        );
+        assert_eq!(state.xdg_decoration_mode_for_surface(true), ToplevelDecorationMode::ServerSide);
     }
 
     #[test]

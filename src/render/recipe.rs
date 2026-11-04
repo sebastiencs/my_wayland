@@ -15,6 +15,7 @@ pub enum TextureSource {
 pub enum TextureMask {
     None,
     RoundedClip { clip: RootSurfaceClip },
+    CornerRoundedClip { clip: RootSurfaceClip },
     FrameRing { ring: RoundedRing },
 }
 

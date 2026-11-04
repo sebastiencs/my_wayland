@@ -23,6 +23,6 @@ pub use {
     visual::{
         map_layout_point, map_layout_rect, place_visual_frame, rounded_ring, shadow_geometry,
         unmap_layout_point, BlurVisualStyle, BorderGradient, BorderVisualStyle,
-        RootSurfaceVisualState, RoundedRing, ShadowVisualStyle, SurfaceEffectStyle,
+        RootSurfaceVisualState, RoundedRing, ShadowVisualStyle, SurfaceEffectStyle, WindowClip,
     },
 };
