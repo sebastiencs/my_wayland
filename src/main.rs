@@ -203,6 +203,7 @@ mod utils;
 mod visual_animation;
 mod wayland_objects;
 mod xkb;
+mod xwayland;
 
 /// Master switch for incremental damage (surface commits, output damage, partial GL redraw,
 /// `FB_DAMAGE_CLIPS`, buffer age, occlusion, etc.). When `false`, code paths should fall back
