@@ -1195,15 +1195,26 @@ pub fn apply_output_settings(state: &mut State, dispatcher: &mut Dispatcher) {
 pub fn execute_action(state: &mut State, dispatcher: &mut Dispatcher, action: CompositorAction) {
     match action {
         CompositorAction::Spawn { command } => {
-            let result = std::process::Command::new("sh")
-                .arg("-lc")
-                .arg(&command)
-                .env("WAYLAND_DISPLAY", WAYLAND_DISPLAY_NAME)
-                .env_remove("DISPLAY")
-                .spawn();
-            if let Err(error) = result {
-                log::warn!("failed to spawn `{}`: {:?}", command, error);
-            }
+            // The spawn rides the process manager: the forker process does the
+            // fork/exec (so no zombie leaks here) and reports the outcome.
+            dispatcher.dispatch(crate::process_manager::ProcessManagerAction::Spawn {
+                prog: "sh".to_string(),
+                argv: vec!["-lc".to_string(), command.clone()],
+                env: vec![
+                    ("WAYLAND_DISPLAY".to_string(), Some(WAYLAND_DISPLAY_NAME.to_string())),
+                    // A stale `DISPLAY` must not leak into children; Xwayland
+                    // will publish its own once it starts.
+                    ("DISPLAY".to_string(), None),
+                ],
+                fd_slots: Vec::new(),
+                fds: Box::new([]),
+                reply_to: crate::runner::Redispatcher::to::<crate::process_manager::ProcessManager>(
+                    move |event| crate::process_manager::ProcessManagerAction::SpawnResult {
+                        command: command.clone(),
+                        event,
+                    },
+                ),
+            });
         }
         CompositorAction::Quit => {
             log::info!("quitting compositor from keybinding");
@@ -1878,6 +1889,31 @@ mod tests {
             wayland_objects::wl_surface::WlSurface,
         },
     };
+
+    #[test]
+    fn spawn_dispatches_a_process_manager_spawn() {
+        let mut state = state_for_tests();
+        let mut dispatcher = Dispatcher::default();
+        execute_action(
+            &mut state,
+            &mut dispatcher,
+            CompositorAction::Spawn { command: "echo hi".to_string() },
+        );
+        assert!(dispatcher.test_has_queued_action::<crate::process_manager::ProcessManagerAction>(
+            |action| match action {
+                crate::process_manager::ProcessManagerAction::Spawn { prog, argv, env, .. } => {
+                    prog == "sh"
+                        && argv == &["-lc".to_string(), "echo hi".to_string()]
+                        && env.contains(&(
+                            "WAYLAND_DISPLAY".to_string(),
+                            Some(WAYLAND_DISPLAY_NAME.to_string()),
+                        ))
+                        && env.contains(&("DISPLAY".to_string(), None))
+                }
+                _ => false,
+            }
+        ));
+    }
 
     #[test]
     fn parses_toml_binding_with_aliases() {
