@@ -5,6 +5,9 @@ pub mod recipe;
 pub mod visual;
 mod vulkan;
 
+/// Color written into output pixels that no surface covers. `#282828`.
+pub const OUTPUT_BACKGROUND: [f32; 4] = [40.0 / 255.0, 40.0 / 255.0, 40.0 / 255.0, 1.0];
+
 #[cfg(test)]
 mod mock;
 

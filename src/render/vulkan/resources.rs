@@ -308,7 +308,7 @@ impl PaintedTarget for OutputTarget {
     }
 
     fn clear_color(&self) -> [f32; 4] {
-        [1.0, 0.0, 0.0, 1.0]
+        crate::render::OUTPUT_BACKGROUND
     }
 
     fn can_readback(&self) -> bool {

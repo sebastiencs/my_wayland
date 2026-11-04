@@ -49,7 +49,7 @@ impl EglFrameBuffer {
         unsafe {
             gl::BindFramebuffer(gl::FRAMEBUFFER as _, self.framebuffer_object);
             gl::Viewport(0, 0, self.width, self.height);
-            gl::ClearColor(1.0, 0.0, 0.0, 1.0);
+            set_output_clear_color();
             gl::Clear(gl::COLOR_BUFFER_BIT as _);
             gl::BlendFunc(gl::ONE as _, gl::ONE_MINUS_SRC_ALPHA as _);
         }
@@ -77,7 +77,7 @@ impl EglFrameBuffer {
         unsafe {
             gl::BindFramebuffer(gl::FRAMEBUFFER as _, self.framebuffer_object);
             gl::Viewport(0, 0, self.width, self.height);
-            gl::ClearColor(1.0, 0.0, 0.0, 1.0);
+            set_output_clear_color();
             gl::BlendFunc(gl::ONE as _, gl::ONE_MINUS_SRC_ALPHA as _);
         }
 
@@ -1229,6 +1229,13 @@ fn create_shadow_program() -> Result<ShadowProgram, String> {
             gl::GetUniformLocation(program, b"u_shadow_power\0".as_ptr().cast())
         },
     })
+}
+
+fn set_output_clear_color() {
+    let [red, green, blue, alpha] = crate::render::OUTPUT_BACKGROUND;
+    unsafe {
+        gl::ClearColor(red, green, blue, alpha);
+    }
 }
 
 fn clear_framebuffer(framebuffer_object: gl::GLuint, width: i32, height: i32) {
