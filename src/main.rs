@@ -171,6 +171,7 @@ mod cursor;
 mod dbus;
 mod dmabuf;
 mod drm;
+mod forker;
 mod gbm;
 mod globals;
 mod idle_inhibit;
@@ -296,6 +297,14 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
     let mut globals = Globals::new();
     globals.initialize();
 
+    let forker = match forker::install() {
+        Ok(proxy) => Some(proxy),
+        Err(error) => {
+            log::warn!("could not start the forker; process spawning will fail: {error}");
+            None
+        }
+    };
+
     let mut state = State {
         objects: Default::default(),
         root_surfaces: Default::default(),
@@ -335,6 +344,7 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
         seat: Default::default(),
         keyboard,
         xkb,
+        forker,
     };
     let mut startup_dispatcher = Dispatcher::default();
     config::apply_general_settings(&mut state, &mut startup_dispatcher);

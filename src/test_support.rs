@@ -79,6 +79,7 @@ pub fn state_for_tests_with_config(config: RuntimeConfig) -> State {
         seat: SeatState::default(),
         keyboard,
         xkb,
+        forker: None,
     }
 }
 
