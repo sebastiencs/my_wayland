@@ -22,7 +22,7 @@ impl VulkanInstance {
         // layer stays a loader warning and does not fail instance creation.
         let entry = unsafe { Entry::load() }
             .map_err(|error| format!("failed to load the vulkan loader: {error}"))?;
-        let name = CString::new("state-management").expect("application name");
+        let name = CString::new("my-wayland").expect("application name");
         let app_info = vk::ApplicationInfo::default()
             .application_name(&name)
             .application_version(1)

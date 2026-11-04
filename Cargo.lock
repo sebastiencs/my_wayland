@@ -553,6 +553,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "my-wayland"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ash",
+ "bitflags 2.4.2",
+ "dbus-message-parser",
+ "derive_more",
+ "drm",
+ "drm-ffi 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "drm-fourcc",
+ "edid-rs",
+ "gpu-alloc",
+ "gpu-alloc-ash",
+ "heck",
+ "inotify",
+ "input",
+ "itertools",
+ "khronos-types",
+ "libc",
+ "log",
+ "loom",
+ "mktemp",
+ "nix",
+ "once_cell",
+ "owo-colors",
+ "rand",
+ "serde",
+ "shaderc-dyn",
+ "static_assertions",
+ "thiserror",
+ "toml",
+ "udev",
+ "wayland-scanner",
+ "xcursor",
+ "xkbcommon",
+]
+
+[[package]]
 name = "nix"
 version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -834,45 +873,6 @@ name = "smallvec"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62bb4feee49fdd9f707ef802e22365a35de4b7b299de4763d44bfea899442ff9"
-
-[[package]]
-name = "state-management"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ash",
- "bitflags 2.4.2",
- "dbus-message-parser",
- "derive_more",
- "drm",
- "drm-ffi 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "drm-fourcc",
- "edid-rs",
- "gpu-alloc",
- "gpu-alloc-ash",
- "heck",
- "inotify",
- "input",
- "itertools",
- "khronos-types",
- "libc",
- "log",
- "loom",
- "mktemp",
- "nix",
- "once_cell",
- "owo-colors",
- "rand",
- "serde",
- "shaderc-dyn",
- "static_assertions",
- "thiserror",
- "toml",
- "udev",
- "wayland-scanner",
- "xcursor",
- "xkbcommon",
-]
 
 [[package]]
 name = "static_assertions"
