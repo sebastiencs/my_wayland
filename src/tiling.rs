@@ -1422,7 +1422,6 @@ pub fn relayout_dirty_workspaces_with_motion(
             let previous_root_pos = surface.root_position();
             let Some(geometry) = root_geometry::build_committed_root_geometry(
                 state,
-                operation.surface_object_id,
                 &surface,
                 Some(operation.allocation),
                 root_geometry::GeometryBuildOverrides {
@@ -3620,7 +3619,6 @@ mod tests {
             .unwrap();
         let geometry = crate::root_geometry::build_committed_root_geometry(
             &state,
-            root(&state, surface_object_id),
             surface,
             Some(LayoutAllocation {
                 frame_rect: RectI { x: 645, y: 20, width: 615, height: 760 },

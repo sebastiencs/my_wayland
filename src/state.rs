@@ -1919,7 +1919,6 @@ impl State {
         let layout_allocation = tiling::layout_allocation_for_surface(self, surface);
         root_geometry::build_committed_root_geometry(
             self,
-            surface,
             surface_ref,
             layout_allocation,
             overrides,
@@ -2234,53 +2233,61 @@ impl State {
                 .root_surface_workspace(surface)
                 .and_then(|workspace_id| self.workspace_output_id(workspace_id))
                 .and_then(|output_id| self.output_bounds(output_id));
-            let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
-                continue;
-            };
-            let previous = composed_window_style(
-                managed.focus_animation.current(),
-                managed.lifecycle_animation.sample(),
-            );
-            managed
-                .focus_animation
-                .advance_with_easing(goal, focus_duration, focus.easing(), now);
-            managed.lifecycle_animation.advance_with_easing(
-                fade_in_duration,
-                fade_in.easing(),
-                now,
-            );
-            let opening_pose = if managed.geometry_animation.wants_opening_pose()
-                && !open_duration.is_zero()
-            {
-                Some(OpeningIntroduction {
-                    style: opening.style(),
-                    output,
-                    timing: GeometryTiming { duration: open_duration, easing: opening.easing() },
-                })
-            } else {
-                None
-            };
-            managed.geometry_animation.advance_with_introduction(
-                now,
-                layout_motion,
-                moving_motion,
-                opening_pose,
-            );
-            let next = composed_window_style(
-                managed.focus_animation.current(),
-                managed.lifecycle_animation.sample(),
-            );
-            if previous != next {
-                if let Some(rect) = damage_rect {
-                    damaged_rects.push(rect);
+            let after_visual = {
+                let Some(managed) = self.managed_root_surfaces.get_mut(&surface) else {
+                    continue;
+                };
+                let previous = composed_window_style(
+                    managed.focus_animation.current(),
+                    managed.lifecycle_animation.sample(),
+                );
+                managed.focus_animation.advance_with_easing(
+                    goal,
+                    focus_duration,
+                    focus.easing(),
+                    now,
+                );
+                managed.lifecycle_animation.advance_with_easing(
+                    fade_in_duration,
+                    fade_in.easing(),
+                    now,
+                );
+                let opening_pose = if managed.geometry_animation.wants_opening_pose()
+                    && !open_duration.is_zero()
+                {
+                    Some(OpeningIntroduction {
+                        style: opening.style(),
+                        output,
+                        timing: GeometryTiming {
+                            duration: open_duration,
+                            easing: opening.easing(),
+                        },
+                    })
+                } else {
+                    None
+                };
+                managed.geometry_animation.advance_with_introduction(
+                    now,
+                    layout_motion,
+                    moving_motion,
+                    opening_pose,
+                );
+                let next = composed_window_style(
+                    managed.focus_animation.current(),
+                    managed.lifecycle_animation.sample(),
+                );
+                if previous != next {
+                    if let Some(rect) = damage_rect {
+                        damaged_rects.push(rect);
+                    }
                 }
-            }
-            let after_visual = managed.geometry_animation.visual_rect();
-            let geometry_active = managed.geometry_animation.is_active();
-            has_active_animations |= managed.focus_animation.is_active()
-                || managed.lifecycle_animation.is_active()
-                || geometry_active;
-            drop(managed);
+                let after_visual = managed.geometry_animation.visual_rect();
+                let geometry_active = managed.geometry_animation.is_active();
+                has_active_animations |= managed.focus_animation.is_active()
+                    || managed.lifecycle_animation.is_active()
+                    || geometry_active;
+                after_visual
+            };
             if before_visual != after_visual {
                 for sample in [before_visual, after_visual].into_iter().flatten() {
                     if let Some(rect) = self.geometry_sample_influence(surface, sample) {

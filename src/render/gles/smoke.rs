@@ -342,7 +342,7 @@ fn effects_darken_and_damage_keeps_untouched_pixels() {
         .renderer
         .readback(&*output_target, rect, 16, &mut preserved)
         .expect("damage readback");
-    assert_eq!(pixel(&preserved, 16, 0, 0)[2], 255, "damaged pixels clear to red");
+    assert_eq!(pixel(&preserved, 16, 0, 0), [40, 40, 40, 255], "damaged pixels clear to #282828");
     assert_eq!(pixel(&preserved, 16, 3, 0), [0, 255, 0, 255]);
 }
 

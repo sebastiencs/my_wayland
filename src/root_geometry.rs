@@ -187,7 +187,6 @@ pub fn resolve_committed_root_geometry_with_overrides(
     cached_geometry_reusable_for_overrides(state, surface_object_id, overrides).or_else(|| {
         build_committed_root_geometry(
             state,
-            surface_object_id,
             surface,
             crate::tiling::layout_allocation_for_surface(state, surface_object_id),
             overrides,
@@ -374,7 +373,6 @@ pub fn effective_window_geometry_for_surface(
 /// from the returned snapshot instead of storing duplicate rectangles.
 pub fn build_committed_root_geometry(
     state: &State,
-    surface_object_id: Resolved<WlSurfaceId>,
     surface: &WlSurface,
     layout_allocation: Option<LayoutAllocation>,
     overrides: GeometryBuildOverrides,

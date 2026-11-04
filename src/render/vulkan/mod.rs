@@ -433,7 +433,7 @@ mod tests {
             .renderer
             .readback(&*target, RectI::new(0, 0, 1, 1).expect("rect"), 4, &mut pixels)
             .expect("read the cleared scanout target");
-        assert_eq!(pixels, [0, 0, 255, 255]);
+        assert_eq!(pixels, [40, 40, 40, 255]);
         drop(target);
     }
 

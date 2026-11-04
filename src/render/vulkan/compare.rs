@@ -809,7 +809,7 @@ fn vulkan_preserves_untouched_scanout_pixels() {
                 let start = y * 32 + x * 4;
                 let pixel = &bytes[start..start + 4];
                 if x < 4 {
-                    assert_eq!(pixel, &[0, 0, 255, 255], "buffer {index} damaged {x},{y}");
+                    assert_eq!(pixel, &[40, 40, 40, 255], "buffer {index} damaged {x},{y}");
                 } else {
                     assert_eq!(pixel, &[0, 255, 0, 255], "buffer {index} preserved {x},{y}");
                 }

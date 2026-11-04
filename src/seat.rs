@@ -4187,7 +4187,7 @@ mod xdg_seat_tests {
     }
 
     #[test]
-    fn compositor_mouse_move_binding_rejects_maximized_windows() {
+    fn compositor_mouse_move_binding_accept_maximized_windows() {
         let mut state = state_for_tests();
         let (mut client, mut dispatcher) = test_client_and_dispatcher(7);
         let mut client_dispatcher = client.test_dispatcher(&mut dispatcher);
@@ -4216,6 +4216,7 @@ mod xdg_seat_tests {
             surface.test_map(ObjectId::from(903usize), 20, 30, 120, 90);
         }
         set_toplevel_window_state(&mut state, toplevel_object_id, true, false);
+        ensure_test_root_geometry(&mut state, wl_surface_object_id);
 
         state.config = RuntimeConfig::parse_for_test(
             r#"
@@ -4230,17 +4231,9 @@ mod xdg_seat_tests {
 
         handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
 
-        assert!(state.seat.pointer_interactive_grab.is_none());
-        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
-            client.client_id(),
-            |action| {
-                matches!(
-                    action,
-                    ClientAction::SeatEvent {
-                        event: SeatClientEvent::PointerButton { button, state, .. },
-                    } if *button == 0x110 && *state == 1
-                )
-            }
+        assert!(matches!(
+            state.seat.pointer_interactive_grab,
+            Some(super::PointerInteractiveGrab::Move { .. })
         ));
     }
 

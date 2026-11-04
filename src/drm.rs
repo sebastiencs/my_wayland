@@ -33,9 +33,9 @@ use crate::{
     object::Object,
     region::{DamageRegion, RectI},
     render::{
-        create_renderer, rounded_ring, EffectElement, FrameElement, FramePhase, OutputFrameRecipe,
-        RenderFrame, RenderTarget, Renderer, RootSurfaceVisualState, RoundedRing, ShmImage,
-        Texture, TextureElement, TextureMask, TextureSource, WindowClip,
+        create_renderer, EffectElement, FrameElement, FramePhase, OutputFrameRecipe, RenderFrame,
+        RenderTarget, Renderer, RootSurfaceVisualState, RoundedRing, ShmImage, Texture,
+        TextureElement, TextureMask, TextureSource, WindowClip,
     },
     runner::{isolate_session_fault, Dispatcher, Model, ModelInstanceId, SessionFault},
     scene::{ComposedEntry, CompositionTier, OutputCompositionView},

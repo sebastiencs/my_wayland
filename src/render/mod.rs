@@ -15,7 +15,7 @@ pub use factory::create_renderer;
 
 pub use {
     backend::{
-        inert_texture, FormatSupport, GraphicsApi, InertTexture, OffscreenTarget, RenderCompletion,
+        inert_texture, FormatSupport, GraphicsApi, OffscreenTarget, RenderCompletion,
         RenderDeviceId, RenderFrame, RenderSyncMode, RenderTarget, Renderer, RendererCapabilities,
         RendererError, ShmImage, Texture,
     },

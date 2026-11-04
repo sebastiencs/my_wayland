@@ -578,7 +578,7 @@ fn pickup_tiled_drag(
     let mut frame = scaled_tiled_preview_frame(geometry.layout_rect_global, pointer);
     let Some(mut built) = root_surface
         .try_ref(state)
-        .and_then(|surface| preview_geometry(state, root_surface, &surface, frame))
+        .and_then(|surface| preview_geometry(state, &surface, frame))
     else {
         abort_pointer_interactive_grab(state, dispatcher, 0);
         return;
@@ -592,7 +592,7 @@ fn pickup_tiled_drag(
         frame.y = (pointer.1 - frame.height as f64 / 2.0).round() as i32;
         let Some(rebuilt) = root_surface
             .try_ref(state)
-            .and_then(|surface| preview_geometry(state, root_surface, &surface, frame))
+            .and_then(|surface| preview_geometry(state, &surface, frame))
         else {
             abort_pointer_interactive_grab(state, dispatcher, 0);
             return;
@@ -694,13 +694,11 @@ fn scaled_tiled_preview_frame(
 
 fn preview_geometry(
     state: &State,
-    root_surface: Resolved<WlSurfaceId>,
     surface: &crate::wayland_objects::wl_surface::WlSurface,
     frame: crate::region::RectI,
 ) -> Option<CommittedRootGeometry> {
     crate::root_geometry::build_committed_root_geometry(
         state,
-        root_surface,
         surface,
         Some(crate::tiling::LayoutAllocation {
             frame_rect: frame,

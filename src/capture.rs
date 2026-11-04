@@ -2813,10 +2813,10 @@ pub(crate) fn map_xdg_toplevel(
     }
     let key = announce_toplevel(state, dispatcher, title, app_id);
     state.capture.by_xdg.insert(toplevel, key);
-    if let Some(toplevel_ref) = toplevel.try_ref(state) {
-        let (maximized, fullscreen) = toplevel_ref.published_shell_state();
-        let parent = toplevel_ref.parent_toplevel();
-        drop(toplevel_ref);
+    let published = toplevel
+        .try_ref(state)
+        .map(|toplevel_ref| (toplevel_ref.published_shell_state(), toplevel_ref.parent_toplevel()));
+    if let Some(((maximized, fullscreen), parent)) = published {
         note_shell_state(state, dispatcher, key, maximized, fullscreen);
         let parent_key = parent.and_then(|parent| state.capture.by_xdg.get(&parent).copied());
         note_parent(state, dispatcher, key, parent_key);
