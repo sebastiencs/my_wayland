@@ -599,6 +599,9 @@ impl Runner {
                     // device teardown comes after the clients are gone.
                     ingress_stopped = true;
                     self.stop_loaded_singleton::<crate::clients::ClientManager>(&mut dispatcher);
+                    self.stop_loaded_singleton::<crate::process_manager::ProcessManager>(
+                        &mut dispatcher,
+                    );
                     self.stop_loaded_singleton::<crate::config::ConfigWatcher>(&mut dispatcher);
                     self.stop_loaded_singleton::<crate::drm::VisualAnimationPump>(&mut dispatcher);
                     self.stop_loaded_singleton::<crate::scheduler::IdleScheduler>(&mut dispatcher);

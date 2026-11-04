@@ -939,9 +939,6 @@ pub struct State {
     pub seat: SeatState,
     pub keyboard: KeyboardState,
     pub xkb: Xkb,
-    /// Connection to the forker process. `None` when the forker failed to
-    /// start; spawn requests then fail until the compositor restarts.
-    pub forker: Option<crate::forker::ForkerProxy>,
 }
 
 const INITIAL_WORKSPACES_PER_OUTPUT: usize = 4;

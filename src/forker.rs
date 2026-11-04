@@ -122,6 +122,12 @@ impl ForkerProxy {
     pub fn pidfd(&self) -> BorrowedFd<'_> {
         self.pidfd.as_fd()
     }
+
+    /// Split into the socket and the forker pidfd, for handing both to the
+    /// model that will own them.
+    pub fn into_parts(self) -> (OwnedFd, OwnedFd) {
+        (self.socket, self.pidfd)
+    }
 }
 
 /// Start the forker and return the compositor side of the connection. Must be
@@ -147,7 +153,7 @@ fn socketpair(ty: SockType) -> io::Result<(OwnedFd, OwnedFd)> {
 }
 
 /// An owned pipe, matching the codebase's `OwnedFd` style.
-fn owned_pipe2(flags: OFlag) -> io::Result<(OwnedFd, OwnedFd)> {
+pub(crate) fn owned_pipe2(flags: OFlag) -> io::Result<(OwnedFd, OwnedFd)> {
     let (read_end, write_end) = pipe2(flags).map_err(io::Error::from)?;
     let read_end = unsafe { OwnedFd::from_raw_fd(read_end) };
     let write_end = unsafe { OwnedFd::from_raw_fd(write_end) };
@@ -166,7 +172,7 @@ fn pidfd_open(pid: Pid) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
 }
 
-fn dupfd_cloexec(fd: RawFd, minimum: RawFd) -> io::Result<RawFd> {
+pub(crate) fn dupfd_cloexec(fd: RawFd, minimum: RawFd) -> io::Result<RawFd> {
     fcntl(fd, FcntlArg::F_DUPFD_CLOEXEC(minimum))
         .map(|fd| fd as RawFd)
         .map_err(io::Error::from)

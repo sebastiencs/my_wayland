@@ -181,6 +181,7 @@ mod io_uring;
 mod libinput;
 mod logger;
 mod object;
+mod process_manager;
 mod protocol;
 mod protocol_generated;
 mod queue;
@@ -344,7 +345,6 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
         seat: Default::default(),
         keyboard,
         xkb,
-        forker,
     };
     let mut startup_dispatcher = Dispatcher::default();
     config::apply_general_settings(&mut state, &mut startup_dispatcher);
@@ -371,6 +371,7 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
     runner.add_model(client_manager);
     runner.add_model(config_watcher);
     runner.add_model(Box::new(drm::VisualAnimationPump::new()));
+    runner.add_model(Box::new(process_manager::ProcessManager::new(forker)));
     let signals = Box::new(signals::SignalHandler::install().map_err(StartupError::Signals)?);
     runner.add_model(signals);
 
@@ -380,6 +381,7 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
     dispatcher.start::<scheduler::IdleScheduler>();
     dispatcher.start::<config::ConfigWatcher>();
     dispatcher.start::<drm::VisualAnimationPump>();
+    dispatcher.start::<process_manager::ProcessManager>();
     dispatcher.start::<signals::SignalHandler>();
 
     // let timer = make_timer(Duration::from_secs(10));
