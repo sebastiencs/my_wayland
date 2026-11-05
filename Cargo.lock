@@ -553,7 +553,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "my-wayland"
+name = "tema"
 version = "0.1.0"
 dependencies = [
  "anyhow",

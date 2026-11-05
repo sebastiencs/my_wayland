@@ -1,4 +1,4 @@
-# My Wayland Architecture Notes
+# Tema architecture notes
 
 This document is a practical map of the repository and of the Linux graphics stack it sits on top of.
 

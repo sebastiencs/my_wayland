@@ -29,7 +29,7 @@ use crate::{
     xkb::{KeyboardState, Xkb},
 };
 
-const CONFIG_DIR_NAME: &str = "my_wayland";
+const CONFIG_DIR_NAME: &str = "tema";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const DEFAULT_CURSOR_THEME: &str = "default";
 const DEFAULT_CURSOR_SIZE: u32 = 24;

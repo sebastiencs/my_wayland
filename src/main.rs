@@ -391,10 +391,10 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
     //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 vlc",
     //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 alacritty",
     //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/wayland-1 /home/sebastien/github/client-toolkit/target/debug/examples/generic_simple_window",
-    //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/my-wayland-0 /home/sebastien/github/wayland-rs/target/debug/examples/simple_window",
-    //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/my-wayland-0 /usr/bin/wev",
-    //                 "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/my-wayland-0 alacritty",
-    //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/my-wayland-0 /home/sebastien/github/weston/build/clients/weston-simple-egl",
+    //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/tema-0 /home/sebastien/github/wayland-rs/target/debug/examples/simple_window",
+    //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/tema-0 /usr/bin/wev",
+    //                 "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/tema-0 alacritty",
+    //                 // "env -u DISPLAY env WAYLAND_DISPLAY=/var/run/user/1000/tema-0 /home/sebastien/github/weston/build/clients/weston-simple-egl",
     //             ])
     //             .status()
     //             .unwrap();

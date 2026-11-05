@@ -1,6 +1,6 @@
-# Example configuration for my_wayland.
-# Copy to:  ~/.config/my_wayland/config.toml
-#     or:  $XDG_CONFIG_HOME/my_wayland/config.toml
+# Example configuration for tema.
+# Copy to:  ~/.config/tema/config.toml
+#     or:  $XDG_CONFIG_HOME/tema/config.toml
 
 [general]
 cursor_theme = "default"

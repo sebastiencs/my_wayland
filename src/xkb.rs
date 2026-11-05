@@ -162,10 +162,7 @@ fn new_memfd(data: *const u8, size: usize) -> std::io::Result<MemFd> {
 
     let fd = unsafe {
         let fd = {
-            libc::memfd_create(
-                c"my_wayland-anon".as_ptr(),
-                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-            )
+            libc::memfd_create(c"tema-anon".as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING)
         };
         if fd == -1 {
             return Err(std::io::Error::last_os_error());

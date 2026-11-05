@@ -1,4 +1,4 @@
-# my_wayland
+# tema
 
 A Wayland compositor written from scratch in Rust, with tiling inspired by
 [bspwm](https://github.com/baskerville/bspwm) (X11). It speaks the Wayland
@@ -7,7 +7,7 @@ through DRM/KMS + GBM, renders with **OpenGL ES** or **Vulkan**, and runs its
 entire event loop (clients, input, udev, D-Bus, DRM) on a single
 io_uring-driven action dispatcher.
 
-![my-wayland running btop, fastfetch, and Alacritty](./static/screenshot.png)
+![tema running btop, fastfetch, and Alacritty](./static/screenshot.png)
 
 ## Status
 
@@ -24,7 +24,6 @@ The essentials are done:
 - Screen capture / sharing
 - Clipboard managers and idle daemons
 - Session locking
-- Variable Refresh Rate (VRR) (tested on 240hz monitor)
 
 ## Features
 
@@ -32,6 +31,7 @@ The essentials are done:
 
 - Hardware-accelerated rendering with **two backends: OpenGL ES and Vulkan**
 - Renderer selectable per GPU device (`opengl`, `vulkan`, or `auto`)
+- Variable Refresh Rate (VRR) (tested on 240hz monitor)
 - Direct DRM/KMS atomic modesetting, GBM buffer allocation, dmabuf import
 - Explicit synchronization (`linux-drm-syncobj`) and incremental damage
   tracking (`FB_DAMAGE_CLIPS`, buffer age, occlusion)
@@ -52,11 +52,11 @@ Requires a Rust **nightly** toolchain and `libshaderc_shared.so`
 
 Run from a TTY inside a logind session:
 
-    ./target/release/my-wayland
+    ./target/release/tema
 
 ## Configuration
 
-The compositor reads `~/.config/my_wayland/config.toml` and reloads it on
+The compositor reads `~/.config/tema/config.toml` and reloads it on
 save.  
 See [config.toml.example](config.toml.example) for all options
 

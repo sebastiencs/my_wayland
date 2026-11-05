@@ -139,7 +139,7 @@ where
     }
 }
 
-pub const WAYLAND_DISPLAY_NAME: &str = "my-wayland-0";
+pub const WAYLAND_DISPLAY_NAME: &str = "tema-0";
 
 pub struct ClientManager {
     current_id: u64,
