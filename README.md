@@ -13,10 +13,10 @@ io_uring-driven action dispatcher.
 
 **Work in progress.** The core is implemented and the compositor runs real
 clients (terminals, bars, browsers, screen capture tools), but the project is
-young: expect rough edges, missing polish, and breaking changes.  
+very young: expect rough edges, missing polish, and breaking changes.  
 The config format is still evolving.
 
-The essentials are done and usable today:
+The essentials are done:
 
 - Tiling, floating and fullscreen windows
 - Multi-output with hotplug
@@ -24,6 +24,7 @@ The essentials are done and usable today:
 - Screen capture / sharing
 - Clipboard managers and idle daemons
 - Session locking
+- Variable Refresh Rate (VRR) (tested on 240hz monitor)
 
 ## Features
 
@@ -42,12 +43,6 @@ The essentials are done and usable today:
 - Blur, shadows, gradient borders with corner rounding
 - Inactive-window dimming and opacity
 
-### Platform
-
-- libinput + xkbcommon, XCursor themes
-- logind session management, VT switching, udev hotplug
-- Hot-reloading TOML configuration (reload on save)
-
 ## Build & run
 
 Requires a Rust **nightly** toolchain and `libshaderc_shared.so`
@@ -58,9 +53,6 @@ Requires a Rust **nightly** toolchain and `libshaderc_shared.so`
 Run from a TTY inside a logind session:
 
     ./target/release/my-wayland
-
-Clients connect on the `my-wayland-0` Wayland socket. Spawned keybind
-commands inherit `WAYLAND_DISPLAY` automatically.
 
 ## Configuration
 
