@@ -13,6 +13,7 @@ use std::{
     io, mem,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
     path::{Path, PathBuf},
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -275,7 +276,10 @@ impl XwaylandServer {
             argv,
             env: vec![("WAYLAND_SOCKET".to_string(), Some("6".to_string()))],
             fd_slots: vec![3, 4, 6],
-            fds: vec![display_write, listen, wayland_child].into_boxed_slice(),
+            fds: vec![display_write, listen, wayland_child]
+                .into_iter()
+                .map(Rc::new)
+                .collect(),
             reply_to: Redispatcher::to::<Self>(move |event| XwaylandAction::SpawnEvent {
                 generation,
                 event,
@@ -618,7 +622,7 @@ mod tests {
                 argv: Vec::new(),
                 env: Vec::new(),
                 fd_slots: vec![1],
-                fds: vec![write].into_boxed_slice(),
+                fds: vec![Rc::new(write)],
                 reply_to: Redispatcher::to::<Probe>(ProbeAction::Env),
             });
         }

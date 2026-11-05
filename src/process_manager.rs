@@ -22,6 +22,7 @@ use std::{
     collections::BTreeMap,
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    rc::Rc,
 };
 
 use crate::{
@@ -56,9 +57,9 @@ pub enum ProcessManagerAction {
         argv: Vec<String>,
         env: Vec<(String, Option<String>)>,
         fd_slots: Vec<RawFd>,
-        /// The fds to attach, in `fd_slots` order. They must stay open until
-        /// the `Sendmsg` completes; the model owns them until then.
-        fds: Box<[OwnedFd]>,
+        /// The fds to attach, in `fd_slots` order. The ring holds these
+        /// references until the `Sendmsg` completes.
+        fds: Vec<Rc<OwnedFd>>,
         reply_to: Redispatcher<ProcessManagerEvent>,
     },
     /// Set or unset (`None`) a variable in the forker's environment, which
@@ -72,7 +73,7 @@ pub enum ProcessManagerAction {
         frame: Box<[u8]>,
         fds: Vec<OwnedFd>,
     },
-    /// A spawn request's `Sendmsg` completed; its fds can be closed.
+    /// A spawn request's `Sendmsg` completed. A failure is reported to the requester.
     SendSettled {
         token: u64,
         error: Option<io::Error>,
@@ -109,8 +110,6 @@ pub struct ProcessManager {
     awaiting: BTreeMap<u64, Redispatcher<ProcessManagerEvent>>,
     /// Children that exec'd; one armed pidfd poll each, by token.
     children: BTreeMap<u64, Child>,
-    /// Fds of spawn requests whose `Sendmsg` has not completed yet.
-    unsent: BTreeMap<u64, Box<[OwnedFd]>>,
 }
 
 impl ProcessManager {
@@ -130,7 +129,6 @@ impl ProcessManager {
             forker_poll_op_id: None,
             awaiting: BTreeMap::new(),
             children: BTreeMap::new(),
-            unsent: BTreeMap::new(),
         }
     }
 
@@ -159,7 +157,7 @@ impl ProcessManager {
         argv: Vec<String>,
         env: Vec<(String, Option<String>)>,
         fd_slots: Vec<RawFd>,
-        fds: Box<[OwnedFd]>,
+        fds: Vec<Rc<OwnedFd>>,
         reply_to: Redispatcher<ProcessManagerEvent>,
     ) {
         let token = self.next_token;
@@ -184,9 +182,7 @@ impl ProcessManager {
             return;
         }
 
-        let raw_fds: Box<[RawFd]> = fds.iter().map(|fd| fd.as_raw_fd()).collect();
         self.awaiting.insert(token, reply_to);
-        self.unsent.insert(token, fds);
 
         let message = ServerMessage::Spawn { token, prog, argv, env, fd_slots };
         let frame: Box<[u8]> = bincode::serialize(&message)
@@ -195,7 +191,7 @@ impl ProcessManager {
         dispatcher.dispatch(IoUringAction::Sendmsg {
             fd: socket.as_raw_fd(),
             buffer: frame,
-            fds: raw_fds,
+            fds,
             dispatch_to: Redispatcher::to_any(move |result: std::io::Result<SendmsgCompleted>| {
                 AnyAction::from(ProcessManagerAction::SendSettled { token, error: result.err() })
             }),
@@ -213,7 +209,7 @@ impl ProcessManager {
         dispatcher.dispatch(IoUringAction::Sendmsg {
             fd: socket.as_raw_fd(),
             buffer: frame,
-            fds: Box::new([]),
+            fds: Vec::new(),
             dispatch_to: Redispatcher::None,
         });
     }
@@ -342,7 +338,6 @@ impl ProcessManager {
                 },
             );
         }
-        self.unsent.clear();
         // Closing the socket stops the forker. Children survive: they run in
         // their own process groups and are reparented to init.
         self.socket = None;
@@ -388,7 +383,6 @@ impl Model for ProcessManager {
                 self.handle_incoming(dispatcher, frame, fds);
             }
             ProcessManagerAction::SendSettled { token, error } => {
-                self.unsent.remove(&token);
                 if let Some(error) = error {
                     if let Some(reply_to) = self.awaiting.remove(&token) {
                         dispatcher.redispatch_to(
@@ -506,7 +500,7 @@ mod tests {
             argv: Vec::new(),
             env: Vec::new(),
             fd_slots: Vec::new(),
-            fds: Box::new([]),
+            fds: Vec::new(),
             reply_to: Redispatcher::to::<SpawnProbe>(|event| SpawnProbeAction::Event(event)),
         });
         let outcome = runner.run(dispatcher);
@@ -535,7 +529,7 @@ mod tests {
             argv: Vec::new(),
             env: Vec::new(),
             fd_slots: Vec::new(),
-            fds: Box::new([]),
+            fds: Vec::new(),
             reply_to: Redispatcher::to::<SpawnProbe>(|event| SpawnProbeAction::Event(event)),
         });
         let outcome = runner.run(dispatcher);
@@ -563,7 +557,7 @@ mod tests {
             argv: Vec::new(),
             env: vec![("PM_SPAWN_ONLY".to_string(), Some("spawn-value".to_string()))],
             fd_slots: vec![1],
-            fds: Box::new([write_end]),
+            fds: vec![Rc::new(write_end)],
             reply_to: Redispatcher::to::<SpawnProbe>(|event| SpawnProbeAction::Event(event)),
         });
         let outcome = runner.run(dispatcher);

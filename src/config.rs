@@ -1202,7 +1202,7 @@ pub fn execute_action(state: &mut State, dispatcher: &mut Dispatcher, action: Co
                 argv: vec!["-lc".to_string(), command.clone()],
                 env: vec![("WAYLAND_DISPLAY".to_string(), Some(WAYLAND_DISPLAY_NAME.to_string()))],
                 fd_slots: Vec::new(),
-                fds: Box::new([]),
+                fds: Vec::new(),
                 reply_to: crate::runner::Redispatcher::to::<crate::process_manager::ProcessManager>(
                     move |event| crate::process_manager::ProcessManagerAction::SpawnResult {
                         command: command.clone(),

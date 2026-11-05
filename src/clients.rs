@@ -3963,7 +3963,10 @@ impl Model for Boom {
 mod client_from_fd_tests {
     use std::{
         io::{Read, Write},
-        os::{fd::AsFd, unix::net::UnixStream},
+        os::{
+            fd::{AsFd, IntoRawFd},
+            unix::net::UnixStream,
+        },
         time::Duration,
     };
 
