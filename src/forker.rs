@@ -633,6 +633,24 @@ fn run_spawned_child(
             exit_now(1);
         }
     };
+    // Slot 3 is the forker socket in this process. A child that asks for
+    // that slot (Xwayland's display fd) must not have it closed again after
+    // the slot is filled.
+    let socket_to_close = if fds.iter().any(|(slot, _)| *slot == socket) {
+        match dupfd_cloexec(socket, max_slot + 1) {
+            Ok(moved) => {
+                let _ = close(socket);
+                moved
+            }
+            Err(error) => {
+                let message = format!("could not move the forker socket: {error}\n");
+                let _ = write(err_dup, message.as_bytes());
+                exit_now(1);
+            }
+        }
+    } else {
+        socket
+    };
     let result: Result<(), String> = (|| {
         let placed = map_fds(fds)?;
         // Slots must survive exec.
@@ -646,8 +664,10 @@ fn run_spawned_child(
                 |error| format!("could not clear O_CLOEXEC: {}", io::Error::from(error)),
             )?;
         }
-        // No forker fds leak into the child.
-        let _ = close(socket);
+        // No forker fds leak into the child. `socket_to_close` is the
+        // original socket, or a dup of it when a requested slot reused its
+        // number.
+        let _ = close(socket_to_close);
         // SIGCHLD's ignored disposition is inherited across exec: reset it so
         // the program can collect its own children.
         unsafe { signal(Signal::SIGCHLD, SigHandler::SigDfl) }

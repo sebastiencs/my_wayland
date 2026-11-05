@@ -98,6 +98,11 @@ impl XSocket {
         format!(":{}", self.id)
     }
 
+    /// Filesystem path of the bound socket.
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
     /// The bound socket. The caller is responsible for `listen(2)`.
     pub fn fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()

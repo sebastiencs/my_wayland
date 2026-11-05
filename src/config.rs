@@ -1200,12 +1200,7 @@ pub fn execute_action(state: &mut State, dispatcher: &mut Dispatcher, action: Co
             dispatcher.dispatch(crate::process_manager::ProcessManagerAction::Spawn {
                 prog: "sh".to_string(),
                 argv: vec!["-lc".to_string(), command.clone()],
-                env: vec![
-                    ("WAYLAND_DISPLAY".to_string(), Some(WAYLAND_DISPLAY_NAME.to_string())),
-                    // A stale `DISPLAY` must not leak into children; Xwayland
-                    // will publish its own once it starts.
-                    ("DISPLAY".to_string(), None),
-                ],
+                env: vec![("WAYLAND_DISPLAY".to_string(), Some(WAYLAND_DISPLAY_NAME.to_string()))],
                 fd_slots: Vec::new(),
                 fds: Box::new([]),
                 reply_to: crate::runner::Redispatcher::to::<crate::process_manager::ProcessManager>(
@@ -1904,11 +1899,11 @@ mod tests {
                 crate::process_manager::ProcessManagerAction::Spawn { prog, argv, env, .. } => {
                     prog == "sh"
                         && argv == &["-lc".to_string(), "echo hi".to_string()]
-                        && env.contains(&(
-                            "WAYLAND_DISPLAY".to_string(),
-                            Some(WAYLAND_DISPLAY_NAME.to_string()),
-                        ))
-                        && env.contains(&("DISPLAY".to_string(), None))
+                        && env
+                            == &[(
+                                "WAYLAND_DISPLAY".to_string(),
+                                Some(WAYLAND_DISPLAY_NAME.to_string()),
+                            )]
                 }
                 _ => false,
             }

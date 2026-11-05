@@ -372,7 +372,11 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
     runner.add_model(client_manager);
     runner.add_model(config_watcher);
     runner.add_model(Box::new(drm::VisualAnimationPump::new()));
+    let enable_xwayland = forker.is_some();
     runner.add_model(Box::new(process_manager::ProcessManager::new(forker)));
+    if enable_xwayland {
+        runner.add_model(Box::new(xwayland::server::XwaylandServer::new()));
+    }
     let signals = Box::new(signals::SignalHandler::install().map_err(StartupError::Signals)?);
     runner.add_model(signals);
 
@@ -383,6 +387,9 @@ fn start_compositor() -> Result<ExitOutcome, StartupError> {
     dispatcher.start::<config::ConfigWatcher>();
     dispatcher.start::<drm::VisualAnimationPump>();
     dispatcher.start::<process_manager::ProcessManager>();
+    if enable_xwayland {
+        dispatcher.start::<xwayland::server::XwaylandServer>();
+    }
     dispatcher.start::<signals::SignalHandler>();
 
     // let timer = make_timer(Duration::from_secs(10));

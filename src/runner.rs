@@ -599,6 +599,12 @@ impl Runner {
                     // device teardown comes after the clients are gone.
                     ingress_stopped = true;
                     self.stop_loaded_singleton::<crate::clients::ClientManager>(&mut dispatcher);
+                    // Drop the X listen socket while the process manager can
+                    // still take the DISPLAY unset. The forker exits with the
+                    // process manager, which is what ends further spawns.
+                    self.stop_loaded_singleton::<crate::xwayland::server::XwaylandServer>(
+                        &mut dispatcher,
+                    );
                     self.stop_loaded_singleton::<crate::process_manager::ProcessManager>(
                         &mut dispatcher,
                     );
