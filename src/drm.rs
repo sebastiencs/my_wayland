@@ -1156,18 +1156,6 @@ fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
 impl drm::Device for DrmFd {}
 impl drm::control::Device for DrmFd {}
 
-nix::ioctl_none!(drm_set_master, b'd', 0x1e);
-
-impl DrmFd {
-    /// Become DRM master on this fd. Logind's resume fd is a different master;
-    /// closing it and calling this keeps framebuffer ids valid on the retained fd.
-    pub(crate) fn set_master(&self) -> std::io::Result<()> {
-        unsafe { drm_set_master(self.as_raw_fd()) }
-            .map(|_| ())
-            .map_err(std::io::Error::from)
-    }
-}
-
 fn apply_output_disables(crtc_ids: &[u32], mut disable: impl FnMut(u32) -> Result<(), String>) {
     for &crtc_id in crtc_ids {
         if let Err(error) = disable(crtc_id) {
@@ -1818,10 +1806,6 @@ impl Drm {
 
     pub(crate) fn describe_allocator(&self) -> String {
         self.gbm.describe_node()
-    }
-
-    pub(crate) fn reclaim_master(&self) -> std::io::Result<()> {
-        self.fd.set_master()
     }
 
     pub fn devnum(&self) -> Option<libc::dev_t> {

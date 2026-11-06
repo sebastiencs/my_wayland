@@ -605,23 +605,14 @@ impl Udev {
                 return Ok(());
             };
             self.awaiting_drm_resume.remove(&devnum);
-            {
-                // The resume fd is the temporary master. Closing it, then
-                // SET_MASTER on the original primary fd, leaves the renderer and
-                // allocator file description untouched.
-                let drm = state.drm.get(drm_id);
-                let allocator = drm.describe_allocator();
-                drop(fd);
-                if let Err(error) = drm.reclaim_master() {
-                    log::warn!(
-                        "primary DRM device {devnum} kept its fd, setmaster failed: {error}; allocator {allocator} remains open"
-                    );
-                } else {
-                    log::info!(
-                        "resumed primary DRM device {devnum}: reclaimed master on the primary fd; allocator {allocator} remains open"
-                    );
-                }
-            }
+            // Logind restores master on its copy of this file description before
+            // ResumeDevice. Closing the duplicate leaves the original primary fd,
+            // its framebuffer ids, and the allocator in place.
+            let allocator = state.drm.get(drm_id).describe_allocator();
+            drop(fd);
+            log::info!(
+                "resumed primary DRM device {devnum}: kept the primary fd; allocator {allocator} remains open"
+            );
             let failed = resume_drm_backend(state, dispatcher, drm_id);
             for crtc_id in failed {
                 if let Some(output_id) = state.output_id_for_drm_crtc(drm_id, crtc_id) {
