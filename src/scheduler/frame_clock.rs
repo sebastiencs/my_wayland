@@ -581,6 +581,18 @@ mod tests {
     }
 
     #[test]
+    fn mode_change_renders_immediately_on_a_variable_output() {
+        let mut clock = FrameClock::new();
+        clock.update_mode(FrameClockMode::Variable, 60_000);
+        clock.update_vrr_state(
+            Some(VrrRange { min_refresh_millihz: 48_000, max_refresh_millihz: 144_000 }),
+            true,
+        );
+        clock.request_frame(RequestFrameReason::ModeChange);
+        assert_eq!(clock.decide(Instant::now()).disposition, ClockDisposition::RenderNow);
+    }
+
+    #[test]
     fn first_frame_bootstraps_immediately_without_present_history() {
         let now = Instant::now();
         let mut clock = FrameClock::new();

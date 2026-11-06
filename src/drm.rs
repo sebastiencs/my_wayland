@@ -197,6 +197,22 @@ pub struct DrmOutput {
     cursor_animation_delay_msec: Option<u32>,
     allow_in_fence_fd: bool,
     allow_fb_damage_clips: bool,
+    /// Plane state the next composited commit still has to apply. Startup records
+    /// geometry here after a TEST_ONLY check; the first rendered frame commits it.
+    pending_modeset: Option<PendingModeset>,
+}
+
+/// Properties that still have to be applied on the next composited commit.
+#[derive(Clone, Copy, Debug)]
+struct PendingModeset {
+    geometry: PrimaryPlaneGeometry,
+    /// Set after a VT restore. Startup leaves this empty and only programs the plane.
+    crtc: Option<PendingCrtc>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingCrtc {
+    mode_blob_id: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -586,6 +602,158 @@ fn dropped_in_fence_wait(
 
 fn rejected_explicit_kms_sync(want_in_fence: bool, use_in_fence: bool) -> bool {
     want_in_fence && !use_in_fence
+}
+
+/// CRTC and SRC rectangles for a primary plane. SRC is 16.16 fixed point.
+/// wlroots and Weston send the same eight properties on the commit that carries
+/// the rendered buffer (`backend/drm/atomic.c`, `libweston/backend-drm/kms.c`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PrimaryPlaneGeometry {
+    crtc_x: u64,
+    crtc_y: u64,
+    crtc_width: u64,
+    crtc_height: u64,
+    src_x: u64,
+    src_y: u64,
+    src_width: u64,
+    src_height: u64,
+}
+
+impl PrimaryPlaneGeometry {
+    fn values(self) -> [u64; 8] {
+        [
+            self.crtc_x,
+            self.crtc_y,
+            self.crtc_width,
+            self.crtc_height,
+            self.src_x,
+            self.src_y,
+            self.src_width,
+            self.src_height,
+        ]
+    }
+}
+
+fn primary_plane_geometry(width: u64, height: u64) -> PrimaryPlaneGeometry {
+    PrimaryPlaneGeometry {
+        crtc_x: 0,
+        crtc_y: 0,
+        crtc_width: width,
+        crtc_height: height,
+        src_x: 0,
+        src_y: 0,
+        src_width: width << 16,
+        src_height: height << 16,
+    }
+}
+
+fn append_primary_plane_geometry(
+    changes: &mut control::atomic::AtomicModeReq,
+    plane: &Plane,
+    geometry: PrimaryPlaneGeometry,
+) {
+    let properties = [
+        plane.crtc.x.handle,
+        plane.crtc.y.handle,
+        plane.crtc.width.handle,
+        plane.crtc.height.handle,
+        plane.src.x.handle,
+        plane.src.y.handle,
+        plane.src.width.handle,
+        plane.src.height.handle,
+    ];
+    for (property, value) in properties.into_iter().zip(geometry.values()) {
+        changes.add_property(
+            plane.handle,
+            property,
+            control::property::Value::UnsignedRange(value),
+        );
+    }
+}
+
+fn render_buffer_commit_flags(pending_modeset: bool) -> control::AtomicCommitFlags {
+    let mut flags =
+        control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK;
+    if pending_modeset {
+        flags |= control::AtomicCommitFlags::ALLOW_MODESET;
+    }
+    flags
+}
+
+fn direct_scanout_blocked(pending_modeset: bool, protected: bool) -> bool {
+    pending_modeset || protected
+}
+
+/// Startup commits plane geometry only. A VT restore also programs the CRTC and connector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingModesetScope {
+    Plane,
+    PlaneCrtcConnector,
+}
+
+fn pending_modeset_scope(has_crtc: bool) -> PendingModesetScope {
+    if has_crtc {
+        PendingModesetScope::PlaneCrtcConnector
+    } else {
+        PendingModesetScope::Plane
+    }
+}
+
+/// Blob kept by an earlier pending restore and replaced before a frame committed it.
+fn mode_blob_replaced(previous: Option<u64>, next: u64) -> Option<u64> {
+    previous.filter(|blob| *blob != next)
+}
+
+/// Installed mode blob that the successful commit supersedes.
+fn retired_mode_blob(previous: u32, applied: u64) -> Option<u64> {
+    if previous != 0 && u64::from(previous) != applied {
+        Some(u64::from(previous))
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PendingCrtcCommit {
+    crtc: crtc::Handle,
+    active_prop: Option<control::property::Handle>,
+    mode_id_prop: Option<control::property::Handle>,
+    connector: connector::Handle,
+    connector_crtc_prop: Option<control::property::Handle>,
+    mode_blob_id: u64,
+}
+
+fn append_pending_crtc_properties(
+    changes: &mut control::atomic::AtomicModeReq,
+    commit: PendingCrtcCommit,
+) {
+    if let Some(active_prop) = commit.active_prop {
+        changes.add_property(commit.crtc, active_prop, control::property::Value::UnsignedRange(1));
+    }
+    if let Some(mode_id_prop) = commit.mode_id_prop {
+        changes.add_property(
+            commit.crtc,
+            mode_id_prop,
+            control::property::Value::Blob(commit.mode_blob_id),
+        );
+    }
+    if let Some(connector_crtc_prop) = commit.connector_crtc_prop {
+        changes.add_property(
+            commit.connector,
+            connector_crtc_prop,
+            control::property::Value::CRTC(Some(commit.crtc)),
+        );
+    }
+}
+
+fn detach_plane(
+    changes: &mut control::atomic::AtomicModeReq,
+    handle: plane::Handle,
+    fb_id: control::property::Handle,
+    crtc_id: control::property::Handle,
+) {
+    changes.add_property(handle, fb_id, control::property::Value::Object(None));
+    changes.add_property(handle, crtc_id, control::property::Value::CRTC(None));
 }
 
 fn cursor_fences_for_attempts(completion: &RenderCompletion, attempts: usize) -> Vec<i64> {
@@ -1680,7 +1848,7 @@ impl Drm {
             .map_err(|error| format!("{error:?}"))
     }
 
-    /// Refresh connector state and modeset every retained output with its scanout buffer.
+    /// Check each retained output's modeset and leave the commit for its next frame.
     /// Failed CRTCs are returned so the caller can remove only those outputs.
     pub(crate) fn restore_outputs_in_place(
         &mut self,
@@ -1726,28 +1894,42 @@ impl Drm {
             };
             Self::restore_modeset_request(output, mode_blob_id)
         };
-        if let Err(error) = self
-            .fd
-            .atomic_commit(control::AtomicCommitFlags::ALLOW_MODESET, changes)
-        {
+        if let Err(error) = self.fd.atomic_commit(
+            control::AtomicCommitFlags::ALLOW_MODESET | control::AtomicCommitFlags::TEST_ONLY,
+            changes,
+        ) {
             let _ = self.fd.destroy_property_blob(mode_blob_id);
             return Err(OutputRestoreError::Modeset(error.to_string()));
         }
-        let (previous, reset) = {
+        let (replaced_blob, reset) = {
             let Some(output) = self.output_mut(drm_crtc_id) else {
+                let _ = self.fd.destroy_property_blob(mode_blob_id);
                 return Err(OutputRestoreError::Modeset("missing DRM output".into()));
             };
-            let previous = std::mem::replace(&mut output.in_use.crtc.mode_id, mode_blob_id as u32);
-            output.in_use.crtc.active = true;
+            let (width, height) = output
+                .in_use
+                .connector
+                .preferred_mode
+                .map(|mode| mode.size())
+                .unwrap_or((0, 0));
+            let previous_blob = output
+                .pending_modeset
+                .and_then(|pending| pending.crtc)
+                .map(|crtc| crtc.mode_blob_id);
+            output.pending_modeset = Some(PendingModeset {
+                geometry: primary_plane_geometry(u64::from(width), u64::from(height)),
+                crtc: Some(PendingCrtc { mode_blob_id }),
+            });
             let bounds = output.output_bounds();
             let reset = output.pipeline.reset_after_session_resume();
             output.pipeline.resume_commits();
             output.pipeline.queue_pending_damage(bounds);
-            (previous, reset)
+            (mode_blob_replaced(previous_blob, mode_blob_id), reset)
         };
-        if previous != 0 && u64::from(previous) != mode_blob_id {
-            let _ = self.fd.destroy_property_blob(u64::from(previous));
+        if let Some(blob) = replaced_blob {
+            let _ = self.fd.destroy_property_blob(blob);
         }
+        log::info!("deferred output restore until the first rendered frame: crtc={drm_crtc_id}");
         Ok(reset)
     }
 
@@ -1921,45 +2103,10 @@ impl Drm {
             plane.crtc_id,
             control::property::Value::CRTC(Some(output.in_use.crtc.handle)),
         );
-        changes.add_property(
-            plane.handle,
-            plane.crtc.x.handle,
-            control::property::Value::UnsignedRange(0),
-        );
-        changes.add_property(
-            plane.handle,
-            plane.crtc.y.handle,
-            control::property::Value::UnsignedRange(0),
-        );
-        changes.add_property(
-            plane.handle,
-            plane.crtc.width.handle,
-            control::property::Value::UnsignedRange(width as u64),
-        );
-        changes.add_property(
-            plane.handle,
-            plane.crtc.height.handle,
-            control::property::Value::UnsignedRange(height as u64),
-        );
-        changes.add_property(
-            plane.handle,
-            plane.src.x.handle,
-            control::property::Value::UnsignedRange(0),
-        );
-        changes.add_property(
-            plane.handle,
-            plane.src.y.handle,
-            control::property::Value::UnsignedRange(0),
-        );
-        changes.add_property(
-            plane.handle,
-            plane.src.width.handle,
-            control::property::Value::UnsignedRange((width as u64) << 16),
-        );
-        changes.add_property(
-            plane.handle,
-            plane.src.height.handle,
-            control::property::Value::UnsignedRange((height as u64) << 16),
+        append_primary_plane_geometry(
+            &mut changes,
+            plane,
+            primary_plane_geometry(u64::from(width), u64::from(height)),
         );
         if let Some(property) = plane.in_fence_fd {
             changes.add_property(plane.handle, property, control::property::Value::SignedRange(-1));
@@ -1971,8 +2118,7 @@ impl Drm {
             if extra.handle == plane.handle {
                 continue;
             }
-            changes.add_property(extra.handle, extra.fb_id, control::property::Value::Object(None));
-            changes.add_property(extra.handle, extra.crtc_id, control::property::Value::CRTC(None));
+            detach_plane(&mut changes, extra.handle, extra.fb_id, extra.crtc_id);
         }
         changes
     }
@@ -2275,8 +2421,30 @@ impl Drm {
                 y2: rect.y2(),
             })
             .collect();
-        let (want_damage_clips, want_in_fence) = {
+        let (want_damage_clips, want_in_fence, pending_modeset, crtc_commit, detached_planes) = {
             let output = self.output(drm_crtc_id).unwrap();
+            let pending_modeset = output.pending_modeset;
+            let crtc_commit = pending_modeset
+                .and_then(|pending| pending.crtc)
+                .map(|crtc_state| PendingCrtcCommit {
+                    crtc: output.in_use.crtc.handle,
+                    active_prop: output.in_use.crtc.active_prop,
+                    mode_id_prop: output.in_use.crtc.mode_id_prop,
+                    connector: output.in_use.connector.handler,
+                    connector_crtc_prop: output.in_use.connector.crtc_id_prop,
+                    mode_blob_id: crtc_state.mode_blob_id,
+                });
+            let detached_planes = if crtc_commit.is_some() {
+                output
+                    .in_use
+                    .planes
+                    .iter()
+                    .filter(|plane| plane.handle != primary_plane.handle)
+                    .map(|plane| (plane.handle, plane.fb_id, plane.crtc_id))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             (
                 ENABLE_DAMAGE
                     && output.allow_fb_damage_clips
@@ -2285,6 +2453,9 @@ impl Drm {
                 output.allow_in_fence_fd
                     && primary_plane.in_fence_fd.is_some()
                     && render_completion.in_fence_fd.is_some(),
+                pending_modeset,
+                crtc_commit,
+                detached_planes,
             )
         };
         let mut last_error = None;
@@ -2330,6 +2501,19 @@ impl Drm {
                 primary_plane.crtc_id,
                 control::property::Value::CRTC(Some(crtc)),
             );
+            if let Some(pending) = pending_modeset {
+                append_primary_plane_geometry(&mut changes, &primary_plane, pending.geometry);
+                if pending_modeset_scope(pending.crtc.is_some())
+                    == PendingModesetScope::PlaneCrtcConnector
+                {
+                    if let Some(commit) = crtc_commit {
+                        append_pending_crtc_properties(&mut changes, commit);
+                        for (handle, fb_id, crtc_id) in &detached_planes {
+                            detach_plane(&mut changes, *handle, *fb_id, *crtc_id);
+                        }
+                    }
+                }
+            }
             self.append_cursor_plane_changes(drm_crtc_id, &mut changes, cursor_plane.as_ref());
 
             if let Some(property) = primary_plane.in_fence_fd {
@@ -2386,10 +2570,9 @@ impl Drm {
                 return Err(error);
             }
 
-            let commit_result = self.fd.atomic_commit(
-                control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
-                changes,
-            );
+            let commit_result = self
+                .fd
+                .atomic_commit(render_buffer_commit_flags(pending_modeset.is_some()), changes);
             match commit_result {
                 Ok(()) => {
                     let submitted_at = Instant::now();
@@ -2411,6 +2594,21 @@ impl Drm {
                         let output = self.output_mut(drm_crtc_id).unwrap();
                         output.allow_in_fence_fd = false;
                         output.render_sync_mode = RenderSyncMode::BlockingFinishFallback;
+                    }
+                    if let Some(pending) = pending_modeset {
+                        let retired = pending.crtc.and_then(|crtc_state| {
+                            let output = self.output_mut(drm_crtc_id).unwrap();
+                            let previous = std::mem::replace(
+                                &mut output.in_use.crtc.mode_id,
+                                crtc_state.mode_blob_id as u32,
+                            );
+                            output.in_use.crtc.active = true;
+                            retired_mode_blob(previous, crtc_state.mode_blob_id)
+                        });
+                        self.output_mut(drm_crtc_id).unwrap().pending_modeset = None;
+                        if let Some(blob) = retired {
+                            let _ = self.fd.destroy_property_blob(blob);
+                        }
                     }
                     let buffer_index = self.output(drm_crtc_id).unwrap().render_buffer_index();
                     let submission = self.output_mut(drm_crtc_id).unwrap().allocate_submission(
@@ -2509,45 +2707,10 @@ impl Drm {
             control::property::Value::CRTC(Some(crtc)),
         );
         self.append_cursor_plane_changes(drm_crtc_id, &mut changes, cursor_plane.as_ref());
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.crtc.x.handle,
-            control::property::Value::UnsignedRange(0),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.crtc.y.handle,
-            control::property::Value::UnsignedRange(0),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.crtc.width.handle,
-            control::property::Value::UnsignedRange(candidate.bounds.width as u64),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.crtc.height.handle,
-            control::property::Value::UnsignedRange(candidate.bounds.height as u64),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.src.x.handle,
-            control::property::Value::UnsignedRange(0),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.src.y.handle,
-            control::property::Value::UnsignedRange(0),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.src.width.handle,
-            control::property::Value::UnsignedRange((candidate.bounds.width as u64) << 16),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.src.height.handle,
-            control::property::Value::UnsignedRange((candidate.bounds.height as u64) << 16),
+        append_primary_plane_geometry(
+            &mut changes,
+            &primary_plane,
+            primary_plane_geometry(candidate.bounds.width as u64, candidate.bounds.height as u64),
         );
         if let Some(property) = primary_plane.fb_damage_clips {
             changes.add_property(primary_plane.handle, property, control::property::Value::Blob(0));
@@ -3106,53 +3269,24 @@ impl Drm {
             primary_plane.crtc_id,
             control::property::Value::CRTC(Some(in_use.crtc.handle)),
         );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.crtc.x.handle,
-            control::property::Value::UnsignedRange(0),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.crtc.y.handle,
-            control::property::Value::UnsignedRange(0),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.crtc.width.handle,
-            control::property::Value::UnsignedRange(hdisplay as _),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.crtc.height.handle,
-            control::property::Value::UnsignedRange(vdisplay as _),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.src.x.handle,
-            control::property::Value::UnsignedRange(0),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.src.y.handle,
-            control::property::Value::UnsignedRange(0),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.src.width.handle,
-            control::property::Value::UnsignedRange((hdisplay as u64) << 16),
-        );
-        changes.add_property(
-            primary_plane.handle,
-            primary_plane.src.height.handle,
-            control::property::Value::UnsignedRange((vdisplay as u64) << 16),
-        );
+        let geometry = primary_plane_geometry(u64::from(hdisplay), u64::from(vdisplay));
+        append_primary_plane_geometry(&mut changes, primary_plane, geometry);
 
-        if let Err(error) = drm.atomic_commit(control::AtomicCommitFlags::ALLOW_MODESET, changes) {
+        // Test the plane state without replacing the framebuffer already on screen.
+        // The first rendered frame commits the same geometry with ALLOW_MODESET.
+        if let Err(error) = drm.atomic_commit(
+            control::AtomicCommitFlags::ALLOW_MODESET | control::AtomicCommitFlags::TEST_ONLY,
+            changes,
+        ) {
             return Err(format!(
                 "initial modeset connector={} crtc={:?} mode={}x{}: {error}",
                 in_use.connector.interface_name, in_use.crtc.handle, hdisplay, vdisplay
             ));
         }
+        log::info!(
+            "deferred initial modeset until the first rendered frame: connector={} crtc={:?} mode={}x{}",
+            in_use.connector.interface_name, in_use.crtc.handle, hdisplay, vdisplay
+        );
 
         Ok(DrmOutput {
             in_use,
@@ -3165,6 +3299,7 @@ impl Drm {
             cursor_animation_delay_msec: None,
             allow_in_fence_fd: true,
             allow_fb_damage_clips: true,
+            pending_modeset: Some(PendingModeset { geometry, crtc: None }),
         })
     }
 
@@ -9676,17 +9811,19 @@ mod presentation_timing_tests {
             cursor_dmabuf_retained, cursor_fences_for_attempts, cursor_in_fence_value,
             cursor_plane_commit_dimensions, cursor_plane_presentation, cursor_plane_recipe,
             cursor_plane_supports_requested_cursor, cursor_render_sync_mode, cursor_target_damage,
-            cursor_target_size_retained, cursor_upload_reuses_cached, dropped_in_fence_wait,
-            effect_transition_requires_full_redraw, find_cursor_slot_index_for_key,
-            import_cursor_render_target, optional_plane_attempts, presentation_feedback_flags,
-            rejected_explicit_kms_sync, render_planner::select_presentation_output_for_scene,
-            request_output, request_outputs_for_rects, rgba_to_drm_argb8888,
+            cursor_target_size_retained, cursor_upload_reuses_cached, direct_scanout_blocked,
+            dropped_in_fence_wait, effect_transition_requires_full_redraw,
+            find_cursor_slot_index_for_key, import_cursor_render_target, mode_blob_replaced,
+            optional_plane_attempts, pending_modeset_scope, presentation_feedback_flags,
+            primary_plane_geometry, rejected_explicit_kms_sync, render_buffer_commit_flags,
+            render_planner::select_presentation_output_for_scene, request_output,
+            request_outputs_for_rects, retired_mode_blob, rgba_to_drm_argb8888,
             scene_item_requires_compositor_compositing, select_cursor_upload_slot,
             submitted_frame_feedbacks_for_discard, surface_allows_direct_scanout,
             CursorBufferAllocation, CursorPlaneContentKey, CursorSurfaceContentKey, Modifier,
-            OutputSubmission, RenderSyncMode, SceneItem, SceneItemContentKey, SceneItemKey,
-            SceneItemMask, SceneItemState, SubmissionPresentationFeedback, SubmittedFrame,
-            ARGB8888, CURSOR_CLEAR,
+            OutputSubmission, PendingModesetScope, RenderSyncMode, SceneItem, SceneItemContentKey,
+            SceneItemKey, SceneItemMask, SceneItemState, SubmissionPresentationFeedback,
+            SubmittedFrame, ARGB8888, CURSOR_CLEAR,
         },
         crate::{
             clients::{ClientId, Resolved},
@@ -10110,6 +10247,38 @@ mod presentation_timing_tests {
         assert!(rejected_explicit_kms_sync(true, false));
         assert!(!rejected_explicit_kms_sync(true, true));
         assert!(!rejected_explicit_kms_sync(false, false));
+    }
+
+    #[test]
+    fn pending_modeset_sets_allow_modeset_and_full_plane_geometry() {
+        assert_eq!(
+            render_buffer_commit_flags(false),
+            drm::control::AtomicCommitFlags::PAGE_FLIP_EVENT
+                | drm::control::AtomicCommitFlags::NONBLOCK
+        );
+        assert_eq!(
+            render_buffer_commit_flags(true),
+            drm::control::AtomicCommitFlags::PAGE_FLIP_EVENT
+                | drm::control::AtomicCommitFlags::NONBLOCK
+                | drm::control::AtomicCommitFlags::ALLOW_MODESET
+        );
+        assert!(direct_scanout_blocked(true, false));
+        assert!(direct_scanout_blocked(false, true));
+        assert!(!direct_scanout_blocked(false, false));
+        let geometry = primary_plane_geometry(3840, 2160);
+        assert_eq!(geometry.values(), [0, 0, 3840, 2160, 0, 0, 3840 << 16, 2160 << 16]);
+    }
+
+    #[test]
+    fn pending_restore_keeps_the_mode_blob_until_the_frame_commits() {
+        assert_eq!(pending_modeset_scope(false), PendingModesetScope::Plane);
+        assert_eq!(pending_modeset_scope(true), PendingModesetScope::PlaneCrtcConnector);
+        assert_eq!(mode_blob_replaced(Some(11), 22), Some(11));
+        assert_eq!(mode_blob_replaced(Some(22), 22), None);
+        assert_eq!(mode_blob_replaced(None, 22), None);
+        assert_eq!(retired_mode_blob(11, 22), Some(11));
+        assert_eq!(retired_mode_blob(22, 22), None);
+        assert_eq!(retired_mode_blob(0, 22), None);
     }
 
     #[test]

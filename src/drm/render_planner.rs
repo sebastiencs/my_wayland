@@ -174,23 +174,24 @@ pub(super) fn build_frame_plan(
         }
     }
 
-    let direct_scanout = if protected {
-        None
-    } else if !has_effects
-        && items.len() == 1
-        && items[0].state.bounds == output_bounds
-        && !super::scene_item_requires_compositor_compositing(&items[0])
-        && !output.pipeline.is_waiting_for_flip()
-    {
-        let bounds = items[0].state.bounds;
-        let sync = items[0].sync.clone();
-        items[0]
-            .direct_scanout
-            .take()
-            .map(|framebuffer| super::DirectScanoutCandidate { bounds, sync, framebuffer })
-    } else {
-        None
-    };
+    let direct_scanout =
+        if super::direct_scanout_blocked(output.pending_modeset.is_some(), protected) {
+            None
+        } else if !has_effects
+            && items.len() == 1
+            && items[0].state.bounds == output_bounds
+            && !super::scene_item_requires_compositor_compositing(&items[0])
+            && !output.pipeline.is_waiting_for_flip()
+        {
+            let bounds = items[0].state.bounds;
+            let sync = items[0].sync.clone();
+            items[0]
+                .direct_scanout
+                .take()
+                .map(|framebuffer| super::DirectScanoutCandidate { bounds, sync, framebuffer })
+        } else {
+            None
+        };
 
     super::FramePlan {
         items,

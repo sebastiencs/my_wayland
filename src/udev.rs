@@ -758,6 +758,7 @@ impl Udev {
             .collect::<Vec<_>>();
         let fd = state.drm.get(drm_id).fd();
         dispatcher.start_model(drm_id, DrmReader::new(drm_id, fd));
+        let mut output_ids = Vec::with_capacity(drm_output_ids.len());
         for drm_output_id in drm_output_ids {
             let output =
                 Output::new(BackendOutputRef::new(drm_id), drm_output_id, state.drm.get(drm_id));
@@ -772,8 +773,20 @@ impl Udev {
             dispatcher
                 .start_model(crate::scheduler::output_scheduler_id(output_id), output_scheduler);
             dispatcher.start_model(output_id, drm_model);
+            output_ids.push(output_id);
         }
         sync_output_nodes_for_backend(state, drm_id);
+        // Both output models are queued to start, and the layout now has the
+        // refreshed mode. The first frame is a full clear; nothing else asks
+        // for one until input arrives.
+        for output_id in output_ids {
+            crate::drm::request_output_frame(
+                state,
+                output_id,
+                crate::scheduler::RequestFrameReason::ModeChange,
+                dispatcher,
+            );
+        }
         if state.drm.get(drm_id).supports_linux_drm_syncobj() {
             let global = WpLinuxDrmSyncobjManagerV1Global::new(drm_id);
             let (interface, version) = global.interface();
