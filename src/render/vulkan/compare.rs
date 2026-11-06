@@ -55,8 +55,8 @@ fn pair() -> Option<Pair> {
     let fd = open_render_node()?;
     let drm = DrmFd::from_owned(fd);
     let gbm = GbmDevice::new(&drm).ok()?;
-    let gl = create_renderer(RendererSelection::OpenGl, &gbm, &gbm).ok()?;
-    let vulkan = create_renderer(RendererSelection::Vulkan, &gbm, &gbm).ok()?;
+    let gl = create_renderer(RendererSelection::OpenGl, &gbm).ok()?;
+    let vulkan = create_renderer(RendererSelection::Vulkan, &gbm).ok()?;
     Some(Pair { gl, vulkan, gbm })
 }
 

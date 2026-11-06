@@ -766,6 +766,20 @@ fn require_xrgb8888(formats: &FormatSet) -> Result<(), String> {
     Err(format!("vulkan device cannot {use_name} DRM XRGB8888"))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::same_node;
+
+    #[test]
+    fn physical_device_matches_either_drm_node() {
+        assert!(same_node(1, 226, 128, 226, 128));
+        assert!(same_node(1, 226, 1, 226, 1));
+        assert!(!same_node(0, 226, 128, 226, 128));
+        assert!(!same_node(1, 226, 128, 226, 129));
+        assert!(!same_node(1, -1, 128, 226, 128));
+    }
+}
+
 fn create_device(
     instance: &VulkanInstance,
     physical: vk::PhysicalDevice,

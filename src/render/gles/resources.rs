@@ -3,7 +3,10 @@ use std::{cell::OnceCell, rc::Rc};
 use khronos_types::{egl, gl};
 
 use {
-    super::{import::GlTexture, loader::EGL},
+    super::{
+        import::{EglImage, GlTexture},
+        loader::EGL,
+    },
     crate::{drm::Format, render::RenderDeviceId},
 };
 
@@ -67,8 +70,9 @@ pub struct EglFrameBuffer {
     pub framebuffer_object: gl::GLuint,
     /// Shader programs and the dim texture shared with every framebuffer on this device.
     pub(super) programs: Rc<GlesPrograms>,
-    /// Keeps an imported output image alive for the renderbuffer that samples it.
-    pub(super) imported_image: Option<GlTexture>,
+    /// Keeps the imported output image alive for the renderbuffer created from it.
+    /// Jay and Smithay store the EGL image the same way. It is not also bound as a texture.
+    pub(super) imported_image: Option<EglImage>,
 }
 
 impl Drop for EglFrameBuffer {

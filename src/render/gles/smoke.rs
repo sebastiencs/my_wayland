@@ -490,13 +490,11 @@ fn factory_prefers_opengl_and_constructs_vulkan_when_the_device_can() {
         eprintln!("skipping GLES smoke: no DRM render node");
         return;
     };
-    let opengl = create_renderer(RendererSelection::OpenGl, &device.gbm, &device.gbm)
-        .expect("opengl renderer");
+    let opengl = create_renderer(RendererSelection::OpenGl, &device.gbm).expect("opengl renderer");
     assert_eq!(opengl.api(), GraphicsApi::OpenGl);
-    let auto =
-        create_renderer(RendererSelection::Auto, &device.gbm, &device.gbm).expect("auto renderer");
+    let auto = create_renderer(RendererSelection::Auto, &device.gbm).expect("auto renderer");
     assert_eq!(auto.api(), GraphicsApi::OpenGl);
-    match create_renderer(RendererSelection::Vulkan, &device.gbm, &device.gbm) {
+    match create_renderer(RendererSelection::Vulkan, &device.gbm) {
         Ok(vulkan) => {
             assert_eq!(vulkan.api(), GraphicsApi::Vulkan);
             assert!(vulkan.capabilities().explicit_sync);

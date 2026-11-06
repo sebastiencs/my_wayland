@@ -68,6 +68,7 @@ use crate::{
 };
 
 mod kms_submit;
+pub(crate) mod node;
 mod output_pipeline;
 mod render_planner;
 
@@ -170,8 +171,14 @@ pub struct Drm {
 impl Drop for Drm {
     fn drop(&mut self) {
         // Output buffers drop while the renderer and GBM device are still alive:
-        // GPU target, then DRM framebuffer, then GBM BO. The renderer field then
-        // terminates EGL, and the GBM device drops after that.
+        // GPU target, then DRM framebuffer, then GBM BO. Field order then drops
+        // the renderer before `gbm`, so EGL terminates before the render-node
+        // GBM device and its file description. `fd` remains the only KMS
+        // descriptor and is not the allocator descriptor.
+        log::info!(
+            "dropping DRM backend after the primary session device; allocator {} closes after the renderer",
+            self.gbm.describe_node()
+        );
         self.renderer.make_current();
         self.outputs.clear();
     }
@@ -631,6 +638,22 @@ impl AsRawFd for DrmFd {
 impl DrmFd {
     pub(crate) fn from_owned(fd: OwnedFd) -> Self {
         Self { fd: Rc::new(fd) }
+    }
+
+    /// Independent render-node file description for this DRM device.
+    ///
+    /// Allocator setup consumes this. KMS stays on `self`.
+    pub(crate) fn open_render_node(&self) -> Result<OwnedFd, node::RenderNodeError> {
+        node::open_matching_render_node(self.as_raw_fd())
+    }
+
+    /// New primary-node file description. This does not return `self`.
+    pub(crate) fn open_primary_node(&self) -> Result<OwnedFd, node::RenderNodeError> {
+        node::open_independent_primary_node(self.as_raw_fd())
+    }
+
+    pub(crate) fn describe_node(&self) -> String {
+        node::describe_drm_node(self.as_raw_fd())
     }
 
     pub fn try_create_lease(&self) -> std::io::Result<DrmFd> {
@@ -1304,18 +1327,23 @@ impl Drm {
         );
 
         let gbm = GbmDevice::new(&drm).map_err(|error| format!("gbm: {error}"))?;
-        let mut renderer = create_renderer(selection, &drm, &gbm)?;
+        let mut renderer = create_renderer(selection, &gbm)?;
         let outputs = Self::init_drm_outputs(&drm, renderer.as_mut(), &gbm, &resources);
         if outputs.is_empty() {
             return Err("no usable connector".into());
         }
 
-        let supports_syncobj_timeline = drm
+        let allocator = gbm.allocator_fd();
+        let supports_syncobj_timeline = allocator
             .get_driver_capability(drm::DriverCapability::TimelineSyncObj)
             .unwrap_or(0)
             != 0;
         let supports_syncobj_eventfd =
-            supports_syncobj_timeline && probe_syncobj_eventfd_support(&drm);
+            supports_syncobj_timeline && probe_syncobj_eventfd_support(&allocator);
+        log::info!(
+            "probed syncobj timeline support on allocator {}: timeline={supports_syncobj_timeline} eventfd={supports_syncobj_eventfd}",
+            gbm.describe_node()
+        );
 
         let mut drm_backend = Self {
             fd: drm,
@@ -1346,6 +1374,16 @@ impl Drm {
 
     pub fn fd(&self) -> DrmFd {
         self.fd.clone()
+    }
+
+    /// File description used for renderer timelines. This is the GBM allocator,
+    /// not the logind primary descriptor used for atomic commits.
+    pub fn allocator_fd(&self) -> DrmFd {
+        self.gbm.allocator_fd()
+    }
+
+    pub(crate) fn describe_allocator(&self) -> String {
+        self.gbm.describe_node()
     }
 
     pub(crate) fn reclaim_master(&self) -> std::io::Result<()> {
@@ -2341,13 +2379,17 @@ impl Drm {
         plane_format: &PlaneFormat,
     ) -> Option<CursorPlaneBuffer> {
         let (fb_width, fb_height) = self.fixed_cursor_plane_size();
-        let bo = self.gbm.create_bo_with_size_no_export(
+        let Some(bo) = self.gbm.try_create_bo_with_size(
             fb_width,
             fb_height,
             DrmFourcc::Argb8888,
             UseFlags::CURSOR | UseFlags::WRITE,
-            &[],
-        );
+        ) else {
+            log::debug!(
+                "Skipping DRM cursor plane candidate: render node could not allocate a writable {fb_width}x{fb_height} cursor buffer"
+            );
+            return None;
+        };
         let bo_modifier = bo.modifier();
         if !plane_format.modifiers.contains(&Modifier::INVALID)
             && !plane_format.modifiers.contains(&bo_modifier)
@@ -2361,14 +2403,14 @@ impl Drm {
         }
         let pitch = drm::buffer::Buffer::pitch(&bo) as usize;
         bo.write(&vec![0; pitch.saturating_mul(fb_height as usize)]);
-        let framebuffer = match Self::add_framebuffer_for_bo(&self.fd, &bo) {
+        let Some(dmabuf) = bo.dmabuf() else {
+            return None;
+        };
+        let framebuffer = match Self::add_framebuffer(&self.fd, dmabuf) {
             Ok(framebuffer) => framebuffer,
             Err(error) => {
                 log::debug!(
-                    "Skipping DRM cursor plane candidate: failed to create framebuffer for {}x{} cursor BO: {:?}",
-                    fb_width,
-                    fb_height,
-                    error
+                    "Skipping DRM cursor plane candidate: failed to import {fb_width}x{fb_height} cursor dmabuf: {error}"
                 );
                 return None;
             }
@@ -2639,6 +2681,13 @@ impl Drm {
         let Some(dmabuf) = bo.dmabuf() else {
             return Err(std::io::Error::other("GBM buffer did not export a dmabuf"));
         };
+        log::debug!(
+            "Created scanout GBM buffer: size={}x{} modifier={:?} planes={}",
+            dmabuf.width,
+            dmabuf.height,
+            dmabuf.modifier,
+            dmabuf.planes.len()
+        );
         let drm_fb = match Self::add_framebuffer(drm, dmabuf) {
             Ok(framebuffer) => framebuffer,
             Err(error) => {
@@ -2669,51 +2718,10 @@ impl Drm {
         })
     }
 
-    fn add_framebuffer_for_bo(drm: &DrmFd, bo: &BufferObject) -> std::io::Result<DrmFrameBuffer> {
-        let flags = match bo.modifier() {
-            Modifier::INVALID | Modifier::LINEAR => FbCmd2Flags::empty(),
-            _ => FbCmd2Flags::MODIFIERS,
-        };
-
-        match drm.add_planar_framebuffer(bo, flags) {
-            Ok(handle) => {
-                log::debug!(
-                    "Created DRM framebuffer directly from GBM BO: handle={:?} size={:?} format={:?} flags={:?}",
-                    handle,
-                    drm::buffer::Buffer::size(bo),
-                    drm::buffer::Buffer::format(bo),
-                    flags
-                );
-                Ok(DrmFrameBuffer { drm: drm.clone(), handle })
-            }
-            Err(source) => {
-                log::debug!(
-                    "Direct DRM framebuffer creation from GBM BO failed: size={:?} format={:?} planes={} modifier={:?} flags={:?} error={:?}",
-                    drm::buffer::Buffer::size(bo),
-                    drm::buffer::Buffer::format(bo),
-                    bo.plane_count(),
-                    bo.modifier(),
-                    flags,
-                    source
-                );
-                if bo.plane_count() == 1 && drm::buffer::Buffer::format(bo) == DrmFourcc::Argb8888 {
-                    drm.add_framebuffer(bo, 32, 32).map(|handle| {
-                        log::debug!(
-                            "Created legacy DRM framebuffer from GBM BO: handle={:?} size={:?} format={:?}",
-                            handle,
-                            drm::buffer::Buffer::size(bo),
-                            drm::buffer::Buffer::format(bo)
-                        );
-                        DrmFrameBuffer { drm: drm.clone(), handle }
-                    })
-                } else {
-                    Err(source)
-                }
-            }
-        }
-    }
-
     fn add_framebuffer(drm: &DrmFd, dmabuf: &DmaBuf) -> std::io::Result<DrmFrameBuffer> {
+        if dmabuf.planes.is_empty() || dmabuf.planes.len() > 4 {
+            return Err(std::io::Error::other("dmabuf plane count is outside 1..=4"));
+        }
         let mut modifier = Modifier::ZERO;
         let mut flags = FbCmd2Flags::empty();
         if dmabuf.modifier != Modifier::INVALID && dmabuf.modifier != Modifier::LINEAR {
@@ -2724,22 +2732,24 @@ impl Drm {
         const N: usize = 4;
         let (mut strides, mut offsets, mut handles, mut modifiers) =
             ([0u32; N], [0u32; N], [0u32; N], [0u64; N]);
-
-        for ((((plane, stride), offset), handle), modifiers) in dmabuf
-            .planes
-            .iter()
-            .zip(&mut strides)
-            .zip(&mut offsets)
-            .zip(&mut handles)
-            .zip(&mut modifiers)
-        {
-            *stride = plane.stride;
-            *offset = plane.offset;
-            *modifiers = modifier.0;
-            *handle = prime_fd_to_gem_handle(drm, plane.fd.as_raw_fd()).unwrap();
+        let imported = match import_plane_handles(dmabuf.planes.len(), |index| {
+            prime_fd_to_gem_handle(drm, dmabuf.planes[index].fd.as_raw_fd())
+        }) {
+            Ok(imported) => imported,
+            Err((imported, error)) => {
+                close_imported_gem_handles(drm, &imported);
+                return Err(error);
+            }
+        };
+        for (index, handle) in imported.iter().copied().enumerate() {
+            let plane = &dmabuf.planes[index];
+            strides[index] = plane.stride;
+            offsets[index] = plane.offset;
+            modifiers[index] = modifier.0;
+            handles[index] = handle;
         }
 
-        let framebuffer = drm_ffi::mode::add_fb2(
+        let framebuffer = match drm_ffi::mode::add_fb2(
             drm.as_fd(),
             dmabuf.width as u32,
             dmabuf.height as u32,
@@ -2749,17 +2759,19 @@ impl Drm {
             &offsets,
             &modifiers,
             flags.bits(),
-        )?;
-
-        let handles = &handles[..dmabuf.planes.len()];
-        close_gem_handles(drm, handles).unwrap();
-
-        let framebuffer = DrmFrameBuffer {
-            drm: drm.clone(),
-            handle: NonZeroU32::new(framebuffer.fb_id).unwrap().into(),
+        ) {
+            Ok(framebuffer) => framebuffer,
+            Err(error) => {
+                close_imported_gem_handles(drm, &imported);
+                return Err(error);
+            }
         };
+        close_imported_gem_handles(drm, &imported);
 
-        Ok(framebuffer)
+        let Some(handle) = NonZeroU32::new(framebuffer.fb_id) else {
+            return Err(std::io::Error::other("DRM addfb2 returned framebuffer id 0"));
+        };
+        Ok(DrmFrameBuffer { drm: drm.clone(), handle: handle.into() })
     }
 
     fn find_valid_connectors(
@@ -3159,18 +3171,65 @@ fn prime_fd_to_gem_handle(fd: &DrmFd, prime: RawFd) -> std::io::Result<u32> {
     Ok(handle)
 }
 
-fn close_gem_handles(fd: &DrmFd, handles: &[u32]) -> std::io::Result<()> {
-    let close = |handle: u32| drm_ffi::gem::close(fd.as_fd(), handle);
-
-    if handles.iter().skip(1).all(|h| *h == handles[0]) {
-        close(handles[0]).unwrap();
-    } else {
-        let set: BTreeSet<_> = handles.iter().collect();
-        for handle in set {
-            close(*handle).unwrap();
+/// Import each plane independently. On the first failure, the `Vec` contains
+/// exactly the handles whose references the caller must close.
+fn import_plane_handles(
+    count: usize,
+    mut import_one: impl FnMut(usize) -> std::io::Result<u32>,
+) -> Result<Vec<u32>, (Vec<u32>, std::io::Error)> {
+    let mut imported = Vec::with_capacity(count);
+    for index in 0..count {
+        match import_one(index) {
+            Ok(handle) => imported.push(handle),
+            Err(error) => return Err((imported, error)),
         }
     }
-    Ok(())
+    Ok(imported)
+}
+
+/// Each successful `drmPrimeFDToHandle` owns one GEM reference, even when two
+/// planes return the same handle number. Closing only the distinct values
+/// leaks one reference per repeated import.
+fn imported_gem_handles_to_close(handles: &[u32]) -> Vec<u32> {
+    handles
+        .iter()
+        .copied()
+        .filter(|handle| *handle != 0)
+        .collect()
+}
+
+fn close_imported_gem_handles(fd: &DrmFd, handles: &[u32]) {
+    for handle in imported_gem_handles_to_close(handles) {
+        if let Err(error) = drm_ffi::gem::close(fd.as_fd(), handle) {
+            log::warn!("failed to close imported GEM handle {handle}: {error}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod gem_import_tests {
+    use super::{import_plane_handles, imported_gem_handles_to_close};
+
+    #[test]
+    fn repeated_plane_imports_are_closed_once_per_import() {
+        assert_eq!(imported_gem_handles_to_close(&[4, 4, 9, 0]), vec![4, 4, 9]);
+    }
+
+    #[test]
+    fn a_failed_plane_import_keeps_only_handles_already_acquired() {
+        let mut attempts = 0;
+        let error = import_plane_handles(3, |_| {
+            attempts += 1;
+            if attempts == 2 {
+                Err(std::io::Error::other("prime import failed"))
+            } else {
+                Ok(7)
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error.0, vec![7]);
+        assert_eq!(error.1.to_string(), "prime import failed");
+    }
 }
 
 /// One scanout buffer. Drop deletes the GPU target, then the DRM framebuffer, then the GBM BO.

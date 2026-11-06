@@ -330,7 +330,7 @@ mod tests {
         let fd = open_render_node()?;
         let drm = DrmFd::from_owned(fd);
         let gbm = GbmDevice::new(&drm).ok()?;
-        let renderer = create_renderer(RendererSelection::Vulkan, &gbm, &gbm).ok()?;
+        let renderer = create_renderer(RendererSelection::Vulkan, &gbm).ok()?;
         Some(Setup { renderer, gbm })
     }
 

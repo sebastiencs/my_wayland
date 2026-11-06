@@ -256,6 +256,8 @@ impl DeferredRelease {
     }
 }
 
+/// Export one timeline point from the render/allocator device. KMS consumes the
+/// resulting sync file through `IN_FENCE_FD` and never receives this syncobj handle.
 fn export_timeline_point_sync_file(
     drm: &DrmFd,
     handle: syncobj::Handle,

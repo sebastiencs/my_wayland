@@ -20,14 +20,27 @@ use {
 pub enum GbmError {
     #[error("IO Error: `{0}`")]
     IO(#[from] std::io::Error),
-    #[error("Failed to create gbm device")]
-    FailedCreate,
+    #[error("failed to create an independent GBM allocator: {0}")]
+    FailedCreate(String),
+}
+
+/// Which independent DRM file description owns the GBM device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AllocatorOrigin {
+    RenderNode,
+    PrimaryLease,
+    PrimaryReopen,
+}
+
+pub(crate) fn allocator_fallback_order() -> [AllocatorOrigin; 3] {
+    [AllocatorOrigin::RenderNode, AllocatorOrigin::PrimaryLease, AllocatorOrigin::PrimaryReopen]
 }
 
 #[derive(Debug)]
 pub struct GbmDevice {
     drm: DrmFd,
     pub gbm_device: *mut sys::gbm_device,
+    origin: AllocatorOrigin,
 }
 
 impl AsFd for GbmDevice {
@@ -42,9 +55,15 @@ impl AsRawFd for GbmDevice {
     }
 }
 
-impl drm::Device for GbmDevice {}
+impl GbmDevice {
+    pub(crate) fn describe_node(&self) -> String {
+        self.drm.describe_node()
+    }
 
-impl drm::control::Device for GbmDevice {}
+    pub(crate) fn allocator_fd(&self) -> DrmFd {
+        self.drm.clone()
+    }
+}
 
 // impl Device
 
@@ -67,13 +86,57 @@ impl drm::control::Device for GbmDevice {}
 // };
 
 impl GbmDevice {
-    /// Create GBM on the same DRM master fd used for KMS (not a lease fd).
-    pub fn new(drm: &DrmFd) -> Result<Self, GbmError> {
+    /// Create GBM on an independent DRM file description.
+    ///
+    /// The KMS master is only the source used to find that description. The
+    /// render node is preferred. An empty primary lease, then a separately
+    /// reopened primary node, are fallbacks. The caller's file description is
+    /// never reused.
+    pub fn new(kms: &DrmFd) -> Result<Self, GbmError> {
+        let mut failures = Vec::new();
+        for origin in allocator_fallback_order() {
+            match Self::open_allocator(kms, origin) {
+                Ok(device) => {
+                    log::info!(
+                        "GBM allocator selected {:?}: primary={} allocator={}",
+                        device.origin,
+                        kms.describe_node(),
+                        device.drm.describe_node()
+                    );
+                    return Ok(device);
+                }
+                Err(error) => {
+                    log::warn!("GBM allocator candidate {origin:?} failed: {error}");
+                    failures.push(format!("{origin:?}: {error}"));
+                }
+            }
+        }
+        Err(GbmError::FailedCreate(failures.join("; ")))
+    }
+
+    fn open_allocator(kms: &DrmFd, origin: AllocatorOrigin) -> Result<Self, GbmError> {
+        let drm = match origin {
+            AllocatorOrigin::RenderNode => DrmFd::from_owned(
+                kms.open_render_node()
+                    .map_err(|error| GbmError::FailedCreate(error.to_string()))?,
+            ),
+            AllocatorOrigin::PrimaryLease => kms.try_create_lease()?,
+            AllocatorOrigin::PrimaryReopen => DrmFd::from_owned(
+                kms.open_primary_node()
+                    .map_err(|error| GbmError::FailedCreate(error.to_string()))?,
+            ),
+        };
         let gbm_device = unsafe { sys::gbm_create_device(drm.as_raw_fd()) };
         if gbm_device.is_null() {
-            return Err(GbmError::FailedCreate);
+            return Err(GbmError::FailedCreate(format!("{origin:?}: gbm_create_device failed")));
         }
-        Ok(Self { drm: drm.clone(), gbm_device })
+        if !probe_rendering_export(gbm_device) {
+            unsafe { sys::gbm_device_destroy(gbm_device) };
+            return Err(GbmError::FailedCreate(format!(
+                "{origin:?}: rendering export probe failed"
+            )));
+        }
+        Ok(Self { drm, gbm_device, origin })
     }
 
     pub fn create_surface(&self, mode: &drm::control::Mode) -> GbmSurface {
@@ -108,18 +171,6 @@ impl GbmDevice {
         )
     }
 
-    pub fn create_bo_with_size_no_export(
-        &self,
-        width: u32,
-        height: u32,
-        format: drm::buffer::DrmFourcc,
-        flags: UseFlags,
-        modifiers: &[Modifier],
-    ) -> BufferObject {
-        let bo = self.allocate_bo(width, height, format, flags, modifiers);
-        BufferObject { bo, dmabuf: None }
-    }
-
     pub fn create_bo_with_size(
         &self,
         width: u32,
@@ -143,11 +194,7 @@ impl GbmDevice {
         let bo = unsafe {
             sys::gbm_bo_create(self.gbm_device, width, height, format as u32, flags.bits())
         };
-        if bo.is_null() {
-            None
-        } else {
-            Some(BufferObject { bo, dmabuf: Some(make_dmabuf(bo)) })
-        }
+        exported_bo(bo)
     }
 
     pub(crate) fn try_create_bo_with_modifiers(
@@ -173,11 +220,7 @@ impl GbmDevice {
                 flags.bits(),
             )
         };
-        if bo.is_null() {
-            None
-        } else {
-            Some(BufferObject { bo, dmabuf: Some(make_dmabuf(bo)) })
-        }
+        exported_bo(bo)
     }
 
     fn allocate_bo(
@@ -229,41 +272,77 @@ impl GbmDevice {
     }
 }
 
+fn probe_rendering_export(device: *mut sys::gbm_device) -> bool {
+    let bo = unsafe {
+        sys::gbm_bo_create(
+            device,
+            1,
+            1,
+            drm::buffer::DrmFourcc::Xrgb8888 as u32,
+            UseFlags::RENDERING.bits(),
+        )
+    };
+    if bo.is_null() {
+        return false;
+    }
+    let fd = unsafe { sys::gbm_bo_get_fd(bo) };
+    unsafe { sys::gbm_bo_destroy(bo) };
+    if fd < 0 {
+        return false;
+    }
+    unsafe { libc::close(fd) };
+    true
+}
+
+fn exported_bo(bo: *mut gbm_bo) -> Option<BufferObject> {
+    if bo.is_null() {
+        return None;
+    }
+    let Some(dmabuf) = try_export_dmabuf(bo) else {
+        unsafe { sys::gbm_bo_destroy(bo) };
+        return None;
+    };
+    Some(BufferObject { bo, dmabuf: Some(dmabuf) })
+}
+
 fn make_dmabuf(bo: *mut libc::c_void) -> DmaBuf {
+    try_export_dmabuf(bo).expect("GBM buffer exported a dmabuf")
+}
+
+fn try_export_dmabuf(bo: *mut libc::c_void) -> Option<DmaBuf> {
     unsafe {
         let nplanes = sys::gbm_bo_get_plane_count(bo);
-        DmaBuf {
+        if nplanes <= 0 || nplanes > 4 {
+            return None;
+        }
+        let format = drm_fourcc::DrmFourcc::try_from(sys::gbm_bo_get_format(bo)).ok()?;
+        let format = *FORMATS_MAP.get(&format)?;
+        let mut planes = Vec::with_capacity(nplanes as usize);
+        for index in 0..nplanes {
+            let offset = sys::gbm_bo_get_offset(bo, index);
+            let stride = sys::gbm_bo_get_stride_for_plane(bo, index);
+            let mut fd = sys::gbm_bo_get_fd_for_plane(bo, index);
+            if fd < 0 && nplanes == 1 {
+                fd = sys::gbm_bo_get_fd(bo);
+                if fd >= 0 {
+                    log::debug!(
+                        "gbm_bo_get_fd_for_plane failed for single-plane BO, falling back to gbm_bo_get_fd"
+                    );
+                }
+            }
+            if fd < 0 {
+                return None;
+            }
+            planes.push(DmaBufPlane { offset, stride, fd: OwnedFd::from_raw_fd(fd) });
+        }
+        Some(DmaBuf {
             id: DmaBufId::next(),
             width: sys::gbm_bo_get_width(bo) as i32,
             height: sys::gbm_bo_get_height(bo) as i32,
-            format: {
-                let format = sys::gbm_bo_get_format(bo);
-                let format = drm_fourcc::DrmFourcc::try_from(format).unwrap();
-                FORMATS_MAP.get(&format).unwrap()
-            },
+            format,
             modifier: Modifier(sys::gbm_bo_get_modifier(bo)),
-            planes: {
-                (0..nplanes)
-                    .map(|index| {
-                        let offset = sys::gbm_bo_get_offset(bo, index);
-                        let stride = sys::gbm_bo_get_stride_for_plane(bo, index);
-                        let mut fd = sys::gbm_bo_get_fd_for_plane(bo, index);
-                        if fd < 0 && nplanes == 1 {
-                            fd = sys::gbm_bo_get_fd(bo);
-                            if fd >= 0 {
-                                log::debug!(
-                                    "gbm_bo_get_fd_for_plane failed for single-plane BO, falling back to gbm_bo_get_fd"
-                                );
-                            }
-                        }
-                        assert!(fd >= 0);
-                        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-                        DmaBufPlane { offset, stride, fd }
-                    })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice()
-            },
-        }
+            planes: planes.into_boxed_slice(),
+        })
     }
 }
 
@@ -412,6 +491,41 @@ impl Drop for BufferObject {
             }
             self.bo = std::ptr::null_mut();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    use {
+        super::{allocator_fallback_order, AllocatorOrigin, GbmDevice},
+        crate::drm::DrmFd,
+    };
+
+    #[test]
+    fn allocator_candidates_prefer_the_render_node() {
+        assert_eq!(
+            allocator_fallback_order(),
+            [
+                AllocatorOrigin::RenderNode,
+                AllocatorOrigin::PrimaryLease,
+                AllocatorOrigin::PrimaryReopen,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_non_drm_fd_does_not_become_the_allocator() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let _write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let error = GbmDevice::new(&DrmFd::from_owned(read)).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("RenderNode"), "{text}");
+        assert!(text.contains("PrimaryLease"), "{text}");
+        assert!(text.contains("PrimaryReopen"), "{text}");
     }
 }
 

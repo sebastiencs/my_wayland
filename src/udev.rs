@@ -213,13 +213,23 @@ impl Model for Udev {
                         }
                     }
                     DevicePauseKind::Pause | DevicePauseKind::Force => {
-                        let live_drm = Self::find_drm_id_for_devnum(state, devnum).is_some();
+                        let drm_id = Self::find_drm_id_for_devnum(state, devnum);
                         let parked_drm = self
                             .parked
                             .get(&devnum)
                             .is_some_and(|parked| matches!(parked.kind, ParkedKind::Drm(_)));
+                        if let Some(drm_id) = drm_id {
+                            log::info!(
+                                "pausing primary DRM device {devnum}: stopping KMS submissions; allocator {} stays open",
+                                state.drm.get(drm_id).describe_allocator()
+                            );
+                        } else if parked_drm {
+                            log::info!(
+                                "pausing parked primary DRM device {devnum}; its allocator is not open"
+                            );
+                        }
                         self.quiesce_device(devnum, state, dispatcher);
-                        if live_drm || parked_drm {
+                        if drm_id.is_some() || parked_drm {
                             self.awaiting_drm_resume.insert(devnum);
                         }
                         dispatcher.dispatch(DbusAction::DevicePauseQuiesced { devnum });
@@ -447,6 +457,9 @@ impl Udev {
         discard_backend_presentation_feedbacks(state, drm_id, dispatcher);
         dispatcher.stop_model(drm_id);
         if let Some(devnum) = devnum {
+            log::info!(
+                "releasing logind primary device {devnum}; the render-node allocator closes with the backend"
+            );
             dispatcher.dispatch(DbusAction::ReleaseDevice { devnum });
         }
         dispatcher.dispatch(UdevAction::FinalizeBackendRemoval { drm_id });
@@ -483,12 +496,17 @@ impl Udev {
             return;
         };
 
-        // From xf86drm.h
-        // #define DRM_DIR_NAME  "/dev/dri"
-        // #define DRM_PRIMARY_MINOR_NAME  "card"
-        // #define DRM_CONTROL_MINOR_NAME  "controlD"
-        // #define DRM_RENDER_MINOR_NAME   "renderD"
-        // #define DRM_PROC_NAME "/proc/dri/" /* For backward Linux compatibility */
+        let Some(sysname) = device.sysname().to_str() else {
+            log::debug!("ignoring DRM device {devnum}: sysname is not UTF-8");
+            return;
+        };
+        if !crate::drm::node::logind_takes_drm_node(sysname) {
+            log::debug!(
+                "ignoring DRM node {sysname} ({devnum}); logind TakeDevice is limited to cardN"
+            );
+            return;
+        }
+        log::info!("requesting logind TakeDevice for primary DRM node {sysname} ({devnum})");
         dispatcher.dispatch(DbusAction::TakeDevice { devnum });
         self.pending.insert(devnum, PendingControl::Drm(device));
     }
@@ -589,11 +607,19 @@ impl Udev {
             self.awaiting_drm_resume.remove(&devnum);
             {
                 // The resume fd is the temporary master. Closing it, then
-                // SET_MASTER, keeps the GBM and framebuffer ids on the original fd.
+                // SET_MASTER on the original primary fd, leaves the renderer and
+                // allocator file description untouched.
                 let drm = state.drm.get(drm_id);
+                let allocator = drm.describe_allocator();
                 drop(fd);
                 if let Err(error) = drm.reclaim_master() {
-                    log::warn!("DRM device {devnum} kept its fd, setmaster failed: {error}");
+                    log::warn!(
+                        "primary DRM device {devnum} kept its fd, setmaster failed: {error}; allocator {allocator} remains open"
+                    );
+                } else {
+                    log::info!(
+                        "resumed primary DRM device {devnum}: reclaimed master on the primary fd; allocator {allocator} remains open"
+                    );
                 }
             }
             let failed = resume_drm_backend(state, dispatcher, drm_id);

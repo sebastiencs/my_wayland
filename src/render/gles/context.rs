@@ -458,7 +458,7 @@ pub fn make_display(
         // let handle = drm::buffer::Buffer::handle(&bo);
         // dbg!(handle);
 
-        let fb = gbm.add_framebuffer(&bo, 24, 32).unwrap();
+        let fb = drm_fd.add_framebuffer(&bo, 24, 32).unwrap();
         let mode = connector.preferred_mode.unwrap();
 
         dbg!(&connector.crtcs);
@@ -468,7 +468,7 @@ pub fn make_display(
             .unwrap();
 
         if let Some((fb, bo)) = previous.replace((fb, bo)) {
-            gbm.destroy_framebuffer(fb).unwrap();
+            drm_fd.destroy_framebuffer(fb).unwrap();
             gbm_surface.release_buffer(bo);
         }
 

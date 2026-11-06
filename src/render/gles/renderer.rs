@@ -5,6 +5,8 @@ use std::{
     rc::{Rc, Weak},
 };
 
+use khronos_types::gl;
+
 use crate::{
     dmabuf::{DmaBuf, DmaBufId},
     gbm::GbmDevice,
@@ -182,15 +184,41 @@ impl Renderer for GlesRenderer {
         &mut self,
         source: &DmaBuf,
     ) -> Result<Box<dyn RenderTarget>, RendererError> {
+        let gpu_diagnostics = std::env::var_os("TEMA_GPU_DIAGNOSTICS").is_some();
+        log::debug!(
+            "GLES output import begin: id={:?} size={}x{} format={} modifier={:?} planes={:?}",
+            source.id,
+            source.width,
+            source.height,
+            source.format.name,
+            source.modifier,
+            source
+                .planes
+                .iter()
+                .map(|plane| (plane.offset, plane.stride))
+                .collect::<Vec<_>>()
+        );
         self.context.bind();
         let image = self.context.import_dmabuf(source);
+        log::debug!("GLES output import created EGL image: id={:?}", source.id);
         let mut framebuffer = self.context.make_fb_from_image(&image, source);
-        framebuffer.imported_image = Some(
-            image
-                .into_texture(self.context.device_id())
-                .map_err(|_| RendererError::ImportFailed)?,
-        );
+        log::debug!("GLES output import created framebuffer: id={:?}", source.id);
+        // The renderbuffer already refers to this image. Holding the image keeps
+        // that storage alive without also binding it as a texture.
+        framebuffer.imported_image = Some(image);
+        log::debug!("GLES output import clearing framebuffer: id={:?}", source.id);
         framebuffer.clear();
+        if gpu_diagnostics {
+            unsafe { gl::Finish() };
+            let error = unsafe { gl::GetError() };
+            log::debug!(
+                "GLES output import blocking clear completed: id={:?} gl_error=0x{:x}",
+                source.id,
+                error
+            );
+        } else {
+            log::debug!("GLES output import queued clear: id={:?}", source.id);
+        }
         Ok(Box::new(framebuffer))
     }
 

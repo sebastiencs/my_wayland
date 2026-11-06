@@ -115,7 +115,7 @@ impl Object for WpLinuxDrmSyncobjManagerV1 {
                     drop(fd);
                     return Ok(());
                 }
-                let drm_fd = drm.fd();
+                let drm_fd = drm.allocator_fd();
                 let borrowed = unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) };
                 let handle = match drm_fd.fd_to_syncobj(borrowed, false) {
                     Ok(handle) => handle,
