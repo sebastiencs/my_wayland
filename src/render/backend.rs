@@ -157,6 +157,8 @@ pub struct RenderFrame<'a> {
     pub preserve_contents: bool,
     pub presentation_transform: OutputPresentationTransform,
     pub sync_mode: RenderSyncMode,
+    /// Replaces the target's usual clear. Output frames leave this empty.
+    pub clear_color: Option<[f32; 4]>,
     /// Blur padding uses this size instead of the target size.
     ///
     /// Output rendering leaves this empty and measures blur against the target.

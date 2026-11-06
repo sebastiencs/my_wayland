@@ -236,6 +236,7 @@ impl Renderer for VulkanRenderer {
                 presentation_transform,
                 sync_mode: RenderSyncMode::BlockingFinishFallback,
                 blur_reference: Some(blur_reference),
+                clear_color: None,
             },
             &mut self.pending_frames,
             acquires,
@@ -423,6 +424,7 @@ mod tests {
                     presentation_transform: OutputPresentationTransform::FlipY,
                     sync_mode: RenderSyncMode::BlockingFinishFallback,
                     blur_reference: None,
+                    clear_color: None,
                 },
             )
             .expect("clear the scanout target");
@@ -497,6 +499,7 @@ mod tests {
                     presentation_transform: OutputPresentationTransform::FlipY,
                     sync_mode: mode,
                     blur_reference: None,
+                    clear_color: None,
                 },
             )
             .expect("render");

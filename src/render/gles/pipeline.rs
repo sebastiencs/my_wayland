@@ -67,6 +67,7 @@ impl EglFrameBuffer {
         damage: &DamageRegion,
         preserve_contents: bool,
         output_transform: OutputPresentationTransform,
+        clear_color: Option<[f32; 4]>,
     ) {
         let Some(output_bounds) = self.output_bounds() else {
             return;
@@ -77,7 +78,10 @@ impl EglFrameBuffer {
         unsafe {
             gl::BindFramebuffer(gl::FRAMEBUFFER as _, self.framebuffer_object);
             gl::Viewport(0, 0, self.width, self.height);
-            set_output_clear_color();
+            match clear_color {
+                Some([red, green, blue, alpha]) => gl::ClearColor(red, green, blue, alpha),
+                None => set_output_clear_color(),
+            }
             gl::BlendFunc(gl::ONE as _, gl::ONE_MINUS_SRC_ALPHA as _);
         }
 
@@ -160,8 +164,9 @@ impl EglFrameBuffer {
         damage: &DamageRegion,
         preserve_contents: bool,
         output_transform: OutputPresentationTransform,
+        clear_color: Option<[f32; 4]>,
     ) -> RenderCompletion {
-        self.clear_damage(damage, preserve_contents, output_transform);
+        self.clear_damage(damage, preserve_contents, output_transform, clear_color);
 
         if recipe.is_empty() {
             return self.finish_render(render_sync_mode);

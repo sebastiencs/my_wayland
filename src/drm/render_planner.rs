@@ -107,11 +107,15 @@ pub(super) fn build_frame_plan(
     let output_bounds = output.output_bounds();
     let mut items = items;
     let mut software_cursor_items = software_cursor_items;
+    let mut frame_elements = frame_elements;
     super::commit_visible_scene_state(&mut items);
     super::commit_visible_scene_state(&mut software_cursor_items);
-    if cursor_plane.is_none() {
-        items.append(&mut software_cursor_items);
-    }
+    incorporate_software_cursor(
+        &mut items,
+        &mut software_cursor_items,
+        &mut frame_elements,
+        cursor_plane.is_some(),
+    );
     let (scene, frame_callback_surfaces, presentation_feedbacks) =
         super::collect_submission_metadata(&items, &software_cursor_items);
     let has_effects = frame_elements
@@ -204,6 +208,26 @@ pub(super) fn build_frame_plan(
             && !has_effects,
         protected,
     }
+}
+
+/// A software cursor is both a scene item and the last overlay texture. A live
+/// hardware cursor keeps those items out of the recipe so the cursor is not drawn twice.
+pub(super) fn incorporate_software_cursor(
+    items: &mut Vec<super::SceneItem>,
+    software_cursor_items: &mut Vec<super::SceneItem>,
+    frame_elements: &mut Vec<super::RecordedFrameElement>,
+    cursor_plane_active: bool,
+) {
+    if cursor_plane_active {
+        return;
+    }
+    let first_index = items.len();
+    let count = software_cursor_items.len();
+    frame_elements.extend((0..count).map(|offset| super::RecordedFrameElement::Texture {
+        phase: crate::render::FramePhase::Overlay,
+        item_index: first_index + offset,
+    }));
+    items.append(software_cursor_items);
 }
 
 fn collect_protected_output_render_plan(
@@ -386,6 +410,21 @@ mod tests {
         )
     }
 
+    fn cursor_item(bounds: RectI, fingerprint: u64) -> super::super::SceneItem {
+        let mut cursor =
+            item(fingerprint as u32, bounds, u8::MAX, super::super::SceneItemMask::None, bounds);
+        cursor.state.key = super::super::SceneItemKey::Cursor;
+        cursor.state.surface_key = None;
+        cursor.state.content_key =
+            super::super::SceneItemContentKey::NamedCursor(crate::cursor::CursorImageContentKey {
+                width: bounds.width,
+                height: bounds.height,
+                fingerprint,
+            });
+        cursor.state_has_alpha = true;
+        cursor
+    }
+
     fn item(
         id: u32,
         bounds: RectI,
@@ -563,6 +602,199 @@ mod tests {
             false,
         );
         assert!(covers_output(&damage));
+    }
+
+    #[test]
+    fn software_cursor_is_the_final_overlay_once() {
+        let window_bounds = RectI::new(0, 0, 200, 100).unwrap();
+        let cursor_bounds = RectI::new(12, 18, 24, 24).unwrap();
+        let mut items =
+            vec![item(1, window_bounds, u8::MAX, super::super::SceneItemMask::None, window_bounds)];
+        let mut software_cursor_items = vec![cursor_item(cursor_bounds, 7)];
+        let mut frame_elements = vec![super::super::RecordedFrameElement::Texture {
+            phase: crate::render::FramePhase::Content,
+            item_index: 0,
+        }];
+
+        incorporate_software_cursor(
+            &mut items,
+            &mut software_cursor_items,
+            &mut frame_elements,
+            false,
+        );
+
+        assert!(software_cursor_items.is_empty());
+        assert_eq!(items.len(), 2);
+        assert!(matches!(items[1].state.key, super::super::SceneItemKey::Cursor));
+        assert_eq!(
+            frame_elements,
+            vec![
+                super::super::RecordedFrameElement::Texture {
+                    phase: crate::render::FramePhase::Content,
+                    item_index: 0,
+                },
+                super::super::RecordedFrameElement::Texture {
+                    phase: crate::render::FramePhase::Overlay,
+                    item_index: 1,
+                },
+            ]
+        );
+        let overlay_textures = frame_elements
+            .iter()
+            .filter(|element| {
+                matches!(
+                    element,
+                    super::super::RecordedFrameElement::Texture {
+                        phase: crate::render::FramePhase::Overlay,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(overlay_textures, 1);
+        let recipe = super::super::build_output_frame_recipe(&items, &frame_elements);
+        assert!(matches!(
+            recipe.elements.last(),
+            Some(crate::render::FrameElement::Texture {
+                phase: crate::render::FramePhase::Overlay,
+                element,
+            }) if element.x == cursor_bounds.x
+                && element.y == cursor_bounds.y
+                && element.width == cursor_bounds.width
+                && element.height == cursor_bounds.height
+        ));
+    }
+
+    #[test]
+    fn hardware_cursor_omits_software_cursor_from_the_recipe() {
+        let window_bounds = RectI::new(0, 0, 200, 100).unwrap();
+        let mut items =
+            vec![item(1, window_bounds, u8::MAX, super::super::SceneItemMask::None, window_bounds)];
+        let mut software_cursor_items = vec![cursor_item(RectI::new(12, 18, 24, 24).unwrap(), 7)];
+        let mut frame_elements = vec![super::super::RecordedFrameElement::Texture {
+            phase: crate::render::FramePhase::Content,
+            item_index: 0,
+        }];
+        let original_elements = frame_elements.clone();
+
+        incorporate_software_cursor(
+            &mut items,
+            &mut software_cursor_items,
+            &mut frame_elements,
+            true,
+        );
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(software_cursor_items.len(), 1);
+        assert_eq!(frame_elements, original_elements);
+        let recipe = super::super::build_output_frame_recipe(&items, &frame_elements);
+        assert!(recipe.elements.iter().all(|element| {
+            !matches!(
+                element,
+                crate::render::FrameElement::Texture {
+                    phase: crate::render::FramePhase::Overlay,
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn retry_fallback_records_the_held_software_cursor_once() {
+        let window_bounds = RectI::new(0, 0, 200, 100).unwrap();
+        let cursor_bounds = RectI::new(30, 40, 16, 16).unwrap();
+        let mut items =
+            vec![item(1, window_bounds, u8::MAX, super::super::SceneItemMask::None, window_bounds)];
+        let mut software_cursor_items =
+            vec![cursor_item(cursor_bounds, 3), cursor_item(cursor_bounds, 4)];
+        let mut frame_elements = vec![super::super::RecordedFrameElement::Texture {
+            phase: crate::render::FramePhase::Content,
+            item_index: 0,
+        }];
+
+        incorporate_software_cursor(
+            &mut items,
+            &mut software_cursor_items,
+            &mut frame_elements,
+            true,
+        );
+        assert_eq!(software_cursor_items.len(), 2);
+        incorporate_software_cursor(
+            &mut items,
+            &mut software_cursor_items,
+            &mut frame_elements,
+            false,
+        );
+        incorporate_software_cursor(
+            &mut items,
+            &mut software_cursor_items,
+            &mut frame_elements,
+            false,
+        );
+
+        assert!(software_cursor_items.is_empty());
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            frame_elements,
+            vec![
+                super::super::RecordedFrameElement::Texture {
+                    phase: crate::render::FramePhase::Content,
+                    item_index: 0,
+                },
+                super::super::RecordedFrameElement::Texture {
+                    phase: crate::render::FramePhase::Overlay,
+                    item_index: 1,
+                },
+                super::super::RecordedFrameElement::Texture {
+                    phase: crate::render::FramePhase::Overlay,
+                    item_index: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_software_cursor_list_leaves_the_recipe_unchanged() {
+        let window_bounds = RectI::new(0, 0, 80, 40).unwrap();
+        let mut items =
+            vec![item(1, window_bounds, u8::MAX, super::super::SceneItemMask::None, window_bounds)];
+        let mut software_cursor_items = Vec::new();
+        let mut frame_elements = vec![super::super::RecordedFrameElement::Texture {
+            phase: crate::render::FramePhase::Content,
+            item_index: 0,
+        }];
+        let original_elements = frame_elements.clone();
+
+        incorporate_software_cursor(
+            &mut items,
+            &mut software_cursor_items,
+            &mut frame_elements,
+            false,
+        );
+
+        assert_eq!(items.len(), 1);
+        assert!(matches!(items[0].state.key, super::super::SceneItemKey::Surface(_)));
+        assert_eq!(frame_elements, original_elements);
+    }
+
+    #[test]
+    fn moved_software_cursor_damages_previous_and_current_bounds() {
+        let previous_bounds = RectI::new(10, 10, 24, 24).unwrap();
+        let current_bounds = RectI::new(40, 12, 24, 24).unwrap();
+        let previous = cursor_item(previous_bounds, 7);
+        let mut current = cursor_item(current_bounds, 7);
+        current.damage = DamageRegion::new();
+        let damage = scene_change_damage(
+            output_bounds(),
+            &[current],
+            &[previous.state],
+            false,
+            false,
+            false,
+        );
+        assert!(damage.intersects_rect(previous_bounds));
+        assert!(damage.intersects_rect(current_bounds));
+        assert!(!covers_output(&damage));
     }
 
     #[test]

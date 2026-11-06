@@ -252,6 +252,7 @@ impl Renderer for GlesRenderer {
                 frame.damage,
                 frame.preserve_contents,
                 frame.presentation_transform,
+                frame.clear_color,
             ));
         }
         let Some(offscreen) = target.as_any().downcast_ref::<OffscreenColorTarget>() else {

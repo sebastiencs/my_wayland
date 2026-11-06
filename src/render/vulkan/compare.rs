@@ -122,6 +122,7 @@ fn paint_scene(
                 presentation_transform: presentation,
                 sync_mode: RenderSyncMode::BlockingFinishFallback,
                 blur_reference: None,
+                clear_color: None,
             },
         )
         .expect("render");
@@ -507,6 +508,7 @@ fn vulkan_draws_a_texture_when_the_frame_also_has_an_effect() {
                 presentation_transform: OutputPresentationTransform::FlipY,
                 sync_mode: RenderSyncMode::BlockingFinishFallback,
                 blur_reference: None,
+                clear_color: None,
             },
         )
         .expect("render the texture under the dim overlay");
@@ -540,6 +542,7 @@ fn paint_elements(
                 presentation_transform: OutputPresentationTransform::FlipY,
                 sync_mode: RenderSyncMode::BlockingFinishFallback,
                 blur_reference: None,
+                clear_color: None,
             },
         )
         .expect("render");
@@ -782,6 +785,7 @@ fn vulkan_preserves_untouched_scanout_pixels() {
                     presentation_transform: OutputPresentationTransform::FlipY,
                     sync_mode: RenderSyncMode::BlockingFinishFallback,
                     blur_reference: None,
+                    clear_color: None,
                 },
             )
             .expect("paint the scanout buffer");
@@ -797,6 +801,7 @@ fn vulkan_preserves_untouched_scanout_pixels() {
                     presentation_transform: OutputPresentationTransform::FlipY,
                     sync_mode: RenderSyncMode::BlockingFinishFallback,
                     blur_reference: None,
+                    clear_color: None,
                 },
             )
             .expect("redraw the damaged half");
@@ -816,4 +821,138 @@ fn vulkan_preserves_untouched_scanout_pixels() {
             }
         }
     }
+}
+
+fn linear_cursor_bo(gbm: &GbmDevice, size: u32) -> Option<crate::gbm::BufferObject> {
+    let attempts = [Some(UseFlags::SCANOUT | UseFlags::RENDERING), Some(UseFlags::empty()), None];
+    attempts
+        .into_iter()
+        .find_map(|flags| gbm.try_create_linear_cursor_bo(size, size, flags))
+}
+
+fn render_cursor_image(
+    renderer: &mut dyn Renderer,
+    target: &mut dyn crate::render::RenderTarget,
+    texture: Rc<dyn Texture>,
+    image_width: i32,
+    image_height: i32,
+    target_size: i32,
+) {
+    let image = RectI::new(0, 0, image_width, image_height).expect("image");
+    let bounds = RectI::new(0, 0, target_size, target_size).expect("target");
+    let recipe = OutputFrameRecipe {
+        elements: vec![FrameElement::Texture {
+            phase: FramePhase::Content,
+            element: TextureElement {
+                source: TextureSource::Texture,
+                texture,
+                x: 0,
+                y: 0,
+                width: image_width,
+                height: image_height,
+                tex_transform: Mat3::identity(),
+                damage: DamageRegion::from_rect(image),
+                blend: true,
+                alpha: u8::MAX,
+                mask: TextureMask::None,
+            },
+        }],
+    };
+    let damage = DamageRegion::from_rect(bounds);
+    renderer
+        .render(
+            target,
+            RenderFrame {
+                recipe: &recipe,
+                damage: &damage,
+                preserve_contents: false,
+                presentation_transform: OutputPresentationTransform::FlipY,
+                sync_mode: RenderSyncMode::BlockingFinishFallback,
+                blur_reference: None,
+                clear_color: Some([0.0, 0.0, 0.0, 0.0]),
+            },
+        )
+        .expect("cursor render");
+}
+
+fn cursor_pixel(bytes: &[u8], x: i32, y: i32) -> [u8; 4] {
+    let start = y as usize * 16 + x as usize * 4;
+    bytes[start..start + 4].try_into().expect("pixel")
+}
+
+#[test]
+fn vulkan_cursor_target_keeps_top_left_and_clears_the_rest() {
+    let Some(mut pair) = pair() else {
+        eprintln!("skipping Vulkan cursor target: no matching DRM node");
+        return;
+    };
+    let Some(bo) = linear_cursor_bo(&pair.gbm, 4) else {
+        eprintln!("skipping Vulkan cursor target: no linear ARGB8888 scanout buffer");
+        return;
+    };
+    let modifier = bo.modifier();
+    if modifier != crate::drm::Modifier::LINEAR && modifier != crate::drm::Modifier::INVALID {
+        eprintln!("skipping Vulkan cursor target: modifier {modifier:?} is not linear");
+        return;
+    }
+    let Some(dmabuf) = bo.dmabuf() else {
+        eprintln!("skipping Vulkan cursor target: buffer exported no dma-buf");
+        return;
+    };
+    let mut target = match pair.vulkan.import_output_target(dmabuf) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("skipping Vulkan cursor target: import failed: {error}");
+            return;
+        }
+    };
+    let rgba = [
+        255, 0, 0, 255, 0, 255, 0, 255, //
+        0, 0, 255, 255, 255, 255, 0, 255,
+    ];
+    let named = pair
+        .vulkan
+        .upload_rgba(&rgba, 2, 2)
+        .expect("named cursor upload");
+    render_cursor_image(&mut *pair.vulkan, &mut *target, named, 2, 2, 4);
+    let mut bytes = vec![0u8; 4 * 4 * 4];
+    let read = RectI::new(0, 0, 4, 4).unwrap();
+    pair.vulkan
+        .readback(&*target, read, 16, &mut bytes)
+        .expect("cursor readback");
+    assert_eq!(cursor_pixel(&bytes, 0, 0), [0, 0, 255, 255], "top-left stays red");
+    assert_eq!(cursor_pixel(&bytes, 0, 1), [255, 0, 0, 255], "second row stays blue");
+    assert_eq!(cursor_pixel(&bytes, 3, 3), [0, 0, 0, 0], "outside the cursor is transparent");
+
+    let shm = [
+        1, 2, 3, 255, 0, 0, 0, 0, //
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let imported = pair
+        .vulkan
+        .import_shm(ShmImage {
+            bytes: &shm,
+            width: 2,
+            height: 2,
+            stride: 8,
+            fourcc: DrmFourcc::Argb8888,
+        })
+        .expect("shm cursor import");
+    render_cursor_image(&mut *pair.vulkan, &mut *target, imported, 2, 2, 4);
+    pair.vulkan
+        .readback(&*target, read, 16, &mut bytes)
+        .expect("shm readback");
+    assert_eq!(cursor_pixel(&bytes, 0, 0), [1, 2, 3, 255]);
+    assert_eq!(cursor_pixel(&bytes, 0, 1), [0, 0, 0, 0]);
+
+    let small = pair
+        .vulkan
+        .upload_rgba(&[255, 255, 255, 255], 1, 1)
+        .expect("small cursor");
+    render_cursor_image(&mut *pair.vulkan, &mut *target, small, 1, 1, 4);
+    pair.vulkan
+        .readback(&*target, read, 16, &mut bytes)
+        .expect("small cursor readback");
+    assert_eq!(cursor_pixel(&bytes, 0, 0), [255, 255, 255, 255]);
+    assert_eq!(cursor_pixel(&bytes, 1, 0), [0, 0, 0, 0], "previous cursor row was cleared");
 }

@@ -9,7 +9,7 @@ mod vulkan;
 pub const OUTPUT_BACKGROUND: [f32; 4] = [40.0 / 255.0, 40.0 / 255.0, 40.0 / 255.0, 1.0];
 
 #[cfg(test)]
-mod mock;
+pub(crate) mod mock;
 
 pub use factory::create_renderer;
 

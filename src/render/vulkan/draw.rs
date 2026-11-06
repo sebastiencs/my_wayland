@@ -141,6 +141,7 @@ pub(super) fn paint(
     }
     let clear_rects =
         clear_rects(target, frame.damage, frame.preserve_contents, frame.presentation_transform);
+    let clear_color = frame.clear_color.unwrap_or_else(|| target.clear_color());
     let explicit = frame.sync_mode == RenderSyncMode::ExplicitInFence;
     let waits = OwnedSemaphores::from_stashed(device, acquires);
     let submitted = device.submit_rendered(explicit, waits.as_slice(), |vulkan, command| {
@@ -177,6 +178,7 @@ pub(super) fn paint(
                             draw,
                             target,
                             &clear_rects,
+                            clear_color,
                             &mut cleared,
                         );
                         pass_open = true;
@@ -191,19 +193,36 @@ pub(super) fn paint(
                             draw,
                             target,
                             &clear_rects,
+                            clear_color,
                             &mut cleared,
                         );
                     }
                     unsafe { vulkan.cmd_end_render_pass(command) };
                     job.record(vulkan, command, draw, target.image(), &mut layout);
-                    begin_output_pass(vulkan, command, draw, target, &clear_rects, &mut cleared);
+                    begin_output_pass(
+                        vulkan,
+                        command,
+                        draw,
+                        target,
+                        &clear_rects,
+                        clear_color,
+                        &mut cleared,
+                    );
                     pass_open = true;
                     draw_quad(vulkan, command, result);
                 }
             }
         }
         if !pass_open {
-            begin_output_pass(vulkan, command, draw, target, &clear_rects, &mut cleared);
+            begin_output_pass(
+                vulkan,
+                command,
+                draw,
+                target,
+                &clear_rects,
+                clear_color,
+                &mut cleared,
+            );
         }
         unsafe { vulkan.cmd_end_render_pass(command) };
         Ok(())
@@ -861,6 +880,7 @@ fn begin_output_pass(
     draw: &DrawState,
     target: &dyn PaintedTarget,
     clear_rects: &[vk::Rect2D],
+    clear_color: [f32; 4],
     cleared: &mut bool,
 ) {
     let begin = vk::RenderPassBeginInfo::default()
@@ -878,7 +898,7 @@ fn begin_output_pass(
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .color_attachment(0)
                     .clear_value(vk::ClearValue {
-                        color: vk::ClearColorValue { float32: target.clear_color() },
+                        color: vk::ClearColorValue { float32: clear_color },
                     });
                 let regions: Vec<vk::ClearRect> = clear_rects
                     .iter()

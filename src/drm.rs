@@ -33,9 +33,10 @@ use crate::{
     object::Object,
     region::{DamageRegion, RectI},
     render::{
-        create_renderer, EffectElement, FrameElement, FramePhase, OutputFrameRecipe, RenderFrame,
-        RenderTarget, Renderer, RootSurfaceVisualState, RoundedRing, ShmImage, Texture,
-        TextureElement, TextureMask, TextureSource, WindowClip,
+        create_renderer, EffectElement, FrameElement, FramePhase, OutputFrameRecipe,
+        RenderCompletion, RenderFrame, RenderTarget, Renderer, RendererCapabilities,
+        RootSurfaceVisualState, RoundedRing, ShmImage, Texture, TextureElement, TextureMask,
+        TextureSource, WindowClip,
     },
     runner::{isolate_session_fault, Dispatcher, Model, ModelInstanceId, SessionFault},
     scene::{ComposedEntry, CompositionTier, OutputCompositionView},
@@ -281,10 +282,13 @@ struct DirectScanoutCandidate {
     framebuffer: DrmFrameBuffer,
 }
 
+/// Cursor scanout buffer. Drop deletes the GPU target, then the DRM framebuffer,
+/// then the GBM BO, matching [`RenderBuffer`].
 #[derive(Debug)]
 struct CursorPlaneBuffer {
-    bo: crate::gbm::BufferObject,
+    target: Box<dyn RenderTarget>,
     framebuffer: DrmFrameBuffer,
+    bo: crate::gbm::BufferObject,
 }
 
 #[derive(Debug)]
@@ -292,6 +296,9 @@ struct CursorPlaneCandidate {
     x: i32,
     y: i32,
     slot: usize,
+    /// Render completion for this slot. It stays alive until the atomic commit
+    /// returns, including optional-property retries.
+    completion: RenderCompletion,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -368,6 +375,253 @@ fn cursor_plane_commit_dimensions(fixed_cursor_size: (u32, u32)) -> (u64, u64, u
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CursorBufferAllocation {
+    /// `gbm_bo_create_with_modifiers2([LINEAR], flags)` on the allocator fd.
+    ExplicitLinear { flags: UseFlags },
+    /// Plain `gbm_bo_create` with scanout, rendering, and linear usage.
+    PlainLinear,
+}
+
+fn cursor_modifiers_contain(modifiers: &BTreeSet<Modifier>, expected: Modifier) -> bool {
+    modifiers
+        .iter()
+        .any(|modifier| normalize_cursor_modifier(*modifier) == normalize_cursor_modifier(expected))
+}
+
+fn render_modifiers_contain(modifiers: &[u64], expected: Modifier) -> bool {
+    modifiers.iter().any(|modifier| {
+        normalize_cursor_modifier(Modifier(*modifier)) == normalize_cursor_modifier(expected)
+    })
+}
+
+fn argb8888_render_modifiers(capabilities: &RendererCapabilities) -> &[u64] {
+    capabilities
+        .render_formats
+        .iter()
+        .find(|format| format.fourcc == DrmFourcc::Argb8888)
+        .map(|format| format.modifiers.as_slice())
+        .unwrap_or(&[])
+}
+
+/// Explicit attempts require LINEAR on both the cursor plane and the renderer's
+/// ARGB8888 render formats. The plain attempt is also available when both accept
+/// implicit modifiers, and its result may be `INVALID` only in that case.
+fn cursor_buffer_allocations(
+    plane_modifiers: &BTreeSet<Modifier>,
+    render_modifiers: &[u64],
+) -> Vec<CursorBufferAllocation> {
+    let shared_linear = cursor_modifiers_contain(plane_modifiers, Modifier::LINEAR)
+        && render_modifiers_contain(render_modifiers, Modifier::LINEAR);
+    let shared_implicit = cursor_modifiers_contain(plane_modifiers, Modifier::INVALID)
+        && render_modifiers_contain(render_modifiers, Modifier::INVALID);
+    let mut allocations = Vec::new();
+    if shared_linear {
+        allocations.push(CursorBufferAllocation::ExplicitLinear {
+            flags: UseFlags::SCANOUT | UseFlags::RENDERING,
+        });
+        allocations.push(CursorBufferAllocation::ExplicitLinear { flags: UseFlags::empty() });
+    }
+    if shared_linear || shared_implicit {
+        allocations.push(CursorBufferAllocation::PlainLinear);
+    }
+    allocations
+}
+
+fn cursor_allocation_result_accepted(
+    allocation: CursorBufferAllocation,
+    bo_modifier: Modifier,
+    allow_implicit: bool,
+) -> bool {
+    let bo_modifier = normalize_cursor_modifier(bo_modifier);
+    if bo_modifier == Modifier::LINEAR {
+        return true;
+    }
+    bo_modifier == Modifier::INVALID
+        && allow_implicit
+        && matches!(allocation, CursorBufferAllocation::PlainLinear)
+}
+
+fn expected_cursor_extent(extent: u32) -> Result<i32, String> {
+    i32::try_from(extent)
+        .map_err(|_| format!("cursor extent {extent} does not fit a render target"))
+}
+
+fn cursor_dmabuf_retained(
+    expected_width: u32,
+    expected_height: u32,
+    dmabuf: &DmaBuf,
+    allow_implicit: bool,
+) -> Result<(), String> {
+    let expected_width = expected_cursor_extent(expected_width)?;
+    let expected_height = expected_cursor_extent(expected_height)?;
+    if dmabuf.format.drm != DrmFourcc::Argb8888 {
+        return Err(format!("cursor buffer format {:?} is not ARGB8888", dmabuf.format.drm));
+    }
+    if dmabuf.width != expected_width || dmabuf.height != expected_height {
+        return Err(format!(
+            "cursor buffer size {}x{} does not match {expected_width}x{expected_height}",
+            dmabuf.width, dmabuf.height
+        ));
+    }
+    let modifier = normalize_cursor_modifier(dmabuf.modifier);
+    if modifier == Modifier::LINEAR || (modifier == Modifier::INVALID && allow_implicit) {
+        return Ok(());
+    }
+    Err(format!("cursor buffer modifier {modifier:?} is not a retained linear target"))
+}
+
+fn cursor_target_size_retained(
+    expected_width: u32,
+    expected_height: u32,
+    target_width: i32,
+    target_height: i32,
+) -> Result<(), String> {
+    let expected_width = expected_cursor_extent(expected_width)?;
+    let expected_height = expected_cursor_extent(expected_height)?;
+    if target_width == expected_width && target_height == expected_height {
+        Ok(())
+    } else {
+        Err(format!(
+            "cursor render target size {target_width}x{target_height} does not match {expected_width}x{expected_height}"
+        ))
+    }
+}
+
+fn import_cursor_render_target(
+    renderer: &mut dyn Renderer,
+    dmabuf: &DmaBuf,
+    expected: (u32, u32),
+    allow_implicit: bool,
+) -> Result<Box<dyn RenderTarget>, String> {
+    cursor_dmabuf_retained(expected.0, expected.1, dmabuf, allow_implicit)?;
+    let target = renderer
+        .import_output_target(dmabuf)
+        .map_err(|error| format!("renderer cursor target import failed: {error}"))?;
+    cursor_target_size_retained(expected.0, expected.1, target.width(), target.height())?;
+    Ok(target)
+}
+
+/// Both slots stay unused unless every import succeeded. A partial result drops
+/// the targets it owns.
+fn commit_cursor_slot_results<T>(results: [Result<T, String>; 2]) -> [Option<T>; 2] {
+    match results {
+        [Ok(first), Ok(second)] => [Some(first), Some(second)],
+        _ => [None, None],
+    }
+}
+
+/// Transparent pixels outside the cursor image. Output frames keep their own clear.
+const CURSOR_CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+
+/// Logical y=0 is the first row of the KMS buffer. GLES `read_top_left` and Vulkan
+/// readback both store that row first when the projection is `FlipY`.
+fn cursor_plane_presentation() -> OutputPresentationTransform {
+    OutputPresentationTransform::FlipY
+}
+
+fn cursor_buffer_row(logical_y: i32, target_height: i32) -> i32 {
+    match cursor_plane_presentation() {
+        OutputPresentationTransform::FlipY => logical_y,
+        OutputPresentationTransform::Normal => target_height - logical_y - 1,
+    }
+}
+
+fn cursor_upload_reuses_cached(
+    cached: Option<CursorPlaneContentKey>,
+    requested: CursorPlaneContentKey,
+) -> bool {
+    cached == Some(requested)
+}
+
+fn cursor_render_sync_mode(
+    renderer_explicit_sync: bool,
+    plane_accepts_in_fence: bool,
+) -> RenderSyncMode {
+    if renderer_explicit_sync && plane_accepts_in_fence {
+        RenderSyncMode::ExplicitInFence
+    } else {
+        RenderSyncMode::BlockingFinishFallback
+    }
+}
+
+/// Fence value for the cursor plane. A blocking completion has already finished,
+/// so KMS may sample the buffer with no in-fence. An explicit completion must
+/// keep its fd; `-1` would submit an unfinished buffer.
+fn cursor_in_fence_value(completion: &RenderCompletion) -> i64 {
+    completion
+        .in_fence_fd
+        .as_ref()
+        .map(|fd| fd.as_raw_fd() as i64)
+        .unwrap_or(-1)
+}
+
+fn cursor_fences_for_attempts(completion: &RenderCompletion, attempts: usize) -> Vec<i64> {
+    (0..attempts)
+        .map(|_| cursor_in_fence_value(completion))
+        .collect()
+}
+
+fn cursor_plane_recipe(texture: Rc<dyn Texture>, width: i32, height: i32) -> OutputFrameRecipe {
+    let damage = RectI::new(0, 0, width.max(0), height.max(0))
+        .map(DamageRegion::from_rect)
+        .unwrap_or_else(DamageRegion::new);
+    OutputFrameRecipe {
+        elements: vec![FrameElement::Texture {
+            phase: FramePhase::Content,
+            element: TextureElement {
+                source: TextureSource::Texture,
+                texture,
+                x: 0,
+                y: 0,
+                width,
+                height,
+                tex_transform: transform::Mat3::identity(),
+                damage,
+                blend: true,
+                alpha: u8::MAX,
+                mask: TextureMask::None,
+            },
+        }],
+    }
+}
+
+fn cursor_target_damage(width: u32, height: u32) -> Option<DamageRegion> {
+    let width = i32::try_from(width).ok()?;
+    let height = i32::try_from(height).ok()?;
+    Some(DamageRegion::from_rect(RectI::new(0, 0, width, height)?))
+}
+
+/// `LINEAR` and `ZERO` are the same DRM linear modifier. Keep one spelling so a
+/// plane that advertises either form matches a buffer that reports the other.
+fn normalize_cursor_modifier(modifier: Modifier) -> Modifier {
+    if modifier == Modifier::ZERO {
+        Modifier::LINEAR
+    } else {
+        modifier
+    }
+}
+
+fn cursor_plane_supports_requested_cursor(modifiers: &BTreeSet<Modifier>) -> bool {
+    modifiers.iter().any(|modifier| {
+        let modifier = normalize_cursor_modifier(*modifier);
+        modifier == Modifier::LINEAR || modifier == Modifier::INVALID
+    })
+}
+
+fn cursor_buffer_modifier_accepted(
+    plane_modifiers: &BTreeSet<Modifier>,
+    bo_modifier: Modifier,
+) -> bool {
+    let bo_modifier = normalize_cursor_modifier(bo_modifier);
+    if bo_modifier == Modifier::INVALID {
+        return plane_modifiers.contains(&Modifier::INVALID);
+    }
+    plane_modifiers
+        .iter()
+        .any(|modifier| normalize_cursor_modifier(*modifier) == bo_modifier)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CursorPlaneState {
     Ready,
     Backoff { remaining_frames: u8, consecutive_failures: u8 },
@@ -396,7 +650,7 @@ struct FramePlan {
     protected: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecordedFrameElement {
     Texture { phase: FramePhase, item_index: usize },
     Effect { phase: FramePhase, element: EffectElement },
@@ -1755,6 +2009,7 @@ impl Drm {
                 presentation_transform,
                 sync_mode,
                 blur_reference: None,
+                clear_color: None,
             },
         ) {
             Ok(completion) => completion,
@@ -1787,7 +2042,7 @@ impl Drm {
             return None;
         }
         let (fb_width, fb_height) = self.fixed_cursor_plane_size();
-        let slot = if let Some(slot) = self
+        let (slot, completion) = if let Some(slot) = self
             .output(drm_crtc_id)?
             .cursor_slot_index_for_content_key(request.content_key)
         {
@@ -1807,10 +2062,10 @@ impl Drm {
                 cached.buffer.framebuffer.id()
                 );
             }
-            slot
+            (slot, RenderCompletion::blocking_fallback())
         } else {
             let slot = self.output(drm_crtc_id)?.preferred_upload_cursor_slot()?;
-            self.upload_cursor_plane_slot(drm_crtc_id, slot, request)?;
+            let completion = self.upload_cursor_plane_slot(drm_crtc_id, slot, request)?;
             let cached = self.output(drm_crtc_id)?.cursor_slot(slot).unwrap();
             if crate::logger::ENABLE_NOISY_LOG {
                 log::debug!(
@@ -1827,9 +2082,9 @@ impl Drm {
                 cached.buffer.framebuffer.id()
                 );
             }
-            slot
+            (slot, completion)
         };
-        Some(CursorPlaneCandidate { x, y, slot })
+        Some(CursorPlaneCandidate { x, y, slot, completion })
     }
 
     fn append_cursor_plane_changes(
@@ -1920,11 +2175,48 @@ impl Drm {
             control::property::Value::UnsignedRange(src_height),
         );
         if let Some(property) = plane.in_fence_fd {
-            changes.add_property(plane.handle, property, control::property::Value::SignedRange(-1));
+            let fence = cursor
+                .map(|cursor| cursor_in_fence_value(&cursor.completion))
+                .unwrap_or(-1);
+            changes.add_property(
+                plane.handle,
+                property,
+                control::property::Value::SignedRange(fence),
+            );
         }
         if let Some(property) = plane.fb_damage_clips {
             changes.add_property(plane.handle, property, control::property::Value::Blob(0));
         }
+    }
+
+    fn wait_cursor_render_from(&mut self, cursor: Option<CursorPlaneCandidate>) {
+        let Some(cursor) = cursor else {
+            return;
+        };
+        self.wait_cursor_render(cursor.completion);
+    }
+
+    fn wait_cursor_render(&mut self, completion: RenderCompletion) {
+        if completion.used_blocking_fallback {
+            return;
+        }
+        let Some(fence) = completion.in_fence_fd else {
+            return;
+        };
+        if let Err(error) = self.renderer.wait_fence(fence) {
+            log::warn!("failed to wait on cursor render fence after atomic rejection: {error:?}");
+        }
+    }
+
+    fn cursor_plane_sync_mode(&self, drm_crtc_id: u32) -> RenderSyncMode {
+        let plane_accepts_in_fence = self.output(drm_crtc_id).is_some_and(|output| {
+            output.allow_in_fence_fd
+                && output
+                    .in_use
+                    .cursor_plane()
+                    .is_some_and(|plane| plane.supports_explicit_sync())
+        });
+        cursor_render_sync_mode(self.renderer.capabilities().explicit_sync, plane_accepts_in_fence)
     }
 
     fn submit_render_buffer(
@@ -1936,7 +2228,7 @@ impl Drm {
         scene: Vec<SceneItemState>,
         frame_callback_surfaces: Vec<SurfaceKey>,
         presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
-        cursor_plane: Option<CursorPlaneCandidate>,
+        mut cursor_plane: Option<CursorPlaneCandidate>,
         had_effects: bool,
         scene_build_duration: Duration,
         render_started_at: Instant,
@@ -2034,9 +2326,15 @@ impl Drm {
 
             let color_blobs = match self.append_output_color_changes(drm_crtc_id, &mut changes) {
                 Ok(blobs) => blobs,
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.wait_cursor_render_from(cursor_plane.take());
+                    return Err(error);
+                }
             };
-            self.append_output_vrr_change(drm_crtc_id, &mut changes)?;
+            if let Err(error) = self.append_output_vrr_change(drm_crtc_id, &mut changes) {
+                self.wait_cursor_render_from(cursor_plane.take());
+                return Err(error);
+            }
 
             let commit_result = self.fd.atomic_commit(
                 control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
@@ -2113,14 +2411,17 @@ impl Drm {
                         last_error = Some(error);
                         continue;
                     }
+                    self.wait_cursor_render_from(cursor_plane.take());
                     return Err(error);
                 }
             }
         }
 
         let Some(error) = last_error else {
+            self.wait_cursor_render_from(cursor_plane.take());
             return Err(std::io::Error::other("no atomic commit attempt executed"));
         };
+        self.wait_cursor_render_from(cursor_plane.take());
         return Err(error);
     }
 
@@ -2132,7 +2433,7 @@ impl Drm {
         scene: Vec<SceneItemState>,
         frame_callback_surfaces: Vec<SurfaceKey>,
         presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
-        cursor_plane: Option<CursorPlaneCandidate>,
+        mut cursor_plane: Option<CursorPlaneCandidate>,
         scene_build_duration: Duration,
         render_started_at: Instant,
     ) -> std::io::Result<SubmittedFrameRegistration> {
@@ -2204,6 +2505,7 @@ impl Drm {
                 self.output(drm_crtc_id)
                     .is_some_and(|output| output.allow_in_fence_fd)
             }) else {
+                self.wait_cursor_render_from(cursor_plane.take());
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "scanout sync-file acquire requires IN_FENCE_FD support",
@@ -2215,6 +2517,7 @@ impl Drm {
                 control::property::Value::SignedRange(sync_file.as_raw_fd() as i64),
             );
         } else if !candidate.sync.acquire.is_none() {
+            self.wait_cursor_render_from(cursor_plane.take());
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "scanout currently only supports empty or sync-file acquire fences",
@@ -2230,13 +2533,23 @@ impl Drm {
             );
         }
 
-        let color_blobs = self.append_output_color_changes(drm_crtc_id, &mut changes)?;
-        self.append_output_vrr_change(drm_crtc_id, &mut changes)?;
+        let color_blobs = match self.append_output_color_changes(drm_crtc_id, &mut changes) {
+            Ok(blobs) => blobs,
+            Err(error) => {
+                self.wait_cursor_render_from(cursor_plane.take());
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.append_output_vrr_change(drm_crtc_id, &mut changes) {
+            self.wait_cursor_render_from(cursor_plane.take());
+            return Err(error);
+        }
         if let Err(error) = self.fd.atomic_commit(
             control::AtomicCommitFlags::PAGE_FLIP_EVENT | control::AtomicCommitFlags::NONBLOCK,
             changes,
         ) {
             self.destroy_pending_color_blobs(color_blobs);
+            self.wait_cursor_render_from(cursor_plane.take());
             return Err(error);
         }
         self.finish_output_color_commit(drm_crtc_id, color_blobs);
@@ -2276,45 +2589,76 @@ impl Drm {
         let Some(plane_format) = self.cursor_plane_format(drm_crtc_id) else {
             return;
         };
-        let (fb_width, fb_height) = self.fixed_cursor_plane_size();
-        let slot_count = self
+        if self
             .output(drm_crtc_id)
-            .map(|output| output.cursor_slots.len())
-            .unwrap_or(0);
-        for slot in 0..slot_count {
-            let Some(buffer) = self.allocate_cursor_plane_buffer(&plane_format) else {
+            .is_none_or(|output| output.cursor_slots.len() != 2)
+        {
+            self.clear_cursor_plane_slots(drm_crtc_id);
+            return;
+        }
+        let first = self.allocate_cursor_plane_buffer(&plane_format);
+        let second = if first.is_ok() {
+            self.allocate_cursor_plane_buffer(&plane_format)
+        } else {
+            Err(String::new())
+        };
+        let failure = first
+            .as_ref()
+            .err()
+            .filter(|reason| !reason.is_empty())
+            .cloned()
+            .or_else(|| {
+                second
+                    .as_ref()
+                    .err()
+                    .filter(|reason| !reason.is_empty())
+                    .cloned()
+            });
+        if first.is_err() || second.is_err() {
+            self.renderer.make_current();
+        }
+        let committed = commit_cursor_slot_results([first, second]);
+        let [Some(first), Some(second)] = committed else {
+            if let Some(reason) = failure {
                 log::warn!(
-                    "Failed to preallocate DRM cursor plane slot {} at {}x{}, falling back to software cursor composition",
-                    slot,
-                    fb_width,
-                    fb_height
+                    "Disabling hardware cursor: {reason}; falling back to software cursor composition"
                 );
-                if let Some(output) = self.output_mut(drm_crtc_id) {
-                    output.cursor_slots = [None, None];
-                }
-                return;
-            };
+            }
+            self.clear_cursor_plane_slots(drm_crtc_id);
+            return;
+        };
+        let (fb_width, fb_height) = self.fixed_cursor_plane_size();
+        let Some(output) = self.output_mut(drm_crtc_id) else {
+            return;
+        };
+        for (slot, buffer) in [first, second].into_iter().enumerate() {
             log::debug!(
-                "Preallocated DRM cursor plane slot: slot={} fb_size={}x{} fb={:?}",
-                slot,
-                fb_width,
-                fb_height,
-                buffer.framebuffer.id()
+                "Preallocated DRM cursor plane slot: slot={slot} fb_size={fb_width}x{fb_height} fb={:?} target={}x{}",
+                buffer.framebuffer.id(),
+                buffer.target.width(),
+                buffer.target.height()
             );
-            self.output_mut(drm_crtc_id).unwrap().cursor_slots[slot] =
-                Some(CachedCursorPlaneSlot { content_key: None, buffer });
+            output.cursor_slots[slot] = Some(CachedCursorPlaneSlot { content_key: None, buffer });
+        }
+    }
+
+    fn clear_cursor_plane_slots(&mut self, drm_crtc_id: u32) {
+        self.renderer.make_current();
+        if let Some(output) = self.output_mut(drm_crtc_id) {
+            output.cursor_slots = [None, None];
         }
     }
 
     fn cursor_plane_format(&self, drm_crtc_id: u32) -> Option<PlaneFormat> {
-        let plane = self.output(drm_crtc_id)?.in_use.cursor_plane()?;
+        let Some(plane) = self.output(drm_crtc_id)?.in_use.cursor_plane() else {
+            log::warn!("Disabling hardware cursor: output has no ARGB8888 cursor plane");
+            return None;
+        };
         let plane_format = plane.formats.get(&DrmFourcc::Argb8888)?.clone();
-        if !plane_format.modifiers.contains(&Modifier::INVALID)
-            && !plane_format.modifiers.contains(&Modifier::LINEAR)
-            && !plane_format.modifiers.contains(&Modifier::ZERO)
-        {
-            log::debug!(
-                "Skipping DRM cursor plane initialization: plane modifiers {:?} do not accept linear ARGB8888 cursor buffers",
+        let render_modifiers = argb8888_render_modifiers(self.renderer.capabilities());
+        if cursor_buffer_allocations(&plane_format.modifiers, render_modifiers).is_empty() {
+            log::warn!(
+                "Disabling hardware cursor: no shared renderable linear or implicit ARGB8888 modifier; plane={:?} render={render_modifiers:?}",
                 plane_format.modifiers
             );
             return None;
@@ -2335,87 +2679,220 @@ impl Drm {
         drm_crtc_id: u32,
         slot: usize,
         request: &CursorPlaneRequest,
-    ) -> Option<()> {
-        let (_, fb_height) = self.fixed_cursor_plane_size();
-        let cached = self.output_mut(drm_crtc_id)?.cursor_slots[slot]
-            .as_mut()
-            .unwrap();
-        if cached.content_key != Some(request.content_key) {
-            let pitch = drm::buffer::Buffer::pitch(&cached.buffer.bo) as usize;
-            let bytes = match &request.upload {
-                CursorPlaneUploadSource::Named { image } => {
-                    let image = unsafe { image.as_ref() }?;
-                    rgba_to_drm_argb8888(
-                        &image.pixels_rgba,
-                        image.width as usize,
-                        image.height as usize,
-                        pitch,
-                        fb_height as usize,
-                    )
-                }
-                CursorPlaneUploadSource::SurfaceShm { buffer } => {
-                    buffer.copy_to_drm_argb8888_cursor_bytes(pitch, fb_height as usize)
-                }
-            };
-            cached.buffer.bo.write(&bytes);
-            cached.content_key = Some(request.content_key);
+    ) -> Option<RenderCompletion> {
+        let cached_key = self.output(drm_crtc_id)?.cursor_slots[slot]
+            .as_ref()
+            .and_then(|cached| cached.content_key);
+        if cursor_upload_reuses_cached(cached_key, request.content_key) {
+            let framebuffer_id = self.output(drm_crtc_id)?.cursor_slots[slot]
+                .as_ref()?
+                .buffer
+                .framebuffer
+                .id();
             log::debug!(
-                "Updated cached DRM cursor plane slot pixels: slot={} fb={:?}",
-                slot,
-                cached.buffer.framebuffer.id()
+                "Reused cached DRM cursor plane slot without pixel upload: slot={slot} fb={framebuffer_id:?}"
             );
-        } else {
-            log::debug!(
-                "Reused cached DRM cursor plane slot without pixel upload: slot={} fb={:?}",
-                slot,
-                cached.buffer.framebuffer.id()
-            );
+            return Some(RenderCompletion::blocking_fallback());
         }
-        Some(())
-    }
-
-    fn allocate_cursor_plane_buffer(
-        &self,
-        plane_format: &PlaneFormat,
-    ) -> Option<CursorPlaneBuffer> {
         let (fb_width, fb_height) = self.fixed_cursor_plane_size();
-        let Some(bo) = self.gbm.try_create_bo_with_size(
-            fb_width,
-            fb_height,
-            DrmFourcc::Argb8888,
-            UseFlags::CURSOR | UseFlags::WRITE,
-        ) else {
-            log::debug!(
-                "Skipping DRM cursor plane candidate: render node could not allocate a writable {fb_width}x{fb_height} cursor buffer"
-            );
+        let sync_mode = self.cursor_plane_sync_mode(drm_crtc_id);
+        let Some(damage) = cursor_target_damage(fb_width, fb_height) else {
+            log::warn!("Disabling hardware cursor: cursor target has no positive size");
+            self.clear_cursor_plane_slots(drm_crtc_id);
             return None;
         };
-        let bo_modifier = bo.modifier();
-        if !plane_format.modifiers.contains(&Modifier::INVALID)
-            && !plane_format.modifiers.contains(&bo_modifier)
-        {
-            log::debug!(
-                "Skipping DRM cursor plane candidate: plane modifiers {:?} do not accept cursor BO modifier {:?}",
-                plane_format.modifiers,
-                bo_modifier
-            );
-            return None;
-        }
-        let pitch = drm::buffer::Buffer::pitch(&bo) as usize;
-        bo.write(&vec![0; pitch.saturating_mul(fb_height as usize)]);
-        let Some(dmabuf) = bo.dmabuf() else {
-            return None;
-        };
-        let framebuffer = match Self::add_framebuffer(&self.fd, dmabuf) {
-            Ok(framebuffer) => framebuffer,
+        let texture = match self.import_cursor_texture(request) {
+            Ok(texture) => texture,
             Err(error) => {
-                log::debug!(
-                    "Skipping DRM cursor plane candidate: failed to import {fb_width}x{fb_height} cursor dmabuf: {error}"
-                );
+                log::warn!("Disabling hardware cursor: cursor texture import failed: {error}");
+                self.clear_cursor_plane_slots(drm_crtc_id);
                 return None;
             }
         };
-        Some(CursorPlaneBuffer { bo, framebuffer })
+        let recipe = cursor_plane_recipe(texture, request.width, request.height);
+        let content_key = request.content_key;
+        let rendered = {
+            let Drm { renderer, outputs, .. } = self;
+            let Some(output) = outputs.get_mut(&drm_crtc_id) else {
+                return None;
+            };
+            let Some(cached) = output.cursor_slots[slot].as_mut() else {
+                return None;
+            };
+            renderer.render(
+                cached.buffer.target.as_mut(),
+                RenderFrame {
+                    recipe: &recipe,
+                    damage: &damage,
+                    preserve_contents: false,
+                    presentation_transform: cursor_plane_presentation(),
+                    sync_mode,
+                    blur_reference: None,
+                    clear_color: Some(CURSOR_CLEAR),
+                },
+            )
+        };
+        match rendered {
+            Ok(completion) => {
+                if self
+                    .output(drm_crtc_id)
+                    .and_then(|output| output.cursor_slots[slot].as_ref())
+                    .is_none()
+                {
+                    self.wait_cursor_render(completion);
+                    return None;
+                }
+                let cached = self.output_mut(drm_crtc_id).unwrap().cursor_slots[slot]
+                    .as_mut()
+                    .unwrap();
+                cached.content_key = Some(content_key);
+                log::debug!(
+                    "Rendered DRM cursor plane slot: slot={slot} fb={:?} explicit_fence={}",
+                    cached.buffer.framebuffer.id(),
+                    completion.in_fence_fd.is_some()
+                );
+                Some(completion)
+            }
+            Err(error) => {
+                log::warn!("Disabling hardware cursor: cursor render failed: {error}");
+                self.clear_cursor_plane_slots(drm_crtc_id);
+                None
+            }
+        }
+    }
+
+    fn import_cursor_texture(
+        &mut self,
+        request: &CursorPlaneRequest,
+    ) -> Result<Rc<dyn Texture>, String> {
+        match &request.upload {
+            CursorPlaneUploadSource::Named { image } => {
+                let Some(image) = (unsafe { image.as_ref() }) else {
+                    return Err("named cursor image is gone".to_string());
+                };
+                self.renderer
+                    .upload_rgba(&image.pixels_rgba, image.width, image.height)
+                    .map_err(|error| error.to_string())
+            }
+            CursorPlaneUploadSource::SurfaceShm { buffer } => {
+                let bytes = buffer.argb_bytes();
+                if bytes.is_empty() {
+                    return Err("SHM cursor has no ARGB bytes".to_string());
+                }
+                self.renderer
+                    .import_shm(ShmImage {
+                        bytes: &bytes,
+                        width: buffer.width(),
+                        height: buffer.height(),
+                        stride: buffer.stride(),
+                        fourcc: DrmFourcc::Argb8888,
+                    })
+                    .map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    fn allocate_cursor_plane_buffer(
+        &mut self,
+        plane_format: &PlaneFormat,
+    ) -> Result<CursorPlaneBuffer, String> {
+        let (fb_width, fb_height) = self.fixed_cursor_plane_size();
+        let render_modifiers = argb8888_render_modifiers(self.renderer.capabilities()).to_vec();
+        let allocations = cursor_buffer_allocations(&plane_format.modifiers, &render_modifiers);
+        if allocations.is_empty() {
+            return Err(format!(
+                "no shared renderable linear or implicit ARGB8888 modifier; plane={:?} render={render_modifiers:?}",
+                plane_format.modifiers
+            ));
+        }
+        let allow_implicit = cursor_modifiers_contain(&plane_format.modifiers, Modifier::INVALID)
+            && render_modifiers_contain(&render_modifiers, Modifier::INVALID);
+        let mut failures = Vec::new();
+        for allocation in allocations {
+            log::debug!(
+                "Trying DRM cursor allocation: size={fb_width}x{fb_height} method={allocation:?} plane_modifiers={:?} render_modifiers={render_modifiers:?}",
+                plane_format.modifiers
+            );
+            let Some(bo) = self.gbm.try_create_linear_cursor_bo(
+                fb_width,
+                fb_height,
+                match allocation {
+                    CursorBufferAllocation::ExplicitLinear { flags } => Some(flags),
+                    CursorBufferAllocation::PlainLinear => None,
+                },
+            ) else {
+                log::debug!("Cursor allocation produced no exported buffer: method={allocation:?}");
+                failures.push(format!("{allocation:?}: no exported buffer"));
+                continue;
+            };
+            let bo_modifier = bo.modifier();
+            let planes = bo.plane_count();
+            if !cursor_allocation_result_accepted(allocation, bo_modifier, allow_implicit) {
+                log::debug!(
+                    "Rejecting cursor buffer: method={allocation:?} modifier={bo_modifier:?} planes={planes}"
+                );
+                failures.push(format!(
+                    "{allocation:?}: rejected modifier {bo_modifier:?} planes={planes}"
+                ));
+                continue;
+            }
+            let imported = {
+                let Some(dmabuf) = bo.dmabuf() else {
+                    failures.push(format!("{allocation:?}: missing dma-buf"));
+                    continue;
+                };
+                if let Err(reason) =
+                    cursor_dmabuf_retained(fb_width, fb_height, dmabuf, allow_implicit)
+                {
+                    log::debug!(
+                        "Rejecting cursor dma-buf before renderer import: method={allocation:?} {reason}"
+                    );
+                    failures.push(format!("{allocation:?}: {reason}"));
+                    continue;
+                }
+                let framebuffer = match Self::add_framebuffer(&self.fd, dmabuf) {
+                    Ok(framebuffer) => framebuffer,
+                    Err(error) => {
+                        log::debug!(
+                            "Cursor PRIME import failed: method={allocation:?} modifier={bo_modifier:?} planes={planes}: {error}"
+                        );
+                        failures.push(format!("{allocation:?}: import {error}"));
+                        continue;
+                    }
+                };
+                let target = match self.renderer.import_output_target(dmabuf) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        log::debug!(
+                            "Cursor renderer import failed: method={allocation:?} modifier={bo_modifier:?} planes={planes}: {error}"
+                        );
+                        failures.push(format!("{allocation:?}: renderer import {error}"));
+                        continue;
+                    }
+                };
+                if let Err(reason) = cursor_target_size_retained(
+                    fb_width,
+                    fb_height,
+                    target.width(),
+                    target.height(),
+                ) {
+                    log::debug!(
+                        "Rejecting cursor render target: method={allocation:?} modifier={bo_modifier:?} {reason}"
+                    );
+                    failures.push(format!("{allocation:?}: {reason}"));
+                    continue;
+                }
+                log::debug!(
+                    "Imported DRM cursor plane buffer: method={allocation:?} modifier={bo_modifier:?} planes={planes} fb={:?} target={}x{}",
+                    framebuffer.id(),
+                    target.width(),
+                    target.height()
+                );
+                (framebuffer, target)
+            };
+            return Ok(CursorPlaneBuffer { target: imported.1, framebuffer: imported.0, bo });
+        }
+        Err(format!("cursor allocation attempts failed: {}", failures.join("; ")))
     }
 
     fn list_resources(drm: &DrmFd) -> Result<DrmResources, String> {
@@ -3172,7 +3649,7 @@ fn prime_fd_to_gem_handle(fd: &DrmFd, prime: RawFd) -> std::io::Result<u32> {
 }
 
 /// Import each plane independently. On the first failure, the `Vec` contains
-/// exactly the handles whose references the caller must close.
+/// every handle acquired so far. The caller closes each distinct value once.
 fn import_plane_handles(
     count: usize,
     mut import_one: impl FnMut(usize) -> std::io::Result<u32>,
@@ -3187,15 +3664,17 @@ fn import_plane_handles(
     Ok(imported)
 }
 
-/// Each successful `drmPrimeFDToHandle` owns one GEM reference, even when two
-/// planes return the same handle number. Closing only the distinct values
-/// leaks one reference per repeated import.
+/// A multi-plane dma-buf can import as one GEM handle. amdgpu returns that
+/// same handle for every plane, and a second `GEM_CLOSE` fails with `EINVAL`.
+/// Close each distinct nonzero handle once, in first-seen order.
 fn imported_gem_handles_to_close(handles: &[u32]) -> Vec<u32> {
-    handles
-        .iter()
-        .copied()
-        .filter(|handle| *handle != 0)
-        .collect()
+    let mut closed = Vec::new();
+    for handle in handles.iter().copied().filter(|handle| *handle != 0) {
+        if !closed.contains(&handle) {
+            closed.push(handle);
+        }
+    }
+    closed
 }
 
 fn close_imported_gem_handles(fd: &DrmFd, handles: &[u32]) {
@@ -3211,8 +3690,9 @@ mod gem_import_tests {
     use super::{import_plane_handles, imported_gem_handles_to_close};
 
     #[test]
-    fn repeated_plane_imports_are_closed_once_per_import() {
-        assert_eq!(imported_gem_handles_to_close(&[4, 4, 9, 0]), vec![4, 4, 9]);
+    fn repeated_plane_imports_close_each_distinct_handle_once() {
+        assert_eq!(imported_gem_handles_to_close(&[4, 4, 9, 0]), vec![4, 9]);
+        assert_eq!(imported_gem_handles_to_close(&[2, 9, 2]), vec![2, 9]);
     }
 
     #[test]
@@ -4221,6 +4701,7 @@ fn render_prepared_toplevels(
                         presentation_transform: OutputPresentationTransform::FlipY,
                         sync_mode: RenderSyncMode::BlockingFinishFallback,
                         blur_reference: Some((reference_width, reference_height)),
+                        clear_color: None,
                     },
                 )
                 .is_err()
@@ -4377,6 +4858,7 @@ impl DrmOutputModel {
                 .cursor_animation_delay_msec = cursor_animation_delay_msec;
 
             if let Some(candidate) = direct_scanout {
+                let submitted_cursor = cursor_plane.is_some();
                 match kms_submit::submit_direct_scanout(
                     drm,
                     drm_crtc_id,
@@ -4423,16 +4905,24 @@ impl DrmOutputModel {
                         );
                         return;
                     }
-                    Err(_) => {}
+                    Err(error) => {
+                        if submitted_cursor {
+                            log::warn!(
+                                "Disabling hardware cursor: atomic submission failed ({error:?}); retrying with software cursor"
+                            );
+                            drm.clear_cursor_plane_slots(drm_crtc_id);
+                            drm.output_mut(drm_crtc_id)
+                                .unwrap()
+                                .note_cursor_plane_failure();
+                        }
+                    }
                 }
                 if !software_cursor_items.is_empty() {
-                    items.append(&mut software_cursor_items);
-                    // Clone the effect recipe on cursor fallback to keep the retry path simple;
-                    // if fallback becomes hot we should switch this to recipe reuse.
+                    // Plan again with the held cursor so its overlay elements are recorded.
                     let fallback_plan = render_planner::build_frame_plan(
                         drm.output_mut(drm_crtc_id).unwrap(),
                         items,
-                        Vec::new(),
+                        software_cursor_items,
                         frame_elements.clone(),
                         None,
                         protected,
@@ -4545,14 +5035,12 @@ impl DrmOutputModel {
                     if submit_had_cursor_plane {
                         if !software_cursor_items.is_empty() {
                             log::warn!(
-                                "DRM cursor plane submission failed, retrying with software cursor: {:?}",
-                                error
+                                "Disabling hardware cursor: atomic submission failed ({error:?}); retrying with software cursor"
                             );
-                            items.append(&mut software_cursor_items);
                             let fallback_plan = render_planner::build_frame_plan(
                                 drm.output_mut(drm_crtc_id).unwrap(),
                                 items,
-                                Vec::new(),
+                                software_cursor_items,
                                 frame_elements.clone(),
                                 None,
                                 protected,
@@ -4593,6 +5081,7 @@ impl DrmOutputModel {
                                             zero_copy: registration.zero_copy,
                                         },
                                     );
+                                    drm.clear_cursor_plane_slots(drm_crtc_id);
                                     drm.output_mut(drm_crtc_id)
                                         .unwrap()
                                         .note_cursor_plane_failure();
@@ -4616,6 +5105,7 @@ impl DrmOutputModel {
                                         output_id,
                                         dispatcher,
                                     );
+                                    drm.clear_cursor_plane_slots(drm_crtc_id);
                                     drm.output_mut(drm_crtc_id).unwrap().mark_render_failed();
                                     let failed_releases = drm
                                         .output_mut(drm_crtc_id)
@@ -4664,6 +5154,10 @@ impl DrmOutputModel {
                                 output_id,
                                 dispatcher,
                             );
+                            log::warn!(
+                                "Disabling hardware cursor: atomic submission failed ({error:?})"
+                            );
+                            drm.clear_cursor_plane_slots(drm_crtc_id);
                             drm.output_mut(drm_crtc_id)
                                 .unwrap()
                                 .note_cursor_plane_failure();
@@ -9125,31 +9619,42 @@ mod presentation_timing_tests {
     use {
         super::{
             build_surface_cursor_plane_request, collect_submission_metadata,
-            cursor_plane_commit_dimensions, effect_transition_requires_full_redraw,
-            find_cursor_slot_index_for_key, presentation_feedback_flags,
+            commit_cursor_slot_results, cursor_allocation_result_accepted,
+            cursor_buffer_allocations, cursor_buffer_modifier_accepted, cursor_buffer_row,
+            cursor_dmabuf_retained, cursor_fences_for_attempts, cursor_in_fence_value,
+            cursor_plane_commit_dimensions, cursor_plane_presentation, cursor_plane_recipe,
+            cursor_plane_supports_requested_cursor, cursor_render_sync_mode, cursor_target_damage,
+            cursor_target_size_retained, cursor_upload_reuses_cached,
+            effect_transition_requires_full_redraw, find_cursor_slot_index_for_key,
+            import_cursor_render_target, presentation_feedback_flags,
             render_planner::select_presentation_output_for_scene, request_output,
             request_outputs_for_rects, rgba_to_drm_argb8888,
             scene_item_requires_compositor_compositing, select_cursor_upload_slot,
             submitted_frame_feedbacks_for_discard, surface_allows_direct_scanout,
-            CursorPlaneContentKey, CursorSurfaceContentKey, OutputSubmission, SceneItem,
-            SceneItemContentKey, SceneItemKey, SceneItemMask, SceneItemState,
-            SubmissionPresentationFeedback, SubmittedFrame,
+            CursorBufferAllocation, CursorPlaneContentKey, CursorSurfaceContentKey, Modifier,
+            OutputSubmission, RenderSyncMode, SceneItem, SceneItemContentKey, SceneItemKey,
+            SceneItemMask, SceneItemState, SubmissionPresentationFeedback, SubmittedFrame,
+            ARGB8888, CURSOR_CLEAR,
         },
         crate::{
             clients::{ClientId, Resolved},
             cursor::{CursorImageContentKey, CursorSurface},
+            dmabuf::{DmaBuf, DmaBufId, DmaBufPlane},
+            gbm::UseFlags,
             protocol_generated::{WlBufferId, WlSurfaceId, WpPresentationFeedbackId},
             region::{DamageRegion, RectI},
+            render::{mock::MockRenderer, FrameElement, RenderCompletion},
             runner::Dispatcher,
             scheduler::{output_scheduler_id, OutputSchedulerAction, RequestFrameReason},
             state::{BackendOutputRef, DrmId, ObjectId, OutputId},
             test_support::{state_for_tests, test_output},
-            transform,
+            transform::{self, OutputPresentationTransform},
             wayland_objects::{
                 wl_buffer::WlBuffer,
                 wl_surface::{SurfacePresentationFeedback, WlSurface},
             },
         },
+        std::{collections::BTreeSet, os::fd::OwnedFd},
     };
 
     fn submission_feedback(id: u32, version: u32) -> SubmissionPresentationFeedback {
@@ -9280,6 +9785,273 @@ mod presentation_timing_tests {
     #[test]
     fn cursor_plane_commit_dimensions_use_fixed_cursor_size() {
         assert_eq!(cursor_plane_commit_dimensions((64, 32)), (64, 32, 64 << 16, 32 << 16));
+    }
+
+    fn modifiers(values: &[Modifier]) -> BTreeSet<Modifier> {
+        values.iter().copied().collect()
+    }
+
+    #[test]
+    fn shared_linear_cursor_tries_explicit_modifiers_before_plain() {
+        let tiled = Modifier(0x0200_0000_0000_0001);
+        let plane = modifiers(&[Modifier::LINEAR, Modifier::INVALID, tiled]);
+        let render = [Modifier::LINEAR.0, Modifier::INVALID.0, tiled.0];
+        assert_eq!(
+            cursor_buffer_allocations(&plane, &render),
+            vec![
+                CursorBufferAllocation::ExplicitLinear {
+                    flags: UseFlags::SCANOUT | UseFlags::RENDERING,
+                },
+                CursorBufferAllocation::ExplicitLinear { flags: UseFlags::empty() },
+                CursorBufferAllocation::PlainLinear,
+            ]
+        );
+        assert!(!cursor_buffer_allocations(&plane, &render)
+            .iter()
+            .any(|allocation| matches!(
+                allocation,
+                CursorBufferAllocation::ExplicitLinear { flags } if flags.contains(UseFlags::WRITE)
+                    || flags.contains(UseFlags::CURSOR)
+            )));
+    }
+
+    #[test]
+    fn zero_render_modifier_counts_as_shared_linear() {
+        let plane = modifiers(&[Modifier::ZERO]);
+        assert_eq!(
+            cursor_buffer_allocations(&plane, &[0]),
+            vec![
+                CursorBufferAllocation::ExplicitLinear {
+                    flags: UseFlags::SCANOUT | UseFlags::RENDERING,
+                },
+                CursorBufferAllocation::ExplicitLinear { flags: UseFlags::empty() },
+                CursorBufferAllocation::PlainLinear,
+            ]
+        );
+    }
+
+    #[test]
+    fn no_shared_renderable_linear_modifier_disables_explicit_allocation() {
+        let plane = modifiers(&[Modifier::LINEAR]);
+        let tiled = [0x0200_0000_0000_0001u64];
+        assert!(cursor_buffer_allocations(&plane, &tiled).is_empty());
+        assert!(cursor_buffer_allocations(&modifiers(&[Modifier::INVALID]), &[0]).is_empty());
+    }
+
+    #[test]
+    fn implicit_only_cursor_uses_plain_allocation() {
+        let plane = modifiers(&[Modifier::INVALID]);
+        assert_eq!(
+            cursor_buffer_allocations(&plane, &[Modifier::INVALID.0]),
+            vec![CursorBufferAllocation::PlainLinear]
+        );
+    }
+
+    #[test]
+    fn cursor_allocation_accepts_linear_and_only_plain_implicit() {
+        let explicit = CursorBufferAllocation::ExplicitLinear {
+            flags: UseFlags::SCANOUT | UseFlags::RENDERING,
+        };
+        let tiled = Modifier(0x0200_0000_0000_0001);
+        assert!(cursor_allocation_result_accepted(explicit, Modifier::LINEAR, false));
+        assert!(cursor_allocation_result_accepted(
+            CursorBufferAllocation::ExplicitLinear { flags: UseFlags::empty() },
+            Modifier::ZERO,
+            false,
+        ));
+        assert!(!cursor_allocation_result_accepted(explicit, Modifier::INVALID, true));
+        assert!(cursor_allocation_result_accepted(
+            CursorBufferAllocation::PlainLinear,
+            Modifier::INVALID,
+            true,
+        ));
+        assert!(!cursor_allocation_result_accepted(
+            CursorBufferAllocation::PlainLinear,
+            Modifier::INVALID,
+            false,
+        ));
+        assert!(!cursor_allocation_result_accepted(
+            CursorBufferAllocation::PlainLinear,
+            tiled,
+            true,
+        ));
+    }
+
+    fn cursor_test_dmabuf(width: i32, height: i32, modifier: Modifier) -> DmaBuf {
+        let fd = OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+        DmaBuf {
+            id: DmaBufId::next(),
+            width,
+            height,
+            format: ARGB8888,
+            modifier,
+            planes: Box::new([DmaBufPlane { offset: 0, stride: (width as u32) * 4, fd }]),
+        }
+    }
+
+    #[test]
+    fn cursor_target_rejects_non_linear_or_wrong_size_before_it_is_retained() {
+        let linear = cursor_test_dmabuf(64, 64, Modifier::LINEAR);
+        assert!(cursor_dmabuf_retained(64, 64, &linear, false).is_ok());
+        assert!(cursor_target_size_retained(64, 64, 64, 64).is_ok());
+        assert!(cursor_target_size_retained(64, 64, 32, 64).is_err());
+        let tiled = cursor_test_dmabuf(64, 64, Modifier(0x0200_0000_0000_0001));
+        assert!(cursor_dmabuf_retained(64, 64, &tiled, true).is_err());
+        let implicit = cursor_test_dmabuf(64, 64, Modifier::INVALID);
+        assert!(cursor_dmabuf_retained(64, 64, &implicit, false).is_err());
+        assert!(cursor_dmabuf_retained(64, 64, &implicit, true).is_ok());
+    }
+
+    #[test]
+    fn mock_renderer_creates_two_cursor_targets() {
+        let mut renderer = MockRenderer::default();
+        let first = cursor_test_dmabuf(64, 64, Modifier::LINEAR);
+        let second = cursor_test_dmabuf(64, 64, Modifier::ZERO);
+        let imported = [
+            import_cursor_render_target(&mut renderer, &first, (64, 64), false),
+            import_cursor_render_target(&mut renderer, &second, (64, 64), false),
+        ];
+        let slots = commit_cursor_slot_results(imported);
+        assert!(slots.iter().all(|slot| slot.is_some()));
+        assert_eq!(renderer.output_import_count(), 2);
+        assert_eq!(renderer.live_targets(), 2);
+        assert_eq!(slots[0].as_ref().unwrap().width(), 64);
+        assert_eq!(slots[1].as_ref().unwrap().height(), 64);
+    }
+
+    #[test]
+    fn partial_cursor_target_import_leaves_no_hardware_slots() {
+        let mut renderer = MockRenderer::default();
+        renderer.fail_output_import_at(1);
+        let first = cursor_test_dmabuf(64, 64, Modifier::LINEAR);
+        let second = cursor_test_dmabuf(64, 64, Modifier::LINEAR);
+        let imported = [
+            import_cursor_render_target(&mut renderer, &first, (64, 64), false),
+            import_cursor_render_target(&mut renderer, &second, (64, 64), false),
+        ];
+        assert!(imported[0].is_ok());
+        assert!(imported[1].is_err());
+        let slots = commit_cursor_slot_results(imported);
+        assert_eq!(slots.iter().filter(|slot| slot.is_some()).count(), 0);
+        assert_eq!(renderer.output_import_count(), 2);
+        assert_eq!(renderer.live_targets(), 0);
+
+        let mut renderer = MockRenderer::default();
+        renderer.override_target_size(32, 32);
+        let source = cursor_test_dmabuf(64, 64, Modifier::LINEAR);
+        assert!(import_cursor_render_target(&mut renderer, &source, (64, 64), false).is_err());
+        assert_eq!(renderer.live_targets(), 0);
+
+        let mut renderer = MockRenderer::default();
+        let tiled = cursor_test_dmabuf(64, 64, Modifier(0x0200_0000_0000_0001));
+        assert!(import_cursor_render_target(&mut renderer, &tiled, (64, 64), true).is_err());
+        assert_eq!(renderer.output_import_count(), 0);
+    }
+
+    #[test]
+    fn cursor_recipe_blends_at_origin_and_clears_the_fixed_target() {
+        let recipe = cursor_plane_recipe(crate::render::inert_texture(), 24, 16);
+        let FrameElement::Texture { element, .. } = &recipe.elements[0] else {
+            panic!("cursor recipe is a texture");
+        };
+        assert_eq!((element.x, element.y, element.width, element.height), (0, 0, 24, 16));
+        assert!(element.blend);
+        assert_eq!(element.alpha, u8::MAX);
+        assert_eq!(recipe.elements.len(), 1);
+
+        let damage = cursor_target_damage(64, 64).expect("target damage");
+        assert_eq!(damage.extents(), RectI::new(0, 0, 64, 64));
+        assert_eq!(CURSOR_CLEAR, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(cursor_plane_presentation(), OutputPresentationTransform::FlipY);
+    }
+
+    #[test]
+    fn cursor_pixels_keep_the_top_left_buffer_row() {
+        // 2×2 pattern in row-major top-left order. 0xA1 is the logical top-left
+        // pixel and 0xB2 is the logical bottom-left pixel.
+        let width = 2usize;
+        let height = 2i32;
+        let pattern = [0xA1u8, 0xC3, 0xB2, 0xD4];
+        let top_left = cursor_buffer_row(0, height) as usize * width;
+        let bottom_left = cursor_buffer_row(1, height) as usize * width;
+        assert_eq!(pattern[top_left], 0xA1);
+        assert_eq!(pattern[bottom_left], 0xB2);
+        let normal_top_row = (height as usize - 1) * width;
+        assert_ne!(top_left, normal_top_row);
+    }
+
+    #[test]
+    fn cached_cursor_content_is_not_rendered_again() {
+        let key = CursorPlaneContentKey::Named(CursorImageContentKey {
+            width: 24,
+            height: 24,
+            fingerprint: 9,
+        });
+        let other = CursorPlaneContentKey::Named(CursorImageContentKey {
+            width: 24,
+            height: 24,
+            fingerprint: 10,
+        });
+        assert!(cursor_upload_reuses_cached(Some(key), key));
+        assert!(!cursor_upload_reuses_cached(None, key));
+        assert!(!cursor_upload_reuses_cached(Some(other), key));
+    }
+
+    #[test]
+    fn cursor_fence_follows_explicit_sync_and_stays_distinct() {
+        assert_eq!(cursor_render_sync_mode(true, true), RenderSyncMode::ExplicitInFence);
+        assert_eq!(cursor_render_sync_mode(true, false), RenderSyncMode::BlockingFinishFallback);
+        assert_eq!(cursor_render_sync_mode(false, true), RenderSyncMode::BlockingFinishFallback);
+
+        let blocking = RenderCompletion::blocking_fallback();
+        assert_eq!(cursor_in_fence_value(&blocking), -1);
+        assert!(blocking.used_blocking_fallback);
+
+        let primary =
+            RenderCompletion::explicit(OwnedFd::from(std::fs::File::open("/dev/null").unwrap()));
+        let cursor =
+            RenderCompletion::explicit(OwnedFd::from(std::fs::File::open("/dev/zero").unwrap()));
+        let primary_fence = cursor_in_fence_value(&primary);
+        let cursor_fence = cursor_in_fence_value(&cursor);
+        assert_ne!(primary_fence, -1);
+        assert_ne!(cursor_fence, -1);
+        assert_ne!(primary_fence, cursor_fence);
+        let attempts = cursor_fences_for_attempts(&cursor, 4);
+        assert_eq!(attempts, vec![cursor_fence; 4]);
+        assert!(cursor.in_fence_fd.is_some());
+    }
+
+    #[test]
+    fn linear_and_zero_cursor_modifiers_match() {
+        let linear = modifiers(&[Modifier::LINEAR]);
+        assert!(cursor_plane_supports_requested_cursor(&linear));
+        assert!(cursor_buffer_modifier_accepted(&linear, Modifier::LINEAR));
+        assert!(cursor_buffer_modifier_accepted(&linear, Modifier::ZERO));
+        let zero = modifiers(&[Modifier::ZERO]);
+        assert!(cursor_plane_supports_requested_cursor(&zero));
+        assert!(cursor_buffer_modifier_accepted(&zero, Modifier::LINEAR));
+    }
+
+    #[test]
+    fn invalid_cursor_modifier_requires_implicit_plane_support() {
+        let implicit = modifiers(&[Modifier::INVALID]);
+        assert!(cursor_plane_supports_requested_cursor(&implicit));
+        assert!(cursor_buffer_modifier_accepted(&implicit, Modifier::INVALID));
+        assert!(!cursor_buffer_modifier_accepted(
+            &modifiers(&[Modifier::LINEAR]),
+            Modifier::INVALID
+        ));
+        assert!(!cursor_buffer_modifier_accepted(&implicit, Modifier::LINEAR));
+    }
+
+    #[test]
+    fn unadvertised_cursor_modifier_is_rejected() {
+        let tiled = Modifier(0x0200_0000_0000_0001);
+        let linear_or_implicit = modifiers(&[Modifier::LINEAR, Modifier::INVALID]);
+        assert!(!cursor_buffer_modifier_accepted(&linear_or_implicit, tiled));
+        assert!(cursor_buffer_modifier_accepted(&modifiers(&[tiled]), tiled));
+        assert!(!cursor_plane_supports_requested_cursor(&modifiers(&[tiled])));
+        assert!(!cursor_buffer_modifier_accepted(&modifiers(&[]), Modifier::LINEAR));
     }
 
     #[test]

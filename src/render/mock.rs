@@ -1,6 +1,6 @@
 use std::{
     any::Any,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fs,
     os::fd::OwnedFd,
     path::{Path, PathBuf},
@@ -28,6 +28,7 @@ enum Call {
     MakeCurrent,
     ImportDmabuf,
     ImportShm,
+    ImportOutputTarget,
     WaitAcquire,
     CreateOffscreen,
     Render,
@@ -43,6 +44,13 @@ impl Texture for MockTexture {}
 struct MockTarget {
     width: i32,
     height: i32,
+    live: Rc<Cell<usize>>,
+}
+
+impl Drop for MockTarget {
+    fn drop(&mut self) {
+        self.live.set(self.live.get().saturating_sub(1));
+    }
 }
 
 impl RenderTarget for MockTarget {
@@ -66,9 +74,13 @@ impl RenderTarget for MockTarget {
 impl OffscreenTarget for MockTarget {}
 
 #[derive(Debug)]
-struct MockRenderer {
+pub(crate) struct MockRenderer {
     calls: RefCell<Vec<Call>>,
     capabilities: RendererCapabilities,
+    live_targets: Rc<Cell<usize>>,
+    output_imports: Cell<usize>,
+    fail_output_import_at: Option<usize>,
+    target_size_override: Option<(i32, i32)>,
 }
 
 impl Default for MockRenderer {
@@ -80,6 +92,10 @@ impl Default for MockRenderer {
                 render_formats: Vec::new(),
                 explicit_sync: false,
             },
+            live_targets: Rc::new(Cell::new(0)),
+            output_imports: Cell::new(0),
+            fail_output_import_at: None,
+            target_size_override: None,
         }
     }
 }
@@ -91,6 +107,26 @@ impl MockRenderer {
 
     fn record(&self, call: Call) {
         self.calls.borrow_mut().push(call);
+    }
+
+    pub(crate) fn fail_output_import_at(&mut self, index: usize) {
+        self.fail_output_import_at = Some(index);
+    }
+
+    pub(crate) fn override_target_size(&mut self, width: i32, height: i32) {
+        self.target_size_override = Some((width, height));
+    }
+
+    pub(crate) fn output_import_count(&self) -> usize {
+        self.calls
+            .borrow()
+            .iter()
+            .filter(|call| **call == Call::ImportOutputTarget)
+            .count()
+    }
+
+    pub(crate) fn live_targets(&self) -> usize {
+        self.live_targets.get()
     }
 }
 
@@ -126,7 +162,17 @@ impl Renderer for MockRenderer {
         &mut self,
         source: &DmaBuf,
     ) -> Result<Box<dyn RenderTarget>, RendererError> {
-        Ok(Box::new(MockTarget { width: source.width, height: source.height }))
+        self.record(Call::ImportOutputTarget);
+        let index = self.output_imports.get();
+        self.output_imports.set(index + 1);
+        if self.fail_output_import_at == Some(index) {
+            return Err(RendererError::TargetFailed);
+        }
+        self.live_targets.set(self.live_targets.get() + 1);
+        let (width, height) = self
+            .target_size_override
+            .unwrap_or((source.width, source.height));
+        Ok(Box::new(MockTarget { width, height, live: Rc::clone(&self.live_targets) }))
     }
 
     fn create_offscreen_target(
@@ -135,7 +181,8 @@ impl Renderer for MockRenderer {
         height: i32,
     ) -> Result<Box<dyn OffscreenTarget>, RendererError> {
         self.record(Call::CreateOffscreen);
-        Ok(Box::new(MockTarget { width, height }))
+        self.live_targets.set(self.live_targets.get() + 1);
+        Ok(Box::new(MockTarget { width, height, live: Rc::clone(&self.live_targets) }))
     }
 
     fn render(
@@ -244,6 +291,7 @@ fn composite_imported_frame(renderer: &mut dyn Renderer) {
                 presentation_transform: OutputPresentationTransform::FlipY,
                 sync_mode: RenderSyncMode::BlockingFinishFallback,
                 blur_reference: None,
+                clear_color: None,
             },
         )
         .expect("render");

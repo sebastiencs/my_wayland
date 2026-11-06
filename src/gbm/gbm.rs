@@ -197,6 +197,33 @@ impl GbmDevice {
         exported_bo(bo)
     }
 
+    /// Cursor scanout buffers are linear and renderer-owned. `explicit_flags`
+    /// selects `gbm_bo_create_with_modifiers2([LINEAR], flags)`; `None` selects
+    /// plain `gbm_bo_create` with scanout, rendering, and linear usage.
+    pub(crate) fn try_create_linear_cursor_bo(
+        &self,
+        width: u32,
+        height: u32,
+        explicit_flags: Option<UseFlags>,
+    ) -> Option<BufferObject> {
+        let format = drm::buffer::DrmFourcc::Argb8888;
+        match explicit_flags {
+            Some(flags) => {
+                log::debug!(
+                    "Allocating linear cursor GBM BO with modifiers: size={width}x{height} flags={flags:?} modifiers=[LINEAR]"
+                );
+                self.try_create_bo_with_modifiers(width, height, format, flags, &[Modifier::LINEAR])
+            }
+            None => {
+                let flags = UseFlags::SCANOUT | UseFlags::RENDERING | UseFlags::LINEAR;
+                log::debug!(
+                    "Allocating linear cursor GBM BO without modifiers: size={width}x{height} flags={flags:?}"
+                );
+                self.try_create_bo_with_size(width, height, format, flags)
+            }
+        }
+    }
+
     pub(crate) fn try_create_bo_with_modifiers(
         &self,
         width: u32,
