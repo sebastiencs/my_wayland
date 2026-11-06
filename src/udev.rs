@@ -213,6 +213,10 @@ impl Model for Udev {
                         }
                     }
                     DevicePauseKind::Pause | DevicePauseKind::Force => {
+                        // Logind drops DRM master before this card's own PauseDevice
+                        // is delivered. An earlier input pause has to stop KMS or the
+                        // scheduler retries the failed commit and never reads dbus.
+                        self.disarm_session_outputs(state, dispatcher);
                         let drm_id = Self::find_drm_id_for_devnum(state, devnum);
                         let parked_drm = self
                             .parked
@@ -538,6 +542,16 @@ impl Udev {
     }
 
     /// Stop using one device before logind is told the pause is complete.
+    /// Stop every output clock. The card's own pause still quiesces that device.
+    fn disarm_session_outputs(&self, state: &State, dispatcher: &mut Dispatcher) {
+        for (output_id, _) in state.outputs.iter() {
+            dispatcher.dispatch_to(
+                crate::scheduler::output_scheduler_id(output_id),
+                crate::scheduler::OutputSchedulerAction::Disarm,
+            );
+        }
+    }
+
     fn quiesce_device(
         &mut self,
         devnum: libc::dev_t,
@@ -1071,6 +1085,63 @@ mod tests {
         .expect("gone without a backend");
         assert!(!dispatcher.shutdown_requested());
         assert!(udev.resumed_fds.get(&4).is_some());
+    }
+
+    #[test]
+    fn session_pause_disarms_every_output() {
+        use crate::{
+            runner::Model, scheduler::OutputSchedulerAction, state::BackendOutputRef,
+            test_support::test_output,
+        };
+
+        let mut udev = Udev::new().expect("udev monitor");
+        let mut state = crate::test_support::state_for_tests();
+        let output_id = state.insert_output(test_output(
+            BackendOutputRef::new(crate::state::DrmId::from(0usize)),
+            1,
+            0,
+            0,
+            1920,
+            1080,
+            "DP-1",
+        ));
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        udev.retained_inputs.insert(42, "/dev/input/event0".into());
+        udev.retained_inputs.insert(43, "/dev/input/event1".into());
+        let scheduler_id = crate::scheduler::output_scheduler_id(output_id);
+        let disarms = |dispatcher: &crate::runner::Dispatcher| {
+            dispatcher.test_count_queued_action(|action: &OutputSchedulerAction| {
+                matches!(action, OutputSchedulerAction::Disarm)
+            })
+        };
+
+        udev.process(
+            &mut state,
+            super::UdevAction::PauseDevice { devnum: 42, kind: super::DevicePauseKind::Pause },
+            &mut dispatcher,
+        )
+        .expect("pause input");
+        assert_eq!(disarms(&dispatcher), 1);
+        assert!(dispatcher.test_has_queued_action_for(
+            scheduler_id,
+            |action: &OutputSchedulerAction| matches!(action, OutputSchedulerAction::Disarm),
+        ));
+
+        udev.process(
+            &mut state,
+            super::UdevAction::PauseDevice { devnum: 43, kind: super::DevicePauseKind::Force },
+            &mut dispatcher,
+        )
+        .expect("force pause");
+        assert_eq!(disarms(&dispatcher), 2);
+
+        udev.process(
+            &mut state,
+            super::UdevAction::PauseDevice { devnum: 44, kind: super::DevicePauseKind::Gone },
+            &mut dispatcher,
+        )
+        .expect("device removal");
+        assert_eq!(disarms(&dispatcher), 2);
     }
 
     #[test]
