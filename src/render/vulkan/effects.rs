@@ -94,13 +94,14 @@ impl BlurImage {
             unsafe { device.device.destroy_image(image, None) };
             return Err(format!("vulkan blur image bind failed: {error}"));
         }
-        let view = match create_view(&device.device, image, format) {
-            Ok(view) => view,
-            Err(_) => {
-                unsafe { device.device.destroy_image(image, None) };
-                return Err("vulkan blur image view failed".to_string());
-            }
-        };
+        let view =
+            match create_view(&device.device, image, format, resources::component_mapping(false)) {
+                Ok(view) => view,
+                Err(_) => {
+                    unsafe { device.device.destroy_image(image, None) };
+                    return Err("vulkan blur image view failed".to_string());
+                }
+            };
         let render = if render {
             let render_pass = match resources::color_render_pass(&device.device, format) {
                 Ok(pass) => pass,

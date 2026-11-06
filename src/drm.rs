@@ -555,6 +555,39 @@ fn cursor_in_fence_value(completion: &RenderCompletion) -> i64 {
         .unwrap_or(-1)
 }
 
+fn optional_plane_attempts(want_damage_clips: bool, want_in_fence: bool) -> Vec<(bool, bool)> {
+    let mut attempts = vec![(want_damage_clips, want_in_fence)];
+    if want_damage_clips {
+        attempts.push((false, want_in_fence));
+    }
+    if want_in_fence {
+        attempts.push((want_damage_clips, false));
+    }
+    if want_damage_clips || want_in_fence {
+        attempts.push((false, false));
+    }
+    attempts.sort_unstable();
+    attempts.dedup();
+    attempts.reverse();
+    attempts
+}
+
+/// A commit that omits the render fence must CPU-wait it first. The cursor
+/// plane still programs its own `IN_FENCE_FD` on that attempt, so its fence is
+/// waited as well.
+fn dropped_in_fence_wait(
+    use_in_fence: bool,
+    render_fence_present: bool,
+    cursor_fence_present: bool,
+) -> (bool, bool) {
+    let wait_render = !use_in_fence && render_fence_present;
+    (wait_render, wait_render && cursor_fence_present)
+}
+
+fn rejected_explicit_kms_sync(want_in_fence: bool, use_in_fence: bool) -> bool {
+    want_in_fence && !use_in_fence
+}
+
 fn cursor_fences_for_attempts(completion: &RenderCompletion, attempts: usize) -> Vec<i64> {
     (0..attempts)
         .map(|_| cursor_in_fence_value(completion))
@@ -1379,27 +1412,6 @@ impl Drm {
         Ok(())
     }
 
-    fn optional_plane_attempts(
-        &self,
-        want_damage_clips: bool,
-        want_in_fence: bool,
-    ) -> Vec<(bool, bool)> {
-        let mut attempts = vec![(want_damage_clips, want_in_fence)];
-        if want_damage_clips {
-            attempts.push((false, want_in_fence));
-        }
-        if want_in_fence {
-            attempts.push((want_damage_clips, false));
-        }
-        if want_damage_clips || want_in_fence {
-            attempts.push((false, false));
-        }
-        attempts.sort_unstable();
-        attempts.dedup();
-        attempts.reverse();
-        attempts
-    }
-
     fn append_output_color_changes(
         &mut self,
         drm_crtc_id: u32,
@@ -2208,6 +2220,17 @@ impl Drm {
         }
     }
 
+    fn wait_fence_dup(&mut self, fence: &std::os::fd::OwnedFd, what: &str) {
+        match fence.try_clone() {
+            Ok(duplicated) => {
+                if let Err(error) = self.renderer.wait_fence(duplicated) {
+                    log::warn!("failed to wait on {what}: {error:?}");
+                }
+            }
+            Err(error) => log::warn!("failed to duplicate {what}: {error}"),
+        }
+    }
+
     fn cursor_plane_sync_mode(&self, drm_crtc_id: u32) -> RenderSyncMode {
         let plane_accepts_in_fence = self.output(drm_crtc_id).is_some_and(|output| {
             output.allow_in_fence_fd
@@ -2266,9 +2289,36 @@ impl Drm {
         };
         let mut last_error = None;
 
+        let render_fence_present = render_completion.in_fence_fd.is_some();
+        let cursor_fence_present = cursor_plane.as_ref().is_some_and(|cursor| {
+            !cursor.completion.used_blocking_fallback && cursor.completion.in_fence_fd.is_some()
+        });
+        let mut waited_dropped_fence = false;
         for (use_damage_clips, use_in_fence) in
-            self.optional_plane_attempts(want_damage_clips, want_in_fence)
+            optional_plane_attempts(want_damage_clips, want_in_fence)
         {
+            let (wait_render, wait_cursor) =
+                dropped_in_fence_wait(use_in_fence, render_fence_present, cursor_fence_present);
+            if wait_render && !waited_dropped_fence {
+                waited_dropped_fence = true;
+                if let Some(fence) = render_completion.in_fence_fd.as_ref() {
+                    self.wait_fence_dup(
+                        fence,
+                        "render fence before a KMS commit without IN_FENCE_FD",
+                    );
+                }
+                if wait_cursor {
+                    if let Some(fence) = cursor_plane
+                        .as_ref()
+                        .and_then(|cursor| cursor.completion.in_fence_fd.as_ref())
+                    {
+                        self.wait_fence_dup(
+                            fence,
+                            "cursor render fence before a KMS commit without IN_FENCE_FD",
+                        );
+                    }
+                }
+            }
             let mut changes = control::atomic::AtomicModeReq::new();
             changes.add_property(
                 primary_plane.handle,
@@ -2353,12 +2403,14 @@ impl Drm {
                         );
                         self.output_mut(drm_crtc_id).unwrap().allow_fb_damage_clips = false;
                     }
-                    if want_in_fence && !use_in_fence {
+                    if rejected_explicit_kms_sync(want_in_fence, use_in_fence) {
                         log::warn!(
                             "drm submit_render_buffer: driver rejected IN_FENCE_FD on {}, disabling explicit KMS in-fences",
                             self.driver.name
                         );
-                        self.output_mut(drm_crtc_id).unwrap().allow_in_fence_fd = false;
+                        let output = self.output_mut(drm_crtc_id).unwrap();
+                        output.allow_in_fence_fd = false;
+                        output.render_sync_mode = RenderSyncMode::BlockingFinishFallback;
                     }
                     let buffer_index = self.output(drm_crtc_id).unwrap().render_buffer_index();
                     let submission = self.output_mut(drm_crtc_id).unwrap().allocate_submission(
@@ -9624,11 +9676,11 @@ mod presentation_timing_tests {
             cursor_dmabuf_retained, cursor_fences_for_attempts, cursor_in_fence_value,
             cursor_plane_commit_dimensions, cursor_plane_presentation, cursor_plane_recipe,
             cursor_plane_supports_requested_cursor, cursor_render_sync_mode, cursor_target_damage,
-            cursor_target_size_retained, cursor_upload_reuses_cached,
+            cursor_target_size_retained, cursor_upload_reuses_cached, dropped_in_fence_wait,
             effect_transition_requires_full_redraw, find_cursor_slot_index_for_key,
-            import_cursor_render_target, presentation_feedback_flags,
-            render_planner::select_presentation_output_for_scene, request_output,
-            request_outputs_for_rects, rgba_to_drm_argb8888,
+            import_cursor_render_target, optional_plane_attempts, presentation_feedback_flags,
+            rejected_explicit_kms_sync, render_planner::select_presentation_output_for_scene,
+            request_output, request_outputs_for_rects, rgba_to_drm_argb8888,
             scene_item_requires_compositor_compositing, select_cursor_upload_slot,
             submitted_frame_feedbacks_for_discard, surface_allows_direct_scanout,
             CursorBufferAllocation, CursorPlaneContentKey, CursorSurfaceContentKey, Modifier,
@@ -10019,6 +10071,45 @@ mod presentation_timing_tests {
         let attempts = cursor_fences_for_attempts(&cursor, 4);
         assert_eq!(attempts, vec![cursor_fence; 4]);
         assert!(cursor.in_fence_fd.is_some());
+    }
+
+    #[test]
+    fn dropped_in_fence_waits_before_the_fallback_and_blocks_later_frames() {
+        let attempts = optional_plane_attempts(true, true);
+        assert_eq!(attempts, vec![(true, true), (true, false), (false, true), (false, false)]);
+        let waits: Vec<_> = attempts
+            .iter()
+            .map(|(_, use_in_fence)| dropped_in_fence_wait(*use_in_fence, true, true))
+            .collect();
+        assert_eq!(waits, vec![(false, false), (true, true), (false, false), (true, true)]);
+        let mut waited = false;
+        let waited_at: Vec<_> = waits
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (wait_render, _))| {
+                if *wait_render && !waited {
+                    waited = true;
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(waited_at, vec![1], "the render fence is waited once");
+        assert_eq!(attempts[waited_at[0]], (true, false));
+
+        assert_eq!(dropped_in_fence_wait(false, true, false), (true, false));
+        assert_eq!(dropped_in_fence_wait(false, false, true), (false, false));
+        assert_eq!(dropped_in_fence_wait(true, true, true), (false, false));
+
+        let without_fence = optional_plane_attempts(true, false);
+        assert!(without_fence
+            .iter()
+            .all(|(_, use_in_fence)| { dropped_in_fence_wait(*use_in_fence, true, true).0 }));
+
+        assert!(rejected_explicit_kms_sync(true, false));
+        assert!(!rejected_explicit_kms_sync(true, true));
+        assert!(!rejected_explicit_kms_sync(false, false));
     }
 
     #[test]

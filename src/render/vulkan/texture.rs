@@ -1,7 +1,7 @@
 //! Sampled images. Shared memory is copied through a host-visible staging buffer.
 //! dma-buf planes stay on dedicated imported memory.
 
-use std::{any::Any, fmt::Debug, rc::Rc};
+use std::{any::Any, fmt::Debug, os::fd::OwnedFd, rc::Rc};
 
 use {ash::vk, gpu_alloc::UsageFlags};
 
@@ -25,6 +25,8 @@ pub(super) struct VulkanTexture {
     image: vk::Image,
     view: vk::ImageView,
     memory: TextureMemory,
+    /// One dup of each distinct dma-buf plane. Empty for uploaded textures.
+    planes: Vec<OwnedFd>,
 }
 
 enum TextureMemory {
@@ -61,6 +63,19 @@ impl VulkanTexture {
 
     pub(super) fn view(&self) -> vk::ImageView {
         self.view
+    }
+
+    pub(super) fn image(&self) -> vk::Image {
+        self.image
+    }
+
+    /// A client dma-buf. Each frame acquires it from the foreign queue.
+    pub(super) fn foreign(&self) -> bool {
+        matches!(self.memory, TextureMemory::Imported(_))
+    }
+
+    pub(super) fn plane_fds(&self) -> &[OwnedFd] {
+        &self.planes
     }
 
     pub(super) fn import_dmabuf(
@@ -173,7 +188,12 @@ impl VulkanTexture {
             }
             return Err(error);
         }
-        let view = match create_view(&device.device, image, format) {
+        let view = match create_view(
+            &device.device,
+            image,
+            format,
+            resources::component_mapping(!source.format.has_alpha),
+        ) {
             Ok(view) => view,
             Err(error) => {
                 unsafe {
@@ -185,15 +205,27 @@ impl VulkanTexture {
                 return Err(error);
             }
         };
-        let texture = Self {
+        let planes = match distinct_plane_fds(&source.planes) {
+            Ok(planes) => planes,
+            Err(error) => {
+                unsafe {
+                    device.device.destroy_image_view(view, None);
+                    for memory in memories {
+                        device.device.free_memory(memory, None);
+                    }
+                    device.device.destroy_image(image, None);
+                }
+                return Err(error);
+            }
+        };
+        Ok(Self {
             device: device.clone(),
             device_id: device.device_id(),
             image,
             view,
             memory: TextureMemory::Imported(memories),
-        };
-        transition_sampled(device, image)?;
-        Ok(texture)
+            planes,
+        })
     }
 
     pub(super) fn import_shm(
@@ -212,6 +244,7 @@ impl VulkanTexture {
             image.height,
             image.stride,
             vk::Format::B8G8R8A8_UNORM,
+            resources::component_mapping(image.fourcc == XRGB8888.drm),
             RendererError::ImportFailed,
         )
     }
@@ -237,6 +270,7 @@ impl VulkanTexture {
             height,
             row_bytes,
             vk::Format::R8G8B8A8_UNORM,
+            resources::component_mapping(false),
             RendererError::UploadFailed,
         )
     }
@@ -292,6 +326,7 @@ fn upload_sampled(
     height: i32,
     stride: usize,
     format: vk::Format,
+    components: vk::ComponentMapping,
     failed: RendererError,
 ) -> Result<VulkanTexture, RendererError> {
     let info = vk::ImageCreateInfo::default()
@@ -327,7 +362,7 @@ fn upload_sampled(
         unsafe { device.device.destroy_image(image, None) };
         return Err(failed);
     }
-    let view = match create_view(&device.device, image, format) {
+    let view = match create_view(&device.device, image, format, components) {
         Ok(view) => view,
         Err(error) => {
             unsafe { device.device.destroy_image(image, None) };
@@ -413,6 +448,7 @@ fn upload_sampled(
         image,
         view,
         memory: TextureMemory::Gpu(allocation),
+        planes: Vec::new(),
     })
 }
 
@@ -461,34 +497,52 @@ impl VulkanTexture {
             unsafe { device.device.destroy_image(image, None) };
             return Err(RendererError::RenderFailed);
         }
-        let view = match create_view(&device.device, image, format) {
-            Ok(view) => view,
-            Err(error) => {
-                unsafe { device.device.destroy_image(image, None) };
-                return Err(error);
-            }
-        };
-        let old_layout = source.layout().get();
-        let copied = device.submit(RendererError::RenderFailed, |vulkan, command| {
-            let (src_stage, src_access) = if old_layout == vk::ImageLayout::UNDEFINED {
-                (vk::PipelineStageFlags::TOP_OF_PIPE, vk::AccessFlags::empty())
-            } else {
-                (
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                )
+        let view =
+            match create_view(&device.device, image, format, resources::component_mapping(false)) {
+                Ok(view) => view,
+                Err(error) => {
+                    unsafe { device.device.destroy_image(image, None) };
+                    return Err(error);
+                }
             };
-            command::image_barrier(
-                vulkan,
-                command,
-                source.image(),
-                old_layout,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                src_stage,
-                vk::PipelineStageFlags::TRANSFER,
-                src_access,
-                vk::AccessFlags::TRANSFER_READ,
-            );
+        let old_layout = source.layout().get();
+        let external = source.external();
+        let graphics_family = device.graphics_queue_family;
+        let copied = device.submit(RendererError::RenderFailed, |vulkan, command| {
+            if external {
+                command::record_barrier(
+                    vulkan,
+                    command,
+                    source.image(),
+                    command::foreign_acquire(
+                        old_layout == vk::ImageLayout::UNDEFINED,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::AccessFlags::TRANSFER_READ,
+                        graphics_family,
+                    ),
+                );
+            } else {
+                let (src_stage, src_access) = if old_layout == vk::ImageLayout::UNDEFINED {
+                    (vk::PipelineStageFlags::TOP_OF_PIPE, vk::AccessFlags::empty())
+                } else {
+                    (
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    )
+                };
+                command::image_barrier(
+                    vulkan,
+                    command,
+                    source.image(),
+                    old_layout,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    src_stage,
+                    vk::PipelineStageFlags::TRANSFER,
+                    src_access,
+                    vk::AccessFlags::TRANSFER_READ,
+                );
+            }
             command::image_barrier(
                 vulkan,
                 command,
@@ -517,17 +571,31 @@ impl VulkanTexture {
                     std::slice::from_ref(&region),
                 );
             }
-            command::image_barrier(
-                vulkan,
-                command,
-                source.image(),
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                vk::AccessFlags::TRANSFER_READ,
-                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            );
+            if external {
+                command::record_barrier(
+                    vulkan,
+                    command,
+                    source.image(),
+                    command::foreign_release(
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::AccessFlags::TRANSFER_READ,
+                        graphics_family,
+                    ),
+                );
+            } else {
+                command::image_barrier(
+                    vulkan,
+                    command,
+                    source.image(),
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::AccessFlags::TRANSFER_READ,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                );
+            }
             command::image_barrier(
                 vulkan,
                 command,
@@ -548,34 +616,36 @@ impl VulkanTexture {
             }
             return Err(error);
         }
-        source
-            .layout()
-            .set(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        source.layout().set(if external {
+            vk::ImageLayout::GENERAL
+        } else {
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+        });
         Ok(Self {
             device: device.clone(),
             device_id: device.device_id(),
             image,
             view,
             memory: TextureMemory::Gpu(allocation),
+            planes: Vec::new(),
         })
     }
 }
 
-fn transition_sampled(device: &VulkanDevice, image: vk::Image) -> Result<(), RendererError> {
-    device.submit(RendererError::ImportFailed, |device, command| {
-        command::image_barrier(
-            device,
-            command,
-            image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::AccessFlags::empty(),
-            vk::AccessFlags::SHADER_READ,
-        );
-        Ok(())
-    })
+fn distinct_plane_fds(
+    planes: &[crate::dmabuf::DmaBufPlane],
+) -> Result<Vec<OwnedFd>, RendererError> {
+    let mut identities = Vec::new();
+    let mut fds = Vec::new();
+    for plane in planes {
+        let identity = resources::plane_file(plane)?;
+        if identities.contains(&identity) {
+            continue;
+        }
+        identities.push(identity);
+        fds.push(super::memory::duplicate_fd(&plane.fd)?);
+    }
+    Ok(fds)
 }
 
 fn color_layers() -> vk::ImageSubresourceLayers {

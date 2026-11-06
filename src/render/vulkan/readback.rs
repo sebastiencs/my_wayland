@@ -1,8 +1,9 @@
-//! Top-left readback of an offscreen color image.
+//! Top-left readback of a color image.
 //!
 //! Row 0 of the copy is image row 0. With the FlipY projection that row is the
 //! same pixel GLES `read_flip_y_framebuffer` stores first. Output dma-bufs are
-//! imported without `TRANSFER_SRC`, so their readback stays unavailable.
+//! imported with `TRANSFER_SRC`, so both offscreen images and output targets
+//! can be copied.
 
 use std::rc::Rc;
 
@@ -53,18 +54,43 @@ pub(super) fn read_color(
         RendererError::ReadbackFailed
     })?;
     let old_layout = target.layout().get();
+    let external = target.external();
+    let graphics_family = device.graphics_queue_family;
     device.submit(RendererError::ReadbackFailed, |vulkan, command| {
-        command::image_barrier(
-            vulkan,
-            command,
-            target.image(),
-            old_layout,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            vk::AccessFlags::TRANSFER_READ,
-        );
+        if external {
+            command::record_barrier(
+                vulkan,
+                command,
+                target.image(),
+                command::foreign_acquire(
+                    old_layout == vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::AccessFlags::TRANSFER_READ,
+                    graphics_family,
+                ),
+            );
+        } else {
+            let (src_stage, src_access) = if old_layout == vk::ImageLayout::UNDEFINED {
+                (vk::PipelineStageFlags::TOP_OF_PIPE, vk::AccessFlags::empty())
+            } else {
+                (
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                )
+            };
+            command::image_barrier(
+                vulkan,
+                command,
+                target.image(),
+                old_layout,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                src_stage,
+                vk::PipelineStageFlags::TRANSFER,
+                src_access,
+                vk::AccessFlags::TRANSFER_READ,
+            );
+        }
         let region = vk::BufferImageCopy::default()
             .image_subresource(vk::ImageSubresourceLayers {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -87,22 +113,38 @@ pub(super) fn read_color(
                 std::slice::from_ref(&region),
             );
         }
-        command::image_barrier(
-            vulkan,
-            command,
-            target.image(),
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            vk::AccessFlags::TRANSFER_READ,
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-        );
+        if external {
+            command::record_barrier(
+                vulkan,
+                command,
+                target.image(),
+                command::foreign_release(
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::AccessFlags::TRANSFER_READ,
+                    graphics_family,
+                ),
+            );
+        } else {
+            command::image_barrier(
+                vulkan,
+                command,
+                target.image(),
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags::TRANSFER_READ,
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            );
+        }
         Ok(())
     })?;
-    target
-        .layout()
-        .set(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+    target.layout().set(if external {
+        vk::ImageLayout::GENERAL
+    } else {
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+    });
     let mut tightly = vec![0_u8; tight];
     buffer.read(&mut tightly).map_err(|error| {
         log::error!("{error}");

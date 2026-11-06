@@ -50,6 +50,9 @@ pub(super) struct VulkanDevice {
     pub(super) memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub(super) formats: FormatSet,
     device_id: RenderDeviceId,
+    /// `false` after the kernel rejects `DMA_BUF_IOCTL_EXPORT_SYNC_FILE` or
+    /// `DMA_BUF_IOCTL_IMPORT_SYNC_FILE`. Later frames poll the dma-buf instead.
+    implicit_sync: Cell<bool>,
 }
 
 /// One explicit submission. The renderer keeps it until the fence signals.
@@ -100,6 +103,10 @@ pub(super) struct DetachedSubmit {
 }
 
 impl DetachedSubmit {
+    pub(super) fn sync_fd(&self) -> &OwnedFd {
+        &self.sync_fd
+    }
+
     pub(super) fn into_frame(
         self,
         device: &Rc<VulkanDevice>,
@@ -200,7 +207,21 @@ impl VulkanDevice {
             memory_properties,
             formats,
             device_id: RenderDeviceId::next(),
+            implicit_sync: Cell::new(true),
         }))
+    }
+
+    pub(super) fn implicit_sync_available(&self) -> bool {
+        self.implicit_sync.get()
+    }
+
+    /// Logs the fallback once. Later calls stay quiet.
+    pub(super) fn note_implicit_sync_unsupported(&self) {
+        if self.implicit_sync.replace(false) {
+            log::warn!(
+                "dma-buf sync-file ioctls are unavailable; waiting on the dma-buf file descriptors"
+            );
+        }
     }
 
     pub(super) fn device_id(&self) -> RenderDeviceId {
@@ -375,7 +396,9 @@ impl VulkanDevice {
         signal: Option<vk::Semaphore>,
         fence: vk::Fence,
     ) -> Result<(), String> {
-        let stages = vec![vk::PipelineStageFlags::TOP_OF_PIPE; waits.len()];
+        // wlroots waits every acquire semaphore at ALL_COMMANDS (pass.c).
+        // TOP_OF_PIPE does not include the later color and fragment accesses.
+        let stages = vec![vk::PipelineStageFlags::ALL_COMMANDS; waits.len()];
         let signals: Vec<vk::Semaphore> = signal.into_iter().collect();
         let mut info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command));
         if !waits.is_empty() {
@@ -700,6 +723,7 @@ fn require_api_version(
 const REQUIRED_EXTENSIONS: &[&CStr] = &[
     vk::KHR_EXTERNAL_MEMORY_FD_NAME,
     vk::EXT_EXTERNAL_MEMORY_DMA_BUF_NAME,
+    vk::EXT_QUEUE_FAMILY_FOREIGN_NAME,
     vk::EXT_IMAGE_DRM_FORMAT_MODIFIER_NAME,
     vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME,
     vk::EXT_PHYSICAL_DEVICE_DRM_NAME,

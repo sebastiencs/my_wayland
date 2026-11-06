@@ -84,7 +84,7 @@ fn memory_type_index(
     (0..properties.memory_type_count).find(|index| type_bits & (1 << index) != 0)
 }
 
-fn duplicate_fd(fd: &OwnedFd) -> Result<OwnedFd, RendererError> {
+pub(super) fn duplicate_fd(fd: &OwnedFd) -> Result<OwnedFd, RendererError> {
     let raw = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
     if raw < 0 {
         log::error!("failed to duplicate a dma-buf fd: {}", std::io::Error::last_os_error());

@@ -20,6 +20,8 @@ use std::{
     rc::{Rc, Weak},
 };
 
+use drm::control::Device;
+
 use crate::{
     dmabuf::{DmaBuf, DmaBufId},
     region::{DamageRegion, RectI},
@@ -251,7 +253,7 @@ impl Renderer for VulkanRenderer {
             Ok(Some(sync_file)) => sync_file,
             Err(error) => {
                 log::warn!("vulkan acquire sync-file export failed: {error}");
-                return Ok(());
+                return wait_acquire_on_cpu(acquire);
             }
         };
         match sync::import_sync_file(&self.device, sync_file) {
@@ -261,7 +263,19 @@ impl Renderer for VulkanRenderer {
             }
             Err(error) => {
                 log::warn!("vulkan acquire sync-file import failed: {error}");
-                Ok(())
+                // Import closes the sync file. Export another and wait on the CPU.
+                match acquire.prepare_wait_fd() {
+                    Ok(Some(sync_file)) => crate::sync::wait_sync_file_cpu(sync_file.as_fd())
+                        .map_err(|error| {
+                            log::warn!("vulkan acquire CPU wait failed: {error}");
+                            RendererError::FenceWaitFailed
+                        }),
+                    Ok(None) => Ok(()),
+                    Err(error) => {
+                        log::warn!("vulkan acquire sync-file export failed: {error}");
+                        wait_acquire_on_cpu(acquire)
+                    }
+                }
             }
         }
     }
@@ -274,6 +288,45 @@ impl Renderer for VulkanRenderer {
             RendererError::FenceWaitFailed
         })
     }
+}
+
+/// CPU fallback when a Vulkan semaphore cannot represent the acquire.
+///
+/// A timeline point is waited with `syncobj_timeline_wait`. That ioctl takes an
+/// absolute `CLOCK_MONOTONIC` deadline. One second matches the dma-buf poll
+/// used when implicit sync is unavailable.
+fn wait_acquire_on_cpu(acquire: &AcquireSync) -> Result<(), RendererError> {
+    match acquire {
+        AcquireSync::None => Ok(()),
+        AcquireSync::SyncFile(fd) => crate::sync::wait_sync_file_cpu(fd.as_fd()).map_err(|error| {
+            log::warn!("vulkan acquire CPU wait failed: {error}");
+            RendererError::FenceWaitFailed
+        }),
+        AcquireSync::TimelinePoint { timeline, point } => {
+            let deadline = monotonic_deadline_nsec(std::time::Duration::from_secs(1))?;
+            timeline
+                .drm()
+                .syncobj_timeline_wait(&[timeline.handle()], &[*point], deadline, true, true, false)
+                .map(|_| ())
+                .map_err(|error| {
+                    log::warn!("vulkan acquire timeline wait failed: {error}");
+                    RendererError::FenceWaitFailed
+                })
+        }
+    }
+}
+
+fn monotonic_deadline_nsec(bound: std::time::Duration) -> Result<i64, RendererError> {
+    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+        log::warn!("vulkan acquire clock read failed: {}", std::io::Error::last_os_error());
+        return Err(RendererError::FenceWaitFailed);
+    }
+    let now_nsec = (now.tv_sec as i64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(now.tv_nsec as i64);
+    let bound_nsec = i64::try_from(bound.as_nanos()).unwrap_or(i64::MAX);
+    Ok(now_nsec.saturating_add(bound_nsec))
 }
 
 #[cfg(test)]
@@ -627,6 +680,101 @@ mod tests {
         held_green_frame(&mut renderer, quad, || {
             blocked.release().expect("release the timeline point");
         });
+    }
+
+    #[test]
+    fn vulkan_implicit_sync_tracks_a_sampled_dma_buf() {
+        let Some((drm, mut renderer)) = vulkan_device() else {
+            eprintln!("skipping vulkan implicit sync: no matching DRM node");
+            return;
+        };
+        let Ok(gbm) = GbmDevice::new(&drm) else {
+            eprintln!("skipping vulkan implicit sync: no gbm device");
+            return;
+        };
+        let caps = renderer.capabilities();
+        let render = caps
+            .render_formats
+            .iter()
+            .find(|format| format.fourcc == DrmFourcc::Xrgb8888);
+        let sample = caps
+            .sample_formats
+            .iter()
+            .find(|format| format.fourcc == DrmFourcc::Xrgb8888);
+        let modifiers: Vec<u64> = match (render, sample) {
+            (Some(render), Some(sample)) => render
+                .modifiers
+                .iter()
+                .copied()
+                .filter(|modifier| sample.modifiers.contains(modifier))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let Some(bo) = modifiers.iter().find_map(|modifier| {
+            gbm.try_create_bo_with_modifiers(
+                8,
+                4,
+                DrmFourcc::Xrgb8888,
+                UseFlags::RENDERING | UseFlags::SCANOUT,
+                &[crate::drm::Modifier(*modifier)],
+            )
+        }) else {
+            eprintln!("skipping vulkan implicit sync: GBM allocated no shared buffer");
+            return;
+        };
+        let Some(dmabuf) = bo.dmabuf() else {
+            eprintln!("skipping vulkan implicit sync: buffer exported no dma-buf");
+            return;
+        };
+        let fresh =
+            crate::dmabuf::export_sync_file(&dmabuf.planes[0].fd, crate::dmabuf::DMA_BUF_SYNC_READ)
+                .expect("export a fresh dma-buf");
+        assert!(sync_file_ready(&fresh), "a fresh dma-buf export is already signaled");
+        drop(fresh);
+
+        let texture = renderer.import_dmabuf(dmabuf).expect("import the dma-buf");
+        let blocked = BlockedSyncFile::open(&renderer.device).expect("unsignaled sync file");
+        renderer
+            .wait_acquire(&AcquireSync::from_sync_file(dup_fd(blocked.fd())))
+            .expect("stash the acquire");
+        let rect = RectI::new(0, 0, 8, 4).expect("rect");
+        let quad = FrameElement::Texture {
+            phase: FramePhase::Content,
+            element: TextureElement {
+                source: TextureSource::Texture,
+                texture,
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 4,
+                tex_transform: Mat3::identity(),
+                damage: DamageRegion::from_rect(rect),
+                blend: false,
+                alpha: 255,
+                mask: TextureMask::None,
+            },
+        };
+        let (_target, completion) =
+            render_offscreen(&mut renderer, vec![quad], RenderSyncMode::ExplicitInFence);
+        let render_fence = completion.in_fence_fd.expect("explicit render fence");
+        assert!(!sync_file_ready(&render_fence), "the render fence signaled early");
+        let write_fence = crate::dmabuf::export_sync_file(
+            &dmabuf.planes[0].fd,
+            crate::dmabuf::DMA_BUF_SYNC_WRITE,
+        )
+        .expect("export the dma-buf write fence");
+        assert!(
+            !sync_file_ready(&write_fence),
+            "the dma-buf became writable before the render finished"
+        );
+        blocked.release().expect("release the acquire");
+        renderer
+            .wait_fence(render_fence)
+            .expect("wait for the render");
+        assert!(
+            sync_file_ready(&write_fence),
+            "the dma-buf write fence did not follow the render fence"
+        );
     }
 
     #[test]

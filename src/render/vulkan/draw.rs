@@ -125,10 +125,24 @@ pub(super) fn paint(
         RendererError::RenderFailed
     })?;
     let mut ops = Vec::new();
+    let mut kept_textures = Vec::new();
+    let mut foreign_images = Vec::new();
+    let mut foreign_textures = Vec::new();
     for element in &frame.recipe.elements {
         match element {
             FrameElement::Texture { element, .. } => {
                 if let Some(quad) = prepare_texture(device, draw, target, element, &frame)? {
+                    if let Some(texture) =
+                        texture::sampled_texture(element.texture.as_ref(), device.device_id())
+                    {
+                        // Jay and wlroots acquire every sampled dma-buf from
+                        // GENERAL. UNDEFINED would discard the client's contents.
+                        if texture.foreign() && !foreign_images.contains(&texture.image()) {
+                            foreign_images.push(texture.image());
+                            foreign_textures.push(Rc::clone(&element.texture));
+                        }
+                    }
+                    kept_textures.push(Rc::clone(&element.texture));
                     ops.push(FrameOp::Quad(quad));
                 }
             }
@@ -143,28 +157,64 @@ pub(super) fn paint(
         clear_rects(target, frame.damage, frame.preserve_contents, frame.presentation_transform);
     let clear_color = frame.clear_color.unwrap_or_else(|| target.clear_color());
     let explicit = frame.sync_mode == RenderSyncMode::ExplicitInFence;
+    let foreign_planes = foreign_plane_fds(&foreign_textures, device.device_id());
+    let implicit = super::sync::implicit_read_waits(device, &foreign_planes)?;
+    let mut acquires = acquires;
+    acquires.extend(implicit);
     let waits = OwnedSemaphores::from_stashed(device, acquires);
+    let external = target.external();
+    let graphics_family = device.graphics_queue_family;
     let submitted = device.submit_rendered(explicit, waits.as_slice(), |vulkan, command| {
         let old_layout = target.layout().get();
-        let (src_stage, src_access) = if old_layout == vk::ImageLayout::UNDEFINED {
-            (vk::PipelineStageFlags::TOP_OF_PIPE, vk::AccessFlags::empty())
+        if external {
+            command::record_barrier(
+                vulkan,
+                command,
+                target.image(),
+                command::foreign_acquire(
+                    old_layout == vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::AccessFlags::COLOR_ATTACHMENT_READ
+                        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    graphics_family,
+                ),
+            );
         } else {
-            (
+            let (src_stage, src_access) = if old_layout == vk::ImageLayout::UNDEFINED {
+                (vk::PipelineStageFlags::TOP_OF_PIPE, vk::AccessFlags::empty())
+            } else {
+                (
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                )
+            };
+            command::image_barrier(
+                vulkan,
+                command,
+                target.image(),
+                old_layout,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                src_stage,
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            )
-        };
-        command::image_barrier(
-            vulkan,
-            command,
-            target.image(),
-            old_layout,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            src_stage,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            src_access,
-            vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-        );
+                src_access,
+                vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            );
+        }
+        for image in &foreign_images {
+            command::record_barrier(
+                vulkan,
+                command,
+                *image,
+                command::foreign_acquire(
+                    false,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::AccessFlags::SHADER_READ,
+                    graphics_family,
+                ),
+            );
+        }
         let mut layout = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
         let mut pass_open = false;
         let mut cleared = false;
@@ -225,17 +275,52 @@ pub(super) fn paint(
             );
         }
         unsafe { vulkan.cmd_end_render_pass(command) };
+        for image in &foreign_images {
+            command::record_barrier(
+                vulkan,
+                command,
+                *image,
+                command::foreign_release(
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::AccessFlags::SHADER_READ,
+                    graphics_family,
+                ),
+            );
+        }
+        if external {
+            // Jay's final_barriers releases a direct framebuffer from
+            // COLOR_ATTACHMENT_OPTIMAL back to the foreign queue.
+            command::record_barrier(
+                vulkan,
+                command,
+                target.image(),
+                command::foreign_release(
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    graphics_family,
+                ),
+            );
+        }
         Ok(())
     })?;
-    target
-        .layout()
-        .set(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+    target.layout().set(if external {
+        vk::ImageLayout::GENERAL
+    } else {
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+    });
     match submitted {
         RenderedSubmit::Blocked => Ok(RenderCompletion::blocking_fallback()),
         RenderedSubmit::Explicit(detached) => {
+            super::sync::attach_implicit_read_fence(device, &foreign_planes, detached.sync_fd());
             let pool = draw.park_pool();
-            let (sync_fd, parked) =
-                detached.into_frame(device, waits.into_handles(), pool, Box::new(ops));
+            let (sync_fd, parked) = detached.into_frame(
+                device,
+                waits.into_handles(),
+                pool,
+                Box::new((ops, kept_textures)),
+            );
             if crate::logger::ENABLE_NOISY_LOG {
                 log::debug!("vulkan exported explicit render fence fd={}", sync_fd.as_raw_fd());
             }
@@ -243,6 +328,17 @@ pub(super) fn paint(
             Ok(RenderCompletion::explicit(sync_fd))
         }
     }
+}
+
+fn foreign_plane_fds(
+    textures: &[Rc<dyn crate::render::Texture>],
+    device_id: crate::render::RenderDeviceId,
+) -> Vec<&std::os::fd::OwnedFd> {
+    textures
+        .iter()
+        .filter_map(|texture| texture::sampled_texture(texture.as_ref(), device_id))
+        .flat_map(|texture| texture.plane_fds().iter())
+        .collect()
 }
 
 fn prepare_texture(

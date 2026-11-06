@@ -823,6 +823,184 @@ fn vulkan_preserves_untouched_scanout_pixels() {
     }
 }
 
+#[test]
+fn vulkan_output_target_preserves_contents_across_frames() {
+    let Some(mut pair) = pair() else {
+        eprintln!("skipping vulkan output preserve: no matching DRM node");
+        return;
+    };
+    let modifiers = pair
+        .vulkan
+        .capabilities()
+        .render_formats
+        .iter()
+        .find(|format| format.fourcc == DrmFourcc::Xrgb8888)
+        .map(|format| format.modifiers.clone())
+        .unwrap_or_default();
+    let Some(bo) = modifiers.iter().find_map(|modifier| {
+        pair.gbm.try_create_bo_with_modifiers(
+            8,
+            4,
+            DrmFourcc::Xrgb8888,
+            UseFlags::RENDERING | UseFlags::SCANOUT,
+            &[crate::drm::Modifier(*modifier)],
+        )
+    }) else {
+        eprintln!("skipping vulkan output preserve: GBM allocated no scanout buffer");
+        return;
+    };
+    let dmabuf = bo.dmabuf().expect("scanout dma-buf");
+    let mut target = pair
+        .vulkan
+        .import_output_target(dmabuf)
+        .expect("import scanout");
+    let empty = OutputFrameRecipe { elements: Vec::new() };
+    let full = DamageRegion::from_rect(RectI::new(0, 0, 8, 4).expect("full"));
+    pair.vulkan
+        .render(
+            &mut *target,
+            RenderFrame {
+                recipe: &empty,
+                damage: &full,
+                preserve_contents: false,
+                presentation_transform: OutputPresentationTransform::FlipY,
+                sync_mode: RenderSyncMode::BlockingFinishFallback,
+                blur_reference: None,
+                clear_color: Some([1.0, 0.0, 0.0, 1.0]),
+            },
+        )
+        .expect("paint the scanout buffer red");
+    let corner = DamageRegion::from_rect(RectI::new(0, 0, 2, 2).expect("corner"));
+    pair.vulkan
+        .render(
+            &mut *target,
+            RenderFrame {
+                recipe: &empty,
+                damage: &corner,
+                preserve_contents: true,
+                presentation_transform: OutputPresentationTransform::FlipY,
+                sync_mode: RenderSyncMode::BlockingFinishFallback,
+                blur_reference: None,
+                clear_color: Some([0.0, 1.0, 0.0, 1.0]),
+            },
+        )
+        .expect("paint the damaged corner green");
+    let mut bytes = [0_u8; 8 * 4 * 4];
+    pair.vulkan
+        .readback(&*target, RectI::new(0, 0, 8, 4).expect("read"), 32, &mut bytes)
+        .expect("read the scanout buffer");
+    for y in 0..4 {
+        for x in 0..8 {
+            let start = y * 32 + x * 4;
+            let pixel = &bytes[start..start + 4];
+            // Readback is B8G8R8A8. The clear colors are RGBA.
+            if x < 2 && y < 2 {
+                assert_eq!(pixel, &[0, 255, 0, 255], "damaged {x},{y}");
+            } else {
+                assert_eq!(pixel, &[0, 0, 255, 255], "preserved {x},{y}");
+            }
+        }
+    }
+}
+
+#[test]
+fn vulkan_client_dmabuf_sees_writes_between_frames() {
+    let Some(mut pair) = pair() else {
+        eprintln!("skipping vulkan client dma-buf: no matching DRM node");
+        return;
+    };
+    let caps = pair.vulkan.capabilities();
+    let render = caps
+        .render_formats
+        .iter()
+        .find(|format| format.fourcc == DrmFourcc::Xrgb8888);
+    let sample = caps
+        .sample_formats
+        .iter()
+        .find(|format| format.fourcc == DrmFourcc::Xrgb8888);
+    let modifiers: Vec<u64> = match (render, sample) {
+        (Some(render), Some(sample)) => render
+            .modifiers
+            .iter()
+            .copied()
+            .filter(|modifier| sample.modifiers.contains(modifier))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let Some(bo) = modifiers.iter().find_map(|modifier| {
+        pair.gbm.try_create_bo_with_modifiers(
+            8,
+            4,
+            DrmFourcc::Xrgb8888,
+            UseFlags::RENDERING | UseFlags::SCANOUT,
+            &[crate::drm::Modifier(*modifier)],
+        )
+    }) else {
+        eprintln!("skipping vulkan client dma-buf: GBM allocated no shared buffer");
+        return;
+    };
+    let Some(dmabuf) = bo.dmabuf() else {
+        eprintln!("skipping vulkan client dma-buf: buffer exported no dma-buf");
+        return;
+    };
+    let texture = match pair.vulkan.import_dmabuf(dmabuf) {
+        Ok(texture) => texture,
+        Err(error) => {
+            eprintln!("skipping vulkan client dma-buf: import failed: {error}");
+            return;
+        }
+    };
+    let mut source = pair
+        .vulkan
+        .import_output_target(dmabuf)
+        .expect("import the same buffer as a render target");
+    clear_output(&mut *pair.vulkan, &mut *source, 8, 4, [1.0, 0.0, 0.0, 1.0]);
+    let red = paint(
+        &mut *pair.vulkan,
+        element(Rc::clone(&texture), 0, 0, 8, 4, u8::MAX, TextureMask::None),
+        8,
+        4,
+    );
+    for y in 0..4 {
+        for x in 0..8 {
+            assert_eq!(pixel(&red, 8, x, y), &[0, 0, 255, 255], "red sample {x},{y}");
+        }
+    }
+    clear_output(&mut *pair.vulkan, &mut *source, 8, 4, [0.0, 1.0, 0.0, 1.0]);
+    let green =
+        paint(&mut *pair.vulkan, element(texture, 0, 0, 8, 4, u8::MAX, TextureMask::None), 8, 4);
+    for y in 0..4 {
+        for x in 0..8 {
+            assert_eq!(pixel(&green, 8, x, y), &[0, 255, 0, 255], "green sample {x},{y}");
+        }
+    }
+}
+
+fn clear_output(
+    renderer: &mut dyn Renderer,
+    target: &mut dyn crate::render::RenderTarget,
+    width: i32,
+    height: i32,
+    color: [f32; 4],
+) {
+    let recipe = OutputFrameRecipe { elements: Vec::new() };
+    let damage = DamageRegion::from_rect(RectI::new(0, 0, width, height).expect("full"));
+    renderer
+        .render(
+            target,
+            RenderFrame {
+                recipe: &recipe,
+                damage: &damage,
+                preserve_contents: false,
+                presentation_transform: OutputPresentationTransform::FlipY,
+                sync_mode: RenderSyncMode::BlockingFinishFallback,
+                blur_reference: None,
+                clear_color: Some(color),
+            },
+        )
+        .expect("paint the client buffer");
+}
+
 fn linear_cursor_bo(gbm: &GbmDevice, size: u32) -> Option<crate::gbm::BufferObject> {
     let attempts = [Some(UseFlags::SCANOUT | UseFlags::RENDERING), Some(UseFlags::empty()), None];
     attempts
@@ -955,4 +1133,64 @@ fn vulkan_cursor_target_keeps_top_left_and_clears_the_rest() {
         .expect("small cursor readback");
     assert_eq!(cursor_pixel(&bytes, 0, 0), [255, 255, 255, 255]);
     assert_eq!(cursor_pixel(&bytes, 1, 0), [0, 0, 0, 0], "previous cursor row was cleared");
+}
+
+#[test]
+fn vulkan_xrgb_shm_stays_opaque_when_blended() {
+    let Some(mut pair) = pair() else {
+        eprintln!("skipping vulkan xrgb alpha: no matching DRM node");
+        return;
+    };
+    // Little-endian B, G, R, A. Red with a zero alpha byte.
+    let xrgb = pair
+        .vulkan
+        .import_shm(ShmImage {
+            bytes: &[0, 0, 255, 0],
+            width: 1,
+            height: 1,
+            stride: 4,
+            fourcc: DrmFourcc::Xrgb8888,
+        })
+        .expect("xrgb");
+    assert_eq!(
+        paint(&mut *pair.vulkan, blended_pixel(xrgb), 1, 1),
+        [0, 0, 255, 255],
+        "xrgb alpha byte 0 must sample as opaque"
+    );
+
+    let argb = pair
+        .vulkan
+        .import_shm(ShmImage {
+            bytes: &[0, 0, 255, 0],
+            width: 1,
+            height: 1,
+            stride: 4,
+            fourcc: DrmFourcc::Argb8888,
+        })
+        .expect("argb");
+    assert_eq!(
+        paint(&mut *pair.vulkan, blended_pixel(argb), 1, 1),
+        [0, 0, 255, 0],
+        "argb keeps the stored alpha"
+    );
+}
+
+fn blended_pixel(texture: Rc<dyn Texture>) -> FrameElement {
+    let rect = RectI::new(0, 0, 1, 1).expect("rect");
+    FrameElement::Texture {
+        phase: FramePhase::Content,
+        element: TextureElement {
+            source: TextureSource::Texture,
+            texture,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            tex_transform: Mat3::identity(),
+            damage: DamageRegion::from_rect(rect),
+            blend: true,
+            alpha: u8::MAX,
+            mask: TextureMask::None,
+        },
+    }
 }

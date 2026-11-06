@@ -24,6 +24,8 @@ pub(super) struct OutputTarget {
     framebuffer: vk::Framebuffer,
     width: i32,
     height: i32,
+    /// `UNDEFINED` before the first successful use. After each release to the
+    /// foreign queue it is `GENERAL`.
     layout: Cell<vk::ImageLayout>,
 }
 
@@ -134,7 +136,7 @@ impl OutputTarget {
             )?);
         }
         bind_memory(device, image, &imported.memories, disjoint)?;
-        let view = create_view(&device.device, image, vk_format)?;
+        let view = create_view(&device.device, image, vk_format, component_mapping(false))?;
         let view_guard = DestroyView { device: &device.device, view, disarm: false };
         let render_pass = color_render_pass(&device.device, vk_format).map_err(|error| {
             log::error!("{error}");
@@ -222,7 +224,7 @@ impl OffscreenImage {
             unsafe { device.device.destroy_image(image, None) };
             return Err(RendererError::TargetFailed);
         }
-        let view = match create_view(&device.device, image, format) {
+        let view = match create_view(&device.device, image, format, component_mapping(false)) {
             Ok(view) => view,
             Err(error) => {
                 unsafe { device.device.destroy_image(image, None) };
@@ -280,6 +282,9 @@ pub(super) trait PaintedTarget {
     fn layout(&self) -> &Cell<vk::ImageLayout>;
     fn clear_color(&self) -> [f32; 4];
     fn can_readback(&self) -> bool;
+    /// Imported dma-buf. Ownership moves to and from the foreign queue, and
+    /// [`Self::layout`] is then `UNDEFINED` or `GENERAL`.
+    fn external(&self) -> bool;
 }
 
 impl PaintedTarget for OutputTarget {
@@ -312,6 +317,10 @@ impl PaintedTarget for OutputTarget {
     }
 
     fn can_readback(&self) -> bool {
+        true
+    }
+
+    fn external(&self) -> bool {
         true
     }
 }
@@ -347,6 +356,10 @@ impl PaintedTarget for OffscreenImage {
 
     fn can_readback(&self) -> bool {
         true
+    }
+
+    fn external(&self) -> bool {
+        false
     }
 }
 
@@ -449,20 +462,21 @@ impl Drop for OutputTarget {
     }
 }
 
+pub(super) fn plane_file(plane: &DmaBufPlane) -> Result<(u64, u64), RendererError> {
+    let stat = nix::sys::stat::fstat(plane.fd.as_raw_fd()).map_err(|error| {
+        log::error!("failed to stat a dma-buf plane: {error}");
+        RendererError::ImportFailed
+    })?;
+    Ok((stat.st_dev, stat.st_ino))
+}
+
 pub(super) fn planes_are_disjoint(planes: &[DmaBufPlane]) -> Result<bool, RendererError> {
     if planes.len() <= 1 {
         return Ok(false);
     }
-    let first = nix::sys::stat::fstat(planes[0].fd.as_raw_fd()).map_err(|error| {
-        log::error!("failed to stat a dma-buf plane: {error}");
-        RendererError::ImportFailed
-    })?;
+    let first = plane_file(&planes[0])?;
     for plane in &planes[1..] {
-        let stat = nix::sys::stat::fstat(plane.fd.as_raw_fd()).map_err(|error| {
-            log::error!("failed to stat a dma-buf plane: {error}");
-            RendererError::ImportFailed
-        })?;
-        if stat.st_dev != first.st_dev || stat.st_ino != first.st_ino {
+        if plane_file(plane)? != first {
             return Ok(true);
         }
     }
@@ -515,15 +529,26 @@ pub(super) fn bind_memory(
     Ok(())
 }
 
+pub(super) fn component_mapping(opaque_alpha: bool) -> vk::ComponentMapping {
+    vk::ComponentMapping {
+        r: vk::ComponentSwizzle::IDENTITY,
+        g: vk::ComponentSwizzle::IDENTITY,
+        b: vk::ComponentSwizzle::IDENTITY,
+        a: if opaque_alpha { vk::ComponentSwizzle::ONE } else { vk::ComponentSwizzle::IDENTITY },
+    }
+}
+
 pub(super) fn create_view(
     device: &ash::Device,
     image: vk::Image,
     format: vk::Format,
+    components: vk::ComponentMapping,
 ) -> Result<vk::ImageView, RendererError> {
     let info = vk::ImageViewCreateInfo::default()
         .image(image)
         .view_type(vk::ImageViewType::TYPE_2D)
         .format(format)
+        .components(components)
         .subresource_range(vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
             base_mip_level: 0,
