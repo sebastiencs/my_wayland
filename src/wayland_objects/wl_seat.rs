@@ -83,8 +83,14 @@ impl Object for WlSeat {
             }
             GetKeyboard { id } => {
                 let wl_keyboard = WlKeyboard::new(id);
-
-                wl_keyboard.send_keymap(&state.xkb, dispatcher);
+                let keymap = state
+                    .seat
+                    .client_keymap(client.client_id())
+                    .unwrap_or_else(|| state.xkb.keymap_blob());
+                wl_keyboard.send_keymap_blob(&keymap, dispatcher);
+                state
+                    .seat
+                    .remember_client_keymap(client.client_id(), keymap);
                 // `repeat_info` exists since wl_keyboard version 4; v1–v3 clients (e.g. weston
                 // simple-egl with wl_seat v1) have no listener slot and libwayland aborts.
                 if self.version >= wl_keyboard::REPEAT_INFO_SINCE {

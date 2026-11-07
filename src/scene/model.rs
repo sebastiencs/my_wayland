@@ -125,6 +125,7 @@ fn collect_unmanaged_scene_entries(
         if surface.has_cursor_role()
             || surface.has_dnd_icon_role()
             || surface.has_lock_surface_role()
+            || surface.has_input_popup_role()
         {
             continue;
         }

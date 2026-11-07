@@ -348,6 +348,36 @@ impl Dispatcher {
         }
     }
 
+    pub(crate) fn test_take_actions_for<T: 'static, I: ModelInstanceId>(
+        &mut self,
+        id: I,
+    ) -> Vec<T> {
+        let specifier = Some(id.into_raw());
+        let mut taken = Vec::new();
+        let mut kept = VecDeque::new();
+        while let Some(action) = self.queue.pop_front() {
+            if action.id.specifier == specifier {
+                match action.ptr.downcast::<T>() {
+                    Ok(value) => {
+                        taken.push(*value);
+                        continue;
+                    }
+                    Err(ptr) => {
+                        kept.push_back(AnyAction {
+                            id: action.id,
+                            ptr,
+                            type_name: action.type_name,
+                        });
+                        continue;
+                    }
+                }
+            }
+            kept.push_back(action);
+        }
+        self.queue = kept;
+        taken
+    }
+
     pub(crate) fn test_has_queued_action_for<T: 'static, I: ModelInstanceId>(
         &self,
         id: I,

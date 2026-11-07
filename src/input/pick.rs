@@ -46,6 +46,43 @@ pub(crate) fn scene_pick_at(state: &State, pointer_pos: (f64, f64)) -> ScenePick
     )
 }
 
+/// Global top-left of `surface`.
+///
+/// A subsurface adds its current offset to its parent. An xdg popup uses the
+/// same origin as scene rendering (`surface_scene_origin`). Anything else uses
+/// the surface's layout position.
+pub(crate) fn surface_global_origin(
+    state: &State,
+    surface: Resolved<WlSurfaceId>,
+) -> Option<(i32, i32)> {
+    surface_global_origin_depth(state, surface, 0)
+}
+
+fn surface_global_origin_depth(
+    state: &State,
+    surface: Resolved<WlSurfaceId>,
+    depth: u32,
+) -> Option<(i32, i32)> {
+    if depth > 32 {
+        return None;
+    }
+    let (parent, dx, dy) = {
+        let wl_surface = surface.try_ref(state)?;
+        match wl_surface.parent_surface().copied() {
+            Some(parent) => {
+                let (dx, dy) = wl_surface.current_subsurface_position();
+                (Some(parent), dx, dy)
+            }
+            None => (None, 0, 0),
+        }
+    };
+    if let Some(parent) = parent {
+        let (parent_x, parent_y) = surface_global_origin_depth(state, parent, depth + 1)?;
+        return Some((parent_x.saturating_add(dx), parent_y.saturating_add(dy)));
+    }
+    state.surface_scene_origin(surface)
+}
+
 fn pick_roots(
     state: &State,
     pointer_pos: (f64, f64),
@@ -59,6 +96,7 @@ fn pick_roots(
             || surface.has_cursor_role()
             || surface.has_dnd_icon_role()
             || surface.has_lock_surface_role()
+            || surface.has_input_popup_role()
         {
             continue;
         }

@@ -3550,6 +3550,18 @@ impl State {
         true
     }
 
+    /// `zwp_input_method_manager_v2` is advertised to every client. The check
+    /// stays in one place so a later privilege model can refuse the bind.
+    pub fn client_allows_input_method(&self, _client: &crate::clients::Client) -> bool {
+        true
+    }
+
+    /// `zwp_virtual_keyboard_manager_v1` is advertised to every client. The
+    /// check stays in one place so a later privilege model can refuse the bind.
+    pub fn client_allows_virtual_keyboard(&self, _client: &crate::clients::Client) -> bool {
+        true
+    }
+
     pub fn gamma_control_owner(
         &self,
         output_id: OutputId,

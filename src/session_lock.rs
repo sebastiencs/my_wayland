@@ -77,6 +77,11 @@ impl SessionLock {
         self.phase
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_phase_for_tests(&mut self, phase: SessionLockPhase) {
+        self.phase = phase;
+    }
+
     pub fn owner(&self) -> Option<ClientId> {
         self.owner
     }

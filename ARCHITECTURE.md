@@ -154,6 +154,24 @@ The Wayland layer does not directly put pixels on the monitor. It defines:
 
 The lower graphics layers take over after that.
 
+## 5.1 Input methods
+
+Text entry is three protocols, all advertised to every client:
+
+- `zwp_text_input_v3` is the application's side. Tema advertises it at version 1. A client enables it on the focused surface and sends the surrounding text, the content type, and the cursor rectangle. `done.serial` counts that object's commits.
+- `zwp_input_method_v2` is the input method's side. One live input method per seat. A second `get_input_method` is created inert and sent `unavailable` immediately.
+- `zwp_virtual_keyboard_v1` injects keys. `wtype`, fcitx5, and on-screen keyboards use it for keysyms the hardware keymap does not have. Those keys do not enter the hardware key path, so they cannot loop back into the input-method grab.
+
+The relay lives in `src/input/ime.rs`. An enable on the focused surface sends `activate`, the current state, and `done` to the input method. Later commits send only the fields that changed. The input method's `commit` must echo the last `done` serial; a mismatch drops the pending strings. A match is forwarded to the active text input as delete, preedit, commit string, then `done`. A focus change clears the preedit, deactivates the input method, leaves the old client's text inputs, and enters every text input of the new client. Requests the client sends after `leave` are still applied, so its following `disable` is a real edge.
+
+Each client has its own keymap. The hardware keymap is id 0. A virtual keyboard compiles the keymap string it sends and switches the focused client to that blob: if keys are held, the client gets `leave`, the new keymap, `enter` with those keys, then modifiers. The next hardware key or focus change switches back to the hardware keymap. Replacing or destroying a virtual keyboard releases the keys it still has down.
+
+`zwp_input_method_keyboard_grab_v2` is consulted after compositor key bindings and before the focused client. A press goes to the grab and is recorded. Its release stays with the grab, and is swallowed if the grab has already gone. Presses that happened before the grab, or while the session is locked, still reach the client. The lock screen bypasses the grab, and input-method popups are not drawn on it.
+
+`zwp_input_popup_surface_v2` is the candidate window. It is placed below the cursor rectangle on the output that contains the caret, flipped above when it would leave that output, then clamped inside it. `text_input_rectangle` tells the input method where the caret sits in popup-local coordinates. The popup is not a pointer target and never takes keyboard focus.
+
+An on-screen keyboard is a layer-shell surface, usually with `keyboard_interactivity = none`, plus a virtual keyboard. A click on that layer leaves keyboard focus where it is, so the tap does not deactivate the input method. `on_demand` and `exclusive` layers still take focus. Other focus requests, including an explicit `set_keyboard_focus` of a `none` layer, still go through the normal focus normalization.
+
 ## 6. Linux Graphics Stack: The Lower Half
 
 This is the part that usually feels like a wall of acronyms:

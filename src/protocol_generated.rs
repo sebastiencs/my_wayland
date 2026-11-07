@@ -130,6 +130,8 @@ wayland_id! {
   ZwpPrimarySelectionSourceV1Id,
   ZwpRelativePointerManagerV1Id,
   ZwpRelativePointerV1Id,
+  ZwpTextInputV3Id,
+  ZwpTextInputManagerV3Id,
   ZxdgDecorationManagerV1Id,
   ZxdgToplevelDecorationV1Id,
   ZxdgOutputManagerV1Id,
@@ -149,6 +151,12 @@ wayland_id! {
   ZwlrGammaControlV1Id,
   ZwlrLayerShellV1Id,
   ZwlrLayerSurfaceV1Id,
+  ZwpInputMethodV2Id,
+  ZwpInputPopupSurfaceV2Id,
+  ZwpInputMethodKeyboardGrabV2Id,
+  ZwpInputMethodManagerV2Id,
+  ZwpVirtualKeyboardV1Id,
+  ZwpVirtualKeyboardManagerV1Id,
   HyprlandCtmControlManagerV1Id,
 }
 
@@ -15062,6 +15070,691 @@ pub mod zwp_relative_pointer_v1 {
     }
 }
 
+/// Text input
+///
+/// The zwp_text_input_v3 interface represents text input and input methods
+/// associated with a seat. It provides enter/leave events to follow the
+/// text input focus for a seat.
+///
+/// Requests are used to enable/disable the text-input object and set
+/// state information like surrounding and selected text or the content type.
+/// The information about the entered text is sent to the text-input object
+/// via the preedit_string and commit_string events.
+///
+/// Text is valid UTF-8 encoded, indices and lengths are in bytes. Indices
+/// must not point to middle bytes inside a code point: they must either
+/// point to the first byte of a code point or to the end of the buffer.
+/// Lengths must be measured between two valid indices.
+///
+/// Focus moving throughout surfaces will result in the emission of
+/// zwp_text_input_v3.enter and zwp_text_input_v3.leave events. The focused
+/// surface must commit zwp_text_input_v3.enable and
+/// zwp_text_input_v3.disable requests as the keyboard focus moves across
+/// editable and non-editable elements of the UI. Those two requests are not
+/// expected to be paired with each other, the compositor must be able to
+/// handle consecutive series of the same request.
+///
+/// State is sent by the state requests (set_surrounding_text,
+/// set_content_type and set_cursor_rectangle) and a commit request. After an
+/// enter event or disable request all state information is invalidated and
+/// needs to be resent by the client.
+pub mod zwp_text_input_v3 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_text_input_v3::ZwpTextInputV3 {
+        const INTERFACE_NAME: &'static str = "zwp_text_input_v3";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwpTextInputV3Id {
+        type Object = crate::wayland_objects::zwp_text_input_v3::ZwpTextInputV3;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_text_input_v3::ZwpTextInputV3 {
+        type Id = ZwpTextInputV3Id;
+    }
+    /// Minimum interface version for the `set_available_actions` message (XML `since` / `version`).
+    pub const SET_AVAILABLE_ACTIONS_SINCE: u32 = 2;
+    /// Minimum interface version for the `show_input_panel` message (XML `since` / `version`).
+    pub const SHOW_INPUT_PANEL_SINCE: u32 = 2;
+    /// Minimum interface version for the `hide_input_panel` message (XML `since` / `version`).
+    pub const HIDE_INPUT_PANEL_SINCE: u32 = 2;
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the wp_text_input
+        ///
+        /// Destroy the wp_text_input object. Also disables all surfaces enabled
+        /// through this wp_text_input object.
+        Destroy,
+        /// Request text input to be enabled
+        ///
+        /// Requests text input on the surface previously obtained from the enter
+        /// event.
+        ///
+        /// This request must be issued every time the focused text input changes
+        /// to a new one, including within the current surface. Use
+        /// zwp_text_input_v3.disable when there is no longer any input focus on
+        /// the current surface.
+        ///
+        /// Clients must not enable more than one text input on the single seat
+        /// and should disable the current text input before enabling the new one.
+        /// Requests to enable a text input when another text input is enabled
+        /// on the same seat must be ignored by compositor.
+        ///
+        /// This request resets all state associated with previous enable, disable,
+        /// set_surrounding_text, set_text_change_cause, set_content_type, and
+        /// set_cursor_rectangle requests, as well as the state associated with
+        /// preedit_string, commit_string, and delete_surrounding_text events.
+        ///
+        /// The set_surrounding_text, set_content_type and set_cursor_rectangle
+        /// requests must follow if the text input supports the necessary
+        /// functionality.
+        ///
+        /// State set with this request is double-buffered. It will get applied on
+        /// the next zwp_text_input_v3.commit request, and stay valid until the
+        /// next committed enable or disable request.
+        ///
+        /// The changes must be applied by the compositor after issuing a
+        /// zwp_text_input_v3.commit request.
+        Enable,
+        /// Disable text input on a surface
+        ///
+        /// Explicitly disable text input on the current surface (typically when
+        /// there is no focus on any text entry inside the surface).
+        ///
+        /// State set with this request is double-buffered. It will get applied on
+        /// the next zwp_text_input_v3.commit request.
+        Disable,
+        /// Sets the surrounding text
+        ///
+        /// Sets the surrounding plain text around the input, excluding the preedit
+        /// text.
+        ///
+        /// The client should notify the compositor of any changes in any of the
+        /// values carried with this request, including changes caused by handling
+        /// incoming text-input events as well as changes caused by other
+        /// mechanisms like keyboard typing.
+        ///
+        /// If the client is unaware of the text around the cursor, it should not
+        /// issue this request, to signify lack of support to the compositor.
+        ///
+        /// Text is UTF-8 encoded, and should include the cursor position, the
+        /// complete selection and additional characters before and after them.
+        /// There is a maximum length of wayland messages, so text can not be
+        /// longer than 4000 bytes.
+        ///
+        /// Cursor is the byte offset of the cursor within text buffer.
+        ///
+        /// Anchor is the byte offset of the selection anchor within text buffer.
+        /// If there is no selected text, anchor is the same as cursor.
+        ///
+        /// If any preedit text is present, it is replaced with a cursor for the
+        /// purpose of this event.
+        ///
+        /// Values set with this request are double-buffered. They will get applied
+        /// on the next zwp_text_input_v3.commit request, and stay valid until the
+        /// next committed enable or disable request.
+        ///
+        /// The initial state for affected fields is empty, meaning that the text
+        /// input does not support sending surrounding text. If the empty values
+        /// get applied, subsequent attempts to change them may have no effect.
+        SetSurroundingText { text: String, cursor: i32, anchor: i32 },
+        /// Indicates the cause of surrounding text change
+        ///
+        /// Tells the compositor why the text surrounding the cursor changed.
+        ///
+        /// Whenever the client detects an external change in text, cursor, or
+        /// anchor posision, it must issue this request to the compositor. This
+        /// request is intended to give the input method a chance to update the
+        /// preedit text in an appropriate way, e.g. by removing it when the user
+        /// starts typing with a keyboard.
+        ///
+        /// cause describes the source of the change.
+        ///
+        /// The value set with this request is double-buffered. It must be applied
+        /// and reset to initial at the next zwp_text_input_v3.commit request.
+        ///
+        /// The initial value of cause is input_method.
+        SetTextChangeCause { cause: u32 },
+        /// Set content purpose and hint
+        ///
+        /// Sets the content purpose and content hint. While the purpose is the
+        /// basic purpose of an input field, the hint flags allow to modify some of
+        /// the behavior.
+        ///
+        /// Values set with this request are double-buffered. They will get applied
+        /// on the next zwp_text_input_v3.commit request.
+        /// Subsequent attempts to update them may have no effect. The values
+        /// remain valid until the next committed enable or disable request.
+        ///
+        /// The initial value for hint is none, and the initial value for purpose
+        /// is normal.
+        SetContentType { hint: u32, purpose: u32 },
+        /// Set cursor position
+        ///
+        /// Marks an area around the cursor as a x, y, width, height rectangle in
+        /// surface local coordinates.
+        ///
+        /// Allows the compositor to put a window with word suggestions near the
+        /// cursor, without obstructing the text being input.
+        ///
+        /// If the client is unaware of the position of edited text, it should not
+        /// issue this request, to signify lack of support to the compositor.
+        ///
+        /// Values set with this request are double-buffered. They will get applied
+        /// on the next zwp_text_input_v3.commit request, and stay valid until the
+        /// next committed enable or disable request.
+        ///
+        /// The initial values describing a cursor rectangle are empty. That means
+        /// the text input does not support describing the cursor area. If the
+        /// empty values get applied, subsequent attempts to change them may have
+        /// no effect.
+        ///
+        /// As of version 2, the zwp_text_input_v3.commit request does not apply
+        /// values sent with this request. Instead, it stores them in a separate
+        /// "committed" area. The committed values, if still valid, get applied on
+        /// the next wl_surface.commit request on the surface with text-input focus.
+        /// Both committed and applied values get invalidated on:
+        ///
+        /// - the next committed enable or disable request, or
+        /// - a change of the focused surface of the text-input (leave or enter events).
+        ///
+        /// This double stage application allows the compositor to position
+        /// the input method popup in the same frame as the contents
+        /// of the text on the surface are updated.
+        SetCursorRectangle { x: i32, y: i32, width: i32, height: i32 },
+        /// Commit state
+        ///
+        /// Atomically applies state changes recently sent to the compositor.
+        ///
+        /// The commit request establishes and updates the state of the client, and
+        /// must be issued after any changes to apply them.
+        ///
+        /// Text input state (enabled status, content purpose, content hint,
+        /// surrounding text and change cause, cursor rectangle) is conceptually
+        /// double-buffered within the context of a text input, i.e. between a
+        /// committed enable request and the following committed enable or disable
+        /// request.
+        ///
+        /// Protocol requests modify the pending state, as opposed to the current
+        /// state in use by the input method. A commit request atomically applies
+        /// all pending state, replacing the current state. After commit, the new
+        /// pending state is as documented for each related request.
+        ///
+        /// Requests are applied in the order of arrival.
+        ///
+        /// Neither current nor pending state are modified unless noted otherwise.
+        ///
+        /// The compositor must count the number of commit requests coming from
+        /// each zwp_text_input_v3 object and use the count as the serial in done
+        /// events.
+        Commit,
+        /// Set the available actions
+        ///
+        /// Set the actions available for this text input.
+        ///
+        /// Values set with this request are double-buffered. They will get applied
+        /// on the next zwp_text_input_v3.commit request.
+        ///
+        /// If the available_actions array contains the none action, or contains the
+        /// same action multiple times, the compositor must raise the invalid_action
+        /// protocol error.
+        ///
+        /// Initially, no actions are available.
+        SetAvailableActions {
+            /// Available actions,
+            available_actions: Array,
+        },
+        /// Show input panel
+        ///
+        /// Requests an input panel to be shown (e.g. a on-screen keyboard).
+        ///
+        /// This request only hints the desired interaction pattern from the
+        /// client side, and its effect may be ignored by compositors given
+        /// other environmental factors. Repeated calls will be ignored.
+        ShowInputPanel,
+        /// Hide input panel
+        ///
+        /// Requests an input panel to be hidden.
+        ///
+        /// This request only hints the desired interaction pattern from the
+        /// client side, and its effect may be ignored by compositors given
+        /// other environmental factors. Repeated calls will be ignored.
+        HideInputPanel,
+    }
+    impl Parser for crate::wayland_objects::zwp_text_input_v3::ZwpTextInputV3 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => Enable,
+                2 => Disable,
+                3 => SetSurroundingText {
+                    text: req.string()?,
+                    cursor: req.int()?,
+                    anchor: req.int()?,
+                },
+                4 => SetTextChangeCause { cause: req.uint()? },
+                5 => SetContentType { hint: req.uint()?, purpose: req.uint()? },
+                6 => SetCursorRectangle {
+                    x: req.int()?,
+                    y: req.int()?,
+                    width: req.int()?,
+                    height: req.int()?,
+                },
+                7 => Commit,
+                8 => SetAvailableActions { available_actions: req.array()? },
+                9 => ShowInputPanel,
+                10 => HideInputPanel,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    /// Minimum interface version for the `action` message (XML `since` / `version`).
+    pub const ACTION_SINCE: u32 = 2;
+    /// Minimum interface version for the `language` message (XML `since` / `version`).
+    pub const LANGUAGE_SINCE: u32 = 2;
+    /// Minimum interface version for the `preedit_hint` message (XML `since` / `version`).
+    pub const PREEDIT_HINT_SINCE: u32 = 2;
+    #[derive(Debug)]
+    pub enum Event {
+        /// Enter event
+        ///
+        /// Notification that this seat's text-input focus is on a certain surface.
+        ///
+        /// If client has created multiple text input objects, compositor must send
+        /// this event to all of them.
+        ///
+        /// When the seat has the keyboard capability the text-input focus follows
+        /// the keyboard focus. This event sets the current surface for the
+        /// text-input object.
+        Enter { surface: WlSurfaceId },
+        /// Leave event
+        ///
+        /// Notification that this seat's text-input focus is no longer on a
+        /// certain surface. The client should reset any preedit string previously
+        /// set.
+        ///
+        /// The leave notification clears the current surface. It is sent before
+        /// the enter notification for the new focus. After leave event, compositor
+        /// must ignore requests from any text input instances until next enter
+        /// event.
+        ///
+        /// When the seat has the keyboard capability the text-input focus follows
+        /// the keyboard focus.
+        Leave { surface: WlSurfaceId },
+        /// Pre-edit
+        ///
+        /// Notify when a new composing text (pre-edit) should be set at the
+        /// current cursor position. Any previously set composing text must be
+        /// removed. Any previously existing selected text must be removed.
+        ///
+        /// The argument text contains the pre-edit string buffer.
+        ///
+        /// The parameters cursor_begin and cursor_end are counted in bytes
+        /// relative to the beginning of the submitted text buffer. Cursor should
+        /// be hidden when both are equal to -1.
+        ///
+        /// They could be represented by the client as a line if both values are
+        /// the same, or as a text highlight otherwise.
+        ///
+        /// Values set with this event are double-buffered. They must be applied
+        /// and reset to initial on the next zwp_text_input_v3.done event.
+        ///
+        /// The initial value of text is an empty string, and cursor_begin,
+        /// cursor_end and cursor_hidden are all 0.
+        PreeditString { text: String, cursor_begin: i32, cursor_end: i32 },
+        /// Text commit
+        ///
+        /// Notify when text should be inserted into the editor widget. The text to
+        /// commit could be either just a single character after a key press or the
+        /// result of some composing (pre-edit).
+        ///
+        /// Values set with this event are double-buffered. They must be applied
+        /// and reset to initial on the next zwp_text_input_v3.done event.
+        ///
+        /// The initial value of text is an empty string.
+        CommitString { text: String },
+        /// Delete surrounding text
+        ///
+        /// Notify when the text around the current cursor position should be
+        /// deleted.
+        ///
+        /// Before_length and after_length are the number of bytes before and after
+        /// the current cursor index (excluding the selection) to delete.
+        ///
+        /// If a preedit text is present, in effect before_length is counted from
+        /// the beginning of it, and after_length from its end (see done event
+        /// sequence).
+        ///
+        /// Values set with this event are double-buffered. They must be applied
+        /// and reset to initial on the next zwp_text_input_v3.done event.
+        ///
+        /// The initial values of both before_length and after_length are 0.
+        DeleteSurroundingText {
+            /// Length of text before current cursor position,
+            before_length: u32,
+            /// Length of text after current cursor position,
+            after_length: u32,
+        },
+        /// Apply changes
+        ///
+        /// Instruct the application to apply changes to state requested by the
+        /// preedit_string, commit_string delete_surrounding_text, and action
+        /// events.
+        ///
+        /// The state relating to these events is double-buffered, and each one
+        /// modifies the pending state. This event replaces the current state with
+        /// the pending state.
+        ///
+        /// The application must proceed by evaluating the changes in the following
+        /// order:
+        ///
+        /// 1. Replace existing preedit string with the cursor.
+        /// 2. Delete requested surrounding text.
+        /// 3. Insert commit string with the cursor at its end.
+        /// 4. Calculate surrounding text to send.
+        /// 5. Insert new preedit text in cursor position.
+        /// 6. Place cursor inside preedit text.
+        /// 7. Perform the requested action.
+        ///
+        /// The serial number reflects the last state of the zwp_text_input_v3
+        /// object known to the compositor. The value of the serial argument must
+        /// be equal to the number of commit requests already issued on that object.
+        ///
+        /// When the client receives a done event with a serial different than the
+        /// number of past commit requests, it must proceed with evaluating and
+        /// applying the changes as normal, except it should not change the current
+        /// state of the zwp_text_input_v3 object. All pending state requests
+        /// (set_surrounding_text, set_content_type and set_cursor_rectangle) on
+        /// the zwp_text_input_v3 object should be sent and committed after
+        /// receiving a zwp_text_input_v3.done event with a matching serial.
+        Done { serial: u32 },
+        /// Action performed
+        ///
+        /// An action was performed on this text input.
+        ///
+        /// Values set with this event are double-buffered. They must be applied
+        /// and reset to initial on the next zwp_text_input_v3.done event.
+        ///
+        /// The initial value of action is none.
+        Action {
+            /// Action performed,
+            action: u32,
+            /// Serial number of the action event,
+            serial: u32,
+        },
+        /// Notify of language selection
+        ///
+        /// Notify the application of language used by the input method.
+        ///
+        /// This event will be sent on creation if known and for all subsequent changes.
+        ///
+        /// The language should be specified as an IETF BCP 47 tag.
+        /// Setting an empty string will reset any known language back to the default unknown state.
+        Language {
+            /// New language set by IME,
+            language: String,
+        },
+        /// Pre-edit
+        ///
+        /// Notify of contextual hints for the pre-edit string. This
+        /// event is always sent together with a zwp_text_input_v3.preedit_string
+        /// event.
+        ///
+        /// The parameters start and end are counted in bytes relative to the
+        /// beginning of the text buffer submitted through
+        /// zwp_text_input_v3.preedit_string, and represent the substring in the
+        /// pre-edit text affected by the hint.
+        ///
+        /// Multiple events may be submitted if the preedit string has different
+        /// sections. The extent of hints may overlap. The parts of the preedit
+        /// string that are not covered by any zwp_text_input_v3.preedit_hint event,
+        /// the text will be considered unhinted. This is also the case if no
+        /// preedit_hint event is sent.
+        ///
+        /// Clients should provide recognizable visuals to these hints. if they are
+        /// unable to comply with this requisition, it may be preferable for them
+        /// keep the preedit_shown content hint disabled.
+        ///
+        /// Values set with this event are double-buffered. They must be applied
+        /// and reset on the next zwp_text_input_v3.done event.
+        PreeditHint {
+            /// Starting point of the affected substring,
+            start: u32,
+            /// End point of the affected substring,
+            end: u32,
+            /// Hint to apply,
+            hint: u32,
+        },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_text_input_v3::ZwpTextInputV3 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Enter { surface } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 1);
+                    raw.id(surface);
+                    raw
+                }
+                Leave { surface } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 1);
+                    raw.id(surface);
+                    raw
+                }
+                PreeditString { text, cursor_begin, cursor_end } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 3);
+                    raw.string(text);
+                    raw.int(cursor_begin);
+                    raw.int(cursor_end);
+                    raw
+                }
+                CommitString { text } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.string(text);
+                    raw
+                }
+                DeleteSurroundingText { before_length, after_length } => {
+                    let mut raw = RawEvent::new(self.id(), 4, 2);
+                    raw.uint(before_length);
+                    raw.uint(after_length);
+                    raw
+                }
+                Done { serial } => {
+                    let mut raw = RawEvent::new(self.id(), 5, 1);
+                    raw.uint(serial);
+                    raw
+                }
+                Action { action, serial } => {
+                    let mut raw = RawEvent::new(self.id(), 6, 2);
+                    raw.uint(action);
+                    raw.uint(serial);
+                    raw
+                }
+                Language { language } => {
+                    let mut raw = RawEvent::new(self.id(), 7, 1);
+                    raw.string(language);
+                    raw
+                }
+                PreeditHint { start, end, hint } => {
+                    let mut raw = RawEvent::new(self.id(), 8, 3);
+                    raw.uint(start);
+                    raw.uint(end);
+                    raw.uint(hint);
+                    raw
+                }
+            }
+        }
+    }
+    /// Text change reason
+    ///
+    /// Reason for the change of surrounding text or cursor posision.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum ChangeCause {
+        /// Input method caused the change,
+        InputMethod = 0,
+        /// Something else than the input method caused the change,
+        Other = 1,
+    }
+    /// Content hint
+    ///
+    /// Content hint is a bitmask to allow to modify the behavior of the text
+    /// input.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum ContentHint {
+        /// No special behavior,
+        None = 0,
+        /// Suggest word completions,
+        Completion = 1,
+        /// Suggest word corrections,
+        Spellcheck = 2,
+        /// Switch to uppercase letters at the start of a sentence,
+        AutoCapitalization = 4,
+        /// Prefer lowercase letters,
+        Lowercase = 8,
+        /// Prefer uppercase letters,
+        Uppercase = 16,
+        /// Prefer casing for titles and headings (can be language dependent),
+        Titlecase = 32,
+        /// Characters should be hidden,
+        HiddenText = 64,
+        /// Typed text should not be stored,
+        SensitiveData = 128,
+        /// Just Latin characters should be entered,
+        Latin = 256,
+        /// The text input is multiline,
+        Multiline = 512,
+        /// An on-screen way to fill in the input is already provided by the client,
+        OnScreenInputProvided = 1024,
+        /// Prefer not offering emoji support,
+        NoEmoji = 2048,
+        /// The text input will display preedit text in place,
+        PreeditShown = 4096,
+    }
+    /// Content purpose
+    ///
+    /// The content purpose allows to specify the primary purpose of a text
+    /// input.
+    ///
+    /// This allows an input method to show special purpose input panels with
+    /// extra characters or to disallow some characters.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum ContentPurpose {
+        /// Default input, allowing all characters,
+        Normal = 0,
+        /// Allow only alphabetic characters,
+        Alpha = 1,
+        /// Allow only digits,
+        Digits = 2,
+        /// Input a number (including decimal separator and sign),
+        Number = 3,
+        /// Input a phone number,
+        Phone = 4,
+        /// Input an URL,
+        Url = 5,
+        /// Input an email address,
+        Email = 6,
+        /// Input a name of a person,
+        Name = 7,
+        /// Input a password (combine with sensitive_data hint),
+        Password = 8,
+        /// Input is a numeric password (combine with sensitive_data hint),
+        Pin = 9,
+        /// Input a date,
+        Date = 10,
+        /// Input a time,
+        Time = 11,
+        /// Input a date and time,
+        Datetime = 12,
+        /// Input for a terminal,
+        Terminal = 13,
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// An invalid or duplicate action was specified,
+        InvalidAction = 0,
+    }
+    /// Action
+    ///
+    /// A possible action to perform on a text input.
+    ///
+    /// The submit action is intended for input entries that expect some sort of
+    /// activation after user interaction, e.g. the URL entry in a browser.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Action {
+        /// No action,
+        None = 0,
+        /// The action is submitted,
+        Submit = 1,
+    }
+    /// Preedit style hint
+    ///
+    /// Style hints for the preedit string.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum PreeditHint {
+        /// Simple pre-edit text style, typically underlined,
+        Whole = 1,
+        /// Hint for a selected piece of text, e.g. per-character navigation and composition,
+        Selection = 2,
+        /// Predicted text, not typed by the user,
+        Prediction = 3,
+        /// Prefixed text not being currently edited, e.g. prior to a 'selection' section,
+        Prefix = 4,
+        /// Suffixed text not being currently edited, e.g. after a 'selection' section,
+        Suffix = 5,
+        /// Spelling error,
+        SpellingError = 6,
+        /// Wrong composition, e.g. user input that can not be transliterated,
+        ComposeError = 7,
+    }
+}
+
+/// Text input manager
+///
+/// A factory for text-input objects. This object is a global singleton.
+pub mod zwp_text_input_manager_v3 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_text_input_manager_v3::ZwpTextInputManagerV3 {
+        const INTERFACE_NAME: &'static str = "zwp_text_input_manager_v3";
+        const INTERFACE_VERSION: u32 = 2;
+    }
+    impl crate::object::IdToObject for ZwpTextInputManagerV3Id {
+        type Object = crate::wayland_objects::zwp_text_input_manager_v3::ZwpTextInputManagerV3;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_text_input_manager_v3::ZwpTextInputManagerV3
+    {
+        type Id = ZwpTextInputManagerV3Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Destroy the wp_text_input_manager
+        ///
+        /// Destroy the wp_text_input_manager object.
+        Destroy,
+        /// Create a new text input object
+        ///
+        /// Creates a new text-input object for a given seat.
+        GetTextInput { id: ZwpTextInputV3Id, seat: WlSeatId },
+    }
+    impl Parser for crate::wayland_objects::zwp_text_input_manager_v3::ZwpTextInputManagerV3 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                1 => GetTextInput { id: req.id()?, seat: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
 /// Window decoration manager
 ///
 /// This interface allows a compositor to announce support for server-side
@@ -17750,6 +18443,796 @@ pub mod zwlr_layer_surface_v1 {
         Left = 4,
         /// The right edge of the anchor rectangle,
         Right = 8,
+    }
+}
+
+/// Input method
+///
+/// An input method object allows for clients to compose text.
+///
+/// The objects connects the client to a text input in an application, and
+/// lets the client to serve as an input method for a seat.
+///
+/// The zwp_input_method_v2 object can occupy two distinct states: active and
+/// inactive. In the active state, the object is associated to and
+/// communicates with a text input. In the inactive state, there is no
+/// associated text input, and the only communication is with the compositor.
+/// Initially, the input method is in the inactive state.
+///
+/// Requests issued in the inactive state must be accepted by the compositor.
+/// Because of the serial mechanism, and the state reset on activate event,
+/// they will not have any effect on the state of the next text input.
+///
+/// There must be no more than one input method object per seat.
+pub mod zwp_input_method_v2 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_input_method_v2::ZwpInputMethodV2 {
+        const INTERFACE_NAME: &'static str = "zwp_input_method_v2";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpInputMethodV2Id {
+        type Object = crate::wayland_objects::zwp_input_method_v2::ZwpInputMethodV2;
+    }
+    impl crate::object::ObjectWithId for crate::wayland_objects::zwp_input_method_v2::ZwpInputMethodV2 {
+        type Id = ZwpInputMethodV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Commit string
+        ///
+        /// Send the commit string text for insertion to the application.
+        ///
+        /// Inserts a string at current cursor position (see commit event
+        /// sequence). The string to commit could be either just a single character
+        /// after a key press or the result of some composing.
+        ///
+        /// The argument text is a buffer containing the string to insert. There is
+        /// a maximum length of wayland messages, so text can not be longer than
+        /// 4000 bytes.
+        ///
+        /// Values set with this event are double-buffered. They must be applied
+        /// and reset to initial on the next zwp_text_input_v3.commit request.
+        ///
+        /// The initial value of text is an empty string.
+        CommitString { text: String },
+        /// Pre-edit string
+        ///
+        /// Send the pre-edit string text to the application text input.
+        ///
+        /// Place a new composing text (pre-edit) at the current cursor position.
+        /// Any previously set composing text must be removed. Any previously
+        /// existing selected text must be removed. The cursor is moved to a new
+        /// position within the preedit string.
+        ///
+        /// The argument text is a buffer containing the preedit string. There is
+        /// a maximum length of wayland messages, so text can not be longer than
+        /// 4000 bytes.
+        ///
+        /// The arguments cursor_begin and cursor_end are counted in bytes relative
+        /// to the beginning of the submitted string buffer. Cursor should be
+        /// hidden by the text input when both are equal to -1.
+        ///
+        /// cursor_begin indicates the beginning of the cursor. cursor_end
+        /// indicates the end of the cursor. It may be equal or different than
+        /// cursor_begin.
+        ///
+        /// Values set with this event are double-buffered. They must be applied on
+        /// the next zwp_input_method_v2.commit event.
+        ///
+        /// The initial value of text is an empty string. The initial value of
+        /// cursor_begin, and cursor_end are both 0.
+        SetPreeditString { text: String, cursor_begin: i32, cursor_end: i32 },
+        /// Delete text
+        ///
+        /// Remove the surrounding text.
+        ///
+        /// before_length and after_length are the number of bytes before and after
+        /// the current cursor index (excluding the preedit text) to delete.
+        ///
+        /// If any preedit text is present, it is replaced with the cursor for the
+        /// purpose of this event. In effect before_length is counted from the
+        /// beginning of preedit text, and after_length from its end (see commit
+        /// event sequence).
+        ///
+        /// Values set with this event are double-buffered. They must be applied
+        /// and reset to initial on the next zwp_input_method_v2.commit request.
+        ///
+        /// The initial values of both before_length and after_length are 0.
+        DeleteSurroundingText { before_length: u32, after_length: u32 },
+        /// Apply state
+        ///
+        /// Apply state changes from commit_string, set_preedit_string and
+        /// delete_surrounding_text requests.
+        ///
+        /// The state relating to these events is double-buffered, and each one
+        /// modifies the pending state. This request replaces the current state
+        /// with the pending state.
+        ///
+        /// The connected text input is expected to proceed by evaluating the
+        /// changes in the following order:
+        ///
+        /// 1. Replace existing preedit string with the cursor.
+        /// 2. Delete requested surrounding text.
+        /// 3. Insert commit string with the cursor at its end.
+        /// 4. Calculate surrounding text to send.
+        /// 5. Insert new preedit text in cursor position.
+        /// 6. Place cursor inside preedit text.
+        ///
+        /// The serial number reflects the last state of the zwp_input_method_v2
+        /// object known to the client. The value of the serial argument must be
+        /// equal to the number of done events already issued by that object. When
+        /// the compositor receives a commit request with a serial different than
+        /// the number of past done events, it must proceed as normal, except it
+        /// should not change the current state of the zwp_input_method_v2 object.
+        Commit { serial: u32 },
+        /// Create popup surface
+        ///
+        /// Creates a new zwp_input_popup_surface_v2 object wrapping a given
+        /// surface.
+        ///
+        /// The surface gets assigned the "input_popup" role. If the surface
+        /// already has an assigned role, the compositor must issue a protocol
+        /// error.
+        GetInputPopupSurface { id: ZwpInputPopupSurfaceV2Id, surface: WlSurfaceId },
+        /// Grab hardware keyboard
+        ///
+        /// Allow an input method to receive hardware keyboard input and process
+        /// key events to generate text events (with pre-edit) over the wire. This
+        /// allows input methods which compose multiple key events for inputting
+        /// text like it is done for CJK languages.
+        ///
+        /// The compositor should send all keyboard events on the seat to the grab
+        /// holder via the returned wl_keyboard object. Nevertheless, the
+        /// compositor may decide not to forward any particular event. The
+        /// compositor must not further process any event after it has been
+        /// forwarded to the grab holder.
+        ///
+        /// Releasing the resulting wl_keyboard object releases the grab.
+        GrabKeyboard { keyboard: ZwpInputMethodKeyboardGrabV2Id },
+        /// Destroy the text input
+        ///
+        /// Destroys the zwp_text_input_v2 object and any associated child
+        /// objects, i.e. zwp_input_popup_surface_v2 and
+        /// zwp_input_method_keyboard_grab_v2.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_input_method_v2::ZwpInputMethodV2 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => CommitString { text: req.string()? },
+                1 => SetPreeditString {
+                    text: req.string()?,
+                    cursor_begin: req.int()?,
+                    cursor_end: req.int()?,
+                },
+                2 => {
+                    DeleteSurroundingText { before_length: req.uint()?, after_length: req.uint()? }
+                }
+                3 => Commit { serial: req.uint()? },
+                4 => GetInputPopupSurface { id: req.id()?, surface: req.id()? },
+                5 => GrabKeyboard { keyboard: req.id()? },
+                6 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Input method has been requested
+        ///
+        /// Notification that a text input focused on this seat requested the input
+        /// method to be activated.
+        ///
+        /// This event serves the purpose of providing the compositor with an
+        /// active input method.
+        ///
+        /// This event resets all state associated with previous enable, disable,
+        /// surrounding_text, text_change_cause, and content_type events, as well
+        /// as the state associated with set_preedit_string, commit_string, and
+        /// delete_surrounding_text requests. In addition, it marks the
+        /// zwp_input_method_v2 object as active, and makes any existing
+        /// zwp_input_popup_surface_v2 objects visible.
+        ///
+        /// The surrounding_text, and content_type events must follow before the
+        /// next done event if the text input supports the respective
+        /// functionality.
+        ///
+        /// State set with this event is double-buffered. It will get applied on
+        /// the next zwp_input_method_v2.done event, and stay valid until changed.
+        Activate,
+        /// Deactivate event
+        ///
+        /// Notification that no focused text input currently needs an active
+        /// input method on this seat.
+        ///
+        /// This event marks the zwp_input_method_v2 object as inactive. The
+        /// compositor must make all existing zwp_input_popup_surface_v2 objects
+        /// invisible until the next activate event.
+        ///
+        /// State set with this event is double-buffered. It will get applied on
+        /// the next zwp_input_method_v2.done event, and stay valid until changed.
+        Deactivate,
+        /// Surrounding text event
+        ///
+        /// Updates the surrounding plain text around the cursor, excluding the
+        /// preedit text.
+        ///
+        /// If any preedit text is present, it is replaced with the cursor for the
+        /// purpose of this event.
+        ///
+        /// The argument text is a buffer containing the preedit string, and must
+        /// include the cursor position, and the complete selection. It should
+        /// contain additional characters before and after these. There is a
+        /// maximum length of wayland messages, so text can not be longer than 4000
+        /// bytes.
+        ///
+        /// cursor is the byte offset of the cursor within the text buffer.
+        ///
+        /// anchor is the byte offset of the selection anchor within the text
+        /// buffer. If there is no selected text, anchor must be the same as
+        /// cursor.
+        ///
+        /// If this event does not arrive before the first done event, the input
+        /// method may assume that the text input does not support this
+        /// functionality and ignore following surrounding_text events.
+        ///
+        /// Values set with this event are double-buffered. They will get applied
+        /// and set to initial values on the next zwp_input_method_v2.done
+        /// event.
+        ///
+        /// The initial state for affected fields is empty, meaning that the text
+        /// input does not support sending surrounding text. If the empty values
+        /// get applied, subsequent attempts to change them may have no effect.
+        SurroundingText { text: String, cursor: u32, anchor: u32 },
+        /// Indicates the cause of surrounding text change
+        ///
+        /// Tells the input method why the text surrounding the cursor changed.
+        ///
+        /// Whenever the client detects an external change in text, cursor, or
+        /// anchor position, it must issue this request to the compositor. This
+        /// request is intended to give the input method a chance to update the
+        /// preedit text in an appropriate way, e.g. by removing it when the user
+        /// starts typing with a keyboard.
+        ///
+        /// cause describes the source of the change.
+        ///
+        /// The value set with this event is double-buffered. It will get applied
+        /// and set to its initial value on the next zwp_input_method_v2.done
+        /// event.
+        ///
+        /// The initial value of cause is input_method.
+        TextChangeCause { cause: u32 },
+        /// Content purpose and hint
+        ///
+        /// Indicates the content type and hint for the current
+        /// zwp_input_method_v2 instance.
+        ///
+        /// Values set with this event are double-buffered. They will get applied
+        /// on the next zwp_input_method_v2.done event.
+        ///
+        /// The initial value for hint is none, and the initial value for purpose
+        /// is normal.
+        ContentType { hint: u32, purpose: u32 },
+        /// Apply state
+        ///
+        /// Atomically applies state changes recently sent to the client.
+        ///
+        /// The done event establishes and updates the state of the client, and
+        /// must be issued after any changes to apply them.
+        ///
+        /// Text input state (content purpose, content hint, surrounding text, and
+        /// change cause) is conceptually double-buffered within an input method
+        /// context.
+        ///
+        /// Events modify the pending state, as opposed to the current state in use
+        /// by the input method. A done event atomically applies all pending state,
+        /// replacing the current state. After done, the new pending state is as
+        /// documented for each related request.
+        ///
+        /// Events must be applied in the order of arrival.
+        ///
+        /// Neither current nor pending state are modified unless noted otherwise.
+        Done,
+        /// Input method unavailable
+        ///
+        /// The input method ceased to be available.
+        ///
+        /// The compositor must issue this event as the only event on the object if
+        /// there was another input_method object associated with the same seat at
+        /// the time of its creation.
+        ///
+        /// The compositor must issue this request when the object is no longer
+        /// usable, e.g. due to seat removal.
+        ///
+        /// The input method context becomes inert and should be destroyed after
+        /// deactivation is handled. Any further requests and events except for the
+        /// destroy request must be ignored.
+        Unavailable,
+    }
+    impl EventWriter for crate::wayland_objects::zwp_input_method_v2::ZwpInputMethodV2 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Activate {} => {
+                    let mut raw = RawEvent::new(self.id(), 0, 0);
+                    raw
+                }
+                Deactivate {} => {
+                    let mut raw = RawEvent::new(self.id(), 1, 0);
+                    raw
+                }
+                SurroundingText { text, cursor, anchor } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 3);
+                    raw.string(text);
+                    raw.uint(cursor);
+                    raw.uint(anchor);
+                    raw
+                }
+                TextChangeCause { cause } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 1);
+                    raw.uint(cause);
+                    raw
+                }
+                ContentType { hint, purpose } => {
+                    let mut raw = RawEvent::new(self.id(), 4, 2);
+                    raw.uint(hint);
+                    raw.uint(purpose);
+                    raw
+                }
+                Done {} => {
+                    let mut raw = RawEvent::new(self.id(), 5, 0);
+                    raw
+                }
+                Unavailable {} => {
+                    let mut raw = RawEvent::new(self.id(), 6, 0);
+                    raw
+                }
+            }
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Wl_surface has another role,
+        Role = 0,
+    }
+}
+
+/// Popup surface
+///
+/// This interface marks a surface as a popup for interacting with an input
+/// method.
+///
+/// The compositor should place it near the active text input area. It must
+/// be visible if and only if the input method is in the active state.
+///
+/// The client must not destroy the underlying wl_surface while the
+/// zwp_input_popup_surface_v2 object exists.
+pub mod zwp_input_popup_surface_v2 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2 {
+        const INTERFACE_NAME: &'static str = "zwp_input_popup_surface_v2";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpInputPopupSurfaceV2Id {
+        type Object = crate::wayland_objects::zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2
+    {
+        type Id = ZwpInputPopupSurfaceV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Set text input area position
+        ///
+        /// Notify about the position of the area of the text input expressed as a
+        /// rectangle in surface local coordinates.
+        ///
+        /// This is a hint to the input method telling it the relative position of
+        /// the text being entered.
+        TextInputRectangle { x: i32, y: i32, width: i32, height: i32 },
+    }
+    impl EventWriter for crate::wayland_objects::zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2 {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                TextInputRectangle { x, y, width, height } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 4);
+                    raw.int(x);
+                    raw.int(y);
+                    raw.int(width);
+                    raw.int(height);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// Keyboard grab
+///
+/// The zwp_input_method_keyboard_grab_v2 interface represents an exclusive
+/// grab of the wl_keyboard interface associated with the seat.
+pub mod zwp_input_method_keyboard_grab_v2 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2
+    {
+        const INTERFACE_NAME: &'static str = "zwp_input_method_keyboard_grab_v2";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpInputMethodKeyboardGrabV2Id {
+        type Object =
+            crate::wayland_objects::zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2
+    {
+        type Id = ZwpInputMethodKeyboardGrabV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Release the grab object
+        ///
+        ///
+        Release,
+    }
+    impl Parser
+        for crate::wayland_objects::zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Release,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug)]
+    pub enum Event {
+        /// Keyboard mapping
+        ///
+        /// This event provides a file descriptor to the client which can be
+        /// memory-mapped to provide a keyboard mapping description.
+        Keymap {
+            /// Keymap format,
+            format: u32,
+            /// Keymap file descriptor,
+            fd: Rc<OwnedFd>,
+            /// Keymap size, in bytes,
+            size: u32,
+        },
+        /// Key event
+        ///
+        /// A key was pressed or released.
+        /// The time argument is a timestamp with millisecond granularity, with an
+        /// undefined base.
+        Key {
+            /// Serial number of the key event,
+            serial: u32,
+            /// Timestamp with millisecond granularity,
+            time: u32,
+            /// Key that produced the event,
+            key: u32,
+            /// Physical state of the key,
+            state: u32,
+        },
+        /// Modifier and group state
+        ///
+        /// Notifies clients that the modifier and/or group state has changed, and
+        /// it should update its local state.
+        Modifiers {
+            /// Serial number of the modifiers event,
+            serial: u32,
+            /// Depressed modifiers,
+            mods_depressed: u32,
+            /// Latched modifiers,
+            mods_latched: u32,
+            /// Locked modifiers,
+            mods_locked: u32,
+            /// Keyboard layout,
+            group: u32,
+        },
+        /// Repeat rate and delay
+        ///
+        /// Informs the client about the keyboard's repeat rate and delay.
+        ///
+        /// This event is sent as soon as the zwp_input_method_keyboard_grab_v2
+        /// object has been created, and is guaranteed to be received by the
+        /// client before any key press event.
+        ///
+        /// Negative values for either rate or delay are illegal. A rate of zero
+        /// will disable any repeating (regardless of the value of delay).
+        ///
+        /// This event can be sent later on as well with a new value if necessary,
+        /// so clients should continue listening for the event past the creation
+        /// of zwp_input_method_keyboard_grab_v2.
+        RepeatInfo {
+            /// The rate of repeating keys in characters per second,
+            rate: i32,
+            /// Delay in milliseconds since key down until repeating starts,
+            delay: i32,
+        },
+    }
+    impl EventWriter
+        for crate::wayland_objects::zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2
+    {
+        type Event = Event;
+        fn object_id(&self) -> WaylandId {
+            use crate::object::Object;
+            self.id()
+        }
+        fn to_raw_event(&self, event: Event) -> RawEvent {
+            use {crate::object::Object, Event::*};
+            match event {
+                Keymap { format, fd, size } => {
+                    let mut raw = RawEvent::new(self.id(), 0, 3);
+                    raw.uint(format);
+                    raw.fd(fd);
+                    raw.uint(size);
+                    raw
+                }
+                Key { serial, time, key, state } => {
+                    let mut raw = RawEvent::new(self.id(), 1, 4);
+                    raw.uint(serial);
+                    raw.uint(time);
+                    raw.uint(key);
+                    raw.uint(state);
+                    raw
+                }
+                Modifiers { serial, mods_depressed, mods_latched, mods_locked, group } => {
+                    let mut raw = RawEvent::new(self.id(), 2, 5);
+                    raw.uint(serial);
+                    raw.uint(mods_depressed);
+                    raw.uint(mods_latched);
+                    raw.uint(mods_locked);
+                    raw.uint(group);
+                    raw
+                }
+                RepeatInfo { rate, delay } => {
+                    let mut raw = RawEvent::new(self.id(), 3, 2);
+                    raw.int(rate);
+                    raw.int(delay);
+                    raw
+                }
+            }
+        }
+    }
+}
+
+/// Input method manager
+///
+/// The input method manager allows the client to become the input method on
+/// a chosen seat.
+///
+/// No more than one input method must be associated with any seat at any
+/// given time.
+pub mod zwp_input_method_manager_v2 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_input_method_manager_v2::ZwpInputMethodManagerV2 {
+        const INTERFACE_NAME: &'static str = "zwp_input_method_manager_v2";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpInputMethodManagerV2Id {
+        type Object = crate::wayland_objects::zwp_input_method_manager_v2::ZwpInputMethodManagerV2;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_input_method_manager_v2::ZwpInputMethodManagerV2
+    {
+        type Id = ZwpInputMethodManagerV2Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Request an input method object
+        ///
+        /// Request a new input zwp_input_method_v2 object associated with a given
+        /// seat.
+        GetInputMethod { seat: WlSeatId, input_method: ZwpInputMethodV2Id },
+        /// Destroy the input method manager
+        ///
+        /// Destroys the zwp_input_method_manager_v2 object.
+        ///
+        /// The zwp_input_method_v2 objects originating from it remain valid.
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_input_method_manager_v2::ZwpInputMethodManagerV2 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => GetInputMethod { seat: req.id()?, input_method: req.id()? },
+                1 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+}
+
+/// Virtual keyboard
+///
+/// The virtual keyboard provides an application with requests which emulate
+/// the behaviour of a physical keyboard.
+///
+/// This interface can be used by clients on its own to provide raw input
+/// events, or it can accompany the input method protocol.
+pub mod zwp_virtual_keyboard_v1 {
+    use super::*;
+    impl Constants for crate::wayland_objects::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1 {
+        const INTERFACE_NAME: &'static str = "zwp_virtual_keyboard_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpVirtualKeyboardV1Id {
+        type Object = crate::wayland_objects::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1
+    {
+        type Id = ZwpVirtualKeyboardV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Keyboard mapping
+        ///
+        /// Provide a file descriptor to the compositor which can be
+        /// memory-mapped to provide a keyboard mapping description.
+        ///
+        /// Format carries a value from the keymap_format enumeration.
+        Keymap {
+            /// Keymap format,
+            format: u32,
+            /// Keymap file descriptor,
+            fd: Rc<OwnedFd>,
+            /// Keymap size, in bytes,
+            size: u32,
+        },
+        /// Key event
+        ///
+        /// A key was pressed or released.
+        /// The time argument is a timestamp with millisecond granularity, with an
+        /// undefined base. All requests regarding a single object must share the
+        /// same clock.
+        ///
+        /// Keymap must be set before issuing this request.
+        ///
+        /// State carries a value from the key_state enumeration.
+        Key {
+            /// Timestamp with millisecond granularity,
+            time: u32,
+            /// Key that produced the event,
+            key: u32,
+            /// Physical state of the key,
+            state: u32,
+        },
+        /// Modifier and group state
+        ///
+        /// Notifies the compositor that the modifier and/or group state has
+        /// changed, and it should update state.
+        ///
+        /// The client should use wl_keyboard.modifiers event to synchronize its
+        /// internal state with seat state.
+        ///
+        /// Keymap must be set before issuing this request.
+        Modifiers {
+            /// Depressed modifiers,
+            mods_depressed: u32,
+            /// Latched modifiers,
+            mods_latched: u32,
+            /// Locked modifiers,
+            mods_locked: u32,
+            /// Keyboard layout,
+            group: u32,
+        },
+        /// Destroy the virtual keyboard keyboard object
+        ///
+        ///
+        Destroy,
+    }
+    impl Parser for crate::wayland_objects::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1 {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => Keymap { format: req.uint()?, fd: req.fd()?, size: req.uint()? },
+                1 => Key { time: req.uint()?, key: req.uint()?, state: req.uint()? },
+                2 => Modifiers {
+                    mods_depressed: req.uint()?,
+                    mods_latched: req.uint()?,
+                    mods_locked: req.uint()?,
+                    group: req.uint()?,
+                },
+                3 => Destroy,
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// No keymap was set,
+        NoKeymap = 0,
+    }
+}
+
+/// Virtual keyboard manager
+///
+/// A virtual keyboard manager allows an application to provide keyboard
+/// input events as if they came from a physical keyboard.
+pub mod zwp_virtual_keyboard_manager_v1 {
+    use super::*;
+    impl Constants
+        for crate::wayland_objects::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1
+    {
+        const INTERFACE_NAME: &'static str = "zwp_virtual_keyboard_manager_v1";
+        const INTERFACE_VERSION: u32 = 1;
+    }
+    impl crate::object::IdToObject for ZwpVirtualKeyboardManagerV1Id {
+        type Object =
+            crate::wayland_objects::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
+    }
+    impl crate::object::ObjectWithId
+        for crate::wayland_objects::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1
+    {
+        type Id = ZwpVirtualKeyboardManagerV1Id;
+    }
+    #[derive(Debug)]
+    pub enum Request {
+        /// Create a new virtual keyboard
+        ///
+        /// Creates a new virtual keyboard associated to a seat.
+        ///
+        /// If the compositor enables a keyboard to perform arbitrary actions, it
+        /// should present an error when an untrusted client requests a new
+        /// keyboard.
+        CreateVirtualKeyboard { seat: WlSeatId, id: ZwpVirtualKeyboardV1Id },
+    }
+    impl Parser
+        for crate::wayland_objects::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1
+    {
+        type Request = Request;
+        fn parse_request(mut req: RawRequest) -> Result<Self::Request, ParserError> {
+            use Request::*;
+            let request = match req.request_id {
+                0 => CreateVirtualKeyboard { seat: req.id()?, id: req.id()? },
+                _ => return Err(ParserError::InvalidRequest),
+            };
+            Ok(request)
+        }
+    }
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
+    pub enum Error {
+        /// Client not authorized to use the interface,
+        Unauthorized = 0,
     }
 }
 

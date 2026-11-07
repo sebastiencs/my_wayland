@@ -9,8 +9,9 @@ use crate::{
 
 use super::{
     apply_interaction_intent, build_protocol_move_target, build_protocol_resize_target,
-    rect_contains_point, resize_cursor_icon_names, resize_edges_for_pointer, scene_pick_at,
-    HitSemantics, InteractionIntent, WindowHit, WindowRoleSnapshot, WindowTarget,
+    popup_keyboard_focus, rect_contains_point, resize_cursor_icon_names, resize_edges_for_pointer,
+    scene_pick_at, set_keyboard_focus, HitSemantics, InteractionIntent, SurfaceFocus,
+    SurfaceFocusPick, WindowHit, WindowRoleSnapshot, WindowTarget,
     POINTER_INTERACTION_START_OPTIONS, PROTOCOL_INTERACTION_START_OPTIONS,
 };
 
@@ -38,6 +39,47 @@ pub(crate) fn begin_pointer_binding(
         return false;
     };
     apply_interaction_intent(state, dispatcher, intent, POINTER_INTERACTION_START_OPTIONS)
+}
+
+/// Keyboard focus for a pointer press.
+///
+/// A layer surface with `keyboard_interactivity = none` produces
+/// [`InteractionIntent::None`]: the press is delivered, and the current
+/// keyboard focus stays. Other hits produce [`InteractionIntent::FocusSurface`].
+/// A press with no target clears keyboard focus.
+pub(crate) fn apply_pointer_press_keyboard_focus(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    pointer_focus: Option<SurfaceFocusPick>,
+) {
+    if !state.session_lock.input_gated() {
+        if let Some(focus) = popup_keyboard_focus(state) {
+            apply_interaction_intent(
+                state,
+                dispatcher,
+                InteractionIntent::FocusSurface(focus),
+                POINTER_INTERACTION_START_OPTIONS,
+            );
+            return;
+        }
+    }
+
+    let Some(pointer_focus) = pointer_focus else {
+        set_keyboard_focus(state, dispatcher, None);
+        return;
+    };
+    let focus = state
+        .root_surface_for_surface(pointer_focus.target.surface)
+        .map(SurfaceFocus::new)
+        .unwrap_or(pointer_focus.target);
+    let keeps_focus =
+        crate::wayland_objects::zwlr_layer_surface_v1::layer_surface_keyboard_focus(
+            state,
+            focus.surface,
+        ) == Some(crate::wayland_objects::zwlr_layer_surface_v1::LayerKeyboardFocus::None);
+    let intent =
+        if keeps_focus { InteractionIntent::None } else { InteractionIntent::FocusSurface(focus) };
+    apply_interaction_intent(state, dispatcher, intent, POINTER_INTERACTION_START_OPTIONS);
 }
 
 pub(crate) fn begin_decoration_pointer_action(

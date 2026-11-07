@@ -15,6 +15,7 @@ use libc::getsockopt;
 use crate::{
     dbus::Dbus,
     drm::{kick_visual_animation_pump, request_active_output, request_output},
+    input::ime::{ImEvent, KeyboardGrabClientEvent, TextInputClientEvent},
     io_uring::{
         model::IoUringAction,
         ring::{AcceptCompleted, RecvmsgCompleted, RingId},
@@ -26,7 +27,8 @@ use crate::{
         WaylandId, WlCallbackId, WlDataOfferId, WlDataSourceId, WlOutputId, WlRegistryId,
         WlSurfaceId, WpPresentationFeedbackId, XdgPopupId, XdgToplevelId,
         ZwlrDataControlSourceV1Id, ZwlrGammaControlV1Id, ZwlrLayerSurfaceV1Id,
-        ZwpPrimarySelectionSourceV1Id, ZxdgOutputV1Id,
+        ZwpInputMethodKeyboardGrabV2Id, ZwpInputMethodV2Id, ZwpInputPopupSurfaceV2Id,
+        ZwpPrimarySelectionSourceV1Id, ZwpTextInputV3Id, ZxdgOutputV1Id,
     },
     region::RectI,
     runner::{Dispatcher, Model, ModelInstanceId, Redispatcher},
@@ -460,6 +462,23 @@ pub enum ClientAction {
     },
     SeatEvent {
         event: SeatClientEvent,
+    },
+    TextInputEvent {
+        text_input: Resolved<ZwpTextInputV3Id>,
+        event: TextInputClientEvent,
+    },
+    /// One batch for `zwp_input_method_v2`. `Done` is incremented when it is written.
+    InputMethodEvent {
+        input_method: Resolved<ZwpInputMethodV2Id>,
+        events: Vec<ImEvent>,
+    },
+    KeyboardGrabEvent {
+        grab: Resolved<ZwpInputMethodKeyboardGrabV2Id>,
+        event: KeyboardGrabClientEvent,
+    },
+    InputPopupEvent {
+        popup: Resolved<ZwpInputPopupSurfaceV2Id>,
+        cursor: RectI,
     },
     RequestToplevelClose {
         toplevel: Resolved<crate::protocol_generated::XdgToplevelId>,
@@ -1134,6 +1153,40 @@ impl Client {
                     keyboard
                         .ref_mut(state)
                         .send_key(serial, time, key, key_state, dispatcher);
+                }
+            }
+            SeatClientEvent::KeyboardKeymap {
+                serial,
+                surface,
+                keymap,
+                keys,
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+            } => {
+                let held = !keys.0.is_empty() && surface.exists(state);
+                for keyboard in state.seat.keyboard_resources(self.id) {
+                    if !keyboard.exists(state) {
+                        continue;
+                    }
+                    state.seat.record_client_serial(self.id, serial);
+                    let keyboard = keyboard.ref_mut(state);
+                    if held {
+                        keyboard.send_leave(serial, surface, dispatcher);
+                    }
+                    keyboard.send_keymap_blob(&keymap, dispatcher);
+                    if held {
+                        keyboard.send_enter(serial, surface, keys.clone(), dispatcher);
+                    }
+                    keyboard.send_modifiers(
+                        serial,
+                        mods_depressed,
+                        mods_latched,
+                        mods_locked,
+                        group,
+                        dispatcher,
+                    );
                 }
             }
             SeatClientEvent::KeyboardModifiers {
@@ -2074,6 +2127,23 @@ impl Client {
                 }
                 continue;
             }
+            if surface.has_input_popup_role() {
+                if let Some((base_x, base_y)) =
+                    crate::input::ime::popup_output_base(state, root_surface)
+                {
+                    refresh_surface_tree_outputs(
+                        self,
+                        state,
+                        dispatcher,
+                        root_surface,
+                        base_x,
+                        base_y,
+                    );
+                } else {
+                    clear_surface_tree_outputs(self, state, dispatcher, root_surface);
+                }
+                continue;
+            }
             if surface.has_dnd_icon_role() {
                 if let Some((active_surface, base_x, base_y)) = active_dnd_icon_surface {
                     if active_surface == root_surface {
@@ -2614,6 +2684,38 @@ impl Model for Client {
             }
             SeatEvent { event } => {
                 self.handle_seat_event(state, &mut dispatcher, event);
+            }
+            TextInputEvent { text_input, event } => {
+                crate::input::ime::deliver_text_input_event(
+                    state,
+                    &mut dispatcher,
+                    text_input,
+                    event,
+                );
+            }
+            InputMethodEvent { input_method, events } => {
+                crate::input::ime::deliver_input_method_event(
+                    state,
+                    &mut dispatcher,
+                    input_method,
+                    events,
+                );
+            }
+            KeyboardGrabEvent { grab, event } => {
+                crate::wayland_objects::zwp_input_method_keyboard_grab_v2::deliver_keyboard_grab_event(
+                    state,
+                    &mut dispatcher,
+                    grab,
+                    event,
+                );
+            }
+            InputPopupEvent { popup, cursor } => {
+                crate::wayland_objects::zwp_input_popup_surface_v2::deliver_input_popup_event(
+                    state,
+                    &mut dispatcher,
+                    popup,
+                    cursor,
+                );
             }
             RequestToplevelClose { toplevel } => {
                 if let Some(toplevel) = toplevel.try_ref(state) {
@@ -3210,6 +3312,11 @@ impl RawEvent {
         let w: WaylandId = id.into();
         self.id(w);
         Ok(id)
+    }
+
+    /// A null Wayland string. The length word is 0 and no bytes follow.
+    pub fn null_string(&mut self) {
+        self.push(0);
     }
 
     pub fn string<S: AsRef<str>>(&mut self, s: S) {

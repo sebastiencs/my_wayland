@@ -1,3 +1,6 @@
+pub const KEY_REPEAT_RATE: i32 = 25;
+pub const KEY_REPEAT_DELAY: i32 = 250;
+
 use crate::{
     clients::{Client, ClientDispatcher, EventWriter, RawRequest, Resolved},
     object::{Object, Parser, RequestResult},
@@ -5,7 +8,7 @@ use crate::{
     seat::empty_keys,
     state::{GrabbedObject, State},
     wayland_objects::wl_display::WlDisplay,
-    xkb::Xkb,
+    xkb::{KeymapBlob, Xkb},
 };
 
 #[derive(Debug)]
@@ -47,19 +50,25 @@ impl Object for WlKeyboard {
 
 impl WlKeyboard {
     pub fn send_keymap(&self, xkb: &Xkb, dispatcher: &mut ClientDispatcher) {
-        let keymap = xkb.keymap_fd();
+        self.send_keymap_blob(&xkb.keymap_blob(), dispatcher);
+    }
+
+    pub fn send_keymap_blob(&self, keymap: &KeymapBlob, dispatcher: &mut ClientDispatcher) {
         self.send_event(
             wl_keyboard::Event::Keymap {
                 format: wl_keyboard::KeymapFormat::XkbV1 as u32,
-                fd: keymap.rc(),
-                size: keymap.len() as u32,
+                fd: keymap.fd.rc(),
+                size: keymap.fd.len() as u32,
             },
             dispatcher,
         )
     }
 
     pub fn send_repeat_info(&self, dispatcher: &mut ClientDispatcher) {
-        self.send_event(wl_keyboard::Event::RepeatInfo { rate: 25, delay: 250 }, dispatcher)
+        self.send_event(
+            wl_keyboard::Event::RepeatInfo { rate: KEY_REPEAT_RATE, delay: KEY_REPEAT_DELAY },
+            dispatcher,
+        )
     }
 
     pub fn send_enter(

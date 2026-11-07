@@ -1,5 +1,6 @@
 pub(crate) mod focus;
 pub(crate) mod grab;
+pub(crate) mod ime;
 pub(crate) mod interaction;
 pub(crate) mod pick;
 pub(crate) mod pointer_confine;
@@ -19,9 +20,11 @@ pub(crate) use {
         finish_pointer_interactive_grab, recover_pointer_after_interactive_grab_loss,
         resize_cursor_icon_names, tiled_drag_tracks_surface, tiled_resize_active_root_surfaces,
     },
+    ime::ImeState,
     interaction::{
-        begin_decoration_pointer_action, begin_pointer_binding, decoration_hover_cursor_icon_names,
-        request_toplevel_move, request_toplevel_resize, window_hit_at,
+        apply_pointer_press_keyboard_focus, begin_decoration_pointer_action, begin_pointer_binding,
+        decoration_hover_cursor_icon_names, request_toplevel_move, request_toplevel_resize,
+        window_hit_at,
     },
     pick::{
         build_protocol_move_target, build_protocol_resize_target, rect_contains_point,

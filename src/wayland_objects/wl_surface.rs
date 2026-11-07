@@ -15,7 +15,7 @@ use crate::{
         wp_viewport, xdg_wm_base, ExtSessionLockSurfaceV1Id, WaylandId, WlBufferId, WlCallbackId,
         WlOutputId, WlRegionId, WlSubsurfaceId, WlSurfaceId, WpFractionalScaleV1Id,
         WpLinuxDrmSyncobjSurfaceV1Id, WpPresentationFeedbackId, WpViewportId, XdgSurfaceId,
-        ZwlrLayerSurfaceV1Id, ZwpIdleInhibitorV1Id,
+        ZwlrLayerSurfaceV1Id, ZwpIdleInhibitorV1Id, ZwpInputPopupSurfaceV2Id,
     },
     region::{DamageRegion, RectI, RegionValue},
     scene::visibility::root_participates_in_input,
@@ -128,6 +128,7 @@ pub enum Role {
     LayerSurface,
     Subsurface,
     LockSurface,
+    InputPopup,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -210,6 +211,7 @@ pub struct WlSurface {
     pointer_constraint: Option<SurfacePointerConstraint>,
     idle_inhibitors: Vec<Resolved<ZwpIdleInhibitorV1Id>>,
     lock_surface: Option<Resolved<ExtSessionLockSurfaceV1Id>>,
+    input_popup: Option<Resolved<ZwpInputPopupSurfaceV2Id>>,
 }
 
 #[derive(Clone, Debug)]
@@ -449,6 +451,7 @@ impl WlSurface {
             pointer_constraint: None,
             idle_inhibitors: Vec::new(),
             lock_surface: None,
+            input_popup: None,
         }
     }
 
@@ -575,6 +578,34 @@ impl WlSurface {
 
     pub fn has_lock_surface_role(&self) -> bool {
         self.role == Role::LockSurface
+    }
+
+    pub fn has_input_popup_role(&self) -> bool {
+        self.role == Role::InputPopup
+    }
+
+    /// Assign the input-popup role. Fails when the surface already has a role or a buffer.
+    pub fn set_input_popup_role(&mut self) -> Result<(), ()> {
+        if self.role != Role::None || self.has_attached_or_committed_buffer() {
+            return Err(());
+        }
+        self.role = Role::InputPopup;
+        Ok(())
+    }
+
+    pub fn assign_input_popup(&mut self, popup: Resolved<ZwpInputPopupSurfaceV2Id>) {
+        self.input_popup = Some(popup);
+    }
+
+    pub fn input_popup(&self) -> Option<Resolved<ZwpInputPopupSurfaceV2Id>> {
+        self.input_popup
+    }
+
+    pub fn clear_input_popup_role(&mut self) {
+        if self.role == Role::InputPopup {
+            self.role = Role::None;
+            self.input_popup = None;
+        }
     }
 
     pub fn lock_surface(&self) -> Option<Resolved<ExtSessionLockSurfaceV1Id>> {
@@ -2158,7 +2189,7 @@ impl WlSurface {
                 }
             }
         }
-        if !this.has_cursor_role() && !this.has_dnd_icon_role() {
+        if !this.has_cursor_role() && !this.has_dnd_icon_role() && !this.has_input_popup_role() {
             (this, _) = client.with_ungrabbed(this, state, |state| {
                 state.mark_root_geometry_dirty_for_surface(resolved_surface);
             });
@@ -2260,6 +2291,10 @@ impl WlSurface {
                 request_outputs(state, this.output_membership_ids(), dispatcher);
                 request_active_output(state, dispatcher);
             }
+        }
+
+        if this.role == Role::InputPopup {
+            dispatcher.dispatch_post_action(crate::input::ime::RepositionInputPopups);
         }
 
         if matches!(this.shell_surface, Some(ShellSurfaceObject::LayerSurface(_))) {

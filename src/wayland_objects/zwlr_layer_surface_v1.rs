@@ -314,6 +314,11 @@ impl ZwlrLayerSurfaceV1 {
         self.mapped = mapped;
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_set_keyboard_interactivity(&mut self, keyboard_interactivity: u32) {
+        self.current.keyboard_interactivity = keyboard_interactivity;
+    }
+
     pub fn namespace(&self) -> &str {
         &self.namespace
     }

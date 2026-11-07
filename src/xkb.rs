@@ -3,6 +3,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     ptr::NonNull,
     rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use xkbcommon::xkb;
@@ -12,8 +13,20 @@ use crate::{libinput::ForeignStr, protocol_generated::Array, wayland_objects::wl
 pub struct Xkb {
     ctx: xkb::Context,
     keymap: xkb::Keymap,
-    pub keymap_fd: MemFd,
+    keymap_blob: Rc<KeymapBlob>,
 }
+
+/// One compiled keymap and the sealed memfd clients map.
+///
+/// The hardware keymap is id 0. Every keymap compiled from a client string
+/// gets the next id.
+#[derive(Debug)]
+pub struct KeymapBlob {
+    pub id: u64,
+    pub fd: MemFd,
+}
+
+static NEXT_KEYMAP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct KeyboardModifiers {
@@ -36,14 +49,30 @@ impl Xkb {
             xkb::Keymap::new_from_names(&ctx, "", "", "us", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
                 .ok_or_else(|| "failed to compile the us keymap".to_string())?;
 
-        let keymap_fd = {
-            let s = keymap_as_cstr(&keymap);
-            let s_slice = s.to_bytes_with_nul();
-            new_memfd(s_slice.as_ptr(), s_slice.len())
-                .map_err(|error| format!("keymap memfd: {error}"))?
-        };
+        let keymap_blob = Rc::new(KeymapBlob {
+            id: 0,
+            fd: keymap_memfd(&keymap).map_err(|error| format!("keymap memfd: {error}"))?,
+        });
 
-        Ok(Self { ctx, keymap, keymap_fd })
+        Ok(Self { ctx, keymap, keymap_blob })
+    }
+
+    /// Compile a keymap string and serialize that compiled map into a new memfd.
+    pub fn compile_keymap_from_string(text: &str) -> Result<Rc<KeymapBlob>, String> {
+        if text.contains('\0') {
+            return Err("keymap contains an interior NUL".to_string());
+        }
+        let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let keymap = xkb::Keymap::new_from_string(
+            &ctx,
+            text.to_string(),
+            xkb::KEYMAP_FORMAT_TEXT_V1,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .ok_or_else(|| "failed to compile keymap".to_string())?;
+        let fd = keymap_memfd(&keymap).map_err(|error| format!("keymap memfd: {error}"))?;
+        let id = NEXT_KEYMAP_ID.fetch_add(1, Ordering::Relaxed);
+        Ok(Rc::new(KeymapBlob { id, fd }))
     }
 
     /// The us keymap is present in tests. Startup uses [`Self::try_new`].
@@ -52,7 +81,11 @@ impl Xkb {
     }
 
     pub fn keymap_fd(&self) -> &MemFd {
-        &self.keymap_fd
+        &self.keymap_blob.fd
+    }
+
+    pub fn keymap_blob(&self) -> Rc<KeymapBlob> {
+        Rc::clone(&self.keymap_blob)
     }
 
     pub fn keymap(&self) -> &xkb::Keymap {
@@ -128,6 +161,12 @@ fn serialize_modifiers(state: &xkb::State) -> KeyboardModifiers {
     }
 }
 
+fn keymap_memfd(keymap: &xkb::Keymap) -> std::io::Result<MemFd> {
+    let s = keymap_as_cstr(keymap);
+    let bytes = s.to_bytes_with_nul();
+    new_memfd(bytes.as_ptr(), bytes.len())
+}
+
 fn keymap_as_cstr<'a>(keymap: &xkb::Keymap) -> ForeignStr<'a> {
     unsafe {
         let s =
@@ -136,6 +175,7 @@ fn keymap_as_cstr<'a>(keymap: &xkb::Keymap) -> ForeignStr<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct MemFd {
     fd: Rc<OwnedFd>,
     size: usize,

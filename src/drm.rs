@@ -7284,6 +7284,15 @@ fn collect_render_items_for_output_view(
             &mut retired_candidates,
         );
     }
+    collect_input_popup_render_items(
+        state,
+        drm_id,
+        drm_crtc_id,
+        output_id,
+        output_bounds,
+        &mut items,
+        &mut retired_candidates,
+    );
     collect_dnd_render_items(
         state,
         drm_id,
@@ -7343,6 +7352,67 @@ fn collect_render_items_for_output_view(
         cursor_plane,
         cursor_animation_delay_msec,
     )
+}
+
+fn collect_input_popup_render_items(
+    state: &mut State,
+    drm_id: DrmId,
+    drm_crtc_id: u32,
+    output_id: OutputId,
+    output_bounds: RectI,
+    items: &mut Vec<SceneItem>,
+    retired_candidates: &mut Vec<RetiredBufferCandidate>,
+) {
+    if state.session_lock.input_gated() {
+        return;
+    }
+    let popups = state.seat.ime.input_popups().to_vec();
+    for popup in popups {
+        let Some(global) = popup.global else {
+            continue;
+        };
+        if !crate::input::ime::input_popup_visible(state, popup.surface) {
+            continue;
+        }
+        let Some(surface) = popup.surface.try_ref(state) else {
+            continue;
+        };
+        let (root_x, root_y) = surface.root_position();
+        let base_x = global.x.saturating_sub(root_x);
+        let base_y = global.y.saturating_sub(root_y);
+        let owns_output = state
+            .primary_output_for_rect(global, None)
+            .unwrap_or(output_id);
+        if owns_output != output_id && !global.intersects(output_bounds) {
+            continue;
+        }
+        let mut snapshots = Vec::new();
+        collect_surface_snapshots(
+            state,
+            popup.surface,
+            base_x,
+            base_y,
+            true,
+            retired_candidates,
+            &mut snapshots,
+        );
+        let (objects, drm_map) = (&mut state.objects, &mut state.drm);
+        let drm = drm_map.get_mut(drm_id);
+        let drm_fd = drm.fd();
+        push_scene_items_from_snapshots(
+            items,
+            objects,
+            drm,
+            &drm_fd,
+            drm_crtc_id,
+            output_bounds,
+            snapshots,
+            false,
+            None,
+            u8::MAX,
+            None,
+        );
+    }
 }
 
 fn collect_dnd_render_items(
@@ -7654,6 +7724,7 @@ fn render_composed_entry(
         || surface.has_cursor_role()
         || surface.has_dnd_icon_role()
         || surface.has_lock_surface_role()
+        || surface.has_input_popup_role()
     {
         return;
     }

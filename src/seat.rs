@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    rc::Rc,
     time::Instant,
 };
 
@@ -9,9 +10,9 @@ use crate::{
     cursor::{CursorSourceRef, CursorState},
     drm::request_outputs_for_points,
     input::{
-        maybe_dismiss_popup_grab_on_button, popup_keyboard_focus, refresh_drag_focus,
-        set_keyboard_focus, ActiveGrabState, PointerInteractiveGrab, ScenePick, SurfaceFocusPick,
-        WindowHit,
+        apply_pointer_press_keyboard_focus, maybe_dismiss_popup_grab_on_button,
+        popup_keyboard_focus, refresh_drag_focus, set_keyboard_focus, ActiveGrabState, ImeState,
+        PointerInteractiveGrab, ScenePick, SurfaceFocusPick, WindowHit,
     },
     protocol_generated::{
         Array, ExtDataControlDeviceV1Id, WlDataDeviceId, WlDataOfferId, WlDataSourceId,
@@ -30,7 +31,7 @@ use crate::{
         xdg_surface::xdg_toplevel::{InteractiveSizeConstraints, ToplevelDecorationMode},
         zwlr_layer_surface_v1::LayerLayoutObjectSnapshot,
     },
-    xkb::KeyboardModifiers,
+    xkb::{KeyboardModifiers, KeymapBlob},
 };
 
 pub use crate::input::SurfaceFocus;
@@ -120,6 +121,19 @@ pub enum SeatClientEvent {
     },
     KeyboardModifiers {
         serial: u32,
+        mods_depressed: u32,
+        mods_latched: u32,
+        mods_locked: u32,
+        group: u32,
+    },
+    /// The focused client is on a different keymap. `keys` empty means send
+    /// the keymap while the client stays entered. Otherwise `leave`, keymap,
+    /// `enter(keys)`.
+    KeyboardKeymap {
+        serial: u32,
+        surface: Resolved<WlSurfaceId>,
+        keymap: Rc<KeymapBlob>,
+        keys: Array,
         mods_depressed: u32,
         mods_latched: u32,
         mods_locked: u32,
@@ -331,8 +345,11 @@ pub struct SeatState {
     pub(crate) active_pointer_lock: Option<Resolved<ZwpLockedPointerV1Id>>,
     pub(crate) active_pointer_confine: Option<Resolved<ZwpConfinedPointerV1Id>>,
     keyboard_resources: BTreeMap<ClientId, Vec<Resolved<WlKeyboardId>>>,
+    /// Keymap last sent to each client. Absent means the hardware keymap, id 0.
+    client_keymaps: BTreeMap<ClientId, Rc<KeymapBlob>>,
     intercepted_keyboard_keys: BTreeSet<u32>,
     intercepted_pointer_buttons: BTreeSet<u32>,
+    pub(crate) ime: ImeState,
     /// Last real libinput event on this seat. Absent until the first one.
     /// A held key or button does not refresh it, and neither do synthetic
     /// pause releases or focus changes.
@@ -373,8 +390,10 @@ impl Default for SeatState {
             active_pointer_lock: None,
             active_pointer_confine: None,
             keyboard_resources: BTreeMap::default(),
+            client_keymaps: BTreeMap::default(),
             intercepted_keyboard_keys: BTreeSet::default(),
             intercepted_pointer_buttons: BTreeSet::default(),
+            ime: ImeState::default(),
             last_real_input: None,
         }
     }
@@ -489,6 +508,14 @@ impl SeatState {
 
     pub fn unregister_keyboard(&mut self, keyboard: Resolved<WlKeyboardId>) {
         remove_resource(&mut self.keyboard_resources, keyboard.client_id(), keyboard);
+    }
+
+    pub(crate) fn client_keymap(&self, client_id: ClientId) -> Option<Rc<KeymapBlob>> {
+        self.client_keymaps.get(&client_id).cloned()
+    }
+
+    pub(crate) fn remember_client_keymap(&mut self, client_id: ClientId, keymap: Rc<KeymapBlob>) {
+        self.client_keymaps.insert(client_id, keymap);
     }
 
     pub fn register_data_device(&mut self, data_device: Resolved<WlDataDeviceId>) {
@@ -990,6 +1017,7 @@ impl SeatState {
             self.active_pointer_confine = None;
         }
         self.keyboard_resources.remove(&client_id);
+        self.client_keymaps.remove(&client_id);
         if self
             .selection_source
             .is_some_and(|selection| selection.owner_client_id() == client_id)
@@ -1497,11 +1525,7 @@ pub fn handle_pointer_button(
     }
 
     if button_state == 1 {
-        set_keyboard_focus(
-            state,
-            dispatcher,
-            keyboard_focus_for_pointer_press(state, pointer_focus),
-        );
+        apply_pointer_press_keyboard_focus(state, dispatcher, pointer_focus);
     }
 
     if !state.session_lock.input_gated() && button_state == 1 {
@@ -1537,26 +1561,6 @@ pub fn handle_pointer_button(
     if button_state != 1 {
         finish_pointer_interactive_grab(state, dispatcher, time);
     }
-}
-
-/// Keyboard target for a button press. A popup grab keeps the top popup. Any other hit,
-/// including that toplevel's popup or subsurface, gives the keyboard to the owning toplevel.
-/// The button itself stays on the hit surface. Focusing the popup sends `wl_keyboard.leave`
-/// to the parent, and clients such as Firefox close the menu on that leave.
-fn keyboard_focus_for_pointer_press(
-    state: &State,
-    pointer_focus: Option<SurfaceFocusPick>,
-) -> Option<SurfaceFocus> {
-    if !state.session_lock.input_gated() {
-        if let Some(focus) = popup_keyboard_focus(state) {
-            return Some(focus);
-        }
-    }
-    let pointer_focus = pointer_focus?;
-    state
-        .root_surface_for_surface(pointer_focus.target.surface)
-        .map(SurfaceFocus::new)
-        .or(Some(pointer_focus.target))
 }
 
 /// Deliver one scroll frame to the pointer-focused client. Pointer resources expand it according
@@ -1721,6 +1725,17 @@ pub fn handle_keyboard_key(
         }
     }
 
+    if crate::input::ime::forward_hardware_key(
+        state,
+        dispatcher,
+        key,
+        key_state,
+        time,
+        changed_modifiers,
+    ) {
+        return;
+    }
+
     if state.session_lock.input_gated() {
         if key_state == 1 {
             let requested = state
@@ -1736,6 +1751,14 @@ pub fn handle_keyboard_key(
     let Some(focus) = state.seat.keyboard_focus else {
         return;
     };
+
+    let keymap = state.xkb.keymap_blob();
+    let modifiers = state.keyboard.modifiers();
+    let mut held = state.keyboard.pressed_keys();
+    if key_state == 1 {
+        held.0.retain(|pressed| *pressed != key);
+    }
+    ensure_client_keymap(state, dispatcher, focus, keymap, held, modifiers);
 
     let serial = state.seat.next_serial();
     state.seat.record_keyboard_trigger(serial, focus);
@@ -1816,7 +1839,54 @@ pub fn refresh_active_drag_focus(state: &mut State, dispatcher: &mut Dispatcher,
     crate::input::refresh_active_drag_focus(state, dispatcher, time);
 }
 
-fn monotonic_time_msec() -> u32 {
+/// Send `keymap` to `focus` when that client still has a different one.
+///
+/// `keys` are the keys already down. An empty list keeps the client entered
+/// and only sends the keymap and modifiers. A non-empty list wraps the keymap
+/// in `leave` and `enter` so the client re-reads those keys with the new map.
+pub(crate) fn ensure_client_keymap(
+    state: &mut State,
+    dispatcher: &mut Dispatcher,
+    focus: SurfaceFocus,
+    keymap: Rc<KeymapBlob>,
+    keys: Array,
+    modifiers: KeyboardModifiers,
+) {
+    let current = state
+        .seat
+        .client_keymap(focus.client_id())
+        .map(|keymap| keymap.id)
+        .unwrap_or(0);
+    if current == keymap.id {
+        return;
+    }
+    log::debug!(
+        "seat keymap switch client={:?} from={} to={}",
+        focus.client_id(),
+        current,
+        keymap.id
+    );
+    state
+        .seat
+        .remember_client_keymap(focus.client_id(), Rc::clone(&keymap));
+    let serial = state.seat.next_serial();
+    dispatch_client_event(
+        dispatcher,
+        focus.client_id(),
+        SeatClientEvent::KeyboardKeymap {
+            serial,
+            surface: focus.surface,
+            keymap,
+            keys,
+            mods_depressed: modifiers.mods_depressed,
+            mods_latched: modifiers.mods_latched,
+            mods_locked: modifiers.mods_locked,
+            group: modifiers.group,
+        },
+    );
+}
+
+pub(crate) fn monotonic_time_msec() -> u32 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
         return 0;
@@ -2206,6 +2276,14 @@ pub fn empty_keys() -> Array {
     Array(Vec::new())
 }
 
+pub(crate) fn resend_keyboard_modifiers(state: &mut State, dispatcher: &mut Dispatcher) {
+    let Some(focus) = state.seat.keyboard_focus else {
+        return;
+    };
+    let modifiers = state.keyboard.modifiers();
+    dispatch_modifiers(dispatcher, focus.client_id(), state.seat.next_serial(), modifiers);
+}
+
 fn dispatch_modifiers(
     dispatcher: &mut Dispatcher,
     client_id: ClientId,
@@ -2455,8 +2533,9 @@ mod xdg_seat_tests {
             cursor::CursorSourceRef,
             object::Object,
             protocol_generated::{
-                xdg_toplevel, Constants, WlPointerId, WlSeatId, WlSubsurfaceId, WlSurfaceId,
-                XdgPopupId, XdgPositionerId, XdgSurfaceId, XdgToplevelId, XdgWmBaseId,
+                xdg_toplevel, zwlr_layer_surface_v1, Constants, WlPointerId, WlSeatId,
+                WlSubsurfaceId, WlSurfaceId, XdgPopupId, XdgPositionerId, XdgSurfaceId,
+                XdgToplevelId, XdgWmBaseId, ZwlrLayerShellV1Id, ZwlrLayerSurfaceV1Id,
                 ZwpRelativePointerV1Id,
             },
             region::{RectI, RegionValue},
@@ -2481,6 +2560,7 @@ mod xdg_seat_tests {
                     XdgSurface,
                 },
                 xdg_wm_base::XdgWmBase,
+                zwlr_layer_surface_v1::{LayerShellLayer, ZwlrLayerSurfaceV1},
                 zwp_relative_pointer_v1::ZwpRelativePointerV1,
             },
         },
@@ -3161,6 +3241,86 @@ mod xdg_seat_tests {
                 ClientAction::SeatEvent { event: SeatClientEvent::KeyboardLeave { .. } }
             )
         ));
+    }
+
+    #[test]
+    fn pointer_press_on_a_keyboard_none_layer_keeps_focus() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output_with_crtc_name(
+            BackendOutputRef::new(DrmId::from(0usize)),
+            1,
+            0,
+            0,
+            200,
+            200,
+        ));
+        let (mut app, mut dispatcher) = test_client_and_dispatcher(1);
+        let window_object = insert_surface(&mut state, &mut app, WlSurfaceId::from(5));
+        root(&state, window_object).ref_mut(&mut state).test_map(
+            ObjectId::from(5usize),
+            10,
+            10,
+            40,
+            40,
+        );
+        let window_focus = focus_for_surface(app.client_id(), WlSurfaceId::from(5), window_object);
+        set_keyboard_focus(&mut state, &mut dispatcher, Some(window_focus));
+
+        let (mut osk, _) = test_client_and_dispatcher(2);
+        let layer_object = insert_surface(&mut state, &mut osk, WlSurfaceId::from(7));
+        let layer_root = root(&state, layer_object);
+        layer_root
+            .ref_mut(&mut state)
+            .test_map(ObjectId::from(7usize), 10, 80, 120, 40);
+        let mut layer = ZwlrLayerSurfaceV1::new(
+            ZwlrLayerSurfaceV1Id::from(8),
+            Resolved::new(osk.client_id(), ZwlrLayerShellV1Id::from(6), ObjectId::from(6usize)),
+            4,
+            layer_root,
+            Some(output_id),
+            LayerShellLayer::Overlay,
+            "osk".to_string(),
+        );
+        layer.test_set_mapped(true);
+        let (layer_resolved, _) = osk.insert_object(&mut state, layer);
+        state.register_layer_surface_object(layer_resolved);
+        layer_root
+            .ref_mut(&mut state)
+            .set_layer_surface_impl(layer_resolved);
+
+        let layer_focus = focus_for_surface(osk.client_id(), WlSurfaceId::from(7), layer_object);
+        set_keyboard_focus(&mut state, &mut dispatcher, Some(layer_focus));
+        assert_eq!(state.seat.keyboard_focus, None);
+        set_keyboard_focus(&mut state, &mut dispatcher, Some(window_focus));
+
+        state.seat.pointer_pos = (20.0, 90.0);
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 100);
+
+        assert_eq!(state.seat.keyboard_focus, Some(window_focus));
+        assert_eq!(
+            state
+                .seat
+                .pointer_focus
+                .map(|focus| focus.target.surface_id()),
+            Some(WlSurfaceId::from(7))
+        );
+        assert!(dispatcher.test_has_queued_action_for::<ClientAction, ClientId>(
+            osk.client_id(),
+            |action| matches!(
+                action,
+                ClientAction::SeatEvent {
+                    event: SeatClientEvent::PointerButton { button: 0x110, state: 1, .. },
+                }
+            )
+        ));
+
+        layer_resolved
+            .ref_mut(&mut state)
+            .test_set_keyboard_interactivity(
+                zwlr_layer_surface_v1::KeyboardInteractivity::OnDemand as u32,
+            );
+        handle_pointer_button(&mut state, &mut dispatcher, 0x110, 1, 120);
+        assert_eq!(state.seat.keyboard_focus.map(|focus| focus.surface), Some(layer_root));
     }
 
     #[test]
