@@ -19,6 +19,7 @@ pub(super) fn submit_render_buffer(
     scene_build_duration: std::time::Duration,
     render_started_at: std::time::Instant,
     protected: bool,
+    async_flip: bool,
 ) -> std::io::Result<SubmittedFrameRegistration> {
     drm.submit_render_buffer(
         drm_crtc_id,
@@ -33,6 +34,7 @@ pub(super) fn submit_render_buffer(
         scene_build_duration,
         render_started_at,
         protected,
+        async_flip,
     )
 }
 
@@ -47,6 +49,7 @@ pub(super) fn submit_direct_scanout(
     cursor_plane: Option<CursorPlaneCandidate>,
     scene_build_duration: std::time::Duration,
     render_started_at: std::time::Instant,
+    async_flip: bool,
 ) -> std::io::Result<SubmittedFrameRegistration> {
     drm.submit_direct_scanout(
         drm_crtc_id,
@@ -58,5 +61,6 @@ pub(super) fn submit_direct_scanout(
         cursor_plane,
         scene_build_duration,
         render_started_at,
+        async_flip,
     )
 }

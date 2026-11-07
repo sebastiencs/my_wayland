@@ -12,6 +12,10 @@ cursor_size = 24
 # Changing this requires a restart; a running compositor keeps its current renderer.
 renderer = "opengl"
 
+# Allow a fullscreen window to tear when it asks through wp_tearing_control_v1.
+# A per-output value under [output.tearing] replaces this for that connector.
+allow_tearing = true
+
 # Tiling gaps (logical pixels). Outer gap shrinks the tiling region inside the usable area;
 # inner gap is space between sibling tiles. Fullscreen ignores gaps.
 outer_gap = 10
@@ -163,3 +167,8 @@ style = "fade"
 # [output.scales]
 # "DP-1" = "auto"
 # "eDP-1" = 1.25
+
+# Optional: replace general.allow_tearing for one connector. Names match wl_output.name.
+# [output.tearing]
+# "DP-1" = false
+# "eDP-1" = true

@@ -53,6 +53,8 @@ pub mod wp_linux_drm_syncobj_surface_v1;
 pub mod wp_linux_drm_syncobj_timeline_v1;
 pub mod wp_presentation;
 pub mod wp_presentation_feedback;
+pub mod wp_tearing_control_manager_v1;
+pub mod wp_tearing_control_v1;
 pub mod wp_viewport;
 pub mod wp_viewporter;
 pub mod xdg_activation_token_v1;
@@ -145,8 +147,6 @@ fake_obj! {
     { wp_drm_lease_request_v1, WpDrmLeaseRequestV1 },
     { wp_drm_lease_v1, WpDrmLeaseV1 },
     { wp_single_pixel_buffer_manager_v1, WpSinglePixelBufferManagerV1 },
-    { wp_tearing_control_manager_v1, WpTearingControlManagerV1 },
-    { wp_tearing_control_v1, WpTearingControlV1 },
     // { xdg_activation_v1, XdgActivationV1 },
     { xwayland_shell_v1, XwaylandShellV1 },
     { xwayland_surface_v1, XwaylandSurfaceV1 },

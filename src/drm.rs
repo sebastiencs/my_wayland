@@ -165,6 +165,7 @@ pub struct Drm {
     driver: Driver,
     supports_syncobj_timeline: bool,
     supports_syncobj_eventfd: bool,
+    supports_async_flip: bool,
     /// Bumped on each in-place restore. Flip events armed earlier are ignored.
     event_generation: u64,
 }
@@ -200,6 +201,14 @@ pub struct DrmOutput {
     /// Plane state the next composited commit still has to apply. Startup records
     /// geometry here after a TEST_ONLY check; the first rendered frame commits it.
     pending_modeset: Option<PendingModeset>,
+    /// Unset until a real commit succeeds. Startup only TEST_ONLY-commits geometry.
+    committed_primary_geometry: Option<PrimaryPlaneGeometry>,
+    /// `None` until a commit records it. `Some(Hidden)` is a committed cursor plane.
+    committed_cursor: Option<RecordedCursor>,
+    committed_vrr_enabled: Option<bool>,
+    /// Render buffer or client buffer. Logged when it changes; not an async gate.
+    committed_fb_kind: Option<CommittedFramebufferKind>,
+    async_flip_rejections: u64,
 }
 
 /// Properties that still have to be applied on the next composited commit.
@@ -680,6 +689,187 @@ fn render_buffer_commit_flags(pending_modeset: bool) -> control::AtomicCommitFla
     flags
 }
 
+/// `PAGE_FLIP_EVENT | NONBLOCK | PAGE_FLIP_ASYNC`. The sync retry uses
+/// [`render_buffer_commit_flags`] and never sets `PAGE_FLIP_ASYNC`.
+fn async_page_flip_flags() -> control::AtomicCommitFlags {
+    control::AtomicCommitFlags::PAGE_FLIP_EVENT
+        | control::AtomicCommitFlags::NONBLOCK
+        | control::AtomicCommitFlags::PAGE_FLIP_ASYNC
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CommittedCursor {
+    slot: usize,
+    x: i32,
+    y: i32,
+}
+
+/// Cursor plane recorded after a successful commit. `None` on the output means
+/// no commit has recorded it yet, which is different from a hidden cursor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecordedCursor {
+    Hidden,
+    Shown(CommittedCursor),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommittedFramebufferKind {
+    RenderBuffer,
+    DirectScanout,
+}
+
+impl CommittedFramebufferKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RenderBuffer => "a composited buffer",
+            Self::DirectScanout => "a client buffer",
+        }
+    }
+}
+
+/// Inputs for [`async_flip_is_allowed`]. Comparisons live here so tests can
+/// flip one condition without a DRM device.
+struct AsyncFlipGate {
+    supports_async_flip: bool,
+    pending_modeset: bool,
+    committed_geometry: Option<PrimaryPlaneGeometry>,
+    geometry: PrimaryPlaneGeometry,
+    committed_cursor: Option<RecordedCursor>,
+    cursor: RecordedCursor,
+    cursor_newly_uploaded: bool,
+    gamma_dirty: bool,
+    ctm_dirty: bool,
+    committed_vrr_enabled: Option<bool>,
+    vrr_enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AsyncFlipBlock {
+    Capability,
+    Modeset,
+    Geometry,
+    Cursor,
+    Color,
+    VariableRefresh,
+}
+
+fn async_flip_block_reason(gate: &AsyncFlipGate) -> Option<AsyncFlipBlock> {
+    if !gate.supports_async_flip {
+        return Some(AsyncFlipBlock::Capability);
+    }
+    if gate.pending_modeset {
+        return Some(AsyncFlipBlock::Modeset);
+    }
+    if gate.committed_geometry != Some(gate.geometry) {
+        return Some(AsyncFlipBlock::Geometry);
+    }
+    if gate.cursor_newly_uploaded || gate.committed_cursor != Some(gate.cursor) {
+        return Some(AsyncFlipBlock::Cursor);
+    }
+    if gate.gamma_dirty || gate.ctm_dirty {
+        return Some(AsyncFlipBlock::Color);
+    }
+    if gate.committed_vrr_enabled != Some(gate.vrr_enabled) {
+        return Some(AsyncFlipBlock::VariableRefresh);
+    }
+    None
+}
+
+fn async_flip_is_allowed(gate: &AsyncFlipGate) -> bool {
+    async_flip_block_reason(gate).is_none()
+}
+
+fn recorded_cursor(cursor: Option<&CursorPlaneCandidate>) -> RecordedCursor {
+    match cursor {
+        Some(cursor) => {
+            RecordedCursor::Shown(CommittedCursor { slot: cursor.slot, x: cursor.x, y: cursor.y })
+        }
+        None => RecordedCursor::Hidden,
+    }
+}
+
+/// Primary-plane properties an async commit is allowed to program. The request
+/// builder applies this list and nothing else.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AsyncFlipStep {
+    Framebuffer,
+    InFence,
+    DamageClips,
+}
+
+fn async_flip_steps(include_in_fence: bool, include_damage: bool) -> Vec<AsyncFlipStep> {
+    let mut steps = vec![AsyncFlipStep::Framebuffer];
+    if include_in_fence {
+        steps.push(AsyncFlipStep::InFence);
+    }
+    if include_damage {
+        steps.push(AsyncFlipStep::DamageClips);
+    }
+    steps
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AsyncFencePlan {
+    None,
+    Program,
+    CpuWait,
+}
+
+fn async_fence_plan(fence_present: bool, can_program: bool) -> AsyncFencePlan {
+    match (fence_present, can_program) {
+        (false, _) => AsyncFencePlan::None,
+        (true, true) => AsyncFencePlan::Program,
+        (true, false) => AsyncFencePlan::CpuWait,
+    }
+}
+
+fn log_async_flip_rejection(count: u64) -> bool {
+    count == 1 || count % 32 == 0
+}
+
+fn build_async_flip_request(
+    plane: &Plane,
+    fb: control::framebuffer::Handle,
+    in_fence: Option<RawFd>,
+    damage: Option<control::property::Value<'_>>,
+) -> control::atomic::AtomicModeReq {
+    let mut changes = control::atomic::AtomicModeReq::new();
+    let include_fence = in_fence.is_some() && plane.in_fence_fd.is_some();
+    let include_damage = damage.is_some() && plane.fb_damage_clips.is_some();
+    for step in async_flip_steps(include_fence, include_damage) {
+        match step {
+            AsyncFlipStep::Framebuffer => {
+                changes.add_property(
+                    plane.handle,
+                    plane.fb_id,
+                    control::property::Value::Object(Some(fb.into())),
+                );
+            }
+            AsyncFlipStep::InFence => {
+                changes.add_property(
+                    plane.handle,
+                    plane
+                        .in_fence_fd
+                        .expect("IN_FENCE_FD step requires the property"),
+                    control::property::Value::SignedRange(
+                        in_fence.expect("in-fence step requires a fence") as i64,
+                    ),
+                );
+            }
+            AsyncFlipStep::DamageClips => {
+                changes.add_property(
+                    plane.handle,
+                    plane
+                        .fb_damage_clips
+                        .expect("FB_DAMAGE_CLIPS step requires the property"),
+                    damage.expect("damage step requires a value"),
+                );
+            }
+        }
+    }
+    changes
+}
+
 fn direct_scanout_blocked(pending_modeset: bool, protected: bool) -> bool {
     pending_modeset || protected
 }
@@ -851,6 +1041,130 @@ struct FramePlan {
     protected: bool,
 }
 
+/// Why the last successful submission was a vsync flip after tearing had been on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TearingStopReason {
+    Config,
+    SessionLock,
+    WorkspaceTransition,
+    Hint,
+    CompositedContent,
+    Cursor,
+    Geometry,
+    VariableRefresh,
+    Color,
+    Modeset,
+    Capability,
+    KernelRejection,
+}
+
+impl TearingStopReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::SessionLock => "session lock",
+            Self::WorkspaceTransition => "workspace transition",
+            Self::Hint => "hint",
+            Self::CompositedContent => "composited content",
+            Self::Cursor => "cursor",
+            Self::Geometry => "geometry",
+            Self::VariableRefresh => "variable refresh",
+            Self::Color => "color",
+            Self::Modeset => "modeset",
+            Self::Capability => "capability",
+            Self::KernelRejection => "kernel rejection",
+        }
+    }
+}
+
+impl From<crate::state::TearingCandidateDenial> for TearingStopReason {
+    fn from(denial: crate::state::TearingCandidateDenial) -> Self {
+        match denial {
+            crate::state::TearingCandidateDenial::Config => Self::Config,
+            crate::state::TearingCandidateDenial::SessionLock => Self::SessionLock,
+            crate::state::TearingCandidateDenial::WorkspaceTransition => Self::WorkspaceTransition,
+            crate::state::TearingCandidateDenial::Hint => Self::Hint,
+        }
+    }
+}
+
+fn scene_blocks_tearing(
+    state: &crate::state::State,
+    candidate: SurfaceKey,
+    scene: &[SceneItemState],
+) -> bool {
+    scene.iter().any(|item| match item.key {
+        SceneItemKey::Cursor => false,
+        SceneItemKey::ClosingSnapshot(_) | SceneItemKey::LockBlank => true,
+        SceneItemKey::Surface(_) => {
+            item.surface_key
+                .and_then(|surface| state.root_surface_for_surface(surface))
+                != Some(candidate)
+        }
+    })
+}
+
+fn elements_block_tearing(elements: &[RecordedFrameElement]) -> bool {
+    elements
+        .iter()
+        .any(|element| matches!(element, RecordedFrameElement::Effect { .. }))
+}
+
+fn frame_tearing_decision(
+    state: &crate::state::State,
+    output_id: crate::state::OutputId,
+    scene: &[SceneItemState],
+    elements: &[RecordedFrameElement],
+    protected: bool,
+    capture_pending: bool,
+) -> Result<SurfaceKey, TearingStopReason> {
+    let candidate = state
+        .classify_tearing_candidate(output_id)
+        .map_err(TearingStopReason::from)?;
+    if protected
+        || capture_pending
+        || elements_block_tearing(elements)
+        || scene_blocks_tearing(state, candidate, scene)
+    {
+        return Err(TearingStopReason::CompositedContent);
+    }
+    Ok(candidate)
+}
+
+fn sync_stop_reason(
+    policy: Result<SurfaceKey, TearingStopReason>,
+    block: Option<AsyncFlipBlock>,
+) -> TearingStopReason {
+    if let Err(reason) = policy {
+        return reason;
+    }
+    match block {
+        Some(AsyncFlipBlock::Cursor) => TearingStopReason::Cursor,
+        Some(AsyncFlipBlock::Geometry) => TearingStopReason::Geometry,
+        Some(AsyncFlipBlock::VariableRefresh) => TearingStopReason::VariableRefresh,
+        Some(AsyncFlipBlock::Color) => TearingStopReason::Color,
+        Some(AsyncFlipBlock::Modeset) => TearingStopReason::Modeset,
+        Some(AsyncFlipBlock::Capability) => TearingStopReason::Capability,
+        None => TearingStopReason::KernelRejection,
+    }
+}
+
+fn note_tearing_submission(
+    output: &mut crate::state::Output,
+    submitted_async: bool,
+    reason: TearingStopReason,
+) {
+    if output.tearing_active == submitted_async {
+        return;
+    }
+    output.tearing_active = submitted_async;
+    if submitted_async {
+        log::info!("output {}: tearing on", output.name);
+    } else {
+        log::info!("output {}: tearing off ({})", output.name, reason.label());
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecordedFrameElement {
     Texture { phase: FramePhase, item_index: usize },
@@ -881,6 +1195,8 @@ pub(crate) struct OutputSubmission {
     submitted_at: Instant,
     /// Queuing this frame is not presentation. The flip completion is.
     protected: bool,
+    /// This commit used `DRM_MODE_PAGE_FLIP_ASYNC`. A rejected attempt stays false.
+    async_flip: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -919,6 +1235,7 @@ struct SubmittedFrameRegistration {
     output_id: Option<OutputId>,
     zero_copy: bool,
     presentation_feedbacks: Vec<SubmissionPresentationFeedback>,
+    async_flip: bool,
 }
 
 impl DrmOutput {
@@ -956,6 +1273,7 @@ impl DrmOutput {
         render_submit_duration: Duration,
         submitted_at: Instant,
         protected: bool,
+        async_flip: bool,
     ) -> OutputSubmission {
         self.pipeline.allocate_submission(
             output_id,
@@ -968,6 +1286,7 @@ impl DrmOutput {
             render_submit_duration,
             submitted_at,
             protected,
+            async_flip,
         )
     }
 
@@ -1723,6 +2042,11 @@ impl Drm {
         drm.set_client_capability(drm::ClientCapability::Atomic, true)
             .map(|()| log::info!("Enabled DRM client capability: Atomic"))
             .map_err(|error| format!("atomic capability: {error}"))?;
+        let supports_async_flip = drm
+            .get_driver_capability(drm::DriverCapability::AtomicASyncPageFlip)
+            .unwrap_or(0)
+            == 1;
+        log::info!("DRM atomic async page flip capability: {supports_async_flip}");
         match drm.set_client_capability(drm::ClientCapability::CursorPlaneHotspot, true) {
             Ok(()) => log::info!("Enabled DRM client capability: CursorPlaneHotspot"),
             Err(error) => {
@@ -1777,6 +2101,7 @@ impl Drm {
             driver,
             supports_syncobj_timeline,
             supports_syncobj_eventfd,
+            supports_async_flip,
             event_generation: 0,
         };
         let drm_output_ids = drm_backend.outputs.keys().copied().collect::<Vec<_>>();
@@ -2372,6 +2697,144 @@ impl Drm {
         cursor_render_sync_mode(self.renderer.capabilities().explicit_sync, plane_accepts_in_fence)
     }
 
+    fn async_flip_gate(
+        &self,
+        drm_crtc_id: u32,
+        geometry: PrimaryPlaneGeometry,
+        cursor: Option<&CursorPlaneCandidate>,
+    ) -> Option<AsyncFlipGate> {
+        let output = self.output(drm_crtc_id)?;
+        Some(AsyncFlipGate {
+            supports_async_flip: self.supports_async_flip,
+            pending_modeset: output.pending_modeset.is_some(),
+            committed_geometry: output.committed_primary_geometry,
+            geometry,
+            committed_cursor: output.committed_cursor,
+            cursor: recorded_cursor(cursor),
+            cursor_newly_uploaded: cursor
+                .is_some_and(|cursor| !cursor.completion.used_blocking_fallback),
+            gamma_dirty: output.color_state.gamma_dirty,
+            ctm_dirty: output.color_state.ctm_dirty,
+            committed_vrr_enabled: output.committed_vrr_enabled,
+            vrr_enabled: output.in_use.crtc.vrr_enabled,
+        })
+    }
+
+    fn async_flip_block(
+        &self,
+        drm_crtc_id: u32,
+        geometry: PrimaryPlaneGeometry,
+        cursor: Option<&CursorPlaneCandidate>,
+    ) -> Option<AsyncFlipBlock> {
+        let Some(gate) = self.async_flip_gate(drm_crtc_id, geometry, cursor) else {
+            return Some(AsyncFlipBlock::Capability);
+        };
+        async_flip_block_reason(&gate)
+    }
+
+    fn async_flip_allowed(
+        &self,
+        drm_crtc_id: u32,
+        geometry: PrimaryPlaneGeometry,
+        cursor: Option<&CursorPlaneCandidate>,
+    ) -> bool {
+        self.async_flip_block(drm_crtc_id, geometry, cursor)
+            .is_none()
+    }
+
+    fn requested_render_geometry(&self, drm_crtc_id: u32) -> PrimaryPlaneGeometry {
+        let output = self
+            .output(drm_crtc_id)
+            .expect("missing DRM output pipeline for submit");
+        if let Some(pending) = output.pending_modeset {
+            return pending.geometry;
+        }
+        if let Some(geometry) = output.committed_primary_geometry {
+            return geometry;
+        }
+        let buffer = output.render_buffer();
+        primary_plane_geometry(buffer.width as u64, buffer.height as u64)
+    }
+
+    fn commit_async_primary_plane(
+        &mut self,
+        drm_crtc_id: u32,
+        plane: &Plane,
+        fb: control::framebuffer::Handle,
+        fence: Option<&OwnedFd>,
+        damage_rects: Option<&Vec<drm_ffi::drm_mode_rect>>,
+    ) -> std::io::Result<Option<u64>> {
+        let can_program_fence = plane.in_fence_fd.is_some()
+            && self
+                .output(drm_crtc_id)
+                .is_some_and(|output| output.allow_in_fence_fd);
+        if async_fence_plan(fence.is_some(), can_program_fence) == AsyncFencePlan::CpuWait {
+            if let Some(fence) = fence {
+                self.wait_fence_dup(fence, "fence before an async page flip without IN_FENCE_FD");
+            }
+        }
+        let programmed_fence = match async_fence_plan(fence.is_some(), can_program_fence) {
+            AsyncFencePlan::Program => fence.map(|fence| fence.as_raw_fd()),
+            AsyncFencePlan::None | AsyncFencePlan::CpuWait => None,
+        };
+        let (damage, damage_blob) = match damage_rects {
+            None => (None, None),
+            Some(rects) if rects.is_empty() || plane.fb_damage_clips.is_none() => {
+                (Some(control::property::Value::Blob(0)), None)
+            }
+            Some(rects) => match self.fd.create_property_blob(rects) {
+                Ok(blob) => (Some(blob), blob.as_blob()),
+                Err(error) => {
+                    log::debug!("async page flip omitted FB_DAMAGE_CLIPS: {error}");
+                    (None, None)
+                }
+            },
+        };
+        let changes = build_async_flip_request(plane, fb, programmed_fence, damage);
+        if let Err(error) = self.fd.atomic_commit(async_page_flip_flags(), changes) {
+            if let Some(blob) = damage_blob {
+                let _ = self.fd.destroy_property_blob(blob);
+            }
+            return Err(error);
+        }
+        Ok(damage_blob)
+    }
+
+    fn note_async_flip_rejected(&mut self, drm_crtc_id: u32, error: &std::io::Error) {
+        let Some(output) = self.output_mut(drm_crtc_id) else {
+            return;
+        };
+        output.async_flip_rejections = output.async_flip_rejections.saturating_add(1);
+        let count = output.async_flip_rejections;
+        if log_async_flip_rejection(count) {
+            log::debug!(
+                "async page flip rejected on {} (attempt {count}): {error}",
+                output.output_name()
+            );
+        }
+    }
+
+    fn note_successful_commit(
+        &mut self,
+        drm_crtc_id: u32,
+        geometry: Option<PrimaryPlaneGeometry>,
+        cursor: Option<&CursorPlaneCandidate>,
+        kind: CommittedFramebufferKind,
+    ) {
+        let Some(output) = self.output_mut(drm_crtc_id) else {
+            return;
+        };
+        if geometry.is_some() {
+            output.committed_primary_geometry = geometry;
+        }
+        output.committed_cursor = Some(recorded_cursor(cursor));
+        output.committed_vrr_enabled = Some(output.in_use.crtc.vrr_enabled);
+        if output.committed_fb_kind != Some(kind) {
+            log::debug!("{}: primary plane now shows {}", output.output_name(), kind.label());
+            output.committed_fb_kind = Some(kind);
+        }
+    }
+
     fn submit_render_buffer(
         &mut self,
         drm_crtc_id: u32,
@@ -2386,6 +2849,7 @@ impl Drm {
         scene_build_duration: Duration,
         render_started_at: Instant,
         protected: bool,
+        async_flip: bool,
     ) -> std::io::Result<SubmittedFrameRegistration> {
         let (primary_plane, fb, crtc) = {
             let output = self
@@ -2442,6 +2906,74 @@ impl Drm {
                 detached_planes,
             )
         };
+        if async_flip {
+            let geometry = self.requested_render_geometry(drm_crtc_id);
+            if self.async_flip_allowed(drm_crtc_id, geometry, cursor_plane.as_ref()) {
+                let use_damage_rects = ENABLE_DAMAGE
+                    && self
+                        .output(drm_crtc_id)
+                        .is_some_and(|output| output.allow_fb_damage_clips)
+                    && !rects.is_empty();
+                let empty_damage = Vec::new();
+                let damage_rects = primary_plane
+                    .fb_damage_clips
+                    .is_some()
+                    .then_some(if use_damage_rects { &rects } else { &empty_damage });
+                match self.commit_async_primary_plane(
+                    drm_crtc_id,
+                    &primary_plane,
+                    fb,
+                    render_completion.in_fence_fd.as_ref(),
+                    damage_rects,
+                ) {
+                    Ok(damage_blob) => {
+                        self.note_successful_commit(
+                            drm_crtc_id,
+                            Some(geometry),
+                            cursor_plane.as_ref(),
+                            CommittedFramebufferKind::RenderBuffer,
+                        );
+                        let submitted_at = Instant::now();
+                        let render_submit_duration =
+                            submitted_at.saturating_duration_since(render_started_at);
+                        let buffer_index = self.output(drm_crtc_id).unwrap().render_buffer_index();
+                        let submission = self.output_mut(drm_crtc_id).unwrap().allocate_submission(
+                            output_id,
+                            scene,
+                            frame_callback_surfaces,
+                            presentation_feedbacks.clone(),
+                            false,
+                            had_effects,
+                            scene_build_duration,
+                            render_submit_duration,
+                            submitted_at,
+                            protected,
+                            true,
+                        );
+                        let callback_surfaces = submission.frame_callback_surfaces.clone();
+                        let submission_id = submission.id;
+                        self.output_mut(drm_crtc_id).unwrap().mark_frame_submitted(
+                            SubmittedFrame::Composited {
+                                buffer_index,
+                                damage: damage.clone(),
+                                submission,
+                                damage_blob,
+                                cursor_slot: cursor_plane.map(|cursor| cursor.slot),
+                            },
+                        );
+                        return Ok(SubmittedFrameRegistration {
+                            callback_surfaces,
+                            submission_id,
+                            output_id,
+                            zero_copy: false,
+                            presentation_feedbacks,
+                            async_flip: true,
+                        });
+                    }
+                    Err(error) => self.note_async_flip_rejected(drm_crtc_id, &error),
+                }
+            }
+        }
         let mut last_error = None;
 
         let render_fence_present = render_completion.in_fence_fd.is_some();
@@ -2594,6 +3126,12 @@ impl Drm {
                             let _ = self.fd.destroy_property_blob(blob);
                         }
                     }
+                    self.note_successful_commit(
+                        drm_crtc_id,
+                        pending_modeset.map(|pending| pending.geometry),
+                        cursor_plane.as_ref(),
+                        CommittedFramebufferKind::RenderBuffer,
+                    );
                     let buffer_index = self.output(drm_crtc_id).unwrap().render_buffer_index();
                     let submission = self.output_mut(drm_crtc_id).unwrap().allocate_submission(
                         output_id,
@@ -2606,6 +3144,7 @@ impl Drm {
                         render_submit_duration,
                         submitted_at,
                         protected,
+                        false,
                     );
                     let callback_surfaces = submission.frame_callback_surfaces.clone();
                     let submission_id = submission.id;
@@ -2624,6 +3163,7 @@ impl Drm {
                         output_id,
                         zero_copy: false,
                         presentation_feedbacks,
+                        async_flip: false,
                     });
                 }
                 Err(error) => {
@@ -2670,6 +3210,7 @@ impl Drm {
         mut cursor_plane: Option<CursorPlaneCandidate>,
         scene_build_duration: Duration,
         render_started_at: Instant,
+        async_flip: bool,
     ) -> std::io::Result<SubmittedFrameRegistration> {
         let (primary_plane, crtc) = {
             let output = self
@@ -2678,6 +3219,78 @@ impl Drm {
             let (primary_plane, _) = output.in_use.primary_plane();
             (primary_plane.clone(), output.in_use.crtc.handle)
         };
+        let scanout_geometry =
+            primary_plane_geometry(candidate.bounds.width as u64, candidate.bounds.height as u64);
+        let acquire_fence = match &candidate.sync.acquire {
+            crate::sync::AcquireSync::SyncFile(sync_file) => Some(sync_file.as_ref()),
+            acquire if acquire.is_none() => None,
+            _ => {
+                self.wait_cursor_render_from(cursor_plane.take());
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "scanout currently only supports empty or sync-file acquire fences",
+                ));
+            }
+        };
+        if async_flip
+            && self.async_flip_allowed(drm_crtc_id, scanout_geometry, cursor_plane.as_ref())
+        {
+            let empty_damage = Vec::new();
+            let damage_rects = primary_plane
+                .fb_damage_clips
+                .is_some()
+                .then_some(&empty_damage);
+            match self.commit_async_primary_plane(
+                drm_crtc_id,
+                &primary_plane,
+                candidate.framebuffer.id(),
+                acquire_fence,
+                damage_rects,
+            ) {
+                Ok(_) => {
+                    self.note_successful_commit(
+                        drm_crtc_id,
+                        Some(scanout_geometry),
+                        cursor_plane.as_ref(),
+                        CommittedFramebufferKind::DirectScanout,
+                    );
+                    let submitted_at = Instant::now();
+                    let render_submit_duration =
+                        submitted_at.saturating_duration_since(render_started_at);
+                    let submission = self.output_mut(drm_crtc_id).unwrap().allocate_submission(
+                        output_id,
+                        scene,
+                        frame_callback_surfaces,
+                        presentation_feedbacks.clone(),
+                        true,
+                        false,
+                        scene_build_duration,
+                        render_submit_duration,
+                        submitted_at,
+                        false,
+                        true,
+                    );
+                    let callback_surfaces = submission.frame_callback_surfaces.clone();
+                    let submission_id = submission.id;
+                    self.output_mut(drm_crtc_id).unwrap().mark_frame_submitted(
+                        SubmittedFrame::DirectScanout {
+                            submission,
+                            framebuffer: candidate.framebuffer,
+                            cursor_slot: cursor_plane.map(|cursor| cursor.slot),
+                        },
+                    );
+                    return Ok(SubmittedFrameRegistration {
+                        callback_surfaces,
+                        submission_id,
+                        output_id,
+                        zero_copy: true,
+                        presentation_feedbacks,
+                        async_flip: true,
+                    });
+                }
+                Err(error) => self.note_async_flip_rejected(drm_crtc_id, &error),
+            }
+        }
 
         let mut changes = control::atomic::AtomicModeReq::new();
         changes.add_property(
@@ -2691,11 +3304,7 @@ impl Drm {
             control::property::Value::CRTC(Some(crtc)),
         );
         self.append_cursor_plane_changes(drm_crtc_id, &mut changes, cursor_plane.as_ref());
-        append_primary_plane_geometry(
-            &mut changes,
-            &primary_plane,
-            primary_plane_geometry(candidate.bounds.width as u64, candidate.bounds.height as u64),
-        );
+        append_primary_plane_geometry(&mut changes, &primary_plane, scanout_geometry);
         if let Some(property) = primary_plane.fb_damage_clips {
             changes.add_property(primary_plane.handle, property, control::property::Value::Blob(0));
         }
@@ -2752,6 +3361,12 @@ impl Drm {
             return Err(error);
         }
         self.finish_output_color_commit(drm_crtc_id, color_blobs);
+        self.note_successful_commit(
+            drm_crtc_id,
+            Some(scanout_geometry),
+            cursor_plane.as_ref(),
+            CommittedFramebufferKind::DirectScanout,
+        );
         let submitted_at = Instant::now();
         let render_submit_duration = submitted_at.saturating_duration_since(render_started_at);
         let submission = self.output_mut(drm_crtc_id).unwrap().allocate_submission(
@@ -2764,6 +3379,7 @@ impl Drm {
             scene_build_duration,
             render_submit_duration,
             submitted_at,
+            false,
             false,
         );
         let callback_surfaces = submission.frame_callback_surfaces.clone();
@@ -2781,6 +3397,7 @@ impl Drm {
             output_id,
             zero_copy: true,
             presentation_feedbacks,
+            async_flip: false,
         })
     }
 
@@ -3284,6 +3901,11 @@ impl Drm {
             allow_in_fence_fd: true,
             allow_fb_damage_clips: true,
             pending_modeset: Some(PendingModeset { geometry, crtc: None }),
+            committed_primary_geometry: None,
+            committed_cursor: None,
+            committed_vrr_enabled: None,
+            committed_fb_kind: None,
+            async_flip_rejections: 0,
         })
     }
 
@@ -5006,6 +5628,15 @@ impl DrmOutputModel {
             } else {
                 None
             };
+            let tearing_decision = frame_tearing_decision(
+                state,
+                self.output_id,
+                &scene,
+                &frame_elements,
+                protected,
+                crate::capture::output_capture_pending(state, self.output_id),
+            );
+            let tearing_eligible = tearing_decision.is_ok();
             let drm = state.drm.get_mut(self.drm_id);
             let target_vrr_enabled =
                 matches!(decision.mode, crate::scheduler::frame_clock::FrameClockMode::Variable)
@@ -5030,6 +5661,12 @@ impl DrmOutputModel {
 
             if let Some(candidate) = direct_scanout {
                 let submitted_cursor = cursor_plane.is_some();
+                let scanout_geometry = primary_plane_geometry(
+                    candidate.bounds.width as u64,
+                    candidate.bounds.height as u64,
+                );
+                let scanout_block =
+                    drm.async_flip_block(drm_crtc_id, scanout_geometry, cursor_plane.as_ref());
                 match kms_submit::submit_direct_scanout(
                     drm,
                     drm_crtc_id,
@@ -5041,8 +5678,16 @@ impl DrmOutputModel {
                     cursor_plane.take(),
                     scene_build_duration,
                     Instant::now(),
+                    tearing_eligible,
                 ) {
                     Ok(registration) => {
+                        if let Some(output) = state.outputs.try_get_mut(self.output_id) {
+                            note_tearing_submission(
+                                output,
+                                registration.async_flip,
+                                sync_stop_reason(tearing_decision, scanout_block),
+                            );
+                        }
                         state.presentation.register_submission(
                             self.output_id,
                             crate::scheduler::presentation::SubmissionRecord {
@@ -5050,6 +5695,7 @@ impl DrmOutputModel {
                                 output_id: registration.output_id,
                                 feedbacks: registration.presentation_feedbacks,
                                 zero_copy: registration.zero_copy,
+                                async_flip: registration.async_flip,
                             },
                         );
                         drm.output_mut(drm_crtc_id)
@@ -5187,6 +5833,9 @@ impl DrmOutputModel {
                 if submit_had_cursor_plane && crate::logger::ENABLE_NOISY_LOG {
                     log::debug!("Submitting DRM frame with cursor plane enabled");
                 }
+                let render_geometry = drm.requested_render_geometry(drm_crtc_id);
+                let render_block =
+                    drm.async_flip_block(drm_crtc_id, render_geometry, cursor_plane.as_ref());
                 let submit_result = kms_submit::submit_render_buffer(
                     drm,
                     drm_crtc_id,
@@ -5201,6 +5850,7 @@ impl DrmOutputModel {
                     scene_build_duration,
                     render_started_at,
                     protected,
+                    tearing_eligible,
                 );
                 if let Err(error) = submit_result {
                     if submit_had_cursor_plane {
@@ -5227,6 +5877,9 @@ impl DrmOutputModel {
                                 &fallback_plan.damage,
                                 fallback_plan.preserve_contents,
                             );
+                            let fallback_geometry = drm.requested_render_geometry(drm_crtc_id);
+                            let fallback_block =
+                                drm.async_flip_block(drm_crtc_id, fallback_geometry, None);
                             match kms_submit::submit_render_buffer(
                                 drm,
                                 drm_crtc_id,
@@ -5241,8 +5894,17 @@ impl DrmOutputModel {
                                 scene_build_duration,
                                 render_started_at,
                                 protected,
+                                tearing_eligible,
                             ) {
                                 Ok(registration) => {
+                                    if let Some(output) = state.outputs.try_get_mut(self.output_id)
+                                    {
+                                        note_tearing_submission(
+                                            output,
+                                            registration.async_flip,
+                                            sync_stop_reason(tearing_decision, fallback_block),
+                                        );
+                                    }
                                     state.presentation.register_submission(
                                         self.output_id,
                                         crate::scheduler::presentation::SubmissionRecord {
@@ -5250,6 +5912,7 @@ impl DrmOutputModel {
                                             output_id: registration.output_id,
                                             feedbacks: registration.presentation_feedbacks,
                                             zero_copy: registration.zero_copy,
+                                            async_flip: registration.async_flip,
                                         },
                                     );
                                     drm.clear_cursor_plane_slots(drm_crtc_id);
@@ -5407,6 +6070,13 @@ impl DrmOutputModel {
                     }
                 } else {
                     let registration = submit_result.expect("submit result already checked");
+                    if let Some(output) = state.outputs.try_get_mut(self.output_id) {
+                        note_tearing_submission(
+                            output,
+                            registration.async_flip,
+                            sync_stop_reason(tearing_decision, render_block),
+                        );
+                    }
                     state.presentation.register_submission(
                         self.output_id,
                         crate::scheduler::presentation::SubmissionRecord {
@@ -5414,6 +6084,7 @@ impl DrmOutputModel {
                             output_id: registration.output_id,
                             feedbacks: registration.presentation_feedbacks,
                             zero_copy: registration.zero_copy,
+                            async_flip: registration.async_flip,
                         },
                     );
                     if submit_had_cursor_plane {
@@ -6001,16 +6672,6 @@ fn dispatch_submission_frame_callbacks(
             ClientAction::CompleteSurfaceFrameCallbacks { surfaces, time_msec: frame_time_msec },
         );
     }
-}
-
-fn presentation_feedback_flags(zero_copy: bool) -> u32 {
-    use crate::protocol_generated::wp_presentation_feedback::Kind;
-
-    let mut flags = Kind::Vsync as u32 | Kind::HwCompletion as u32;
-    if zero_copy {
-        flags |= Kind::ZeroCopy as u32;
-    }
-    flags
 }
 
 fn scene_item_requires_compositor_compositing(item: &SceneItem) -> bool {
@@ -9789,7 +10450,8 @@ mod render_recipe_tests {
 mod presentation_timing_tests {
     use {
         super::{
-            build_surface_cursor_plane_request, collect_submission_metadata,
+            async_fence_plan, async_flip_block_reason, async_flip_is_allowed, async_flip_steps,
+            async_page_flip_flags, build_surface_cursor_plane_request, collect_submission_metadata,
             commit_cursor_slot_results, cursor_allocation_result_accepted,
             cursor_buffer_allocations, cursor_buffer_modifier_accepted, cursor_buffer_row,
             cursor_dmabuf_retained, cursor_fences_for_attempts, cursor_in_fence_value,
@@ -9797,15 +10459,16 @@ mod presentation_timing_tests {
             cursor_plane_supports_requested_cursor, cursor_render_sync_mode, cursor_target_damage,
             cursor_target_size_retained, cursor_upload_reuses_cached, direct_scanout_blocked,
             dropped_in_fence_wait, effect_transition_requires_full_redraw,
-            find_cursor_slot_index_for_key, import_cursor_render_target, mode_blob_replaced,
-            optional_plane_attempts, pending_modeset_scope, presentation_feedback_flags,
+            find_cursor_slot_index_for_key, import_cursor_render_target, log_async_flip_rejection,
+            mode_blob_replaced, optional_plane_attempts, pending_modeset_scope,
             primary_plane_geometry, rejected_explicit_kms_sync, render_buffer_commit_flags,
             render_planner::select_presentation_output_for_scene, request_output,
             request_outputs_for_rects, retired_mode_blob, rgba_to_drm_argb8888,
             scene_item_requires_compositor_compositing, select_cursor_upload_slot,
-            submitted_frame_feedbacks_for_discard, surface_allows_direct_scanout,
-            CursorBufferAllocation, CursorPlaneContentKey, CursorSurfaceContentKey, Modifier,
-            OutputSubmission, PendingModesetScope, RenderSyncMode, SceneItem, SceneItemContentKey,
+            submitted_frame_feedbacks_for_discard, surface_allows_direct_scanout, AsyncFencePlan,
+            AsyncFlipBlock, AsyncFlipGate, AsyncFlipStep, CommittedCursor, CursorBufferAllocation,
+            CursorPlaneContentKey, CursorSurfaceContentKey, Modifier, OutputSubmission,
+            PendingModesetScope, RecordedCursor, RenderSyncMode, SceneItem, SceneItemContentKey,
             SceneItemKey, SceneItemMask, SceneItemState, SubmissionPresentationFeedback,
             SubmittedFrame, ARGB8888, CURSOR_CLEAR,
         },
@@ -9895,15 +10558,16 @@ mod presentation_timing_tests {
 
     #[test]
     fn presentation_flags_do_not_claim_hw_clock() {
-        let flags = presentation_feedback_flags(false);
+        let flags = crate::scheduler::presentation::presentation_feedback_flags(false, true);
         let hw_clock = crate::protocol_generated::wp_presentation_feedback::Kind::HwClock as u32;
         assert_eq!(flags & hw_clock, 0);
     }
 
     #[test]
     fn presentation_flags_only_add_zero_copy_for_scanout() {
-        let base_flags = presentation_feedback_flags(false);
-        let zero_copy_flags = presentation_feedback_flags(true);
+        let base_flags = crate::scheduler::presentation::presentation_feedback_flags(false, true);
+        let zero_copy_flags =
+            crate::scheduler::presentation::presentation_feedback_flags(true, true);
         let zero_copy = crate::protocol_generated::wp_presentation_feedback::Kind::ZeroCopy as u32;
         assert_eq!(base_flags & zero_copy, 0);
         assert_ne!(zero_copy_flags & zero_copy, 0);
@@ -9926,6 +10590,7 @@ mod presentation_timing_tests {
                 render_submit_duration: std::time::Duration::ZERO,
                 submitted_at: std::time::Instant::now(),
                 protected: false,
+                async_flip: false,
             },
             damage_blob: None,
             cursor_slot: None,
@@ -10231,6 +10896,119 @@ mod presentation_timing_tests {
         assert!(rejected_explicit_kms_sync(true, false));
         assert!(!rejected_explicit_kms_sync(true, true));
         assert!(!rejected_explicit_kms_sync(false, false));
+    }
+
+    fn matching_async_gate() -> AsyncFlipGate {
+        let geometry = primary_plane_geometry(1920, 1080);
+        let cursor = RecordedCursor::Shown(CommittedCursor { slot: 0, x: 10, y: 20 });
+        AsyncFlipGate {
+            supports_async_flip: true,
+            pending_modeset: false,
+            committed_geometry: Some(geometry),
+            geometry,
+            committed_cursor: Some(cursor),
+            cursor,
+            cursor_newly_uploaded: false,
+            gamma_dirty: false,
+            ctm_dirty: false,
+            committed_vrr_enabled: Some(false),
+            vrr_enabled: false,
+        }
+    }
+
+    #[test]
+    fn async_flip_allowed_requires_every_gate() {
+        assert!(async_flip_is_allowed(&matching_async_gate()));
+
+        let mut hidden = matching_async_gate();
+        hidden.committed_cursor = Some(RecordedCursor::Hidden);
+        hidden.cursor = RecordedCursor::Hidden;
+        assert!(async_flip_is_allowed(&hidden));
+
+        let mut no_cap = matching_async_gate();
+        no_cap.supports_async_flip = false;
+        assert!(!async_flip_is_allowed(&no_cap));
+
+        let mut modeset = matching_async_gate();
+        modeset.pending_modeset = true;
+        assert!(!async_flip_is_allowed(&modeset));
+
+        let mut geometry = matching_async_gate();
+        geometry.geometry = primary_plane_geometry(1280, 720);
+        assert!(!async_flip_is_allowed(&geometry));
+
+        let mut uncommitted = matching_async_gate();
+        uncommitted.committed_geometry = None;
+        uncommitted.committed_cursor = None;
+        uncommitted.committed_vrr_enabled = None;
+        assert!(!async_flip_is_allowed(&uncommitted));
+
+        let mut moved = matching_async_gate();
+        moved.cursor = RecordedCursor::Shown(CommittedCursor { slot: 0, x: 11, y: 20 });
+        assert!(!async_flip_is_allowed(&moved));
+        assert_eq!(async_flip_block_reason(&moved), Some(AsyncFlipBlock::Cursor));
+        assert_eq!(async_flip_block_reason(&matching_async_gate()), None);
+
+        let mut uploaded = matching_async_gate();
+        uploaded.cursor_newly_uploaded = true;
+        assert!(!async_flip_is_allowed(&uploaded));
+
+        let mut shown = matching_async_gate();
+        shown.cursor = RecordedCursor::Hidden;
+        assert!(!async_flip_is_allowed(&shown));
+
+        let mut gamma = matching_async_gate();
+        gamma.gamma_dirty = true;
+        assert!(!async_flip_is_allowed(&gamma));
+
+        let mut ctm = matching_async_gate();
+        ctm.ctm_dirty = true;
+        assert!(!async_flip_is_allowed(&ctm));
+
+        let mut vrr = matching_async_gate();
+        vrr.vrr_enabled = true;
+        assert!(!async_flip_is_allowed(&vrr));
+    }
+
+    #[test]
+    fn async_flip_request_contains_only_primary_plane_properties() {
+        assert_eq!(async_flip_steps(false, false), vec![AsyncFlipStep::Framebuffer]);
+        assert_eq!(
+            async_flip_steps(true, false),
+            vec![AsyncFlipStep::Framebuffer, AsyncFlipStep::InFence]
+        );
+        assert_eq!(
+            async_flip_steps(false, true),
+            vec![AsyncFlipStep::Framebuffer, AsyncFlipStep::DamageClips]
+        );
+        assert_eq!(
+            async_flip_steps(true, true),
+            vec![AsyncFlipStep::Framebuffer, AsyncFlipStep::InFence, AsyncFlipStep::DamageClips,]
+        );
+    }
+
+    #[test]
+    fn async_page_flip_flags_include_async_only_on_that_attempt() {
+        let async_flags = async_page_flip_flags();
+        assert!(async_flags.contains(drm::control::AtomicCommitFlags::PAGE_FLIP_ASYNC));
+        assert!(async_flags.contains(drm::control::AtomicCommitFlags::PAGE_FLIP_EVENT));
+        assert!(async_flags.contains(drm::control::AtomicCommitFlags::NONBLOCK));
+        assert!(!async_flags.contains(drm::control::AtomicCommitFlags::ALLOW_MODESET));
+        assert!(!render_buffer_commit_flags(false)
+            .contains(drm::control::AtomicCommitFlags::PAGE_FLIP_ASYNC));
+        assert!(!render_buffer_commit_flags(true)
+            .contains(drm::control::AtomicCommitFlags::PAGE_FLIP_ASYNC));
+    }
+
+    #[test]
+    fn async_fence_is_programmed_only_when_the_plane_accepts_it() {
+        assert_eq!(async_fence_plan(false, true), AsyncFencePlan::None);
+        assert_eq!(async_fence_plan(false, false), AsyncFencePlan::None);
+        assert_eq!(async_fence_plan(true, true), AsyncFencePlan::Program);
+        assert_eq!(async_fence_plan(true, false), AsyncFencePlan::CpuWait);
+        assert!(log_async_flip_rejection(1));
+        assert!(!log_async_flip_rejection(2));
+        assert!(log_async_flip_rejection(32));
     }
 
     #[test]
@@ -11131,5 +11909,267 @@ mod output_disable_tests {
             Err(format!("forced failure {crtc_id}"))
         });
         assert_eq!(attempted, [4, 9, 2]);
+    }
+}
+
+#[cfg(test)]
+mod tearing_policy_tests {
+    use crate::{
+        clients::{ClientId, Resolved},
+        config::RuntimeConfig,
+        protocol_generated::{
+            WlBufferId, WlSurfaceId, XdgPopupId, XdgSurfaceId, XdgWmBaseId, ZwlrLayerShellV1Id,
+            ZwlrLayerSurfaceV1Id,
+        },
+        region::RectI,
+        render::{EffectElement, FramePhase},
+        state::{BackendOutputRef, DrmId, ObjectId, OutputId, TearingCandidateDenial},
+        test_support::{state_for_tests, test_output},
+        wayland_objects::{
+            wl_surface::{PresentationHint, WlSurface},
+            xdg_popup::XdgPopup,
+            xdg_positioner::PositionerState,
+            xdg_surface::XdgSurface,
+            zwlr_layer_surface_v1::{LayerShellLayer, ZwlrLayerSurfaceV1},
+        },
+    };
+
+    use super::{
+        frame_tearing_decision, RecordedFrameElement, SceneItemContentKey, SceneItemKey,
+        SceneItemMask, SceneItemState, TearingStopReason,
+    };
+
+    fn surface_item(surface: Resolved<WlSurfaceId>) -> SceneItemState {
+        SceneItemState {
+            key: SceneItemKey::Surface(surface),
+            surface_key: Some(surface),
+            content_key: SceneItemContentKey::Buffer(Resolved::new(
+                ClientId::from_raw(1),
+                WlBufferId::from(1u32),
+                ObjectId::from(1usize),
+            )),
+            bounds: RectI::new(0, 0, 10, 10).unwrap(),
+            tex_transform: crate::transform::Mat3::identity(),
+            alpha: u8::MAX,
+            mask: SceneItemMask::None,
+        }
+    }
+
+    fn cursor_item() -> SceneItemState {
+        SceneItemState {
+            key: SceneItemKey::Cursor,
+            surface_key: None,
+            content_key: SceneItemContentKey::LockBlank { red: false },
+            bounds: RectI::new(0, 0, 8, 8).unwrap(),
+            tex_transform: crate::transform::Mat3::identity(),
+            alpha: u8::MAX,
+            mask: SceneItemMask::None,
+        }
+    }
+
+    fn set_async_hint(state: &mut crate::state::State, surface: Resolved<WlSurfaceId>) {
+        state
+            .objects
+            .get_mut(surface.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .test_set_committed_presentation_hint(PresentationHint::Async);
+    }
+
+    fn mapped_root(state: &mut crate::state::State, raw: u32) -> (OutputId, Resolved<WlSurfaceId>) {
+        let backend = BackendOutputRef::new(DrmId::from(0usize));
+        let output_id = state.insert_output(test_output(backend, 1, 0, 0, 100, 100, "DP-1"));
+        let (_, object_id) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(raw), ClientId::from_raw(1), 6));
+        let surface = Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(raw), object_id);
+        state.register_root_surface(surface);
+        state
+            .managed_root_surfaces
+            .get_mut(&surface)
+            .unwrap()
+            .mapped = true;
+        (output_id, surface)
+    }
+
+    fn async_fullscreen(state: &mut crate::state::State) -> (OutputId, Resolved<WlSurfaceId>) {
+        let (output_id, surface) = mapped_root(state, 41);
+        assert!(state.set_root_surface_fullscreen(surface, true));
+        let workspace_id = state.root_surface_workspace(surface).unwrap();
+        assert!(state
+            .workspaces
+            .try_get_mut(workspace_id)
+            .unwrap()
+            .layout
+            .set_fullscreen(Some(surface)));
+        assert!(state.root_surface_is_fullscreen(surface));
+        set_async_hint(state, surface);
+        (output_id, surface)
+    }
+
+    #[test]
+    fn fullscreen_async_hint_can_tear_with_its_cursor() {
+        let mut state = state_for_tests();
+        let (output_id, surface) = async_fullscreen(&mut state);
+        let scene = [surface_item(surface), cursor_item()];
+        assert_eq!(state.output_tearing_candidate(output_id), Some(surface));
+        assert!(frame_tearing_decision(&state, output_id, &scene, &[], false, false).is_ok());
+        assert_eq!(
+            frame_tearing_decision(&state, output_id, &scene, &[], true, false),
+            Err(TearingStopReason::CompositedContent)
+        );
+        assert_eq!(
+            frame_tearing_decision(&state, output_id, &scene, &[], false, true),
+            Err(TearingStopReason::CompositedContent)
+        );
+        let effect = RecordedFrameElement::Effect {
+            phase: FramePhase::OverWindow,
+            element: EffectElement::DimOverlay {
+                clip: crate::state::RootSurfaceClip::new(
+                    RectI::new(0, 0, 10, 10).unwrap(),
+                    0,
+                    crate::config::RoundingPower::DEFAULT,
+                ),
+                alpha: 1,
+            },
+        };
+        assert_eq!(
+            frame_tearing_decision(&state, output_id, &scene, &[effect], false, false),
+            Err(TearingStopReason::CompositedContent)
+        );
+    }
+
+    #[test]
+    fn an_async_hint_without_fullscreen_does_not_tear() {
+        let mut state = state_for_tests();
+        let (output_id, surface) = mapped_root(&mut state, 41);
+        set_async_hint(&mut state, surface);
+        assert_eq!(state.classify_tearing_candidate(output_id), Err(TearingCandidateDenial::Hint));
+        assert_eq!(
+            frame_tearing_decision(&state, output_id, &[surface_item(surface)], &[], false, false),
+            Err(TearingStopReason::Hint)
+        );
+    }
+
+    #[test]
+    fn a_layer_shell_surface_on_top_does_not_tear() {
+        let mut state = state_for_tests();
+        let (output_id, surface) = async_fullscreen(&mut state);
+        let (_, layer_wl_object) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(80), ClientId::from_raw(1), 6));
+        let layer_wl = Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(80), layer_wl_object);
+        let (_, layer_object) = state.insert_object(ZwlrLayerSurfaceV1::new(
+            ZwlrLayerSurfaceV1Id::from(81),
+            Resolved::new(
+                ClientId::from_raw(1),
+                ZwlrLayerShellV1Id::from(82),
+                ObjectId::from(82usize),
+            ),
+            5,
+            layer_wl,
+            Some(output_id),
+            LayerShellLayer::Overlay,
+            "notification".to_string(),
+        ));
+        let layer_surface =
+            Resolved::new(ClientId::from_raw(1), ZwlrLayerSurfaceV1Id::from(81), layer_object);
+        state
+            .objects
+            .get_mut(layer_wl_object)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_layer_surface_impl(layer_surface);
+        state.register_layer_surface_object(layer_surface);
+        assert_eq!(state.root_surface_for_surface(layer_wl), Some(layer_wl));
+        assert_eq!(
+            frame_tearing_decision(
+                &state,
+                output_id,
+                &[surface_item(surface), surface_item(layer_wl)],
+                &[],
+                false,
+                false,
+            ),
+            Err(TearingStopReason::CompositedContent)
+        );
+    }
+
+    #[test]
+    fn a_per_output_override_of_false_does_not_tear() {
+        let mut state = state_for_tests();
+        let (output_id, surface) = async_fullscreen(&mut state);
+        state.config =
+            RuntimeConfig::parse_for_test("[output.tearing]\n\"DP-1\" = false\n", &state.xkb)
+                .unwrap();
+        assert_eq!(
+            state.classify_tearing_candidate(output_id),
+            Err(TearingCandidateDenial::Config)
+        );
+        assert_eq!(
+            frame_tearing_decision(&state, output_id, &[surface_item(surface)], &[], false, false),
+            Err(TearingStopReason::Config)
+        );
+    }
+
+    #[test]
+    fn a_popup_of_the_fullscreen_root_can_tear() {
+        let mut state = state_for_tests();
+        let (output_id, surface) = async_fullscreen(&mut state);
+        let (_, parent_xdg_object) = state.insert_object(XdgSurface::new(
+            XdgSurfaceId::from(50),
+            Resolved::new(ClientId::from_raw(1), XdgWmBaseId::from(1u32), ObjectId::from(1usize)),
+            surface,
+            7,
+        ));
+        let parent_xdg =
+            Resolved::new(ClientId::from_raw(1), XdgSurfaceId::from(50), parent_xdg_object);
+        state
+            .objects
+            .get_mut(surface.object_id())
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_xdg_surface_impl(parent_xdg);
+
+        let (_, popup_wl_object) =
+            state.insert_object(WlSurface::new(WlSurfaceId::from(60), ClientId::from_raw(1), 6));
+        let popup_wl = Resolved::new(ClientId::from_raw(1), WlSurfaceId::from(60), popup_wl_object);
+        let (_, popup_xdg_object) = state.insert_object(XdgSurface::new(
+            XdgSurfaceId::from(61),
+            Resolved::new(ClientId::from_raw(1), XdgWmBaseId::from(1u32), ObjectId::from(1usize)),
+            popup_wl,
+            7,
+        ));
+        let popup_xdg =
+            Resolved::new(ClientId::from_raw(1), XdgSurfaceId::from(61), popup_xdg_object);
+        state
+            .objects
+            .get_mut(popup_wl_object)
+            .downcast_mut::<WlSurface>()
+            .unwrap()
+            .set_xdg_surface_impl(popup_xdg);
+        let (_, popup_object) = state.insert_object(XdgPopup::new(
+            XdgPopupId::from(62),
+            popup_xdg,
+            Some(parent_xdg),
+            PositionerState::default(),
+            7,
+        ));
+        let popup = Resolved::new(ClientId::from_raw(1), XdgPopupId::from(62), popup_object);
+        state
+            .objects
+            .get_mut(popup_xdg_object)
+            .downcast_mut::<XdgSurface>()
+            .unwrap()
+            .test_set_popup_role(popup);
+
+        assert_eq!(state.root_surface_for_surface(popup_wl), Some(surface));
+        assert!(frame_tearing_decision(
+            &state,
+            output_id,
+            &[surface_item(surface), surface_item(popup_wl), cursor_item()],
+            &[],
+            false,
+            false,
+        )
+        .is_ok());
     }
 }

@@ -165,6 +165,7 @@ impl OutputScheduler {
         let previous_refresh_is_constant = self.clock.refresh_is_constant();
         if !self.session_active || !state.session_active {
             self.clock.update_mode(FrameClockMode::Passive, 60_000);
+            self.clock.set_tearing(false);
             if previous_mode != FrameClockMode::Passive {
                 self.mode_transition_count = self.mode_transition_count.saturating_add(1);
                 log::debug!(
@@ -197,6 +198,12 @@ impl OutputScheduler {
         self.clock.update_mode(mode, nominal_refresh_millihz);
         self.clock
             .update_vrr_state(vrr_range, vrr_capable && vrr_policy_enabled && vrr_range.is_some());
+        let tearing = state
+            .outputs
+            .try_get(self.output_id)
+            .is_some_and(|output| output.tearing_active)
+            || state.output_tearing_candidate(self.output_id).is_some();
+        self.clock.set_tearing(tearing);
         if previous_mode != mode || previous_refresh_is_constant != self.clock.refresh_is_constant()
         {
             if previous_mode != mode {
@@ -919,5 +926,69 @@ mod tests {
             .unwrap();
         assert_eq!(render_frames(&dispatcher), 0);
         assert!(!scheduler.session_active);
+    }
+
+    #[test]
+    fn a_commit_during_a_tearing_flip_renders_when_the_frame_completes() {
+        let mut state = state_for_tests();
+        let output_id = state.insert_output(test_output(
+            BackendOutputRef::new(DrmId::from(0usize)),
+            1,
+            0,
+            0,
+            1920,
+            1080,
+            "DP-1",
+        ));
+        state.outputs.try_get_mut(output_id).unwrap().tearing_active = true;
+
+        let mut scheduler = OutputScheduler::new(DrmId::from(0usize), output_id);
+        let mut dispatcher = Dispatcher::default();
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::PipelineBlocked {
+                    watchdog_deadline: Instant::now() + Duration::from_secs(1),
+                },
+                &mut dispatcher,
+            )
+            .unwrap();
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::RequestFrame { reason: RequestFrameReason::SurfaceCommit },
+                &mut dispatcher,
+            )
+            .unwrap();
+        assert!(!dispatcher.test_has_queued_action_for::<DrmAction, _>(output_id, |action| {
+            matches!(action, DrmAction::RenderFrame { .. })
+        }));
+
+        scheduler
+            .process(
+                &mut state,
+                OutputSchedulerAction::FrameCompleted(FrameCompletionOutcome::Presented(
+                    crate::scheduler::frame_clock::PresentSample {
+                        present_time: Instant::now(),
+                        sequence: 1,
+                        flags: crate::scheduler::frame_clock::PresentFlags {
+                            zero_copy: false,
+                            refresh_is_constant: true,
+                        },
+                        timing: None,
+                    },
+                )),
+                &mut dispatcher,
+            )
+            .unwrap();
+        assert!(dispatcher.test_has_queued_action_for::<DrmAction, _>(output_id, |action| {
+            matches!(
+                action,
+                DrmAction::RenderFrame { decision }
+                    if decision.disposition == ClockDisposition::RenderNow
+                        && decision.mode == FrameClockMode::Fixed
+            )
+        }));
+        assert_eq!(scheduler.clock.mode(), FrameClockMode::Fixed);
     }
 }

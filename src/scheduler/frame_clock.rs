@@ -95,6 +95,7 @@ pub struct FrameClockStateSnapshot {
     pub nominal_refresh_millihz: u32,
     pub vrr: Option<VrrRange>,
     pub vrr_enabled: bool,
+    pub tearing: bool,
     pub pending_work: bool,
     pub target_present: Option<Instant>,
     pub latest_render_start: Option<Instant>,
@@ -116,6 +117,7 @@ pub struct FrameClock {
     nominal_refresh_millihz: u32,
     vrr: Option<VrrRange>,
     vrr_enabled: bool,
+    tearing: bool,
     last_present: Option<PresentSample>,
     present_intervals: VecDeque<Duration>,
     next_target_present: Option<Instant>,
@@ -151,6 +153,7 @@ impl FrameClock {
             nominal_refresh_millihz: 60_000,
             vrr: None,
             vrr_enabled: false,
+            tearing: false,
             last_present: None,
             present_intervals: VecDeque::with_capacity(PRESENT_HISTORY_LIMIT),
             next_target_present: None,
@@ -205,6 +208,16 @@ impl FrameClock {
     pub fn update_vrr_state(&mut self, vrr: Option<VrrRange>, enabled: bool) {
         self.vrr = vrr;
         self.vrr_enabled = enabled;
+        self.recompute_targets();
+    }
+
+    /// Present the next frame as soon as the previous flip completes.
+    /// The clock mode, including variable refresh, stays as it is.
+    pub fn set_tearing(&mut self, tearing: bool) {
+        if self.tearing == tearing {
+            return;
+        }
+        self.tearing = tearing;
         self.recompute_targets();
     }
 
@@ -271,6 +284,7 @@ impl FrameClock {
             nominal_refresh_millihz: self.nominal_refresh_millihz,
             vrr: self.vrr,
             vrr_enabled: self.vrr_enabled,
+            tearing: self.tearing,
             pending_work: self.pending_work,
             target_present: self.next_target_present,
             latest_render_start: self.latest_render_start,
@@ -303,7 +317,10 @@ impl FrameClock {
             .unwrap_or(latest_render_start + DEFAULT_SUBMIT_BUDGET);
         let disposition = if !self.pending_work {
             ClockDisposition::Skip
-        } else if self.timing_hints.allow_immediate || self.timing_hints.wants_low_latency {
+        } else if self.tearing
+            || self.timing_hints.allow_immediate
+            || self.timing_hints.wants_low_latency
+        {
             ClockDisposition::RenderNow
         } else if let Some(target_present) = self.next_target_present {
             if now >= target_present {
@@ -358,6 +375,12 @@ impl FrameClock {
             return;
         }
         let now = Instant::now();
+        if self.tearing {
+            self.next_target_present = Some(now);
+            self.latest_render_start = Some(now);
+            self.latest_submit_or_commit = Some(now);
+            return;
+        }
         if matches!(self.mode, FrameClockMode::Passive) {
             if self.timing_hints.allow_immediate || self.timing_hints.wants_low_latency {
                 self.next_target_present = None;
@@ -710,6 +733,75 @@ mod tests {
         let target = decision.target_present.expect("target present");
         assert!(target >= base + refresh_interval(144_000));
         assert!(target <= base + refresh_interval(48_000));
+    }
+
+    fn presented_at(present_time: Instant) -> PresentSample {
+        PresentSample {
+            present_time,
+            sequence: 1,
+            flags: PresentFlags { zero_copy: false, refresh_is_constant: true },
+            timing: None,
+        }
+    }
+
+    #[test]
+    fn tearing_renders_before_the_fixed_deadline_and_clears_back_to_it() {
+        let base = Instant::now();
+        let mut clock = FrameClock::new();
+        clock.update_mode(FrameClockMode::Fixed, 60_000);
+        clock.notify_presented(presented_at(base));
+        clock.request_frame(RequestFrameReason::Damage);
+
+        let paced = clock.decide(base);
+        let ClockDisposition::WaitUntil(deadline) = paced.disposition else {
+            panic!("fixed mode waits for the render deadline, got {:?}", paced.disposition);
+        };
+        assert!(deadline > base);
+
+        clock.set_tearing(true);
+        assert_eq!(clock.decide(base).disposition, ClockDisposition::RenderNow);
+        assert_eq!(clock.mode(), FrameClockMode::Fixed);
+        assert_eq!(
+            clock.decide(base + Duration::from_secs(2)).disposition,
+            ClockDisposition::RenderNow
+        );
+        assert_eq!(clock.snapshot().missed_frames, 0);
+
+        clock.set_tearing(false);
+        let restored = clock.decide(base);
+        assert!(matches!(restored.disposition, ClockDisposition::WaitUntil(when) if when > base));
+    }
+
+    #[test]
+    fn tearing_skips_the_vrr_minimum_interval() {
+        let base = Instant::now();
+        let mut clock = FrameClock::new();
+        clock.update_mode(FrameClockMode::Variable, 144_000);
+        clock.update_vrr_state(
+            Some(VrrRange { min_refresh_millihz: 48_000, max_refresh_millihz: 144_000 }),
+            true,
+        );
+        clock.notify_presented(presented_at(base));
+        clock.request_frame(RequestFrameReason::Damage);
+        clock.update_timing_hints(TimingHints {
+            cadence_hint: Some(Duration::from_millis(1)),
+            ..TimingHints::default()
+        });
+
+        let paced = clock.decide(base);
+        let min_interval = refresh_interval(144_000);
+        assert!(paced
+            .target_present
+            .is_some_and(|target| target >= base + min_interval));
+
+        clock.set_tearing(true);
+        let tearing = clock.decide(base);
+        assert_eq!(tearing.disposition, ClockDisposition::RenderNow);
+        assert_eq!(clock.mode(), FrameClockMode::Variable);
+        assert!(!clock.refresh_is_constant());
+        assert!(tearing
+            .target_present
+            .is_some_and(|target| target < base + min_interval));
     }
 
     #[test]

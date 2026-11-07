@@ -403,6 +403,37 @@ This is only possible when many constraints are satisfied, for example:
 - geometry is suitable
 - no overlapping composition is needed
 
+### Tearing
+
+A vsync page flip switches framebuffers at the vertical blank. An async page flip switches as soon as the kernel accepts the commit, so the monitor can show part of the old frame and part of the new one. That is tearing. A client asks for it with `wp_tearing_control_v1` by setting the presentation hint to async. Mesa does this for Vulkan immediate presentation.
+
+An output tears only when every one of these holds:
+
+- `general.allow_tearing` is true, or `[output.tearing]` sets this connector to true. The key is the connector name, the same string as `wl_output.name`, for example `"DP-1"`. A missing entry uses the global switch. The global default is true. The name is case-sensitive.
+- The active workspace shows one fullscreen window, and that window's committed hint is async. Popups that belong to that window still count. Another window, a layer-shell surface, an effect, a lock surface, a closing snapshot, a pending capture, or protected content does not.
+- No session lock is gating input, and no workspace transition is running on the output.
+- The driver reports `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP`. There is no legacy page-flip path.
+- This frame keeps the mode, the primary-plane geometry, gamma, the color transform, and the variable-refresh enable bit as they were on the previous successful commit.
+- The hardware cursor keeps the same slot, position, and visibility, and this frame does not upload a new cursor image. A software cursor drawn into the scene is allowed.
+
+The async atomic commit programs the primary plane's framebuffer, plus the in-fence and damage clips when that plane accepts them. Connector, CRTC, cursor, color, variable-refresh, and geometry properties stay out of the request. amdgpu rejects an async commit that changes them. Any error is logged the first time and then every 32 rejections, and the same frame is submitted again as a normal vsync flip. A direct-scanout attempt that fails this way retries direct scanout synchronously. The next frame tries async again.
+
+`wp_presentation` drops the vsync flag only for the commit that landed as async. Hardware completion stays. Zero-copy stays on a direct scanout.
+
+While tearing, the frame clock presents as soon as the previous flip finishes. It skips the vblank deadline and the variable-refresh minimum interval. Variable refresh itself stays as the output already had it, so the async commit does not toggle `VRR_ENABLED`. One flip stays in flight. A commit that arrives during that flip is rendered when the flip completes. Frame callbacks are still sent when the frame is submitted.
+
+The log line `output DP-1: tearing on` or `output DP-1: tearing off (cursor)` is printed only when that state changes. The reason in parentheses is one of: config, session lock, workspace transition, hint, composited content, cursor, geometry, variable refresh, color, modeset, capability, kernel rejection.
+
+### Checking tearing on amdgpu
+
+1. `drm_info | grep -i async` shows `ATOMIC_ASYNC_PAGE_FLIP = 1`.
+2. `wayland-info` lists `wp_tearing_control_manager_v1`.
+3. Fullscreen `vkcube --present_mode 0` tears and runs above the refresh rate.
+4. Moving the mouse drops single frames to vsync. The log says `tearing off (cursor)` once, then `tearing on` once the cursor settles. It does not print a line per frame.
+5. A windowed `vkcube` never tears. The log stays on `tearing off (hint)`.
+6. Set `allow_tearing = false` and save the config. Tearing stops without a restart. `"DP-1" = false` under `[output.tearing]` does the same for that connector.
+7. A layer-shell notification over the fullscreen window stops tearing while it is visible. The log says `tearing off (composited content)`, then `tearing on` when the notification goes away.
+
 ## 9. Format and Modifier
 
 These two are easy to confuse.
@@ -599,6 +630,7 @@ If coming back after a long time, this order should restore the mental model qui
 - framebuffer: image memory description used for rendering or scanout, depending on context
 - scanout: display engine reading pixels from memory to drive the monitor
 - page flip: switching scanout from one framebuffer to another
+- tearing: an async page flip that can change the framebuffer during scanout, so one refresh shows two frames
 - direct scanout: scanning out a client buffer directly without an extra composition step
 - connector: output endpoint such as HDMI or DP
 - CRTC: display timing and scanout engine

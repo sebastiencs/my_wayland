@@ -31,6 +31,8 @@ pub(crate) struct SubmissionRecord {
     pub output_id: Option<OutputId>,
     pub feedbacks: Vec<SubmissionPresentationFeedback>,
     pub zero_copy: bool,
+    /// The commit that landed used `DRM_MODE_PAGE_FLIP_ASYNC`.
+    pub async_flip: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +48,7 @@ pub(crate) struct PresentedSubmission {
     pub output_id: Option<OutputId>,
     pub feedbacks: Vec<SubmissionPresentationFeedback>,
     pub zero_copy: bool,
+    pub async_flip: bool,
     pub present_time: Instant,
     pub sequence: u64,
     pub tv_sec_hi: u32,
@@ -90,6 +93,7 @@ impl PresentationSubsystem {
             output_id: submission.output_id,
             feedbacks: submission.feedbacks,
             zero_copy: submission.zero_copy,
+            async_flip: submission.async_flip,
             present_time: timestamp.present_time,
             sequence,
             tv_sec_hi: (timestamp.tv_sec >> 32) as u32,
@@ -153,7 +157,7 @@ impl PresentationSubsystem {
         if presented.feedbacks.is_empty() {
             return;
         }
-        let flags = presentation_feedback_flags(presented.zero_copy);
+        let flags = presentation_feedback_flags(presented.zero_copy, !presented.async_flip);
 
         let mut per_client = BTreeMap::<(ClientId, u32), Vec<_>>::new();
         for feedback in &presented.feedbacks {
@@ -252,6 +256,7 @@ mod tests {
                 output_id: Some(timeline),
                 feedbacks: vec![feedback(1, 1, 10)],
                 zero_copy: false,
+                async_flip: false,
             },
         );
 
@@ -284,6 +289,7 @@ mod tests {
                 output_id: Some(first_timeline),
                 feedbacks: vec![feedback(1, 1, 42)],
                 zero_copy: false,
+                async_flip: false,
             },
         );
         let first = presentation
@@ -305,6 +311,7 @@ mod tests {
                 output_id: Some(second_timeline),
                 feedbacks: vec![feedback(2, 1, 42)],
                 zero_copy: false,
+                async_flip: false,
             },
         );
         let second = presentation
@@ -321,6 +328,70 @@ mod tests {
             .expect("second presented submission");
 
         assert!(second.sequence > first.sequence);
+    }
+
+    fn presented_flags(async_flip: bool, zero_copy: bool) -> u32 {
+        let mut presentation = PresentationSubsystem::default();
+        let timeline = OutputId::from(1usize);
+        presentation.register_submission(
+            timeline,
+            SubmissionRecord {
+                submission_id: 1,
+                output_id: Some(timeline),
+                feedbacks: vec![feedback(1, 1, 10)],
+                zero_copy,
+                async_flip,
+            },
+        );
+        let presented = presentation
+            .complete(
+                timeline,
+                1,
+                PresentEvent {
+                    tv_sec: 10,
+                    tv_usec: 100,
+                    sequence: 4,
+                    refresh_is_constant: true,
+                },
+            )
+            .expect("presented submission");
+        let mut dispatcher = crate::runner::Dispatcher::default();
+        PresentationSubsystem::dispatch_presented(&mut dispatcher, 60_000, &presented);
+        let mut flags = None;
+        dispatcher.test_for_each_queued_action(|action: &crate::clients::ClientAction| {
+            if let crate::clients::ClientAction::PresentationFeedbackPresented {
+                flags: presented_flags,
+                ..
+            } = action
+            {
+                flags = Some(*presented_flags);
+            }
+        });
+        flags.expect("presented feedback")
+    }
+
+    #[test]
+    fn async_submission_drops_vsync_and_a_sync_fallback_keeps_it() {
+        use crate::protocol_generated::wp_presentation_feedback::Kind;
+
+        let vsync = Kind::Vsync as u32;
+        let hw_completion = Kind::HwCompletion as u32;
+        let zero_copy = Kind::ZeroCopy as u32;
+
+        let async_flags = presented_flags(true, false);
+        assert_eq!(async_flags & vsync, 0);
+        assert_ne!(async_flags & hw_completion, 0);
+        assert_eq!(async_flags & zero_copy, 0);
+
+        let async_scanout = presented_flags(true, true);
+        assert_eq!(async_scanout & vsync, 0);
+        assert_ne!(async_scanout & hw_completion, 0);
+        assert_ne!(async_scanout & zero_copy, 0);
+
+        let sync_flags = presented_flags(false, false);
+        assert_ne!(sync_flags & vsync, 0);
+        assert_ne!(sync_flags & hw_completion, 0);
+        assert_eq!(sync_flags & zero_copy, 0);
     }
 
     #[test]
@@ -357,10 +428,13 @@ pub fn presentation_refresh_interval_ns(
     refresh_ns.min(u64::from(u32::MAX)) as u32
 }
 
-pub fn presentation_feedback_flags(zero_copy: bool) -> u32 {
+pub fn presentation_feedback_flags(zero_copy: bool, vsync: bool) -> u32 {
     use crate::protocol_generated::wp_presentation_feedback::Kind;
 
-    let mut flags = Kind::Vsync as u32 | Kind::HwCompletion as u32;
+    let mut flags = Kind::HwCompletion as u32;
+    if vsync {
+        flags |= Kind::Vsync as u32;
+    }
     if zero_copy {
         flags |= Kind::ZeroCopy as u32;
     }

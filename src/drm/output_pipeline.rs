@@ -191,6 +191,7 @@ impl OutputPipeline {
         render_submit_duration: std::time::Duration,
         submitted_at: Instant,
         protected: bool,
+        async_flip: bool,
     ) -> OutputSubmission {
         let id = self.core.next_submission_id;
         self.core.next_submission_id = self.core.next_submission_id.saturating_add(1);
@@ -206,6 +207,7 @@ impl OutputPipeline {
             render_submit_duration,
             submitted_at,
             protected,
+            async_flip,
         }
     }
 
@@ -445,6 +447,7 @@ mod tests {
             render_submit_duration: std::time::Duration::ZERO,
             submitted_at: Instant::now(),
             protected: false,
+            async_flip: false,
         }
     }
 

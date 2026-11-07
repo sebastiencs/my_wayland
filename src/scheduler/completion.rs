@@ -183,6 +183,7 @@ mod tests {
                     )),
                 }],
                 zero_copy: false,
+                async_flip: false,
             },
         );
         let mut dispatcher = crate::runner::Dispatcher::default();
